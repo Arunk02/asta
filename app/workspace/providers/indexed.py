@@ -151,13 +151,53 @@ class IndexedProvider(ContextProvider):
         safe = (hint or "").replace('"', "'")[:200]
         return f'sh {context_dirname(self.root)}/boot.sh "{safe}"'
 
+    async def _sha_drift(self) -> list[str]:
+        """Repos whose recorded SHA no longer matches HEAD.
+
+        A floor under the script-based check. The script maps drift precisely
+        through each mini-skill's `sources:` front-matter, which is richer — but
+        a context written in a simpler shape has no mini-skills, so the script
+        finds nothing to mark stale and reports CLEAN while the SHAs plainly
+        disagree. A silent false negative is the worst outcome here: the whole
+        point is knowing when to stop trusting the context.
+        """
+        stale = []
+        for repo in self.services():
+            idx = self.ctx / "repos" / repo / "_index.json"
+            repo_dir = self.root / repo
+            if not idx.is_file() or not (repo_dir / ".git").exists():
+                continue
+            try:
+                recorded = json.loads(idx.read_text()).get("verified_against", "")
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not recorded:
+                continue
+            rc, head = await _run(["git", "rev-parse", "HEAD"], repo_dir, 30)
+            head = head.strip()
+            if rc == 0 and head and not head.startswith(recorded[:8]) \
+               and not recorded.startswith(head[:8]):
+                stale.append(f"{repo}: {recorded[:8]}..{head[:8]}")
+        return stale
+
     async def drift(self) -> tuple[bool, str]:
         script = self.ctx / DRIFT
-        if not script.is_file():
+        text = ""
+        if script.is_file():
+            rc, out = await _run(["node", str(script), str(self.root)], self.root, 300,
+                                 self.ctx.name)
+            text = out.strip()
+            if "DRIFT" in text:
+                return True, text[:1500]
+
+        sha_stale = await self._sha_drift()
+        if sha_stale:
+            detail = "DRIFT (recorded SHA no longer matches HEAD):\n  " + "\n  ".join(sha_stale)
+            return True, (detail + (f"\n\n{text[:600]}" if text else ""))[:1500]
+
+        if not script.is_file() and not self.services():
             return False, f"no {DRIFT} in workspace"
-        rc, out = await _run(["node", str(script), str(self.root)], self.root, 300, self.ctx.name)
-        text = out.strip()
-        return ("DRIFT" in text), text[:1500]
+        return False, text[:1500] or "context up-to-date"
 
     def graph_pages(self, workspace_name: str) -> list[dict]:
         graph_dir = self.ctx / "graph"
@@ -184,6 +224,69 @@ class IndexedProvider(ContextProvider):
                (self.ctx / "repos" / name).is_dir():
                 found.append(name)
         return found
+
+    def _repo_meta(self, repo: str) -> dict:
+        f = self.ctx / "repos" / repo / "_index.json"
+        try:
+            return json.loads(f.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _write_manifests(self, repos: list[str]) -> str:
+        """Write workspace.yml, _repo_router.json and _global_links.json.
+
+        Derived entirely from the per-repo indexes, so it is deterministic and
+        costs nothing. The router is a routing *stub*: each repo's declared
+        domains become the phrases that select it. That is honest for a fresh
+        workspace — richer cross-repo routing is a later enrichment, and a stub
+        beats a resolver that cannot start.
+        """
+        written = []
+
+        wsf = self.ctx / "workspace.yml"
+        if not wsf.exists():
+            body = [f"workspace: {self.root.name}", "version: 3",
+                    f"mode: {'single' if len(repos) == 1 else 'workspace'}",
+                    "tier: full", "repos:"]
+            for r in repos:
+                meta = self._repo_meta(r)
+                domains = ", ".join(meta.get("domains", [])[:8])
+                body += [f"  - key: {r}",
+                         f"    root: \"{'.' if len(repos) == 1 else r}\"",
+                         f"    domains: [{domains}]",
+                         "    depends_on: []"]
+            wsf.write_text("\n".join(body) + "\n")
+            written.append("workspace.yml")
+
+        links = self.ctx / "_global_links.json"
+        if not links.exists():
+            # No verified cross-repo contracts yet; an empty list is the correct
+            # starting value and the resolver short-circuits on it.
+            links.write_text("[]\n")
+            written.append("_global_links.json")
+
+        router = self.ctx / "_repo_router.json"
+        if not router.exists():
+            buckets, summaries = {}, {}
+            for r in repos:
+                meta = self._repo_meta(r)
+                summaries[r] = meta.get("summary", "")
+                for phrase in meta.get("domains", []):
+                    buckets.setdefault(str(phrase).lower(), []).append(r)
+                buckets.setdefault(r.lower(), []).append(r)
+            router.write_text(json.dumps({
+                "schema_version": 2,
+                "request_buckets": buckets,
+                "flows": [],
+                "per_repo_summary": summaries,
+                "disambiguation_rules": [],   # array: the resolver iterates it
+                "glossary": [],
+                "default_repo": repos[0] if repos else "",
+            }, indent=2) + "\n")
+            written.append("_repo_router.json")
+
+        return ("  ✓ manifests: " + ", ".join(written)) if written else \
+               "  – manifests already present"
 
     async def provision(self, repos: list[str] | None = None) -> str:
         """Run the deterministic half of setup and report what the interpretive
@@ -217,6 +320,13 @@ class IndexedProvider(ContextProvider):
                 f"     Index generation needs those first — run the repo bootstrap "
                 f"pass (a code-executor task) before re-running provision.")
             return "\n".join(lines)
+
+        # The resolver refuses to start without these three. The generators do
+        # not produce them, so a build that skipped this step produced indexes
+        # that looked complete and a resolver that returned
+        # {"error":"missing_file"} on every query. Written before the
+        # generators run, and never overwritten if the user has customised them.
+        lines.append(self._write_manifests(selected))
 
         # Deterministic generation, in the order the toolchain requires.
         steps = [

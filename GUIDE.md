@@ -10,7 +10,7 @@ full one.) Last updated 2026-07-19.*
 
 Asta is a personal engineering assistant that runs entirely on this laptop
 (`~/help/asta`). It chats over web/WhatsApp/Telegram, answers codebase questions
-through the contmark **booking-workspace**, reads Jira and Grafana/Temporal via MCP,
+through the project context **booking-workspace**, reads Jira and Grafana/Temporal via MCP,
 implements approved code changes headlessly, runs parallel background workers,
 fires reminders/briefings to your phone, watches your CI pipelines, and remembers
 what it learns day by day.
@@ -38,13 +38,13 @@ what it learns day by day.
                        └───────┬─────────────┬──────────────┘
                                ▼             ▼
         agent tools + MCPs (temporal, grafana, context7, atlassian)
-        contmark workspace (resolve-task.js → exact files)
+        project context workspace (resolve-task.js → exact files)
         memory engine (markdown + FTS5 recall)
                                │
       ┌── background engines (asyncio loops in the server) ──────────────┐
       │ missions · tasks (parallel workers) · reminders · brief/standup  │
       │ health check · CI watcher · Jira watcher · Teams watcher         │
-      │ Teams web bridge (Playwright) · contmark drift refresh · digests │
+      │ Teams web bridge (Playwright) · project context drift refresh · digests │
       └── all notify via app/notify.py → WhatsApp + Telegram + UI bell ──┘
 ```
 
@@ -58,7 +58,7 @@ what it learns day by day.
 | Agent & persona | `app/agent.py` | PydanticAI agent, model registry, ~30 tools |
 | Copilot CLI brain | `app/copilot_cli.py` | Default brain; per-conversation sessions; first-turn capability block; per-turn `[now:]` stamp + memory recall |
 | Memory engine | `app/memory.py`, `memory/` | Markdown facts/episodes, FTS5 recall each turn, digests + nightly consolidation on the free local model |
-| Workspace tools | `app/workspace_tools.py` | contmark `resolve_context` → exact files/lines in booking-workspace (IOM parked — one commented line restores it) |
+| Workspace tools | `app/workspace_tools.py` | project context `resolve_context` → exact files/lines in booking-workspace (IOM parked — one commented line restores it) |
 | Missions | `app/missions.py` | Jira/request → plan → **your approval** → headless implement (`copilot -p`) → Claude verify pass; injects the repo's `.github/agents`+`skills` playbooks |
 | Background tasks | `app/tasks.py` | The orchestrator: parallel headless workers (analysis / code / teams_draft); code serialized per workspace; phone notification per result |
 | Reminders | `app/reminders.py` | "remind me at 3pm…"; one-shot or daily/weekdays/weekly; overdue-safe |
@@ -75,7 +75,7 @@ what it learns day by day.
 | macOS banner watcher | `app/msnotify.py` | *Superseded* — needs Full Disk Access; off by default (`TEAMS_WATCHER=0`) |
 | Voice | `app/voice.py`, `~/help/voicebox` | Local Voicebox on :17493 (own venv/process, localhost-only, never sees `.env`): Kokoro neural TTS + Whisper, optional cloned voice. Plain HTTP, **not** MCP — speaking is plumbing, not a model decision, so it costs zero tokens. Browser speech is the automatic fallback |
 | Notifications | `app/notify.py` | Fan-out: WhatsApp + Telegram + UI bell (each fails independently, never crashes) |
-| Context refresh | `app/refresh.py` | contmark drift check (10-min git fingerprint + weekly baseline), graph regen |
+| Context refresh | `app/refresh.py` | project context drift check (10-min git fingerprint + weekly baseline), graph regen |
 | MCP loader | `app/mcp_loader.py`, `mcp.json` | temporal, grafana (40 tools, deferred), context7, atlassian (OAuth), github (needs PAT) |
 | Skills | `app/skills.py` | On-demand playbooks (e.g. grafana-analyser) — loaded only when needed, saves tokens |
 | Tracing | `traces` table, `app/store.py` | Every turn: latency, tokens, tools, errors; Settings → Performance card |
@@ -91,11 +91,11 @@ what it learns day by day.
 
 | Say | What happens |
 |---|---|
-| "why is invoice dispatch email failing?" | contmark resolves exact files → reads only those → answers with citations |
+| "why is invoice dispatch email failing?" | project context resolves exact files → reads only those → answers with citations |
 | "any failed temporal workflows?" / "grafana errors in booking?" | live MCP calls (grafana follows the analyser skill's query discipline) |
 | "my open tickets" / "show BEPTELIKOS-1234" | Jira read (REST — works with every brain) |
 | "comment on BEPTELIKOS-1234: fixed in PR #12" / "move it to Ready for Retest" | Jira write — exact text/status confirmed with you before posting |
-| "implement BEPTELIKOS-1234 in booking" | Mission: plan drafted → you approve → headless implement per your org's contmark playbooks → Claude verify → notified |
+| "implement BEPTELIKOS-1234 in booking" | Mission: plan drafted → you approve → headless implement per your org's project context playbooks → Claude verify → notified |
 | "approve mission 3" / "reject mission 3" | from your phone, mid-commute |
 | "delegate a task to analyze X" | parallel background worker; chat stays free; result pushed to phone |
 | "draft a Teams reply to Vinish saying …" | draft task → held for your approval → "approve task N" sends it |
@@ -115,7 +115,7 @@ what it learns day by day.
 mentions/DMs (Teams activity feed — DIRECT, always immediate), mail from people (Outlook —
 DIRECT), CI for YOUR OWN runs only (ambient: held while you're at the laptop, released when
 you step away),
-Teams-session expiry, health transitions, contmark drift,
+Teams-session expiry, health transitions, project context drift,
 reminder fires, every mission/task completion.
 
 ---
@@ -254,7 +254,7 @@ dev: Ctrl-C + rerun uvicorn. DB peek: `sqlite3 data/asta.db '.tables'`.
 | Symptom | Likely cause → fix |
 |---|---|
 | Doesn't recall a known fact | `python -m app.memory reindex`; check the fact exists in `memory/facts/`; recall is FTS keyword-based — phrase matters |
-| resolve_context empty/wrong | contmark drift → "refresh context" in chat or `/api/refresh/booking`; check `.contmark/` exists in the workspace |
+| resolve_context empty/wrong | project context drift → "refresh context" in chat or `/api/refresh/booking`; check `.asta-context/` exists in the workspace |
 | Graph tab empty | `GRAPHIFY_CMD` unset / graph never generated for that workspace |
 | MCP server missing from sidebar | hover its name for the reason (missing binary, empty env var, failed 20s handshake — often VPN for temporal/grafana) |
 

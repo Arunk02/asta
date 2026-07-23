@@ -1,6 +1,6 @@
-"""Auto-refresh of project context (contmark drift) and graphify.
+"""Auto-refresh of project context (context drift) and graphify.
 
-Cadence follows the contmark-workspace skill's philosophy: drift *detection* is
+Cadence follows the the project-context philosophy: drift *detection* is
 deterministic and free (check-drift.js diffs verified_against..HEAD — no LLM),
 so run it whenever the code actually changed; the token-costly *enrichment*
 (evolution loop rewriting mini-skills) is never run automatically — drift is
@@ -26,7 +26,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import notify, store, workspace_tools
+from . import notify, store
+from . import workspace as ws_mod
 
 BIG_CHANGE_DIRTY_FILES = 40
 
@@ -53,9 +54,10 @@ def _workspace_fingerprint(ws_root: Path) -> dict:
 
 def detect_big_change(workspace: str) -> str | None:
     """Compare fingerprint with last stored; return a reason string if it changed a lot."""
-    ws_root = Path(workspace_tools.WORKSPACES[workspace])
-    if not ws_root.is_dir():
+    ws = ws_mod.get(workspace)
+    if ws is None or not ws.exists():
         return None
+    ws_root = ws.path
     fp = _workspace_fingerprint(ws_root)
     key = f"ws_fingerprint:{workspace}"
     prev_raw = store.kv_get(key)
@@ -89,36 +91,43 @@ async def _run(cmd: list[str] | str, cwd: Path, shell: bool = False, timeout: in
 
 
 async def refresh_workspace(workspace: str, reason: str = "manual") -> str:
-    """Run check-drift + graph regeneration for one workspace; returns a summary.
+    """Check whether a workspace's project context is stale, and regenerate the
+    graph. Returns a summary.
 
-    Notifies only when there's something to act on (drift / failure) — a clean
-    check stays silent unless it was manually requested.
+    Detection is deterministic and free, so it runs whenever code changed. The
+    token-costly enrichment is never triggered here — drift is reported and the
+    user decides. Notifies only when there is something to act on; a clean check
+    stays silent unless it was asked for.
     """
-    ws_root = Path(workspace_tools.WORKSPACES[workspace])
+    ws = ws_mod.get(workspace)
+    if ws is None or not ws.exists():
+        return f"Unknown workspace '{workspace}'."
+    ws_root = ws.path
     lines = [f"🔄 Context refresh — {workspace} ({reason})"]
     noteworthy = reason.startswith("manual") or reason.startswith("requested")
 
-    drift_js = ws_root / ".contmark" / "check-drift.js"
-    if drift_js.is_file():
-        rc, out = await _run(["node", str(drift_js), str(ws_root)], ws_root)
-        drift = out.strip()
-        if "DRIFT" in drift:
-            n = drift.count("DRIFT")
-            noteworthy = True
-            lines.append(f"⚠️ contmark drift in {n} repo(s):\n" + drift[:1200])
-            lines.append("→ say \"update the stale context\" to run the contmark evolution "
-                         "loop on it (uses tokens; your call).")
-        else:
-            lines.append("✓ contmark context in sync")
+    try:
+        stale, detail = await ws_mod.drift(workspace)
+    except (ValueError, OSError) as exc:
+        stale, detail = False, f"drift check failed: {exc}"
+
+    if stale:
+        noteworthy = True
+        lines.append(f"⚠️ project context is stale:\n{detail[:1200]}")
+        lines.append('→ say "rebuild the stale context" to re-run the context '
+                     "build on the drifted repos (uses tokens; your call).")
+    elif detail:
+        lines.append(f"✓ project context in sync ({detail[:200]})"
+                     if detail.strip() else "✓ project context in sync")
     else:
-        lines.append("no check-drift.js in workspace")
+        lines.append("✓ project context in sync")
 
     graph_cmd = os.environ.get("GRAPHIFY_CMD", "").strip()
     if graph_cmd:
         rc, out = await _run(graph_cmd.replace("{workspace}", str(ws_root)), ws_root, shell=True)
         if rc != 0:
             noteworthy = True
-        lines.append("✓ graphify regenerated" if rc == 0 else f"❌ graphify failed (rc={rc}): {out[-400:]}")
+        lines.append("✓ graph regenerated" if rc == 0 else f"❌ graph regen failed (rc={rc}): {out[-400:]}")
     else:
         lines.append("graph regen skipped (set GRAPHIFY_CMD in .env to enable)")
 
@@ -150,7 +159,7 @@ async def scheduler_loop() -> None:
             baseline = _weekly_due(now)
             if baseline:
                 store.kv_set("last_baseline_refresh", str(now))
-            for ws, info in workspace_tools.available_workspaces().items():
+            for ws, info in ws_mod.available_workspaces().items():
                 if not info["exists"]:
                     continue
                 change = await asyncio.to_thread(detect_big_change, ws)

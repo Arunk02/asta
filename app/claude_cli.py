@@ -3,7 +3,7 @@
 Used when Arun picks executor=claude, automatically while Copilot's monthly
 quota is exhausted, or when he selects "Claude CLI" in the UI model picker.
 Claude Code reads .claude/agents, not .github/agents, so the workspace's
-contmark pipeline (contmark.solo.claude / contmark.explore) rides in via
+project context pipeline (Asta's pipelines) rides in via
 --append-system-prompt instead of --agent.
 
 Why the CLI and not AnthropicModel: the CLI runs on Arun's Claude subscription,

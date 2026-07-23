@@ -105,7 +105,7 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
     parts.append(
         "CODE WORK — the flow Arun expects, with a message to him at EVERY step:\n"
         "1. Spawn a code task (kind 'code', workspace set). Routing is automatic: Jira-key "
-        "tickets run the full contmark solo pipeline (plan gate → Arun approves → implement); "
+        "tickets run the full staged pipeline (plan gate → Arun approves → implement); "
         "small ad-hoc asks run the micro pipeline (no gate, ~25 turns, escalates itself if "
         "bigger). Never plan the code change yourself in this chat. If an analysis task "
         'already investigated the topic, add "context_from": <that task id> so the worker '
@@ -153,8 +153,8 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
     )
     if conv.get("workspace"):
         parts.append(
-            f"Active workspace: {conv['workspace']} at {_cwd(conv)} — contmark context lives in "
-            ".contmark/ (resolve-task.js maps questions to exact files)."
+            f"Active workspace: {conv['workspace']} at {_cwd(conv)} — project context lives in "
+            ".asta-context/ (resolve-task.js maps questions to exact files)."
         )
     return "\n\n".join(parts)
 
@@ -340,7 +340,7 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     """Headless one-off prompt.
 
     agent      — a workspace .github/agents/*.agent.md pipeline (e.g.
-                 contmark.solo.copilot); discovered from cwd, so cwd must be the
+                 the staged pipeline); discovered from cwd, so cwd must be the
                  workspace root.
     session_id — pin the Copilot session so a run that pauses at a human gate
                  (solo agent Stage 1) can be resumed later with resume=True.

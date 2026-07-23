@@ -271,6 +271,8 @@ async function loadStatus() {
   const firstOn = Object.entries(s.models).find(([, m]) => m.available);
   pick.value = prev && [...pick.options].some((o) => o.value === prev && !o.disabled) ? prev : firstOn ? firstOn[0] : "claude";
 
+  renderWorkspacePicker(s.workspaces || {});
+
   const mcp = s.mcp.map((m) =>
     `<span class="${m.enabled ? "on" : "off"}" title="${esc(m.reason || "connected")}">${m.name}</span>`
   ).join(" · ");
@@ -289,8 +291,24 @@ function switchTab(name) {
 }
 document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => switchTab(t.dataset.tab)));
 
+function renderWorkspacePicker(spaces) {
+  const pick = $("#workspace-pick");
+  const prev = pick.value;
+  pick.innerHTML = '<option value="">no workspace</option>';
+  Object.keys(spaces).forEach((name) => {
+    const o = document.createElement("option");
+    o.value = name;
+    o.textContent = name + (spaces[name].exists ? "" : " (missing)");
+    pick.appendChild(o);
+  });
+  // Exactly one workspace is the common case — select it so the user never has to.
+  const names = Object.keys(spaces);
+  pick.value = prev && names.includes(prev) ? prev : (names.length === 1 ? names[0] : "");
+}
+
 async function loadGraphs() {
-  const ws = $("#workspace-pick").value || "booking";
+  const ws = $("#workspace-pick").value;
+  if (!ws) { $("#graph-frame").src = "about:blank"; $("#graph-pick").innerHTML = ""; return; }
   const pages = await api("/api/graphs/" + ws);
   const pick = $("#graph-pick");
   pick.innerHTML = "";
@@ -902,6 +920,7 @@ $("#voice-stop").onclick = stopVoiceMode;
 /* ---------- settings (WhatsApp + watchers) ---------- */
 
 async function loadSettings() {
+  loadWorkspaces();
   try {
     const wa = await api("/api/wa/status");
     const stateEl = $("#wa-state");
@@ -1108,7 +1127,8 @@ $("#mission-new").onclick = async () => {
   const title = prompt("Mission title (or Jira key + short description):");
   if (!title) return;
   const jira = prompt("Jira key (optional, e.g. ABC-123):") || "";
-  const ws = prompt("Workspace (booking):", $("#workspace-pick").value || "booking") || "booking";
+  const ws = prompt("Workspace:", $("#workspace-pick").value || "") || "";
+  if (!ws) { alert("Pick a workspace first (Settings → Workspaces)."); return; }
   const repo = prompt("Repo/service dir (optional):") || "";
   await api("/api/missions", { method: "POST", body: JSON.stringify({ title, jira_key: jira, workspace: ws, repo }) });
   loadMissions();
@@ -1147,3 +1167,88 @@ async function boot() {
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/ui/sw.js").catch(() => {});
 boot();
+
+
+/* ---------- workspaces ---------- */
+
+async function loadWorkspaces() {
+  const el = $("#ws-list");
+  try {
+    const spaces = await api("/api/workspaces");
+    const names = Object.keys(spaces);
+    if (!names.length) { el.innerHTML = "<p class='dim'>None yet — add one below.</p>"; return; }
+    el.innerHTML = names.map((n) => {
+      const w = spaces[n];
+      const bits = [
+        w.provider_label || w.provider,
+        (w.repos ?? 0) + " repo" + (w.repos === 1 ? "" : "s"),
+      ];
+      if (w.jira_projects && w.jira_projects.length) bits.push("jira: " + w.jira_projects.join(", "));
+      const warn = w.exists ? "" : " <span class='off'>path missing</span>";
+      const note = w.note ? `<div class="dim">${esc(w.note)}</div>` : "";
+      return `<div class="m-item">
+        <div><b>${esc(n)}</b>${warn} <button class="ws-del" data-ws="${esc(n)}">remove</button></div>
+        <div class="m-sub">${esc(w.root)}</div>
+        <div class="m-sub">${esc(bits.join(" · "))}</div>${note}</div>`;
+    }).join("");
+    el.querySelectorAll(".ws-del").forEach((b) => (b.onclick = () => removeWorkspace(b.dataset.ws)));
+  } catch (e) {
+    el.textContent = "Could not load workspaces.";
+  }
+}
+
+async function removeWorkspace(name) {
+  if (!confirm(`Remove workspace "${name}"? Your files and project context are not touched.`)) return;
+  await api("/api/workspaces/" + encodeURIComponent(name), { method: "DELETE" });
+  await loadWorkspaces();
+  await loadStatus();
+}
+
+$("#ws-detect").onclick = async () => {
+  const path = $("#ws-path").value.trim();
+  const msg = $("#ws-detect-msg");
+  if (!path) { msg.textContent = "Enter a folder path."; return; }
+  msg.textContent = "detecting…";
+  try {
+    const info = await api("/api/workspaces/detect", {
+      method: "POST", body: JSON.stringify({ path }),
+    });
+    msg.textContent = `${info.provider_label} · ${info.repos.length} repo(s)`;
+    $("#ws-repos").innerHTML = info.repos.length
+      ? info.repos.map((r) =>
+          `<label class="ws-repo"><input type="checkbox" value="${esc(r)}" checked> ${esc(r)}</label>`
+        ).join("")
+      : "<p class='dim'>No repos found directly under that folder.</p>";
+    $("#ws-name").value = path.replace(/\/+$/, "").split("/").pop().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+    $("#ws-found").classList.remove("hidden");
+    $("#ws-found").dataset.root = info.root;
+  } catch (e) {
+    msg.textContent = String(e.message || e);
+    $("#ws-found").classList.add("hidden");
+  }
+};
+
+$("#ws-add").onclick = async () => {
+  const msg = $("#ws-add-msg");
+  const checked = [...$("#ws-repos").querySelectorAll("input:checked")].map((i) => i.value);
+  const all = [...$("#ws-repos").querySelectorAll("input")].map((i) => i.value);
+  const body = {
+    name: $("#ws-name").value.trim(),
+    root: $("#ws-found").dataset.root,
+    // Everything selected == no restriction, so new repos appear automatically.
+    repos: checked.length === all.length ? [] : checked,
+    jira_projects: $("#ws-jira").value.split(",").map((x) => x.trim()).filter(Boolean),
+  };
+  if (!body.name) { msg.textContent = "Name required."; return; }
+  msg.textContent = "adding…";
+  try {
+    await api("/api/workspaces", { method: "POST", body: JSON.stringify(body) });
+    msg.textContent = "added ✓";
+    $("#ws-found").classList.add("hidden");
+    $("#ws-path").value = "";
+    await loadWorkspaces();
+    await loadStatus();
+  } catch (e) {
+    msg.textContent = String(e.message || e);
+  }
+};

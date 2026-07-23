@@ -35,7 +35,7 @@ Mission: {title}
 Workspace: {workspace} (services: {services})
 Target repo: {repo}
 
-Contmark context resolution (exact files/flows relevant to this task):
+project context context resolution (exact files/flows relevant to this task):
 {context}
 
 Write a concrete, step-by-step implementation plan:

@@ -32,6 +32,8 @@ from pathlib import Path
 
 from .base import ContextProvider
 
+ROOT = Path(__file__).resolve().parents[3]
+
 #: Where a workspace keeps its project context. Asta creates and looks for
 #: `.asta-context`. A workspace bootstrapped by some other toolchain may use a
 #: different directory name — point ASTA_CONTEXT_DIRNAME at it (or list extra
@@ -70,14 +72,17 @@ def resources_dir() -> Path | None:
     if raw:
         p = Path(raw).expanduser()
         return p if p.is_dir() else None
-    # No built-in default: the generator toolchain is a per-machine install,
-    # not something Asta bundles or names.
-    return None
+    # Asta bundles the generators with its workspace-context skill, so a fresh
+    # install can provision with no extra setup. ASTA_CONTEXT_RESOURCES still
+    # overrides, for a machine that keeps them elsewhere.
+    bundled = ROOT / "skills" / "workspace-context" / "resources"
+    return bundled if bundled.is_dir() else None
 
 
-async def _run(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str]:
+async def _run(cmd: list[str], cwd: Path, timeout: int, ctx_dir: str = "") -> tuple[int, str]:
+    env = {**os.environ, "ASTA_CONTEXT_DIR": ctx_dir} if ctx_dir else None
     proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=str(cwd),
+        *cmd, cwd=str(cwd), env=env,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -124,7 +129,7 @@ class IndexedProvider(ContextProvider):
             return (f"No {RESOLVER} in this workspace — run setup first "
                     f"(POST /api/workspaces/{{name}}/provision).")
         rc, out = await _run(["node", str(script), str(self.root), task],
-                             self.root, _RESOLVE_TIMEOUT)
+                             self.root, _RESOLVE_TIMEOUT, self.ctx.name)
         return out[:20_000] or "(resolver returned nothing)"
 
     def conventions(self) -> str:
@@ -150,7 +155,7 @@ class IndexedProvider(ContextProvider):
         script = self.ctx / DRIFT
         if not script.is_file():
             return False, f"no {DRIFT} in workspace"
-        rc, out = await _run(["node", str(script), str(self.root)], self.root, 300)
+        rc, out = await _run(["node", str(script), str(self.root)], self.root, 300, self.ctx.name)
         text = out.strip()
         return ("DRIFT" in text), text[:1500]
 
@@ -223,14 +228,14 @@ class IndexedProvider(ContextProvider):
             if not Path(cmd[1]).is_file():
                 lines.append(f"  – {label}: generator missing, skipped")
                 continue
-            rc, out = await _run(cmd, self.root, _GEN_TIMEOUT)
+            rc, out = await _run(cmd, self.root, _GEN_TIMEOUT, self.ctx.name)
             lines.append(f"  {'✓' if rc == 0 else '✗'} {label}"
                          + ("" if rc == 0 else f" (rc={rc}) {out[-300:]}"))
 
         for label, script in (("indexes", "validate-indexes.js"), ("links", "validate-links.js")):
             path = res / script
             if path.is_file():
-                rc, out = await _run(["node", str(path), str(self.root)], self.root, 300)
+                rc, out = await _run(["node", str(path), str(self.root)], self.root, 300, self.ctx.name)
                 lines.append(f"  {'✓' if rc == 0 else '⚠'} validate {label}"
                              + ("" if rc == 0 else f": {out[-300:]}"))
 

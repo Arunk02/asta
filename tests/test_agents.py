@@ -95,3 +95,21 @@ def test_compose_of_unknown_pipeline_is_empty():
 
 def test_compose_without_extras_is_just_the_body():
     assert agents.compose("explore") == agents.load("explore")
+
+
+# --- executor environment hygiene --------------------------------------------
+
+def test_claude_cli_never_inherits_the_api_key(monkeypatch):
+    """The CLI runs on the subscription. Anthropic's client prefers
+    ANTHROPIC_API_KEY when present — a different, prepaid account — so
+    inheriting it bills the wrong one and dies when that balance is empty.
+    Found by an end-to-end task failing with 'Credit balance is too low'."""
+    from app import claude_cli
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-leak")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "nope")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
+    env = claude_cli._subprocess_env()
+    for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        assert k not in env, f"{k} must not reach the CLI"
+    assert env["CI"] == "1"
+    assert env.get("PATH"), "the rest of the environment is preserved"

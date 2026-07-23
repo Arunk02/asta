@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-06-14T10:00:00Z",
+  "verified_against": "a1b2c3d",
+  "files": [
+    {
+      "path": "runtime/vts-registration-flow.md",
+      "category": "runtime",
+      "title": "VTS registration flow",
+      "summary": "Inbound REST → validation → TMS lookup → Kafka emit.",
+      "capabilities": ["vts-registration"],
+      "domains": ["VTS"],
+      "entities": ["VtsRequest", "VtsRegisteredEvent"]
+    },
+    {
+      "path": "contracts/vts-request-models.md",
+      "category": "contracts",
+      "title": "VTS request models",
+      "summary": "DTO shape and validation rules for /vts/registrations.",
+      "capabilities": ["vts-registration"],
+      "domains": ["VTS"],
+      "entities": ["VtsRequest"]
+    },
+    {
+      "path": "integrations/tms.md",
+      "category": "integrations",
+      "title": "TMS — Transport Management System",
+      "summary": "Outbound lookup during VTS registration. 5xx → 3 retries, exp backoff.",
+      "capabilities": ["vts-registration"],
+      "domains": ["VTS"],
+      "entities": []
+    }
+  ]
+}

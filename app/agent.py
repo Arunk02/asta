@@ -40,7 +40,7 @@ You have:
   conversation) and follow its query discipline exactly — namespace-wide Loki first, one
   wide-window call for identifier traces, aggregates before raw lines, limit <= 50, no
   per-service loops, Prometheus/Tempo only for performance asks.
-- Contmark workspace tools for the `booking` codebase: ALWAYS call resolve_context
+- project context workspace tools for the `booking` codebase: ALWAYS call resolve_context
   first for any code question — it returns the exact files/lines to read — then read only those
   with read_workspace_file. Never try to explore a repo blindly.
 - A persistent memory. Use the remember tool whenever: Arun corrects you, states a preference,
@@ -481,7 +481,7 @@ def search_memory(query: str) -> str:
 
 
 async def resolve_context(workspace: str, task: str) -> str:
-    """Contmark librarian: given a task/question, returns the exact services, files and
+    """project context librarian: given a task/question, returns the exact services, files and
     line numbers to read in the given workspace ('booking'). Call this FIRST
     for any code question."""
     return await workspace_tools.resolve_context(workspace, task)

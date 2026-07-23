@@ -1,0 +1,44 @@
+# <repo>/.asta-context/context/_pins.yml
+# Full repo profile. Replaces .asta-context/project.yml.
+# Hand-edit. Agents read this at boot in workspace mode (and in single-repo mode
+# once the legacy project.yml is retired).
+
+stack:
+  build: maven           # maven | gradle
+  language: java         # java | kotlin
+  framework: webflux     # webflux | mvc
+
+modules:
+  service: foo-service                # e.g. foo-service or src/main/java
+  test: src/test/java
+  componentTest: componenttest        # or `none` if no CT module
+
+# Exact runnable commands derived from pom.xml / build.gradle at bootstrap.
+# Agents run these VERBATIM — no detection, no pom re-parsing. `none` = not applicable.
+# This is the per-repo specialisation of the generic maven/gradle build skill.
+commands:
+  build:          "mvn -pl foo-service -am -P dev clean package"   # module-scoped reactor build
+  unit_test:      "mvn -pl foo-service test"
+  component_test: "mvn -pl componenttest verify -Dspring.profiles.active=local"   # or `none`
+  lint:           "mvn spotless:check"                              # or `none`
+  verify:         "mvn -pl foo-service -am verify -P test"          # full gate before PR
+
+features:
+  kafka: true
+  temporal: true
+  database: mongo                     # mongo | postgres | dynamo | none
+  avro: true
+
+asta_skills:
+  always:  [execution-core]
+  stack:   [spring-java-conventions, java-reactive-patterns]
+  build:   [maven-build-profiles]
+  domain:  [kafka-consumer-patterns, temporal-workflow-patterns]
+  review:  [code-review-checklist]
+  test:    [unit-testing-java, component-testing-cucumber]
+  pr:      [pr-delivery-and-triage]
+  plan:    [plan-templates]
+
+profiles:
+  application: [local, dev, test, prod]
+  helm: helm/*-values.yml

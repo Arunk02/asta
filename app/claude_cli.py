@@ -35,6 +35,22 @@ def available() -> bool:
     return bool(shutil.which("claude"))
 
 
+
+# The CLI authenticates against the Claude subscription. Anthropic's client
+# prefers ANTHROPIC_API_KEY when it is present in the environment — which is a
+# DIFFERENT, prepaid account, so inheriting it silently bills the wrong one and
+# fails outright once that balance runs dry ("Credit balance is too low"). Asta
+# keeps the key in .env for the API-backed chat model, so it is in os.environ
+# for every subprocess unless stripped here.
+_STRIP_FROM_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+
+
+def _subprocess_env() -> dict:
+    env = {k: v for k, v in os.environ.items() if k not in _STRIP_FROM_ENV}
+    env["CI"] = "1"
+    return env
+
+
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent_file: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
@@ -64,7 +80,7 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     proc = await asyncio.create_subprocess_exec(
         *cmd, cwd=cwd or str(ROOT),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env={**os.environ, "CI": "1"},
+        env=_subprocess_env(),
     )
     async def _drain() -> str:
         # Read incrementally rather than communicate(), so on_progress can watch
@@ -172,7 +188,7 @@ async def run_turn(conv: dict, user_text: str,
     proc = await asyncio.create_subprocess_exec(
         *_build_cmd(conv, user_text), cwd=_cwd(conv),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "CI": "1"},
+        env=_subprocess_env(),
     )
     chunks: list[str] = []
     final = ""

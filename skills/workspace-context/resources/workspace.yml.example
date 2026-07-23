@@ -1,0 +1,39 @@
+# <workspace-root>/.asta-context/workspace.yml
+# One-time declaration for a multi-repo workspace.
+# Commit this file. Absent file = single-repo mode (every agent behaves as today).
+
+workspace: example-platform
+version: 1
+
+# Each repo lives at <workspace-root>/<key>/ — no `path` field.
+repos:
+  - key: booking-service
+    domains: [booking, quote, manifest]
+    depends_on: [shared-contracts]
+
+  - key: transport-service
+    domains: [VTS, CAMS, Rail]
+    depends_on: [shared-contracts]
+
+  - key: shared-contracts
+    domains: [contracts, events]
+    depends_on: []
+
+# Case-insensitive substring match against the task input. Multiple matches union.
+routing_rules:
+  - match: ["booking", "quote", "manifest"]
+    repos: [booking-service]
+  - match: ["VTS", "vehicle transport"]
+    repos: [transport-service, shared-contracts]
+  - match: ["CAMS"]
+    repos: [transport-service]
+  - match: ["kafka event", "shared schema"]
+    repos: [shared-contracts]
+
+# When a file under any of these paths changes, the listed repos are added to
+# $impacted_repos automatically — even if the task text didn't match a rule.
+cross_repo_contracts:
+  - path: shared-contracts/src/main/proto/**
+    impacts: [booking-service, transport-service]
+  - path: shared-contracts/src/main/avro/**
+    impacts: [booking-service, transport-service]

@@ -46,7 +46,6 @@
         <select id="model-pick" title="Model"></select>
         <select id="workspace-pick" title="Workspace">
           <option value="">no workspace</option>
-          <option value="booking">booking</option>
         </select>
         <button id="bell" title="Notifications">🔔<span id="bell-badge" class="hidden"></span></button>
       </div>
@@ -103,6 +102,38 @@
 
     <section id="pane-settings" class="pane">
       <div class="settings-col">
+        <div class="card">
+          <h2>Workspaces</h2>
+          <p class="dim">Point Asta at a folder of repos. Detection picks how it reads
+          them; project context is generated <b>inside your own workspace</b> and never
+          leaves this machine.</p>
+          <div id="ws-list" class="dim">…</div>
+          <div class="field">
+            <label for="ws-path">Folder to add</label>
+            <input id="ws-path" type="text" placeholder="~/my-workspace">
+          </div>
+          <div class="field">
+            <button id="ws-detect">Detect repos</button>
+            <span id="ws-detect-msg" class="dim"></span>
+          </div>
+          <div id="ws-found" class="hidden">
+            <p class="dim">Select the repos Asta should work with:</p>
+            <div id="ws-repos"></div>
+            <div class="field">
+              <label for="ws-name">Name</label>
+              <input id="ws-name" type="text" placeholder="myproject">
+            </div>
+            <div class="field">
+              <label for="ws-jira">Jira project keys <span class="dim">(optional, comma-separated — lets Asta pick this workspace automatically)</span></label>
+              <input id="ws-jira" type="text" placeholder="PROJ, PLAT">
+            </div>
+            <div class="field">
+              <button id="ws-add">Add workspace</button>
+              <span id="ws-add-msg" class="dim"></span>
+            </div>
+          </div>
+        </div>
+
         <div class="card">
           <h2>WhatsApp</h2>
           <p id="wa-state" class="dim">checking bridge…</p>

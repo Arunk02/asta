@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, briefing, ci_watch, claude_cli, copilot_cli, health, jira, mcp_loader, memory, missions, msnotify, notify, outlook, refresh, reminders, store, tasks, teams_bridge, telegram, workspace_tools
+from . import activity, briefing, ci_watch, claude_cli, copilot_cli, health, jira, mcp_loader, memory, missions, msnotify, notify, outlook, refresh, reminders, store, tasks, teams_bridge, telegram, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -88,11 +88,15 @@ async def startup() -> None:
     memory.reindex()
     MCP_TOOLSETS, MCP_STATUS = mcp_loader.load_toolsets()
     asyncio.create_task(_probe_mcp())
-    for name, ws in workspace_tools.available_workspaces().items():
-        if ws["graph"]:
+    for name, ws in workspace.available_workspaces().items():
+        # graph_pages() knows where this workspace keeps its context; the
+        # directory name is per-workspace, so it must not be hardcoded here.
+        pages = workspace.graph_pages(name)
+        if pages:
+            provider = workspace.provider_for(name)
             app.mount(
                 f"/graph/{name}",
-                StaticFiles(directory=Path(ws["root"]) / ".contmark" / "graph"),
+                StaticFiles(directory=provider.ctx / "graph"),
                 name=f"graph-{name}",
             )
     asyncio.create_task(_digest_loop())
@@ -252,6 +256,55 @@ def api_memory_file(path: str):
 @app.get("/api/graphs/{workspace}", dependencies=[Depends(require_auth)])
 def api_graphs(workspace: str):
     return workspace_tools.graph_pages(workspace)
+
+
+# --- workspaces --------------------------------------------------------------
+# Registry-backed, so adding a codebase is a UI action rather than a code edit.
+# The project context these produce stays on this machine, inside the user's own
+# repos — Asta only records where to look.
+
+@app.get("/api/workspaces", dependencies=[Depends(require_auth)])
+def api_workspaces():
+    return workspace.available_workspaces()
+
+
+@app.post("/api/workspaces/detect", dependencies=[Depends(require_auth)])
+async def api_workspaces_detect(request: Request):
+    body = await request.json()
+    info = workspace.detect((body.get("path") or "").strip())
+    if not info["ok"]:
+        raise HTTPException(400, info["error"])
+    return info
+
+
+@app.post("/api/workspaces", dependencies=[Depends(require_auth)])
+async def api_workspaces_add(request: Request):
+    body = await request.json()
+    try:
+        ws = workspace.add(
+            (body.get("name") or "").strip(),
+            (body.get("root") or "").strip(),
+            repos=[r for r in (body.get("repos") or []) if r],
+            jira_projects=[j for j in (body.get("jira_projects") or []) if j],
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"name": ws.name, "status": workspace.available_workspaces().get(ws.name, {})}
+
+
+@app.delete("/api/workspaces/{name}", dependencies=[Depends(require_auth)])
+def api_workspaces_remove(name: str):
+    if not workspace.remove(name):
+        raise HTTPException(404, f"No workspace '{name}'")
+    return {"removed": name}
+
+
+@app.post("/api/workspaces/{name}/provision", dependencies=[Depends(require_auth)])
+async def api_workspaces_provision(name: str):
+    try:
+        return {"report": await workspace.provision(name)}
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
 
 
 @app.get("/api/missions", dependencies=[Depends(require_auth)])

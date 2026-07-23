@@ -173,3 +173,7 @@ select { background: var(--bg3); color: var(--fg); border: 1px solid var(--line)
   #memory-list { width: 100%; max-height: 40%; border-right: none; border-bottom: 1px solid var(--line); }
   .pickers select { max-width: 34vw; }
 }
+
+/* workspace repo checkboxes */
+.ws-repo { display: inline-block; margin: 0 .8rem .3rem 0; font-size: .9rem; }
+.ws-del { float: right; font-size: .75rem; padding: .1rem .5rem; }

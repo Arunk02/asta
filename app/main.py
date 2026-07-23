@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, briefing, ci_watch, claude_cli, copilot_cli, health, jira, mcp_loader, memory, missions, msnotify, notify, outlook, refresh, reminders, store, tasks, teams_bridge, telegram, workspace, workspace_tools
+from . import activity, briefing, ci_watch, claude_cli, context_build, copilot_cli, health, jira, mcp_loader, memory, missions, msnotify, notify, outlook, refresh, reminders, store, tasks, teams_bridge, telegram, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -301,10 +301,42 @@ def api_workspaces_remove(name: str):
 
 @app.post("/api/workspaces/{name}/provision", dependencies=[Depends(require_auth)])
 async def api_workspaces_provision(name: str):
+    """Regenerate the derived indexes only. Cheap and deterministic."""
     try:
         return {"report": await workspace.provision(name)}
     except ValueError as exc:
         raise HTTPException(404, str(exc))
+
+
+@app.get("/api/workspaces/{name}/context-plan", dependencies=[Depends(require_auth)])
+def api_context_plan(name: str):
+    """What a context build would do. The UI shows this before spending."""
+    plan = context_build.plan(name)
+    if not plan["ok"]:
+        raise HTTPException(404, plan["error"])
+    plan["in_progress"] = context_build.in_progress(name)
+    return plan
+
+
+@app.post("/api/workspaces/{name}/build-context", dependencies=[Depends(require_auth)])
+async def api_build_context(name: str, request: Request):
+    """Run the expensive pass that CREATES project context. Explicit by design:
+    it reads whole repositories on a code executor and costs real tokens, so it
+    is never a side effect of registering a workspace."""
+    body = {}
+    with contextlib.suppress(Exception):
+        body = await request.json()
+    if context_build.in_progress(name):
+        raise HTTPException(409, "A context build is already running for this workspace.")
+    plan = context_build.plan(name)
+    if not plan["ok"]:
+        raise HTTPException(404, plan["error"])
+    repos = [r for r in (body.get("repos") or []) if r] or None
+    # Long job: run detached and notify, so the HTTP call does not hang.
+    asyncio.create_task(context_build.build(name, repos, body.get("executor", "")))
+    return {"started": True, "workspace": name,
+            "repos": repos or plan["repos_to_build"],
+            "note": "Running in the background; you will be notified when it finishes."}
 
 
 @app.get("/api/missions", dependencies=[Depends(require_auth)])

@@ -1192,6 +1192,7 @@ async function loadWorkspaces() {
         <div class="m-sub">${esc(bits.join(" · "))}</div>${note}</div>`;
     }).join("");
     el.querySelectorAll(".ws-del").forEach((b) => (b.onclick = () => removeWorkspace(b.dataset.ws)));
+    renderBuildPrompt(names);
   } catch (e) {
     el.textContent = "Could not load workspaces.";
   }
@@ -1250,5 +1251,53 @@ $("#ws-add").onclick = async () => {
     await loadStatus();
   } catch (e) {
     msg.textContent = String(e.message || e);
+  }
+};
+
+
+/* ---------- project context generation ---------- */
+// Never fires on its own: reading whole repositories on a code executor costs
+// real tokens, so the cost is shown and the user presses the button.
+
+async function renderBuildPrompt(names) {
+  const box = $("#ws-build"), msg = $("#ws-build-msg");
+  box.classList.add("hidden");
+  for (const name of names) {
+    let plan;
+    try { plan = await api(`/api/workspaces/${encodeURIComponent(name)}/context-plan`); }
+    catch { continue; }
+    if (plan.in_progress) {
+      msg.innerHTML = `<b>${esc(name)}</b>: building context now…`;
+      $("#ws-build-go").disabled = true;
+      box.dataset.ws = name;
+      box.classList.remove("hidden");
+      return;
+    }
+    if (plan.needs_build) {
+      msg.innerHTML = `<b>${esc(name)}</b> has ${plan.repos_to_build.length} repo(s) with no `
+        + `project context: ${esc(plan.repos_to_build.join(", "))}.<br>`
+        + `<span class="dim">${esc(plan.estimate)}</span>`;
+      $("#ws-build-go").disabled = false;
+      box.dataset.ws = name;
+      box.classList.remove("hidden");
+      return;
+    }
+  }
+}
+
+$("#ws-build-go").onclick = async () => {
+  const name = $("#ws-build").dataset.ws;
+  const state = $("#ws-build-state");
+  if (!name) return;
+  if (!confirm(`Build project context for "${name}"?\n\nThis reads each repository with your code executor and uses real tokens.`)) return;
+  state.textContent = "starting…";
+  try {
+    const r = await api(`/api/workspaces/${encodeURIComponent(name)}/build-context`, {
+      method: "POST", body: JSON.stringify({}),
+    });
+    state.textContent = `building ${r.repos.length} repo(s) — you'll be notified`;
+    $("#ws-build-go").disabled = true;
+  } catch (e) {
+    state.textContent = String(e.message || e);
   }
 };

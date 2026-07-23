@@ -108,6 +108,11 @@
           them; project context is generated <b>inside your own workspace</b> and never
           leaves this machine.</p>
           <div id="ws-list" class="dim">…</div>
+          <div id="ws-build" class="hidden">
+            <p id="ws-build-msg" class="dim"></p>
+            <button id="ws-build-go">Build project context</button>
+            <span id="ws-build-state" class="dim"></span>
+          </div>
           <div class="field">
             <label for="ws-path">Folder to add</label>
             <input id="ws-path" type="text" placeholder="~/my-workspace">
@@ -170,7 +175,7 @@
           <h2>Teams bridge (read + send)</h2>
           <p id="teamsbridge-state" class="dim">…</p>
           <p class="dim">Uses your Teams <b>web session</b> (Playwright). One-time login:
-          <code>.venv/bin/python -m app.teams_bridge login</code> — complete the Maersk SSO in
+          <code>.venv/bin/python -m app.teams_bridge login</code> — complete your organisation's SSO in
           the window. Then ask in chat: “read my Teams chat with Vinish” or “send Vinish: …”.
           Sessions expire every few weeks; you'll get a notification to re-login.
           Meeting-join is deliberately not supported.</p>

@@ -41,6 +41,7 @@ def _git_repo(path: Path, files: dict[str, str]) -> Path:
         f.write_text(body)
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
     subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+    subprocess.run(["git", "-c", "user.email=t@e.com", "-c", "user.name=T", "commit", "-qm", "init"], cwd=path, check=True)
     return path
 
 
@@ -369,3 +370,69 @@ def test_explicit_dirname_override_wins(tmp_path, monkeypatch):
     monkeypatch.setenv("ASTA_CONTEXT_DIRNAME", ".custom")
     ws.add("pinned", root)
     assert ws.provider_for("pinned").ctx.name == ".custom"
+
+
+# --- bugs found by end-to-end testing ----------------------------------------
+
+def test_provision_writes_the_manifests_the_resolver_requires(indexed_ws, monkeypatch, tmp_path):
+    """Without workspace.yml / _repo_router.json / _global_links.json the
+    resolver refuses to start with {"error":"missing_file"} — while the indexes
+    look complete. Found by running a real build."""
+    res = tmp_path / "res"; res.mkdir()
+    (res / "resolve-task.js").write_text("//"); (res / "check-drift.js").write_text("//")
+    monkeypatch.setenv("ASTA_CONTEXT_RESOURCES", str(res))
+    ctx = indexed_ws / ".asta-context"
+    (ctx / "repos" / "svc-a").mkdir(parents=True)
+    (ctx / "repos" / "svc-a" / "_index.json").write_text(json.dumps(
+        {"repo": "svc-a", "summary": "does things", "domains": ["orders", "billing"],
+         "verified_against": "deadbeef"}))
+    ws.add("proj", indexed_ws)
+    asyncio.run(ws.provision("proj"))
+
+    assert (ctx / "workspace.yml").is_file()
+    router = json.loads((ctx / "_repo_router.json").read_text())
+    assert router["schema_version"] == 2
+    assert isinstance(router["disambiguation_rules"], list), "resolver iterates it"
+    assert "orders" in router["request_buckets"], "domains become routing phrases"
+    assert json.loads((ctx / "_global_links.json").read_text()) == []
+
+
+def test_manifests_are_not_overwritten_once_customised(indexed_ws, monkeypatch, tmp_path):
+    res = tmp_path / "res"; res.mkdir()
+    monkeypatch.setenv("ASTA_CONTEXT_RESOURCES", str(res))
+    ctx = indexed_ws / ".asta-context"
+    (ctx / "repos" / "svc-a").mkdir(parents=True)
+    (ctx / "repos" / "svc-a" / "_index.json").write_text('{"repo":"svc-a"}')
+    (ctx / "workspace.yml").write_text("workspace: hand-edited\n")
+    ws.add("proj", indexed_ws)
+    asyncio.run(ws.provision("proj"))
+    assert "hand-edited" in (ctx / "workspace.yml").read_text()
+
+
+def test_sha_mismatch_is_drift_even_with_no_mini_skills(indexed_ws):
+    """The drift script maps staleness through per-mini-skill `sources:`. A
+    context written without mini-skills gave it nothing to flag, so it reported
+    CLEAN while the SHAs plainly disagreed — a silent false negative."""
+    (indexed_ws / ".asta-context" / "check-drift.js").write_text(
+        "console.log('context up-to-date (no drift)');\n")
+    ctx = indexed_ws / ".asta-context" / "repos" / "svc-a"
+    ctx.mkdir(parents=True)
+    ctx.joinpath("_index.json").write_text('{"repo":"svc-a","verified_against":"0000000000"}')
+    ws.add("proj", indexed_ws)
+
+    stale, detail = asyncio.run(ws.drift("proj"))
+    assert stale is True, "a SHA mismatch must never be reported as in sync"
+    assert "svc-a" in detail
+
+
+def test_matching_sha_is_reported_in_sync(indexed_ws):
+    (indexed_ws / ".asta-context" / "check-drift.js").write_text(
+        "console.log('context up-to-date (no drift)');\n")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=indexed_ws / "svc-a",
+                          capture_output=True, text=True).stdout.strip()
+    ctx = indexed_ws / ".asta-context" / "repos" / "svc-a"
+    ctx.mkdir(parents=True)
+    ctx.joinpath("_index.json").write_text(json.dumps({"repo": "svc-a", "verified_against": head}))
+    ws.add("proj", indexed_ws)
+    stale, _ = asyncio.run(ws.drift("proj"))
+    assert stale is False

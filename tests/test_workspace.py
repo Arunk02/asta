@@ -60,15 +60,15 @@ def plain_ws(tmp_path):
 @pytest.fixture
 def indexed_ws(tmp_path):
     root = tmp_path / "indexed-workspace"
-    (root / ".contmark").mkdir(parents=True)
-    (root / ".contmark" / "resolve-task.js").write_text(
+    (root / ".asta-context").mkdir(parents=True)
+    (root / ".asta-context" / "resolve-task.js").write_text(
         "console.log('RESOLVED: ' + process.argv[3]);\n")
-    (root / ".contmark" / "check-drift.js").write_text("console.log('in sync');\n")
-    (root / ".contmark" / "lessons.md").write_text("Always run a clean build first.\n")
-    (root / ".contmark" / "boot.sh").write_text("echo boot\n")
-    (root / ".contmark" / "_global_index.json").write_text("{}")
-    (root / ".contmark" / "graph" / "_workspace").mkdir(parents=True)
-    (root / ".contmark" / "graph" / "_workspace" / "graph.html").write_text("<html></html>")
+    (root / ".asta-context" / "check-drift.js").write_text("console.log('in sync');\n")
+    (root / ".asta-context" / "lessons.md").write_text("Always run a clean build first.\n")
+    (root / ".asta-context" / "boot.sh").write_text("echo boot\n")
+    (root / ".asta-context" / "_global_index.json").write_text("{}")
+    (root / ".asta-context" / "graph" / "_workspace").mkdir(parents=True)
+    (root / ".asta-context" / "graph" / "_workspace" / "graph.html").write_text("<html></html>")
     _git_repo(root / "svc-a", {"a.txt": "a"})
     return root
 
@@ -126,7 +126,7 @@ def test_auto_provider_upgrades_when_index_appears(plain_ws):
     index shows up — no re-registration."""
     ws.add("proj", plain_ws)
     assert ws.provider_for("proj").id == "plain"
-    (plain_ws / ".contmark").mkdir()
+    (plain_ws / ".asta-context").mkdir()
     assert ws.provider_for("proj").id == "indexed"
 
 
@@ -235,7 +235,7 @@ def test_indexed_conventions_reads_lessons(indexed_ws):
 def test_indexed_boot_command_quotes_the_hint(indexed_ws):
     ws.add("proj", indexed_ws)
     cmd = ws.boot_command("proj", 'vessel "eta" sync')
-    assert cmd.startswith("sh .contmark/boot.sh ")
+    assert cmd.startswith("sh .asta-context/boot.sh ")
     assert '"' not in cmd.split("boot.sh ", 1)[1].strip('"'), "inner quotes neutralised"
 
 
@@ -244,7 +244,7 @@ def test_indexed_drift_parses_resolver_output(indexed_ws):
     stale, detail = asyncio.run(ws.drift("proj"))
     assert stale is False and "in sync" in detail
 
-    (indexed_ws / ".contmark" / "check-drift.js").write_text("console.log('DRIFT svc-a');\n")
+    (indexed_ws / ".asta-context" / "check-drift.js").write_text("console.log('DRIFT svc-a');\n")
     stale, detail = asyncio.run(ws.drift("proj"))
     assert stale is True and "DRIFT" in detail
 
@@ -345,3 +345,27 @@ def test_selected_repo_scopes_search_results(plain_ws):
 def test_selection_of_a_nonexistent_repo_yields_nothing(plain_ws):
     ws.add("proj", plain_ws, repos=["ghost-service"])
     assert ws.list_services("proj") == []
+
+
+def test_alternate_context_dirname_is_configurable(tmp_path, monkeypatch):
+    """A workspace bootstrapped by another toolchain uses a different directory
+    name. That name is configuration on this machine, never a constant in Asta."""
+    root = tmp_path / "other-layout"
+    (root / ".legacy-ctx").mkdir(parents=True)
+    (root / ".legacy-ctx" / "resolve-task.js").write_text("console.log('hi');")
+    assert registry.detect_provider(root) == "plain", "unknown layout: not indexed"
+
+    monkeypatch.setenv("ASTA_CONTEXT_DIRNAMES", ".legacy-ctx")
+    assert registry.detect_provider(root) == "indexed", "configured name is detected"
+
+    ws.add("other", root)
+    assert ws.provider_for("other").ctx.name == ".legacy-ctx"
+
+
+def test_explicit_dirname_override_wins(tmp_path, monkeypatch):
+    root = tmp_path / "pinned"
+    (root / ".asta-context").mkdir(parents=True)
+    (root / ".custom").mkdir()
+    monkeypatch.setenv("ASTA_CONTEXT_DIRNAME", ".custom")
+    ws.add("pinned", root)
+    assert ws.provider_for("pinned").ctx.name == ".custom"

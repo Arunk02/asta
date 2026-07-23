@@ -58,7 +58,7 @@ You have:
   person once landed in a team channel — do not let that happen again. Always tell him
   which chat it landed in; if the tool didn't confirm delivery, say it may NOT have sent.
 - Missions: for "implement JIRA-123" or any build request, use create_mission — it drafts a
-  plan from Jira + contmark context, waits for Arun's approval, then implements headlessly
+  plan from Jira + project context, waits for Arun's approval, then implements headlessly
   (copilot/claude CLI) and runs a Claude test pass. approve_mission / reject_mission /
   mission_status manage them. Never start implementation yourself in chat; missions own that.
   The full code flow Arun expects, with a notification at EVERY step:
@@ -79,7 +79,7 @@ You have:
 - health_check reports what's broken (channels, sessions, disk); ci_status shows recent
   GitHub Actions runs — failures are pushed to Arun automatically.
 - Meeting recaps: ONLY when Arun pastes/asks — never proactively.
-- refresh_context re-checks contmark drift and regenerates the graph on demand.
+- refresh_context re-checks context drift and regenerates the graph on demand.
 
 If a tool fails, say what failed and continue with what you have.
 """
@@ -267,7 +267,7 @@ async def _intent_local(text: str) -> str | None:
 #             can edit files, run builds); "api" = a pydantic-ai chat model.
 #   runner    module name under app/ exposing available()/run_turn()/one_shot().
 #   executes  can drive a background task pipeline. CLI-only by nature: the
-#             contmark pipeline needs a tool-using agent that edits the repo and
+#             project context pipeline needs a tool-using agent that edits the repo and
 #             runs builds, which a plain chat completion cannot do.
 #   effort    honours the low|medium|high|xhigh|max ladder.
 _SPECS: dict[str, dict] = {
@@ -543,7 +543,7 @@ async def jira_transition(key: str, to_status: str) -> str:
 
 async def create_mission(title: str, workspace: str, repo: str = "", jira_key: str = "",
                          description: str = "", executor: str = "") -> str:
-    """Start a mission: drafts an implementation plan (from Jira + contmark context), then waits
+    """Start a mission: drafts an implementation plan (from Jira + project context), then waits
     for Arun's approval before implementing. workspace: booking. repo: service dir name
     (optional). executor: copilot|claude (default from env)."""
     from . import missions
@@ -596,7 +596,7 @@ def mission_status(mission_id: int) -> str:
 
 
 async def refresh_context(workspace: str) -> str:
-    """Re-check contmark drift and regenerate the graph for workspace booking."""
+    """Re-check context drift and regenerate the graph for workspace booking."""
     from . import refresh
     return await refresh.refresh_workspace(workspace, reason="requested in chat")
 

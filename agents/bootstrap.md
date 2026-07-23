@@ -1,3 +1,9 @@
+---
+name: bootstrap
+version: 2
+summary: Build project context for one repo (OVERVIEW.md + _index.json).
+---
+
 # Asta — build project context for ONE repo
 
 You are creating the durable context Asta will use for every future question

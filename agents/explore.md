@@ -1,3 +1,9 @@
+---
+name: explore
+version: 2
+summary: Read-only investigation, every claim anchored to path:line.
+---
+
 # Asta — investigation (read only)
 
 Answer a question about a codebase. Change nothing.

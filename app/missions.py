@@ -68,10 +68,9 @@ and any test output summary. Do not make code changes unless a test is trivially
 
 
 def playbook_block(repo_dir: Path) -> str:
-    """Point the executor at the repo's own contmark agent playbooks/skills, if present.
+    """Point the executor at the repo's own project context agent playbooks/skills, if present.
 
-    Arun's workspaces ship .github/agents (contmark.implement, contmark.unit-test,
-    contmark.component-test, contmark.review, …) and .github/skills (build profiles,
+    Arun's workspaces ship .github/agents (implement, unit-test, component-test, review) and .github/skills (build profiles,
     Spring/Kotlin conventions, Kafka/Temporal patterns). Headless executors must code
     and test the way those playbooks specify, not their own defaults.
     """
@@ -79,9 +78,9 @@ def playbook_block(repo_dir: Path) -> str:
         if (base / "agents").is_dir() or (base / "skills").is_dir():
             return (
                 f"\n\nIMPORTANT — this codebase ships its own engineering playbooks under {base}:\n"
-                "- agents/contmark.implement.agent.md — how implementation is done here "
+                "- agents/implement.agent.md — how implementation is done here "
                 "(boot skills, build command from pins, prohibited actions)\n"
-                "- agents/contmark.unit-test.agent.md and contmark.component-test.agent.md — "
+                "- agents/unit-test.agent.md and component-test.agent.md — "
                 "how tests must be written\n"
                 "- skills/ — build profiles (maven/gradle), language conventions "
                 "(spring-java/kotlin/react), domain patterns (kafka/temporal)\n"

@@ -30,14 +30,33 @@ def test_no_publishing_and_no_ai_attribution_anywhere(name):
 
 
 @pytest.mark.parametrize("name", sorted(agents.PIPELINES))
-def test_pipelines_carry_no_project_or_vendor_specifics(name):
-    """The whole point of moving these here: they must be true for ANY codebase.
-    A leaked repo name, ticket prefix, build tool or vendor means it belongs in
-    the workspace, not in Asta."""
+def test_pipelines_name_no_build_tool_or_language(name):
+    """Pipelines must hold for ANY codebase. Naming a build tool or language
+    means that knowledge belongs in the workspace's own facts, not here."""
     body = agents.load(name).lower()
-    for leak in ("contmark", "telikos", "beptelikos", "maersk", "booking-workspace",
-                 "mvn ", "gradle", "java", "arun"):
-        assert leak not in body, f"{name}.md leaks '{leak}'"
+    for leak in ("mvn ", "gradle", "npm ", " java", "kotlin", "spring", "pytest"):
+        assert leak not in body, f"{name}.md names '{leak}'"
+
+
+@pytest.mark.parametrize("name", sorted(agents.PIPELINES))
+def test_pipelines_leak_nothing_from_the_real_registry(name):
+    """Derived rather than hardcoded: whatever workspaces and repos this machine
+    actually has, none of their names may appear in a pipeline. Keeps the check
+    honest without writing anyone's project names into the repo."""
+    from app import workspace as ws
+    body = agents.load(name).lower()
+    private = set()
+    for wsname, w in ws.all_workspaces().items():
+        private.add(wsname.lower())
+        private.add(w.path.name.lower())
+        try:
+            private.update(d.name.lower() for d in w.path.iterdir() if d.is_dir())
+        except OSError:
+            pass
+    for term in private:
+        if len(term) < 5:
+            continue
+        assert term not in body, f"{name}.md leaks '{term}' from the registry"
 
 
 def test_override_dir_wins(tmp_path, monkeypatch):

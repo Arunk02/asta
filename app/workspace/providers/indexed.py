@@ -32,24 +32,32 @@ from pathlib import Path
 
 from .base import ContextProvider
 
-#: Where a workspace keeps its project context, newest name first. Asta creates
-#: `.asta-context`; `.contmark` is the legacy directory an already-bootstrapped
-#: workspace still uses, and is detected so nobody has to migrate. Override with
-#: ASTA_CONTEXT_DIRNAME.
-CONTEXT_DIRS = (".asta-context", ".contmark")
+#: Where a workspace keeps its project context. Asta creates and looks for
+#: `.asta-context`. A workspace bootstrapped by some other toolchain may use a
+#: different directory name — point ASTA_CONTEXT_DIRNAME at it (or list extra
+#: names in ASTA_CONTEXT_DIRNAMES, comma-separated) and it is detected too. No
+#: third-party layout is named in code; that is per-machine configuration.
+DEFAULT_CONTEXT_DIR = ".asta-context"
 RESOLVER = "resolve-task.js"
 DRIFT = "check-drift.js"
 
 
-def context_dirname(root: Path) -> str:
-    """The context directory this workspace actually uses."""
+def candidate_dirnames() -> tuple[str, ...]:
+    """Context directory names to look for, most preferred first."""
     override = os.environ.get("ASTA_CONTEXT_DIRNAME", "").strip()
     if override:
-        return override
-    for name in CONTEXT_DIRS:
+        return (override,)
+    extra = [n.strip() for n in os.environ.get("ASTA_CONTEXT_DIRNAMES", "").split(",") if n.strip()]
+    return (DEFAULT_CONTEXT_DIR, *extra)
+
+
+def context_dirname(root: Path) -> str:
+    """The context directory this workspace actually uses."""
+    names = candidate_dirnames()
+    for name in names:
         if (Path(root) / name).is_dir():
             return name
-    return CONTEXT_DIRS[0]
+    return names[0]
 
 _RESOLVE_TIMEOUT = 60
 _GEN_TIMEOUT = 900
@@ -62,9 +70,9 @@ def resources_dir() -> Path | None:
     if raw:
         p = Path(raw).expanduser()
         return p if p.is_dir() else None
-    default = (Path.home() / "Telikos" / "contmark-agent-harness" / "contmark-plugins"
-               / "skills" / "contmark-workspace" / "resources")
-    return default if default.is_dir() else None
+    # No built-in default: the generator toolchain is a per-machine install,
+    # not something Asta bundles or names.
+    return None
 
 
 async def _run(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str]:
@@ -90,9 +98,7 @@ class IndexedProvider(ContextProvider):
     @classmethod
     def detect(cls, root: Path) -> bool:
         root = Path(root)
-        override = os.environ.get("ASTA_CONTEXT_DIRNAME", "").strip()
-        names = (override,) if override else CONTEXT_DIRS
-        return any((root / n).is_dir() for n in names)
+        return any((root / n).is_dir() for n in candidate_dirnames())
 
     def status(self) -> dict:
         ctx = self.ctx

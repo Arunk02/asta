@@ -2,13 +2,13 @@
 
 Multi-LLM chatbot that runs on this laptop: streams over WebSocket, calls your MCP
 servers (temporal, grafana, github, context7), answers codebase questions through the
-contmark workspace (`~/booking-workspace` — IOM parked for now, one commented line in
+project context workspace (`~/booking-workspace` — IOM parked for now, one commented line in
 workspace_tools.py restores it), shows the graphfy view,
 and keeps a persistent day-by-day memory.
 
 Also: Jira reading + change notifications, **missions** (Jira ticket → drafted plan →
 your approval → headless implementation via Copilot/Claude CLI → Claude test pass),
-voice in/out, a WhatsApp bridge, and daily auto-refresh of contmark context + graph.
+voice in/out, a WhatsApp bridge, and daily auto-refresh of project context context + graph.
 
 ## Run it
 
@@ -98,10 +98,10 @@ fallback and is still what the 5-minute change watcher uses).
 
 Pick `booking` in the top bar; the agent then has:
 
-- `resolve_context(workspace, task)` → contmark's resolve-task.js, returns exact files/lines
+- `resolve_context(workspace, task)` → project context's resolve-task.js, returns exact files/lines
 - `read_workspace_file`, `list_services`
 
-The **Graph** tab embeds `.contmark/graph/*/graph.html` (workspace-wide + per-service).
+The **Graph** tab embeds `.asta-context/graph/*/graph.html` (workspace-wide + per-service).
 (IOM workspace is parked — uncomment its line in app/workspace_tools.py to bring it back.)
 
 ## Memory
@@ -142,7 +142,7 @@ id.atlassian.com → Security → API tokens). Then in chat: "my open tickets",
 
 Say "implement ABC-123 in booking" in chat (or WhatsApp, or the Missions tab):
 
-1. Asta pulls the Jira issue + contmark context and drafts a plan;
+1. Asta pulls the Jira issue + project context context and drafts a plan;
 2. you get a notification; review the plan in the Missions tab (or reply
    "approve mission N" from WhatsApp);
 3. on approval the executor implements **headlessly in the repo** —
@@ -192,7 +192,7 @@ brain via the capability block it gets on each fresh session.
   watches every workspace repo's GitHub Actions: 🔴 on failure, 🟢 on recovery,
   silent baseline on first run. On demand: "ci status" or `GET /api/ci`.
 - Missions and code-tasks automatically point their executor at the workspace's own
-  `.github/agents` + `.github/skills` (contmark playbooks) so implementation and
+  `.github/agents` + `.github/skills` (project context playbooks) so implementation and
   unit/component tests follow your org's conventions.
 - Meeting recaps: on demand only — paste a transcript and ask.
 
@@ -263,7 +263,7 @@ long-term fix is a Graph API app registration (phase 6 below).
 
 ## Auto-refresh of context + graph
 
-Follows the contmark-workspace skill's model: **detection is free** (`check-drift.js`
+Follows the project context-workspace skill's model: **detection is free** (`check-drift.js`
 diffs `verified_against..HEAD` — deterministic node, no LLM), **enrichment costs
 tokens** (the evolution loop rewriting mini-skills) and is never run automatically.
 
@@ -293,7 +293,7 @@ app/main.py             FastAPI: WS chat, REST, graph hosting, auth
 app/agent.py            PydanticAI agent, model registry, persona
 app/memory.py           remember/recall, digests, consolidation, compaction
 app/mcp_loader.py       mcp.json -> toolsets (skip/probe logic)
-app/workspace_tools.py  contmark resolve/read/list + graph pages
+app/workspace_tools.py  project context resolve/read/list + graph pages
 app/store.py            SQLite: chats, usage, FTS5 memory index
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/

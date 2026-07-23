@@ -9,7 +9,7 @@ run. Every audit is persisted to the `waste_audits` table so the trend line —
 is waste actually going down? — is queryable.
 
 Why this exists: the expensive things in agent coding are not the edits, they're
-(1) re-discovering what contmark already knows, (2) dumping raw build logs / wide
+(1) re-discovering what project context already knows, (2) dumping raw build logs / wide
 greps that re-cache every turn, (3) re-planning on a wrong understanding (a
 session resume re-caches everything). This module names those so they can be
 fixed, and measures whether the fixes worked.

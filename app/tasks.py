@@ -26,25 +26,19 @@ import time
 import uuid
 from pathlib import Path
 
-from . import claude_cli, copilot_cli, store, workspace_tools
+from . import agents, claude_cli, copilot_cli, store, workspace_tools
 
 ROOT = Path(__file__).resolve().parent.parent
 TASK_TIMEOUT = {"analysis": 900, "code": 1800, "teams_draft": 300}
 
-# Workspace tasks run the workspace's own .github/agents pipelines (per-workspace
-# by design — nothing at global level). The solo agent already does everything
-# Asta used to prompt by hand, but with contmark discipline: resolver instead of
-# grepping, reads only matched lines, plans behind a human gate, learns into
-# lessons.md via its Stage 5 evolution loop. Asta's job shrinks to launching it,
-# relaying its gates to Arun, and shipping the PR afterwards. Analysis goes
-# through the SAME agent (its Stage 0 inquiry mode) — the lighter explore agent
-# was dropped 2026-07-21: no Boot 0, no lessons, not enough context to be useful.
-CODE_AGENT = "contmark.solo.copilot"
-
-# Small ad-hoc changes skip the whole solo ceremony (Boot 0 artifacts, stages,
-# reviews) — for a 7-line edit the ritual was 85% of the bill. The micro agent
-# is ~25 turns end-to-end and ESCALATEs back here the moment scope grows.
-MICRO_AGENT = "contmark.micro"
+# Pipelines are Asta's own (agents/), not the workspace's. One definition for
+# both executors and every workspace, so improving it improves every run — which
+# is the point: the agents are iterated on to cut token waste, and that only
+# works if there is a single thing to measure. The workspace still supplies the
+# FACTS (resolver, lessons, build commands) via its ContextProvider.
+CODE_PIPELINE = "solo"    # staged delivery, human gates
+MICRO_PIPELINE = "micro"  # small change, ~25 turns, escalates
+ANALYSIS_PIPELINE = "explore"
 _JIRA_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 
 # The solo pipeline ends in a PR; Arun's flow ends at a reviewed diff. This
@@ -53,7 +47,7 @@ _JIRA_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
 CODE_OVERRIDES = """
 
 [Asta runtime overrides — obey exactly]
-- Boot 0 efficiency: run `sh .contmark/boot.sh "<key nouns>"` as ONE terminal
+- Boot 0 efficiency: run `sh .asta-context/boot.sh "<key nouns>"` as ONE terminal
   call to get root + resolver + lessons + pins together — do NOT cat
   workspace.yml, lessons.md, _pins.yml, navigation or integrations as separate
   calls (each is a billed turn). Do NOT run check-drift.js — drift is Asta's
@@ -370,13 +364,13 @@ def _audit_note(task_id: int) -> str:
 
 
 def _agent_for(t: dict) -> str:
-    """Workspace tasks run the workspace's contmark solo agent (code = full
+    """Workspace tasks run the workspace's project context solo agent (code = full
     pipeline, analysis = its inquiry mode); tasks without a workspace (e.g. on
-    asta itself) have no .contmark, and the solo agent hard-stops without
+    asta itself) have no project context, and the staged pipeline hard-stops without
     one — those keep the plain prompt path."""
     if not t["workspace"] or t["kind"] not in ("code", "analysis"):
         return ""
-    return CODE_AGENT
+    return _pipeline_name(t["kind"])
 
 
 def _executor_names() -> tuple[str, ...]:
@@ -438,16 +432,28 @@ def _pipeline_for(task_id: int) -> str:
 
 
 def _code_agent(task_id: int) -> str:
-    return MICRO_AGENT if _pipeline_for(task_id) == "micro" else CODE_AGENT
+    """Pipeline name for a code task (Asta's own, not the workspace's)."""
+    return MICRO_PIPELINE if _pipeline_for(task_id) == "micro" else CODE_PIPELINE
 
 
-def _claude_agent_file(workspace: str | None, kind: str, pipeline: str = "full") -> str:
-    """The contmark pipeline file Claude runs — same agents, claude flavour
-    (analysis uses the solo agent's inquiry mode; micro is executor-neutral)."""
-    name = ("contmark.micro" if kind == "code" and pipeline == "micro"
-            else "contmark.solo.claude")
-    f = Path(_cwd(workspace)) / ".github" / "agents" / f"{name}.agent.md"
-    return str(f) if f.is_file() else ""
+def _pipeline_name(kind: str, pipeline: str = "full") -> str:
+    """Which of Asta's pipelines this task runs. Executor-neutral — the same
+    definition serves Claude and Copilot; only delivery differs."""
+    if kind == "code":
+        return MICRO_PIPELINE if pipeline == "micro" else CODE_PIPELINE
+    return ANALYSIS_PIPELINE
+
+
+def _with_pipeline(pipeline: str, prompt: str) -> str:
+    """Prepend a pipeline body to a prompt, for executors without a file flag."""
+    body = agents.load(pipeline) if pipeline else ""
+    return f"{body}\n\n---\n\n{prompt}" if body else prompt
+
+
+def _agent_file(kind: str, pipeline: str = "full") -> str:
+    """Path to the pipeline body, for executors that take a file."""
+    p = agents.path_for(_pipeline_name(kind, pipeline))
+    return str(p) if p else ""
 
 
 def _is_quota_err(exc: Exception) -> bool:
@@ -499,14 +505,18 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         sid, resume = str(uuid.uuid4()), False
         store.kv_set(sid_key, sid)
     watcher = _progress_watcher(task_id, (store.get_task(task_id) or {}).get("title", ""))
+    pipeline = _pipeline_name("code", _pipeline_for(task_id))
     if ex == "claude":
         return await claude_cli.one_shot(
             prompt, cwd=cwd, timeout=TASK_TIMEOUT["code"],
-            agent_file=_claude_agent_file(workspace, "code", _pipeline_for(task_id)),
+            agent_file=_agent_file("code", _pipeline_for(task_id)),
             effort=effort, session_id=sid, resume=resume, on_progress=watcher)
     try:
+        # Copilot's --agent resolves a name from the workspace's own agent
+        # directory. Asta owns the pipeline now, so the body rides in the
+        # prompt instead and nothing is installed into the user's repo.
         return await copilot_cli.one_shot(
-            prompt, cwd=cwd, timeout=TASK_TIMEOUT["code"], agent=_code_agent(task_id),
+            _with_pipeline(pipeline, prompt), cwd=cwd, timeout=TASK_TIMEOUT["code"],
             effort=effort, session_id=sid, resume=resume, on_progress=watcher)
     except RuntimeError as exc:
         if not _is_quota_err(exc):
@@ -529,13 +539,14 @@ async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
     cwd, tout = _cwd(t["workspace"]), TASK_TIMEOUT[t["kind"]]
     agent = _agent_for(t)
     eff = _effort_for(t["kind"], ex)
-    agent_file = _claude_agent_file(t["workspace"], t["kind"]) if agent else ""
+    pipeline = _pipeline_name(t["kind"]) if agent else ""
+    agent_file = _agent_file(t["kind"]) if agent else ""
     if ex == "claude":
         return await claude_cli.one_shot(prompt, cwd=cwd, timeout=tout,
                                          agent_file=agent_file, effort=eff)
     try:
-        return await copilot_cli.one_shot(prompt, cwd=cwd, timeout=tout,
-                                          agent=agent, effort=eff)
+        return await copilot_cli.one_shot(_with_pipeline(pipeline, prompt),
+                                          cwd=cwd, timeout=tout, effort=eff)
     except RuntimeError as exc:
         if not _is_quota_err(exc) or not claude_cli.available():
             raise
@@ -597,7 +608,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
             f"(fresh window {hops + 1}/{_MAX_REPO_HOPS}).", "task")
         result2 = await _run_code_leg(
             task_id,
-            "Resume from .contmark/todos.md + handoff.md — continue with the next "
+            "Resume from .asta-context/todos.md + handoff.md — continue with the next "
             "repo." + CODE_OVERRIDES,
             _cwd(t["workspace"]), resume=False,
             effort=_impl_effort(_resolve_executor(task_id)),

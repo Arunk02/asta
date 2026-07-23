@@ -43,11 +43,9 @@ def default_executor() -> str:
     """Which CLI runs the pass. Mirrors the task engine's choice but writes no
     per-task state — this is not a task, and `_resolve_executor(0)` would leave
     a kv row for a task id that does not exist."""
-    import os
+    from . import claude_cli, repo_ops, tasks
 
-    from . import claude_cli, tasks
-
-    ex = os.environ.get("ASTA_EXECUTOR", "copilot")
+    ex = repo_ops.default_executor()
     if ex == "copilot" and tasks._copilot_quota_down() and claude_cli.available():
         ex = "claude"
     return ex

@@ -37,7 +37,7 @@
       <button id="burger">☰</button>
       <nav id="tabs">
         <button class="tab active" data-tab="chat">Chat</button>
-        <button class="tab" data-tab="missions">Missions</button>
+        <button class="tab" data-tab="missions">Work</button>
         <button class="tab" data-tab="graph">Graph</button>
         <button class="tab" data-tab="memory">Memory</button>
         <button class="tab" data-tab="settings">⚙</button>
@@ -74,16 +74,16 @@
 
     <section id="pane-missions" class="pane">
       <div class="pane-toolbar">
-        <button id="mission-new">+ New mission</button>
-        <span class="dim">plan → approve → implement (copilot/claude) → Claude test pass</span>
+        <button id="task-new">+ New task</button>
+        <span class="dim">plan gate → your approval → implement → review the diff → you say ship</span>
       </div>
       <div class="card" id="task-card">
         <h2>Background tasks <span class="dim">(parallel workers — you're notified on WhatsApp/Telegram when each finishes)</span></h2>
         <div id="task-list"><p class="dim">No background tasks yet. Ask in chat: “delegate a task to …”.</p></div>
       </div>
-      <div id="missions-wrap">
+      <div class="card" id="legacy-card" hidden>
+        <h2 class="dim">Earlier missions <span class="dim">(history — the mission engine was retired)</span></h2>
         <div id="mission-list"></div>
-        <div id="mission-detail"><p class="dim">Select a mission.</p></div>
       </div>
     </section>
 

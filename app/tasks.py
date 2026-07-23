@@ -26,7 +26,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import agents, claude_cli, copilot_cli, store, workspace_tools
+from . import agents, claude_cli, copilot_cli, repo_ops, store, workspace_tools
 
 ROOT = Path(__file__).resolve().parent.parent
 TASK_TIMEOUT = {"analysis": 900, "code": 1800, "teams_draft": 300}
@@ -499,6 +499,9 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
     dying on a FRESH leg fails over to claude transparently; mid-pipeline it
     surfaces an actionable error instead (claude can't adopt a copilot session)."""
     ex = _resolve_executor(task_id)
+    # Rounds are the signal that a run taught something: a task that took one leg
+    # ran a standard flow, one that took several hit something worth recording.
+    store.kv_set(f"task_rounds:{task_id}", str(_rounds(task_id) + 1))
     sid_key = f"task_session:{task_id}:{ex}"
     sid = store.kv_get(sid_key)
     if not sid:
@@ -556,6 +559,34 @@ async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
                                          agent_file=agent_file, effort=eff)
 
 
+def _rounds(task_id: int) -> int:
+    try:
+        return int(store.kv_get(f"task_rounds:{task_id}") or 0)
+    except ValueError:
+        return 0
+
+
+def _escalated(task_id: int) -> bool:
+    return (store.kv_get(f"task_escalated:{task_id}") or "") == "1"
+
+
+def _learn_from(task_id: int, title: str, result: str, status: str = "done") -> None:
+    """Distil this run into a skill, in the background.
+
+    Fire-and-forget on purpose: the task is finished and Arun has been told. A
+    slow or failing extraction must never delay the result or fail the work.
+    """
+    from . import learn
+    # Recorded for every finished task, not just the ones worth distilling —
+    # "did the work land" is the measurement, and it needs the boring runs too.
+    store.record_outcome("task", status, subject=str(task_id),
+                         detail=f"rounds={_rounds(task_id)} escalated={_escalated(task_id)}")
+    if not learn.should_extract(_rounds(task_id), _escalated(task_id), status):
+        return
+    asyncio.create_task(learn.extract(title, result, outcome=status,
+                                      escalated=_escalated(task_id)))
+
+
 async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     """Route a finished code leg: paused at a gate → ask Arun; handoff → next
     repo in a fresh window; otherwise done with the diff."""
@@ -566,6 +597,9 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         # full solo pipeline (fresh session; micro's context is 1-2 turns, not
         # worth carrying). pipeline=full makes this a one-way door, no loops.
         store.kv_set(f"task_pipeline:{task_id}", "full")
+        # The teacher half of the loop: whatever finishes now writes the skill,
+        # so the micro tier gets through this alone next time.
+        store.kv_set(f"task_escalated:{task_id}", "1")
         for ex in _executor_names():
             store.kv_del(f"task_session:{task_id}:{ex}")
         reason = tail.split("ESCALATE:", 1)[1].strip().split("\n")[0][:200]
@@ -618,6 +652,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         await _finish_code(task_id, t, result2, hops + 1)
         return
     store.update_task(task_id, status="done", result=result, finished_at=time.time())
+    _learn_from(task_id, t["title"], result)
     waste = _audit_note(task_id)
     await notify.notify(
         f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}\n\n"
@@ -646,8 +681,7 @@ async def _worker(task_id: int) -> None:
             if _pipeline_for(task_id) == "full":
                 prompt += CODE_OVERRIDES
         else:
-            from .missions import playbook_block
-            prompt += playbook_block(Path(_cwd(t["workspace"])))
+            prompt += repo_ops.playbook_block(Path(_cwd(t["workspace"])))
     try:
         if t["kind"] == "code":
             async with _ws_lock(t["workspace"]):
@@ -678,6 +712,7 @@ async def _worker(task_id: int) -> None:
         else:
             store.update_task(task_id, status="done", result=result,
                               finished_at=time.time())
+            _learn_from(task_id, t["title"], result)
             snippet = result[:400] + ("…" if len(result) > 400 else "")
             waste = _audit_note(task_id)
             await notify.notify(
@@ -705,6 +740,9 @@ def reply(task_id: int, text: str) -> str:
         raise ValueError(f"task #{task_id} is not a code task awaiting approval "
                          f"(kind={t['kind']}, status={t['status']})")
     approved = text.strip().upper() == "PLAN APPROVED"
+    # Did the plan hold? The cheapest honest measure of planning quality: a plan
+    # Arun approves as-is versus one he sends back.
+    store.record_outcome("plan", "approved" if approved else "replanned", subject=str(task_id))
     # Anything buffered by augment() while the task ran rides in now, on the user's
     # gate action — so mid-flight additions land without a session restart.
     full_text = text + _drain_addenda(task_id)
@@ -770,18 +808,17 @@ async def approve(task_id: int) -> str:
         await notify.notify(f"❌ Task #{task_id}: sending to '{t['teams_chat']}' failed — {msg}", "task")
         return f"Send failed: {msg}"
     store.update_task(task_id, status="sent")
+    store.record_outcome("draft", "sent_unedited", subject=str(task_id))
     await notify.notify(f"📨 Task #{task_id}: message sent to Teams chat '{t['teams_chat']}'.", "task")
     return f"Sent to '{t['teams_chat']}'."
 
 
-_BASE_BRANCHES = ("main", "master", "develop")
 
 
 async def ship(task_id: int) -> str:
     """Push the pipeline's committed feature branch(es) and open PRs — one per
     repo the task touched. Only ever triggered by Arun after reviewing the diff."""
     from . import notify
-    from .missions import _git
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
@@ -793,35 +830,36 @@ async def ship(task_id: int) -> str:
         sorted(p for p in root.iterdir() if (p / ".git").is_dir())
     urls: list[str] = []
     for repo in repos:
-        rc, cur = await _git(repo, "git", "rev-parse", "--abbrev-ref", "HEAD")
+        rc, cur = await repo_ops.git(repo, "git", "rev-parse", "--abbrev-ref", "HEAD")
         cur = cur.strip()
-        if rc != 0 or cur in _BASE_BRANCHES:
+        if rc != 0 or cur in repo_ops.BASE_BRANCHES:
             continue
-        rc, dirty = await _git(repo, "git", "status", "--porcelain")
+        rc, dirty = await repo_ops.git(repo, "git", "status", "--porcelain")
         if dirty.strip():
             # Stage 4 test files sometimes stay uncommitted — fold them in.
-            await _git(repo, "git", "add", "-A")
-            rc, out = await _git(repo, "git", "commit", "-m", t["title"])
+            await repo_ops.git(repo, "git", "add", "-A")
+            rc, out = await repo_ops.git(repo, "git", "commit", "-m", t["title"])
             if rc != 0:
                 raise RuntimeError(f"{repo.name}: commit failed: {out[:200]}")
-        rc, ahead = await _git(repo, "git", "log", "--oneline", f"origin/{cur}..HEAD")
+        rc, ahead = await repo_ops.git(repo, "git", "log", "--oneline", f"origin/{cur}..HEAD")
         if rc == 0 and not ahead.strip():
             continue   # branch exists remotely and has nothing new
-        rc, out = await _git(repo, "git", "push", "-u", "origin", cur, timeout=300)
+        rc, out = await repo_ops.git(repo, "git", "push", "-u", "origin", cur, timeout=300)
         if rc != 0:
             raise RuntimeError(f"{repo.name}: push failed: {out[:300]}")
-        rc, out = await _git(repo, "gh", "pr", "create", "--fill", "--head", cur, timeout=300)
+        rc, out = await repo_ops.git(repo, "gh", "pr", "create", "--fill", "--head", cur, timeout=300)
         if rc != 0 and "already exists" not in out:
             raise RuntimeError(f"{repo.name}: gh pr create failed: {out[:300]}")
         import re as _re
         mu = _re.search(r"https://github\.com/\S+/pull/\d+", out)
         if not mu:
-            rc2, out2 = await _git(repo, "gh", "pr", "view", "--json", "url", "--jq", ".url")
+            rc2, out2 = await repo_ops.git(repo, "gh", "pr", "view", "--json", "url", "--jq", ".url")
             urls.append(f"{repo.name}: {out2.strip() if rc2 == 0 else '(PR url unavailable)'}")
         else:
             urls.append(f"{repo.name}: {mu.group(0)}")
     if not urls:
         raise RuntimeError("no unpushed feature branch found — nothing to ship")
+    store.record_outcome("ship", "pr_opened", subject=str(task_id), detail="; ".join(urls))
     msg = f"🔀 Task #{task_id} shipped:\n" + "\n".join("• " + u for u in urls)
     await notify.notify(msg, "action", urgency="direct")
     return msg
@@ -833,6 +871,7 @@ async def reject(task_id: int) -> str:
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
+    store.record_outcome("task", "rejected", subject=str(task_id))
     killed = await cancel(task_id, status="rejected")
     if not killed:
         store.update_task(task_id, status="rejected")

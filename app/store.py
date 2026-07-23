@@ -93,6 +93,24 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    answer TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at REAL NOT NULL,
+    answered_at REAL
+);
+CREATE TABLE IF NOT EXISTS outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_outcomes_kind ON outcomes(kind, created_at);
 CREATE TABLE IF NOT EXISTS traces (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conv_id TEXT NOT NULL,
@@ -414,6 +432,76 @@ def mark_notifications_seen() -> None:
 
 
 # --- key/value (watermarks for watchers) -------------------------------------
+
+# --- questions (ask_user) ----------------------------------------------------
+
+def create_question(text: str, source: str = "") -> dict:
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO questions (text, source, created_at) VALUES (?,?,?)",
+            (text, source, time.time()))
+        qid = cur.lastrowid
+    return get_question(qid)
+
+
+def get_question(qid: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
+    return dict(row) if row else None
+
+
+def open_questions() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM questions WHERE status='open' ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def close_question(qid: int, answer: str, status: str = "answered") -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE questions SET answer=?, status=?, answered_at=? WHERE id=?",
+            (answer, status, time.time(), qid))
+
+
+def expire_open_questions() -> int:
+    """Called at startup: a question whose waiter died with the process can never
+    be answered, and a stale one would swallow the next message as its answer."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE questions SET status='expired', answered_at=? WHERE status='open'",
+            (time.time(),))
+    return cur.rowcount or 0
+
+
+# --- outcomes (self-evaluation) ----------------------------------------------
+
+def record_outcome(kind: str, outcome: str, subject: str = "", detail: str = "") -> None:
+    """Measurement must never break the thing being measured — a long-lived
+    process on a pre-outcomes database would otherwise fail a finished task."""
+    try:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT INTO outcomes (kind, subject, outcome, detail, created_at) VALUES (?,?,?,?,?)",
+                (kind, subject, outcome, detail[:1000], time.time()))
+    except sqlite3.Error:
+        init()
+
+
+def outcome_counts(since: float = 0.0) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT kind, outcome, COUNT(*) AS n FROM outcomes WHERE created_at >= ? "
+            "GROUP BY kind, outcome ORDER BY kind, n DESC", (since,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def recent_outcomes(limit: int = 30) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM outcomes ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
 
 def kv_get(key: str) -> str | None:
     with _connect() as conn:

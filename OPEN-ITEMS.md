@@ -13,7 +13,7 @@ verified; what remains is at the bottom.
 drops BOTH halves, so a self-healing IOM alert never reaches the phone at all.
 Anything still unrecovered when the window passes is released once, as
 "🚨 Still broken after 20 min". Fire and recovery join on the incident/ticket id
-(`INC…`, `BEPTELIKOS-…`) and fall back to a normalised subject. The ledger
+(`INC…`, `PROJ-…`) and fall back to a normalised subject. The ledger
 self-expires so it cannot grow forever.
 
 ### 2. ServiceNow + duplicate CI mail — DONE
@@ -21,7 +21,7 @@ self-expires so it cannot grow forever.
   sender is Arun's own name and the bulk-sender list never matched it. `_CI_MAIL`
   matches the subject shape instead. `ci_watch` remains the channel for these —
   it knows the run, branch and recovery.
-- **ServiceNow KEPT by default.** Incidents assigned to OH - TELIKOS - L2 are
+- **ServiceNow KEPT by default.** Incidents assigned to OH - example - L2 are
   work, not noise; hiding a live incident is the worse failure. Set
   `ASTA_SUPPRESS_SERVICENOW=1` to change that. They deliberately skip the hold
   window — the word "Incident" would otherwise make `_ALERTY` swallow them

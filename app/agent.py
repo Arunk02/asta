@@ -10,7 +10,7 @@ from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from . import memory, skills, workspace_tools
+from . import memory, skills, untrusted, workspace_tools
 
 def assistant_name() -> str:
     return os.environ.get("ASSISTANT_NAME", "Asta")
@@ -93,7 +93,9 @@ CHANNEL_NOTES = {
 
 def build_instructions(conversation_summary: str, recall_block: str, workspace: str | None,
                        channel: str = "web") -> str:
-    parts = [PERSONA.format(name=assistant_name())]
+    # The safety policy rides in the instructions, ahead of anything external,
+    # so it is in context before the first wrapped block arrives.
+    parts = [PERSONA.format(name=assistant_name()), untrusted.POLICY]
     if channel in CHANNEL_NOTES:
         parts.append(CHANNEL_NOTES[channel])
     idx = memory.index_text()
@@ -484,13 +486,16 @@ async def resolve_context(workspace: str, task: str) -> str:
     """project context librarian: given a task/question, returns the exact services, files and
     line numbers to read in the given workspace ('booking'). Call this FIRST
     for any code question."""
-    return await workspace_tools.resolve_context(workspace, task)
+    return untrusted.wrap(await workspace_tools.resolve_context(workspace, task),
+                          f"workspace resolver: {workspace}")
 
 
 def read_workspace_file(workspace: str, rel_path: str, start_line: int = 1, end_line: int = 0) -> str:
     """Read a file (or line range) from workspace 'booking'.
     rel_path is relative to the workspace root."""
-    return workspace_tools.read_workspace_file(workspace, rel_path, start_line, end_line)
+    return untrusted.wrap(
+        workspace_tools.read_workspace_file(workspace, rel_path, start_line, end_line),
+        f"{workspace}/{rel_path}")
 
 
 def list_services(workspace: str) -> str:
@@ -516,9 +521,11 @@ async def jira_issue(key: str) -> str:
     """Full detail of one Jira issue (summary, status, description)."""
     from . import jira
     i = await jira.get_issue(key)
-    return (f"{i['key']} [{i['type']} / {i['status']} / {i['priority']}] {i['summary']}\n"
-            f"Labels: {', '.join(i['labels']) or '-'} Components: {', '.join(i['components']) or '-'}\n\n"
-            f"{i['description'] or '(no description)'}")
+    head = (f"{i['key']} [{i['type']} / {i['status']} / {i['priority']}] {i['summary']}\n"
+            f"Labels: {', '.join(i['labels']) or '-'} Components: {', '.join(i['components']) or '-'}")
+    # Anyone with tracker access can write the summary, description and comments.
+    return head + "\n\n" + untrusted.wrap(
+        i["description"] or "(no description)", f"Jira {i['key']}")
 
 
 async def jira_comment(key: str, text: str) -> str:
@@ -772,7 +779,7 @@ async def teams_read_chat(chat: str, limit: int = 15) -> str:
         return "Not logged in — Arun must run: .venv/bin/python -m app.teams_bridge login"
     try:
         msgs = await teams_bridge.read_chat(chat, limit)
-        return "\n".join(msgs) if msgs else f"No messages found in chat '{chat}'."
+        return untrusted.wrap_lines(msgs, f"Teams chat: {chat}") or f"No messages found in chat '{chat}'."
     except RuntimeError as exc:
         if "SESSION_EXPIRED" in str(exc):
             return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
@@ -791,7 +798,7 @@ async def teams_activity(limit: int = 25) -> str:
         return "Not logged in — Arun must run: .venv/bin/python -m app.teams_bridge login"
     try:
         items = await teams_bridge.read_activity(limit)
-        return "\n".join(items) if items else "Activity feed is empty."
+        return untrusted.wrap_lines(items, "Teams activity feed") or "Activity feed is empty."
     except RuntimeError as exc:
         if "SESSION_EXPIRED" in str(exc):
             return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
@@ -809,7 +816,7 @@ async def outlook_mail(limit: int = 15, only_needing_attention: bool = False) ->
         mails = await outlook.read_mail(limit)
         if only_needing_attention:
             mails = outlook.needs_attention(mails)
-        return "\n".join(outlook.fmt_mail(m) for m in mails) if mails else "Nothing matching in the inbox."
+        return untrusted.wrap_lines([outlook.fmt_mail(m) for m in mails], "Outlook inbox") or "Nothing matching in the inbox."
     except RuntimeError as exc:
         if "SESSION_EXPIRED" in str(exc):
             return "Outlook session expired — Arun must rerun: python -m app.teams_bridge login"
@@ -824,7 +831,7 @@ async def outlook_meetings() -> str:
         return "Outlook needs the Teams web session — Arun must run: python -m app.teams_bridge login"
     try:
         items = await outlook.todays_meetings()
-        return "\n".join(items) if items else "Nothing on the calendar today."
+        return untrusted.wrap_lines(items, "Outlook calendar") or "Nothing on the calendar today."
     except RuntimeError as exc:
         if "SESSION_EXPIRED" in str(exc):
             return "Outlook session expired — Arun must rerun: python -m app.teams_bridge login"

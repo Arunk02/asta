@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import memory, store, workspace_tools
+from . import memory, store, untrusted, workspace_tools
 
 ROOT = Path(__file__).resolve().parent.parent
 TURN_TIMEOUT = 10 * 60
@@ -47,6 +47,7 @@ def _cwd(conv: dict) -> str:
 
 
 def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
+    # CLI brains never see agent.PERSONA, so the safety policy rides here.
     """Orientation block for a fresh CLI session (it has no Asta memory).
 
     Shared with claude_cli: same assistant, same tools, same rules — only the
@@ -156,7 +157,7 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
             f"Active workspace: {conv['workspace']} at {_cwd(conv)} — project context lives in "
             ".asta-context/ (resolve-task.js maps questions to exact files)."
         )
-    return "\n\n".join(parts)
+    return untrusted.POLICY + "\n\n" + "\n\n".join(parts)
 
 
 _ACTIVITY_ASK = re.compile(
@@ -185,8 +186,9 @@ async def _teams_activity_context(user_text: str) -> str:
         return ""
     if not items:
         return ""
-    return ("[Arun's live Teams activity feed, just read for you — use it to answer; "
-            "no need to run any command:\n" + "\n".join("• " + i for i in items) + "]")
+    return ("Arun's live Teams activity feed, just read for you — use it to answer; "
+            "no need to run any command.\n"
+            + untrusted.wrap_lines(items, "Teams activity feed"))
 
 
 _MAIL_ASK = re.compile(r"\b(mails?|e-?mails?|inbox|outlook)\b", re.I)
@@ -222,8 +224,8 @@ async def _outlook_context(user_text: str) -> str:
             pass
     if not blocks:
         return ""
-    return ("[Arun's live Outlook data, just read for you — answer from it, no command needed:\n"
-            + "\n\n".join(blocks) + "]")
+    return ("Arun's live Outlook data, just read for you — answer from it, no command needed.\n"
+            + untrusted.wrap("\n\n".join(blocks), "Outlook"))
 
 
 def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]:

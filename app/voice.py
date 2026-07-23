@@ -171,8 +171,8 @@ CLONE_SCRIPTS: dict[str, str] = {
         "that change would break the amend flow."
     ),
     "5-technical": (
-        "The ticket is BEPTELIKOS nine three nine seven, on the telikos "
-        "booking service repository. It fails in VesselInformationDomainService "
+        "The ticket is PROJ dash nine three nine seven, on the orders "
+        "service repository. It fails in ShipmentDomainService "
         "with a null pointer when getServiceTypeModes returns null. "
         "Grafana shows the error rate at zero point four percent in preprod."
     ),

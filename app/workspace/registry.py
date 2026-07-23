@@ -1,6 +1,6 @@
 """The workspace registry — configuration, not code.
 
-Replaces the hardcoded `WORKSPACES = {"booking": ~/booking-workspace}` dict.
+Replaces the hardcoded WORKSPACES dict that named one path in code.
 Workspaces are registered at runtime, stored as JSON on the user's machine, and
 resolved to a provider by detection rather than by name.
 
@@ -43,7 +43,7 @@ class Workspace:
     provider: str = "auto"
     #: [] means every repo directory under root
     repos: list[str] = field(default_factory=list)
-    #: Jira project keys that imply this workspace (e.g. ["BEPTELIKOS"])
+    #: Jira project keys that imply this workspace (e.g. ["PROJ"])
     jira_projects: list[str] = field(default_factory=list)
     enabled: bool = True
 
@@ -97,11 +97,15 @@ def all_workspaces() -> dict[str, Workspace]:
 
 
 def _migrate_legacy() -> dict:
-    """The pre-registry install had exactly one workspace at ~/booking-workspace."""
-    legacy = Path.home() / "booking-workspace"
+    """One-time upgrade from the pre-registry install, which had a single
+    workspace whose path was hardcoded. The name is configuration, not a
+    constant: ASTA_LEGACY_WORKSPACE overrides it, and a fresh install simply
+    finds nothing and starts empty."""
+    name = os.environ.get("ASTA_LEGACY_WORKSPACE", "booking-workspace").strip()
+    legacy = Path.home() / name
     if not legacy.is_dir():
         return {}
-    return {"booking": {"root": str(legacy), "provider": "auto", "repos": [],
+    return {name.replace("-workspace", "") or name: {"root": str(legacy), "provider": "auto", "repos": [],
                         "jira_projects": [], "enabled": True}}
 
 

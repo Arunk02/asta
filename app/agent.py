@@ -23,66 +23,40 @@ tight; expand only when asked or when correctness demands it.
 
 Agency: act, don't just answer. When a request needs several steps, chain the tools yourself
 end-to-end (resolve context -> read files -> check logs -> conclude) without asking permission
-between steps. When Arun assigns work ("fix X", "implement Y", a Jira key), create a mission
-right away and tell him it's awaiting his approval. After answering, if there's an obvious next
-move (a mission to create, a fact to verify in grafana/temporal, a follow-up he'll likely want),
+between steps. When Arun assigns work ("fix X", "implement Y", a Jira key), delegate it as a
+background task right away and tell him the task id. After answering, if there's an obvious next
+move (work to delegate, a fact to verify in grafana/temporal, a follow-up he'll likely want),
 offer it in one short line. Ask a clarifying question only when the answer genuinely changes
-what you'd do — otherwise make the sensible assumption and state it.
+what you'd do — and when it does, ask_user rather than stopping the work.
 
 Role: you are the ORCHESTRATOR. Arun's office pays for Copilot, so hands-on implementation work
-is delegated to the Copilot CLI (via missions) rather than burned on API tokens; you plan,
-coordinate, verify, and keep the memory. When Claude tokens run out, routine chat is
+is delegated to the CLI executors (via background tasks) rather than burned on API tokens; you
+plan, coordinate, verify, and keep the memory. When Claude tokens run out, routine chat is
 automatically re-routed to Copilot CLI — never refuse work because of that.
 
-You have:
-- MCP tools (temporal, grafana, github, docs) for live debugging of workflows, logs and metrics.
-  HARD RULE for grafana_* tools: call load_skill('grafana-analyser') first (once per
-  conversation) and follow its query discipline exactly — namespace-wide Loki first, one
-  wide-window call for identifier traces, aggregates before raw lines, limit <= 50, no
-  per-service loops, Prometheus/Tempo only for performance asks.
-- project context workspace tools for the `booking` codebase: ALWAYS call resolve_context
-  first for any code question — it returns the exact files/lines to read — then read only those
-  with read_workspace_file. Never try to explore a repo blindly.
-- A persistent memory. Use the remember tool whenever: Arun corrects you, states a preference,
-  or a debugging session uncovers a root cause / fix / environment gotcha worth keeping.
-  Do it silently as part of answering; mention it in one short parenthetical at most.
-- Jira: the REST tools are PRIMARY — jira_search / jira_issue / jira_my_issues to read,
-  jira_comment to comment, jira_transition to change status. Before any Jira WRITE
-  (comment or status change) show Arun exactly what you're about to post/move and get his
-  confirmation, unless he dictated the exact text/status in the same message. The
-  atlassian_* MCP tools are the optional fallback for anything the REST tools don't cover
-  (e.g. Confluence, creating issues) — don't reach for them for plain reads.
-- Teams messages — HARD RULE: "ping/message/tell <person>" ALWAYS means that person's
-  one-to-one chat. NEVER post to a group chat or team channel unless Arun names the group
-  himself in that message (then, and only then, to_group=True). A message meant for one
-  person once landed in a team channel — do not let that happen again. Always tell him
-  which chat it landed in; if the tool didn't confirm delivery, say it may NOT have sent.
-- Missions: for "implement JIRA-123" or any build request, use create_mission — it drafts a
-  plan from Jira + project context, waits for Arun's approval, then implements headlessly
-  (copilot/claude CLI) and runs a Claude test pass. approve_mission / reject_mission /
-  mission_status manage them. Never start implementation yourself in chat; missions own that.
-  The full code flow Arun expects, with a notification at EVERY step:
-  plan → HIS approval → implement → "code done" → he says raise the PR → ship_mission
-  (commit, push, PR) → "PR raised" → CI watched → "CI passed/failed" → then ASK whether to
-  post it in a group/DM for review, and only post if he says so (and only where he names).
-  Never commit or open a PR unprompted, and never mention Claude/Copilot/AI in a commit
-  message or PR body — Arun's commits must read as his own work.
-- Background tasks: delegate_task spawns a parallel headless worker (kinds: analysis /
-  code / teams_draft) with a SELF-CONTAINED prompt; the chat stays free and Arun is
-  notified on WhatsApp/Telegram when it finishes. Use it for anything slow. teams_draft
-  results always wait for Arun's approval (approve_task) — never sent automatically.
-- Reminders: set_reminder for "remind me…" — convert natural language to a LOCAL ISO
-  timestamp yourself (today's date is in the reminder tool result if unsure; ask only if
-  truly ambiguous). Fires on WhatsApp/Telegram/UI. repeat: daily|weekdays|weekly.
-- Daily rhythm: morning_brief (status digest) and standup_draft (from real git commits +
-  finished work) run automatically on weekdays; run them on demand when asked.
-- health_check reports what's broken (channels, sessions, disk); ci_status shows recent
-  GitHub Actions runs — failures are pushed to Arun automatically.
-- Meeting recaps: ONLY when Arun pastes/asks — never proactively.
-- refresh_context re-checks context drift and regenerates the graph on demand.
+Memory: use the remember tool whenever Arun corrects you, states a preference, or a debugging
+session uncovers a root cause / fix / environment gotcha worth keeping. Do it silently as part
+of answering; mention it in one short parenthetical at most.
+
+MCP tools (temporal, grafana, github, docs) give you live debugging of workflows, logs and
+metrics. HARD RULE for grafana_* tools: call load_skill('grafana-analyser') first (once per
+conversation) and follow its query discipline exactly — namespace-wide Loki first, one wide-window
+call for identifier traces, aggregates before raw lines, limit <= 50, no per-service loops,
+Prometheus/Tempo only for performance asks. The atlassian_* MCP tools are the optional fallback
+for what the Jira REST tools don't cover (Confluence, creating issues) — never for plain reads.
+
+CODE WORK — the flow Arun expects, with a message to him at EVERY step:
+plan → HIS approval → implement → "code done" → he says raise the PR → ship (commit, push, PR)
+→ "PR raised" → CI watched → "CI passed/failed" → then ASK whether to post it in a group/DM for
+review, and only post if he says so, and only where he names. Never plan or implement in chat
+yourself, never commit or open a PR unprompted, and never mention Claude/Copilot/AI in a commit
+message or PR body — Arun's commits must read as his own work.
+
+Meeting recaps and summaries: ONLY when Arun pastes or asks — never proactively.
 
 If a tool fails, say what failed and continue with what you have.
 """
+
 
 CHANNEL_NOTES = {
     "whatsapp": "Channel: WhatsApp. Reply in plain text (no markdown), max ~120 words. "
@@ -92,10 +66,22 @@ CHANNEL_NOTES = {
 
 
 def build_instructions(conversation_summary: str, recall_block: str, workspace: str | None,
-                       channel: str = "web") -> str:
+                       channel: str = "web",
+                       selected: list[str] | tuple[str, ...] | None = None) -> str:
+    """The system prompt for one turn.
+
+    The persona holds identity, agency and the rules that are not about any one
+    tool. Per-tool rules ride with the capability registry instead, so when the
+    toolset narrows for a message the rules narrow with it — and a tool can
+    never be exposed with its hard rule left behind.
+    """
+    from . import capabilities
     # The safety policy rides in the instructions, ahead of anything external,
     # so it is in context before the first wrapped block arrives.
     parts = [PERSONA.format(name=assistant_name()), untrusted.POLICY]
+    notes = capabilities.notes_block(selected)
+    if notes:
+        parts.append(notes)
     if channel in CHANNEL_NOTES:
         parts.append(CHANNEL_NOTES[channel])
     idx = memory.index_text()
@@ -467,7 +453,12 @@ def remember(title: str, fact: str, kind: str = "fact") -> str:
 def load_skill(name: str) -> str:
     """Load a skill playbook by name (see the skills list in your instructions). Call once
     per conversation before working in that skill's area, then follow it strictly."""
+    from . import learn
     body = skills.load(name)
+    if body:
+        # Being loaded is the only evidence a skill earns its place; pruning
+        # reads these counters.
+        learn.record_use(name)
     if body is None:
         available = ", ".join(s["name"] for s in skills.discover()) or "(none)"
         return f"No skill '{name}'. Available: {available}"
@@ -484,14 +475,14 @@ def search_memory(query: str) -> str:
 
 async def resolve_context(workspace: str, task: str) -> str:
     """project context librarian: given a task/question, returns the exact services, files and
-    line numbers to read in the given workspace ('booking'). Call this FIRST
+    line numbers to read in the named workspace. Call this FIRST
     for any code question."""
     return untrusted.wrap(await workspace_tools.resolve_context(workspace, task),
                           f"workspace resolver: {workspace}")
 
 
 def read_workspace_file(workspace: str, rel_path: str, start_line: int = 1, end_line: int = 0) -> str:
-    """Read a file (or line range) from workspace 'booking'.
+    """Read a file (or line range) from a registered workspace.
     rel_path is relative to the workspace root."""
     return untrusted.wrap(
         workspace_tools.read_workspace_file(workspace, rel_path, start_line, end_line),
@@ -499,7 +490,7 @@ def read_workspace_file(workspace: str, rel_path: str, start_line: int = 1, end_
 
 
 def list_services(workspace: str) -> str:
-    """List the service repos inside workspace 'booking'."""
+    """List the service repos inside a registered workspace."""
     return "\n".join(workspace_tools.list_services(workspace))
 
 
@@ -548,64 +539,39 @@ async def jira_transition(key: str, to_status: str) -> str:
     return f"{r['key']} moved to {r['status']}."
 
 
-async def create_mission(title: str, workspace: str, repo: str = "", jira_key: str = "",
-                         description: str = "", executor: str = "") -> str:
-    """Start a mission: drafts an implementation plan (from Jira + project context), then waits
-    for Arun's approval before implementing. workspace: booking. repo: service dir name
-    (optional). executor: copilot|claude (default from env)."""
-    from . import missions
-    m = await missions.start(title, workspace, repo or None, jira_key or None,
-                             description, executor or None)
-    return (f"Mission #{m['id']} created ({m['executor']} executor). Drafting the plan now — "
-            f"Arun will be notified when it's ready for approval.")
-
-
-def list_missions() -> str:
-    """List recent missions with status."""
-    rows = store_missions()
-    if not rows:
-        return "No missions yet."
-    return "\n".join(f"#{m['id']} [{m['status']}] {m['title']} ({m['workspace']}/{m['repo'] or '-'})" for m in rows)
-
-
-def store_missions():
-    from . import store
-    return store.list_missions()
-
-
-async def approve_mission(mission_id: int) -> str:
-    """Approve a mission that is awaiting approval — starts headless implementation + Claude test pass."""
-    from . import missions
-    m = await missions.approve(mission_id)
-    return f"Mission #{mission_id} approved — implementing with {m['executor']}, Claude verifies after. Arun gets notified on completion."
-
-
-async def reject_mission(mission_id: int) -> str:
-    """Reject/cancel a mission."""
-    from . import missions
-    await missions.reject(mission_id)
-    return f"Mission #{mission_id} rejected."
-
-
-def mission_status(mission_id: int) -> str:
-    """Status, plan and log tail of one mission."""
-    from . import missions, store
-    m = store.get_mission(mission_id)
-    if not m:
-        return f"No mission #{mission_id}."
-    out = f"#{m['id']} [{m['status']}] {m['title']}\nExecutor: {m['executor']}  Error: {m['error'] or '-'}\n"
-    if m["plan"]:
-        out += f"\nPLAN:\n{m['plan'][:2000]}\n"
-    tail = missions.log_tail(mission_id, 1500)
-    if tail:
-        out += f"\nLOG TAIL:\n{tail}"
-    return out
-
-
 async def refresh_context(workspace: str) -> str:
-    """Re-check context drift and regenerate the graph for workspace booking."""
+    """Re-check context drift and regenerate a workspace's project context graph."""
     from . import refresh
     return await refresh.refresh_workspace(workspace, reason="requested in chat")
+
+
+async def review_pr(pr: str, workspace: str, repo: str = "") -> str:
+    """Review a pull request and produce reviewer notes for Arun to post.
+
+    pr: a number ("123"), a URL, or a branch. repo: the service directory, needed when the
+    workspace holds several repos. Gathers the PR, its diff, its CI checks and the project
+    context, then runs the review as a background task — reviews are slow, so the chat
+    stays free and Arun is notified when the notes are ready. Read-only: it never comments
+    on the PR or approves it. Use for 'review PR 123', 'what do you think of this PR'."""
+    from . import review, tasks
+    try:
+        text, meta = await review.brief(pr, workspace, repo)
+    except (RuntimeError, ValueError) as exc:
+        return f"Could not read that PR: {exc}"
+    t = tasks.spawn(f"Review PR #{meta['number']}: {meta['title'][:60]}", text,
+                    "analysis", workspace or None)
+    return (f"Task #{t['id']} — reviewing PR #{meta['number']} "
+            f"({meta.get('changedFiles', 0)} files, +{meta.get('additions', 0)}/"
+            f"-{meta.get('deletions', 0)}). Arun gets the notes when it finishes.")
+
+
+def quality_report(days: int = 7) -> str:
+    """How well the work has actually been landing: plans approved as-is vs re-planned,
+    tasks finished vs failed, drafts sent unedited, questions answered, PRs opened, skills
+    learned. Use when Arun asks how Asta is doing, or before suggesting a change to how
+    work is run — this is the evidence, token_audit is only the cost."""
+    from . import quality
+    return quality.report(days)
 
 
 def trace_report(limit: int = 15) -> str:
@@ -696,12 +662,24 @@ async def ci_status() -> str:
     return await ci_watch.recent_runs()
 
 
+async def ask_user(question: str) -> str:
+    """Ask Arun ONE short question and wait for his answer, without stopping anything.
+
+    Use it when the answer genuinely changes what you'd do and you cannot infer it —
+    which of two repos he means, which of two people, whether a number is a booking id
+    or a plan number. The question goes to his phone and this call returns his reply.
+    Do NOT use it for permission to act (that is what the approval gates are for), and
+    do not use it when a sensible assumption you can state would do."""
+    from . import asking
+    return await asking.ask(question, source="chat")
+
+
 def delegate_task(title: str, prompt: str, kind: str = "analysis",
                   workspace: str = "", teams_chat: str = "") -> str:
     """Spawn a background worker so the chat stays free; Arun gets a WhatsApp/Telegram
     notification with the result. The prompt must be SELF-CONTAINED (the worker has no
     chat context). kind: analysis (read-only, parallel) | code (edits code — set
-    workspace booking) | teams_draft (drafts a Teams reply — set teams_chat; the
+    the workspace) | teams_draft (drafts a Teams reply — set teams_chat; the
     draft waits for Arun's approval, it is never sent automatically)."""
     from . import tasks
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
@@ -745,6 +723,18 @@ async def approve_task(task_id: int) -> str:
         return str(exc)
 
 
+async def ship_task(task_id: int) -> str:
+    """Push a finished code task's branch(es) and open a PR per repo it touched.
+
+    Use ONLY when Arun says to raise/ship the PR — a task finishing is not permission
+    to publish. The pipeline never pushes on its own; this is the only path."""
+    from . import tasks
+    try:
+        return await tasks.ship(task_id)
+    except (ValueError, RuntimeError) as exc:
+        return f"Ship failed: {exc}"
+
+
 async def reject_task(task_id: int) -> str:
     """Reject a task: stops a running worker (and its spend), discards a draft."""
     from . import tasks
@@ -752,21 +742,6 @@ async def reject_task(task_id: int) -> str:
         return await tasks.reject(task_id)
     except ValueError as exc:
         return str(exc)
-
-
-async def ship_mission(mission_id: int, review_chat: str = "") -> str:
-    """Commit, push, open a PR for a finished mission, then watch its CI.
-
-    Use ONLY when Arun says to raise/ship the PR — a finished mission is not permission
-    to publish. Notifies him at each step (committed → PR raised → CI pass/fail) and,
-    on green CI, ASKS before posting the PR anywhere for review. Pass review_chat only
-    if he already named the person/group to share it with."""
-    from . import missions
-    try:
-        r = await missions.ship(mission_id, review_chat=review_chat)
-        return f"Committed “{r['committed']}” on {r['branch']}; PR: {r['pr']}. Watching CI now."
-    except Exception as exc:
-        return f"Ship failed: {exc}"
 
 
 async def teams_read_chat(chat: str, limit: int = 15) -> str:
@@ -859,18 +834,13 @@ async def teams_send_message(chat: str, text: str, to_group: bool = False) -> st
         return f"Teams send failed: {exc}"
 
 
-def build_agent() -> Agent:
-    return Agent(
-        tools=[
-            remember, search_memory, load_skill, resolve_context, read_workspace_file, list_services,
-            jira_search, jira_my_issues, jira_issue, jira_comment, jira_transition,
-            create_mission, list_missions, approve_mission, reject_mission, mission_status,
-            ship_mission,
-            refresh_context, trace_report, teams_read_chat, teams_activity, teams_send_message,
-            outlook_mail, outlook_meetings,
-            delegate_task, list_background_tasks, task_result, approve_task, reject_task,
-            set_reminder, list_my_reminders, cancel_reminder,
-            morning_brief, standup_draft, health_check, ci_status,
-        ],
-        retries=1,
-    )
+def build_agent(selected: list[str] | tuple[str, ...] | None = None) -> Agent:
+    """The chat agent.
+
+    Tools come from the capability registry, never from a list written here — the
+    same table teaches the CLI brains and the MCP server, so a capability is
+    described exactly once. `selected` narrows the toolset for one message (see
+    tool_index); None keeps all of them.
+    """
+    from . import capabilities
+    return Agent(tools=capabilities.tools_for(selected), retries=1)

@@ -47,12 +47,19 @@ def _cwd(conv: dict) -> str:
 
 
 def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
-    # CLI brains never see agent.PERSONA, so the safety policy rides here.
     """Orientation block for a fresh CLI session (it has no Asta memory).
+
+    The capability list is GENERATED from the same registry that gives the chat
+    agent its tools, so a new tool is taught here the moment it is added — there
+    is no second description to keep in sync, and no stale copilot_session:* rows
+    to clear after editing prose.
 
     Shared with claude_cli: same assistant, same tools, same rules — only the
     CLI underneath differs, so `via` is the one thing that changes.
+
+    CLI brains never see agent.PERSONA, so the safety policy rides here.
     """
+    from . import capabilities
     name = os.environ.get("ASSISTANT_NAME", "Asta")
     parts = [
         f"You are acting as {name}, Arun's assistant, via {via}. Be concise and direct.",
@@ -60,49 +67,8 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
     idx = memory.index_text().strip()
     if idx:
         parts.append("Arun's memory index (for orientation):\n" + idx[:1500])
-    if os.environ.get("TEAMS_BRIDGE", "").lower() in ("1", "true", "yes"):
-        parts.append(
-            "You CAN read/send Microsoft Teams messages via Arun's logged-in Teams web "
-            f"session (shell commands, run from {ROOT}):\n"
-            f'  {ROOT}/.venv/bin/python -m app.teams_bridge activity [limit]\n'
-            f'  {ROOT}/.venv/bin/python -m app.teams_bridge read "<chat name>" [limit]\n'
-            f'  {ROOT}/.venv/bin/python -m app.teams_bridge send "<chat name>" "<text>"\n'
-            f'  {ROOT}/.venv/bin/python -m app.outlook attention   # unread mail from real people\n'
-            f'  {ROOT}/.venv/bin/python -m app.outlook mail [limit] # recent inbox\n'
-            f'  {ROOT}/.venv/bin/python -m app.outlook meetings     # today\'s calendar\n'
-            "USE `activity` for anything like 'any messages for me', 'anything from X', "
-            "'what did I miss', 'any mentions' — it lists who mentioned him, replies, "
-            "missed calls and invites, read from Teams itself (works even for muted "
-            "chats / notifications off). "
-            "SEND RULE (hard): `send \"<person>\" \"<text>\"` targets that person's ONE-TO-ONE "
-            "chat. Never a group chat or team channel unless Arun names the group himself — "
-            "then add --group. A 1:1 message once went to a team channel; never again. "
-            "The command prints `sent to: <chat name>` — repeat that name back to Arun so he "
-            "can see where it landed; if it prints ERROR, say it did NOT send. "
-            "Each call takes ~10-25s (browser automation). Only SEND when Arun explicitly "
-            "asked; confirm wording with him first unless he dictated it. If a command "
-            "prints ERROR: session expired, tell Arun to run: python -m app.teams_bridge login"
-        )
     port = os.environ.get("ASTA_PORT", "8321")
-    parts.append(
-        "You can DELEGATE slow work to background tasks so this chat stays responsive — "
-        "each task is a separate headless worker, and Arun automatically gets a "
-        "WhatsApp/Telegram notification with the result when it finishes. Use this for "
-        "deep analysis, long investigations, code changes, or drafting Teams replies:\n"
-        f'  curl -s -X POST http://127.0.0.1:{port}/api/tasks '
-        '-H "Authorization: Bearer $ASTA_TOKEN" -H "Content-Type: application/json" '
-        '-d \'{"title":"short title","prompt":"full SELF-CONTAINED instructions","kind":"analysis","workspace":""}\'\n'
-        "kinds: analysis (read-only, runs in parallel) | code (edits code; set workspace "
-        "booking; one per workspace at a time) | teams_draft (also set "
-        '"teams_chat": "<person>"; the draft ALWAYS waits for Arun\'s approval — never '
-        "sent automatically).\n"
-        'Optional "executor": "claude" or "copilot" — only set it when Arun names one; '
-        "empty = auto (copilot normally, claude while copilot's quota is exhausted).\n"
-        f"List/status: curl -s http://127.0.0.1:{port}/api/tasks -H \"Authorization: Bearer $ASTA_TOKEN\"\n"
-        f"When Arun says 'approve task N' / 'reject task N': curl -s -X POST "
-        f"http://127.0.0.1:{port}/api/tasks/N/approve (or /reject) with the same auth header.\n"
-        "After spawning a task, reply to Arun immediately with the task id — do NOT wait for it."
-    )
+    parts.append(capabilities.cli_block(port, str(ROOT)))
     parts.append(
         "CODE WORK — the flow Arun expects, with a message to him at EVERY step:\n"
         "1. Spawn a code task (kind 'code', workspace set). Routing is automatic: Jira-key "
@@ -111,14 +77,11 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
         "bigger). Never plan the code change yourself in this chat. If an analysis task "
         'already investigated the topic, add "context_from": <that task id> so the worker '
         "reuses its evidence instead of re-discovering (big token saver).\n"
-        "2. Relay Arun's answer: 'approve task N' → POST /api/tasks/N/approve (continues as "
-        "PLAN APPROVED). Any other feedback → POST /api/tasks/N/reply with {\"text\":\"…\"} — "
-        "the pipeline re-plans with it.\n"
+        "2. Relay Arun's answer: 'approve task N' → approve_task. Any other feedback → "
+        'POST /api/tasks/N/reply with {"text":"…"} — the pipeline re-plans with it.\n'
         "3. After implementation the task finishes with the diff summary — the pipeline "
-        "NEVER pushes or opens a PR. Show Arun the diff; only when he says ship: "
-        f"curl -s -X POST http://127.0.0.1:{port}/api/tasks/N/ship "
-        '-H "Authorization: Bearer $ASTA_TOKEN" (pushes the branch + opens the PR '
-        "per touched repo).\n"
+        "NEVER pushes or opens a PR. Show Arun the diff; only when he says ship, call "
+        "ship_task.\n"
         "4. Watch CI and tell him pass or fail.\n"
         "5. On green, ASK whether to post the PR for review — and post it only to the person "
         "or group he names, never on your own initiative.\n"
@@ -126,32 +89,12 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
         "trailer, an AI/assistant name, or a 'Generated with …' line — his commits and PRs "
         "must read as his own work. `gh` is already authenticated for push/PR."
     )
-    if os.environ.get("JIRA_BASE_URL") and os.environ.get("JIRA_API_TOKEN"):
-        parts.append(
-            "Jira access (same curl auth header as above; ALL Jira asks go through these):\n"
-            f"  Search — GET http://127.0.0.1:{port}/api/jira/search?jql=<urlencoded JQL>\n"
-            "  Arun's open work — jql=assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC\n"
-            f"  Issue detail — GET http://127.0.0.1:{port}/api/jira/issue/<KEY>\n"
-            f"  Comment — POST http://127.0.0.1:{port}/api/jira/issue/<KEY>/comment with "
-            '{"text":"…"}\n'
-            f"  Status change — GET …/api/jira/issue/<KEY>/transitions to see valid targets, "
-            'then POST …/api/jira/issue/<KEY>/transition with {"status":"<name>"}\n'
-            "WRITE RULE: before posting a comment or changing status, show Arun the exact "
-            "text/target and get his confirmation — unless he dictated it in the same message."
-        )
-    parts.append(
-        "More assistant endpoints (same curl auth header as above):\n"
-        f"  Reminders — POST http://127.0.0.1:{port}/api/reminders with "
-        '{"text":"…","due":"2026-07-19T15:00","repeat":""} (due = LOCAL ISO time you '
-        "compute from the [now: …] stamp on each message; repeat: ''|daily|weekdays|weekly). "
-        "GET /api/reminders lists; POST /api/reminders/<id>/cancel cancels. Fires to "
-        "Arun's phone automatically.\n"
-        "  Morning brief / standup — POST /api/brief/now, POST /api/standup/now "
-        "(they also auto-run weekday mornings; only trigger when Arun asks).\n"
-        "  Health — GET /api/health (what's broken). CI — GET /api/ci (recent GitHub "
-        "Actions runs; failures are auto-pushed to Arun).\n"
-        "Meeting recaps/summaries: only when Arun explicitly asks — never proactively."
-    )
+    if not (os.environ.get("JIRA_BASE_URL") and os.environ.get("JIRA_API_TOKEN")):
+        parts.append("Jira is NOT configured — the jira_* endpoints above will fail; say so "
+                     "rather than guessing ticket contents.")
+    if os.environ.get("TEAMS_BRIDGE", "").lower() not in ("1", "true", "yes"):
+        parts.append("The Teams/Outlook bridge is OFF — those shell capabilities are "
+                     "unavailable this session.")
     if conv.get("workspace"):
         parts.append(
             f"Active workspace: {conv['workspace']} at {_cwd(conv)} — project context lives in "

@@ -30,6 +30,10 @@ whatsapp/config.json
 # exist anywhere else, and the link paths leak internal repo layout.
 skills/*.md
 !skills/README.md
+# Extracted skills and their usage counters are learned on THIS machine
+# from Arun's own runs — local knowledge, not shipped code.
+skills/.usage.json
+
 
 # ─── Python ──────────────────────────────────────────────────────────────────
 .venv/

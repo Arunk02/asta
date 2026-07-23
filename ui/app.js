@@ -1084,54 +1084,39 @@ async function loadTasks() {
   } catch (e) {}
 }
 
-/* ---------- missions ---------- */
+/* ---------- legacy mission history ---------- */
+/* The mission engine was retired — background tasks are the only pipeline.
+   Old rows stay visible so finished work isn't lost, but nothing writes here. */
 
-state.missionId = null;
 async function loadMissions() {
   loadTasks();
-  const rows = await api("/api/missions");
+  let rows = [];
+  try { rows = await api("/api/missions"); } catch (e) { return; }
+  const card = $("#legacy-card");
+  card.hidden = !rows.length;
+  if (!rows.length) return;
   const list = $("#mission-list");
-  list.innerHTML = rows.length ? "" : '<p class="dim">No missions yet. Ask in chat: "implement JIRA-123 in booking" — or use + New mission.</p>';
+  list.innerHTML = "";
   rows.forEach((m) => {
     const el = document.createElement("div");
-    el.className = "mission" + (m.id === state.missionId ? " active" : "");
+    el.className = "mission";
     el.innerHTML = `<div class="m-title"><span class="badge ${esc(m.status)}">${esc(m.status.replace("_", " "))}</span>${esc(m.title)}</div>
       <div class="m-sub">#${m.id} · ${esc(m.workspace)}/${esc(m.repo || "-")} · ${esc(m.executor)}${m.jira_key ? " · " + esc(m.jira_key) : ""}</div>`;
-    el.onclick = () => openMission(m.id);
     list.appendChild(el);
   });
 }
 
-async function openMission(id) {
-  state.missionId = id;
-  const m = await api("/api/missions/" + id);
-  const d = $("#mission-detail");
-  let html = `<h2><span class="badge ${esc(m.status)}">${esc(m.status.replace("_", " "))}</span> ${esc(m.title)}</h2>
-    <p class="dim">#${m.id} · ${esc(m.workspace)}/${esc(m.repo || "-")} · executor: ${esc(m.executor)}${m.jira_key ? " · " + esc(m.jira_key) : ""}</p>`;
-  if (m.error) html += `<p style="color:var(--err)">⚠ ${esc(m.error)}</p>`;
-  if (m.status === "awaiting_approval")
-    html += `<div class="m-actions"><button class="m-approve">✓ Approve & implement</button><button class="m-reject">✕ Reject</button></div>`;
-  if (m.plan) html += `<h3 class="dim">PLAN</h3><pre>${esc(m.plan)}</pre>`;
-  if (m.log_tail) html += `<h3 class="dim">LOG</h3><pre>${esc(m.log_tail)}</pre>`;
-  d.innerHTML = html;
-  const ap = d.querySelector(".m-approve");
-  if (ap) ap.onclick = async () => { await api(`/api/missions/${id}/approve`, { method: "POST" }); refreshMissions(); };
-  const rj = d.querySelector(".m-reject");
-  if (rj) rj.onclick = async () => { await api(`/api/missions/${id}/reject`, { method: "POST" }); refreshMissions(); };
-  loadMissions();
-}
+function refreshMissions() { loadMissions(); }
 
-function refreshMissions() { loadMissions(); if (state.missionId) openMission(state.missionId); }
-
-$("#mission-new").onclick = async () => {
-  const title = prompt("Mission title (or Jira key + short description):");
+$("#task-new").onclick = async () => {
+  const title = prompt("Task title (or Jira key + short description):");
   if (!title) return;
-  const jira = prompt("Jira key (optional, e.g. ABC-123):") || "";
-  const ws = prompt("Workspace:", $("#workspace-pick").value || "") || "";
-  if (!ws) { alert("Pick a workspace first (Settings → Workspaces)."); return; }
-  const repo = prompt("Repo/service dir (optional):") || "";
-  await api("/api/missions", { method: "POST", body: JSON.stringify({ title, jira_key: jira, workspace: ws, repo }) });
-  loadMissions();
+  const kind = (prompt("Kind — analysis | code | teams_draft:", "code") || "code").trim();
+  const ws = kind === "code" ? (prompt("Workspace:", $("#workspace-pick").value || "") || "") : "";
+  if (kind === "code" && !ws) { alert("Code tasks need a workspace (Settings → Workspaces)."); return; }
+  const body = prompt("Full self-contained instructions for the worker:", title) || title;
+  await api("/api/tasks", { method: "POST", body: JSON.stringify({ title, prompt: body, kind, workspace: ws }) });
+  loadTasks();
 };
 
 setInterval(() => {

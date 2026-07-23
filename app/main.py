@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, briefing, ci_watch, claude_cli, context_build, copilot_cli, health, jira, mcp_loader, memory, missions, msnotify, notify, outlook, refresh, reminders, store, tasks, teams_bridge, telegram, workspace, workspace_tools
+from . import activity, asking, briefing, ci_watch, claude_cli, context_build, copilot_cli, health, jira, mcp_loader, memory, msnotify, notify, outlook, refresh, reminders, quality, store, tasks, teams_bridge, telegram, tool_index, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -86,6 +86,9 @@ async def startup() -> None:
     store.init()
     memory.ensure_dirs()
     memory.reindex()
+    # A question whose waiter died with the process can never be answered, and a
+    # stale one would swallow Arun's next message as its answer.
+    asking.expire_stale()
     MCP_TOOLSETS, MCP_STATUS = mcp_loader.load_toolsets()
     asyncio.create_task(_probe_mcp())
     for name, ws in workspace.available_workspaces().items():
@@ -166,6 +169,7 @@ def rotate_sessions(conv_id: str) -> list[str]:
     Telegram (one permanent conversation each) accumulated every message ever
     sent into a single, ever-growing session.
     """
+    tool_index.forget(conv_id)
     dropped = []
     for key in (f"copilot_session:{conv_id}", f"claude_session:{conv_id}"):
         if (store.kv_get(key) or "").strip():
@@ -339,20 +343,68 @@ async def api_build_context(name: str, request: Request):
             "note": "Running in the background; you will be notified when it finishes."}
 
 
+@app.get("/api/workspaces/{name}/resolve", dependencies=[Depends(require_auth)])
+async def api_workspace_resolve(name: str, q: str):
+    """The resolver, over HTTP — the CLI brains reach the same capability the
+    chat agent has, instead of being told to grep a repo."""
+    try:
+        return {"workspace": name, "question": q,
+                "context": await workspace.resolve_context(name, q)}
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.get("/api/workspaces/{name}/file", dependencies=[Depends(require_auth)])
+def api_workspace_file(name: str, path: str, start_line: int = 1, end_line: int = 0):
+    try:
+        return {"workspace": name, "path": path,
+                "content": workspace.read_workspace_file(name, path, start_line, end_line)}
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+# --- ask_user ----------------------------------------------------------------
+
+@app.get("/api/ask", dependencies=[Depends(require_auth)])
+def api_open_questions():
+    return asking.open_questions()
+
+
+@app.post("/api/ask", dependencies=[Depends(require_auth)])
+async def api_ask(request: Request):
+    """Put one question to Arun and BLOCK until he answers.
+
+    Long-poll on purpose: the caller is a worker that needs the answer to carry
+    on, and the alternative — stopping the pipeline and restarting it later —
+    is what this exists to avoid.
+    """
+    b = await request.json()
+    question = (b.get("question") or "").strip()
+    if not question:
+        raise HTTPException(400, "question is required")
+    timeout = float(b.get("timeout") or asking.DEFAULT_TIMEOUT)
+    answer = await asking.ask(question, b.get("source", "cli"),
+                              min(timeout, asking.DEFAULT_TIMEOUT))
+    return {"answer": answer, "answered": answer != asking.NO_ANSWER}
+
+
+@app.post("/api/ask/{qid}/answer", dependencies=[Depends(require_auth)])
+async def api_answer(qid: int, request: Request):
+    b = await request.json()
+    if not asking.answer(qid, (b.get("text") or "").strip()):
+        raise HTTPException(404, f"no open question #{qid}")
+    return {"ok": True}
+
+
 @app.get("/api/missions", dependencies=[Depends(require_auth)])
 def api_missions():
+    """Legacy mission history, read-only.
+
+    Missions were the first of two engines that both did plan → approve →
+    implement → verify → ship. Background tasks are now the only engine; these
+    rows are kept so old work stays visible, but nothing new is created here.
+    """
     return store.list_missions()
-
-
-@app.post("/api/missions", dependencies=[Depends(require_auth)])
-async def api_create_mission(request: Request):
-    b = await request.json()
-    if not b.get("title") or not b.get("workspace"):
-        raise HTTPException(400, "title and workspace are required")
-    return await missions.start(
-        b["title"], b["workspace"], b.get("repo") or None,
-        b.get("jira_key") or None, b.get("description", ""), b.get("executor") or None,
-    )
 
 
 @app.get("/api/missions/{mission_id}", dependencies=[Depends(require_auth)])
@@ -360,33 +412,7 @@ def api_mission(mission_id: int):
     m = store.get_mission(mission_id)
     if not m:
         raise HTTPException(404)
-    m["log_tail"] = missions.log_tail(mission_id)
     return m
-
-
-@app.post("/api/missions/{mission_id}/approve", dependencies=[Depends(require_auth)])
-async def api_approve_mission(mission_id: int):
-    try:
-        return await missions.approve(mission_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.post("/api/missions/{mission_id}/reject", dependencies=[Depends(require_auth)])
-async def api_reject_mission(mission_id: int):
-    try:
-        return await missions.reject(mission_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-@app.post("/api/missions/{mission_id}/ship", dependencies=[Depends(require_auth)])
-async def api_ship_mission(mission_id: int, body: dict | None = None):
-    """Commit → push → PR → watch CI. Explicit action; never automatic."""
-    try:
-        return await missions.ship(mission_id, review_chat=(body or {}).get("review_chat", ""))
-    except Exception as e:
-        raise HTTPException(400, str(e))
 
 
 @app.get("/api/activity", dependencies=[Depends(require_auth)])
@@ -627,6 +653,21 @@ async def api_refresh(workspace: str):
     if workspace not in workspace_tools.WORKSPACES:
         raise HTTPException(404)
     return {"summary": await refresh.refresh_workspace(workspace, reason="manual (UI)")}
+
+
+@app.post("/api/review", dependencies=[Depends(require_auth)])
+async def api_review(request: Request):
+    """Review a PR — the same capability the chat agent has, for the CLI brains."""
+    b = await request.json()
+    if not b.get("pr") or not b.get("workspace"):
+        raise HTTPException(400, "pr and workspace are required")
+    return {"result": await agent_mod.review_pr(str(b["pr"]), b["workspace"],
+                                                b.get("repo", ""))}
+
+
+@app.get("/api/quality", dependencies=[Depends(require_auth)])
+def api_quality(days: int = 7):
+    return quality.summary(days)
 
 
 @app.get("/api/traces", dependencies=[Depends(require_auth)])
@@ -1009,14 +1050,19 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     # Recall rides in the user prompt (not instructions) so the instruction
     # prefix stays byte-stable and the Anthropic prompt cache actually hits.
     prompt = _with_recall(user_text)
-    instructions = agent_mod.build_instructions(conv["summary"], "", conv["workspace"], channel)
+    # Only the tools this conversation has needed, not all 32 — see tool_index
+    # for why the selection is sticky rather than per-message.
+    selected = tool_index.select_sticky(conv["id"], user_text)
+    turn_agent = AGENT if selected is None else agent_mod.build_agent(selected)
+    instructions = agent_mod.build_instructions(conv["summary"], "", conv["workspace"],
+                                                channel, selected)
     assistant_text = ""
     tools_used: list[str] = []
     t0 = time.monotonic()
     first_token_ms: int | None = None
     trace_usage = {"input": 0, "output": 0, "cached": 0}
 
-    async with AGENT.run_stream_events(
+    async with turn_agent.run_stream_events(
         prompt,
         model=model,
         message_history=history or None,
@@ -1177,6 +1223,9 @@ async def _conducted_turn(conv0: dict, first_text: str, sink, channel: str) -> N
         return
 
 
+_ANSWER_CMD = re.compile(r"^\s*answer\s+#?(\d+)\s+(.+)$", re.I | re.S)
+
+
 async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> asyncio.Task | None:
     """Route one incoming message. Called per message on every channel.
 
@@ -1196,6 +1245,24 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                          + ("Previous context is digested into memory, so anything "
                             "durable is still recalled." if dropped
                             else "Nothing to clear.")})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+
+    # An open ask_user question owns the next message. Explicit form first
+    # ("answer 3 the second one"), then the bare reply — which is how a person
+    # actually answers a question on their phone.
+    m = _ANSWER_CMD.match(user_text or "")
+    if m and asking.answer(int(m.group(1)), m.group(2).strip()):
+        await sink.send({"type": "note", "text": f"✅ Answer delivered to question #{m.group(1)}."})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+    pending = asking.pending_for_reply()
+    if pending and (user_text or "").strip():
+        asking.answer(pending["id"], user_text.strip())
+        await sink.send({"type": "note", "text":
+                         f"✅ Passed that back to whatever asked: “{pending['text'][:80]}”"})
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None

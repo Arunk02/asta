@@ -1,6 +1,6 @@
 """Outlook Web bridge (Playwright) — inbox triage + today's meetings.
 
-Reuses the SAME logged-in Chromium profile as the Teams bridge (one Maersk SSO
+Reuses the SAME logged-in Chromium profile as the Teams bridge (one your organisation's SSO
 covers both), so there is nothing extra to set up: if Teams works, this works.
 That is what makes mail/calendar possible without an Azure AD app registration.
 

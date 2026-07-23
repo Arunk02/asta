@@ -1,7 +1,7 @@
 """Teams web bridge (Playwright) — read chats + send messages until Azure AD arrives.
 
 How it works: a persistent Chromium profile at data/teams_profile/ holds your
-Teams web session. You log in ONCE (real Maersk SSO, done by you, in a visible
+Teams web session. You log in ONCE (your organisation's SSO, done by you, in a visible
 window); after that Asta drives Teams web headlessly with deterministic scripts —
 no LLM tokens are spent unless you ask Asta to reason about what it read.
 
@@ -15,7 +15,7 @@ use Teams' own recording/recap and ask Asta to summarize the transcript instead)
 
 Security note: data/teams_profile/ contains your corporate session cookies.
 Same exposure class as your normal browser profile — keep FileVault on, and
-remember Maersk token policy will expire the session every few weeks; Asta
+remember org token policy will expire the session every few weeks; Asta
 notifies you when a re-login is needed.
 
 Fragility note: Teams web DOM changes without notice. Selectors below try
@@ -394,14 +394,14 @@ async def session_watch_loop() -> None:
             if was_ok and not ok:
                 await notify.notify(
                     "Teams session expired — run `.venv/bin/python -m app.teams_bridge login` "
-                    "to reconnect (Maersk SSO).", "warn")
+                    "to reconnect (your organisation's SSO).", "warn")
         except Exception:
             pass
 
 
 async def _login() -> None:
-    """Headed one-time login: user completes Maersk SSO themselves."""
-    print(f"Opening Teams — complete the Maersk SSO login in the window.")
+    """Headed one-time login: user completes your organisation's SSO themselves."""
+    print(f"Opening Teams — complete the your organisation's SSO login in the window.")
     print(f"Profile stored at: {PROFILE_DIR}")
     pw, ctx = await _launch(headless=False)
     try:

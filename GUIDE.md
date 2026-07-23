@@ -93,9 +93,9 @@ what it learns day by day.
 |---|---|
 | "why is invoice dispatch email failing?" | project context resolves exact files → reads only those → answers with citations |
 | "any failed temporal workflows?" / "grafana errors in booking?" | live MCP calls (grafana follows the analyser skill's query discipline) |
-| "my open tickets" / "show BEPTELIKOS-1234" | Jira read (REST — works with every brain) |
-| "comment on BEPTELIKOS-1234: fixed in PR #12" / "move it to Ready for Retest" | Jira write — exact text/status confirmed with you before posting |
-| "implement BEPTELIKOS-1234 in booking" | Mission: plan drafted → you approve → headless implement per your org's project context playbooks → Claude verify → notified |
+| "my open tickets" / "show PROJ-1234" | Jira read (REST — works with every brain) |
+| "comment on PROJ-1234: fixed in PR #12" / "move it to Ready for Retest" | Jira write — exact text/status confirmed with you before posting |
+| "implement PROJ-1234 in booking" | Mission: plan drafted → you approve → headless implement per your org's project context playbooks → Claude verify → notified |
 | "approve mission 3" / "reject mission 3" | from your phone, mid-commute |
 | "delegate a task to analyze X" | parallel background worker; chat stays free; result pushed to phone |
 | "draft a Teams reply to Vinish saying …" | draft task → held for your approval → "approve task N" sends it |
@@ -149,7 +149,7 @@ Open http://localhost:8321 → log in with `ASTA_TOKEN` from `.env`.
 2. **Telegram** (recommended, zero ban risk): @BotFather → `/newbot` → token into
    `TELEGRAM_BOT_TOKEN` in `.env` → restart → open your bot, send
    `/start <ASTA_TOKEN>`. Strangers are ignored.
-3. **Teams bridge**: `.venv/bin/python -m app.teams_bridge login` → complete Maersk
+3. **Teams bridge**: `.venv/bin/python -m app.teams_bridge login` → complete your organisation
    SSO in the window. Session lives in `data/teams_profile/`; you're notified when
    it expires (every few weeks).
 4. **CI watcher**: `gh` CLI must be authed — **already is** (keychain). If ever not:
@@ -299,7 +299,7 @@ dev: Ctrl-C + rerun uvicorn. DB peek: `sqlite3 data/asta.db '.tables'`.
 - Teams bridge scope is read+send only; **meeting joins deliberately excluded**
   (participant-list presence + recording consent). Outgoing Teams messages and all
   code changes require your explicit approval.
-- Credential logins (Maersk SSO, Atlassian OAuth, `gh auth login`) are always done
+- Credential logins (your organisation's SSO, Atlassian OAuth, `gh auth login`) are always done
   by **you** in a real browser window — Asta never handles your passwords.
 
 ## 7. Parked / roadmap

@@ -11,7 +11,7 @@ DISABLED BY DEFAULT. To enable:
   2. Set TEAMS_WATCHER=1 in .env (and optionally TEAMS_WATCH_KEYWORDS).
   3. Make sure Teams/Outlook banners are ON in System Settings → Notifications.
 
-Limitations (by design — this is the zero-approval fallback until a Maersk
+Limitations (by design — this is the zero-approval fallback until an org
 Graph API app registration is possible):
   - only sees what macOS shows as a banner (muted chats / DND = invisible);
   - notification text is short (title + preview), not the full message;

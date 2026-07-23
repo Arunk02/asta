@@ -35,7 +35,7 @@ on power adapter when the display is off".
 
 **Why not Docker?** Docker Desktop containers pause when the Mac sleeps — it solves
 nothing for the sleep problem, and it complicates everything else: the stdio MCP
-proxies are host Python scripts behind the Maersk VPN, LM Studio serves on the host,
+proxies are host Python scripts behind the your organisation VPN, LM Studio serves on the host,
 `copilot`/`claude` CLIs are host binaries with host auth. Docker earns its keep only
 if Asta later moves to an always-on Linux box (mini-PC/NAS/VM) reached over Tailscale
 — that is the real "always available" endgame; revisit then.
@@ -83,7 +83,7 @@ remove it from the IDE file (use `${GITHUB_PERSONAL_ACCESS_TOKEN}` there too if 
 IDE supports it).
 
 **Atlassian MCP (Jira/Confluence)** — the same remote MCP your IDE uses, with OAuth.
-One-time login (opens your browser for the Atlassian/Maersk SSO consent):
+One-time login (opens your browser for the Atlassian/your organisation's SSO consent):
 
 ```bash
 cd ~/help/asta && .venv/bin/python -m app.mcp_login atlassian
@@ -233,7 +233,7 @@ as the web UI. Status shows in ⚙ Settings.
 ## Teams bridge (read + send, no Azure AD)
 
 `app/teams_bridge.py` drives **Teams web** through a Playwright browser profile
-holding your session. One-time login (you complete the Maersk SSO yourself):
+holding your session. One-time login (you complete the your organisation's SSO yourself):
 
 ```bash
 .venv/bin/python -m app.teams_bridge login
@@ -241,7 +241,7 @@ holding your session. One-time login (you complete the Maersk SSO yourself):
 
 Then in chat: "read my Teams chat with Vinish", "send Vinish: running late".
 Deterministic automation — no LLM tokens unless you ask Asta to reason about
-what it read. Sessions expire on Maersk's token policy (every few weeks); Asta
+what it read. Sessions expire on your organisation's token policy (every few weeks); Asta
 notifies you to re-login. **Deliberately no meeting-join**: your name would show
 in the participant list while you're absent — use Teams recording/recap and ask
 Asta to summarize the transcript instead. Note the profile dir
@@ -280,7 +280,7 @@ tokens** (the evolution loop rewriting mini-skills) and is never run automatical
 
 ## Later (phase 6)
 
-- **Teams / Outlook / meetings**: needs an Azure AD app registration in the Maersk
+- **Teams / Outlook / meetings**: needs an Azure AD app registration in the your organisation
   tenant with Microsoft Graph scopes (Mail.Read, Chat.Read, Calendars.Read, Send).
   When approved, add a Graph MCP server to `mcp.json` and it plugs straight in.
 - Telegram companion bot for push notifications.

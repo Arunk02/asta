@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0e14">
+<title>Asta</title>
+<link rel="manifest" href="/ui/manifest.json">
+<link rel="stylesheet" href="/ui/style.css?v=5">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='none' stroke='%234fd1c5' stroke-width='8'/><circle cx='50' cy='50' r='16' fill='%234fd1c5'/></svg>">
+</head>
+<body>
+
+<div id="login" class="overlay hidden">
+  <div class="login-card">
+    <div class="arc"></div>
+    <h1 id="login-name">Asta</h1>
+    <p>Enter your access token (ASTA_TOKEN in .env)</p>
+    <input id="login-token" type="password" placeholder="token" autocomplete="off">
+    <button id="login-btn">Connect</button>
+    <p id="login-err" class="err"></p>
+  </div>
+</div>
+
+<div id="shell">
+  <aside id="sidebar">
+    <div class="side-head">
+      <div class="brand"><span class="arc small"></span> <span id="brand-name">Asta</span></div>
+      <button id="new-chat" title="New chat">+</button>
+    </div>
+    <div id="conv-list"></div>
+    <div id="side-status"></div>
+  </aside>
+
+  <main id="main">
+    <header id="topbar">
+      <button id="burger">☰</button>
+      <nav id="tabs">
+        <button class="tab active" data-tab="chat">Chat</button>
+        <button class="tab" data-tab="missions">Missions</button>
+        <button class="tab" data-tab="graph">Graph</button>
+        <button class="tab" data-tab="memory">Memory</button>
+        <button class="tab" data-tab="settings">⚙</button>
+      </nav>
+      <div class="pickers">
+        <select id="model-pick" title="Model"></select>
+        <select id="workspace-pick" title="Workspace">
+          <option value="">no workspace</option>
+          <option value="booking">booking</option>
+        </select>
+        <button id="bell" title="Notifications">🔔<span id="bell-badge" class="hidden"></span></button>
+      </div>
+    </header>
+
+    <div id="notif-panel" class="hidden">
+      <div class="notif-head">Notifications <button id="notif-clear">mark seen</button></div>
+      <div id="notif-list"></div>
+    </div>
+
+    <section id="pane-chat" class="pane active">
+      <div id="messages"></div>
+      <div id="voice-banner" class="hidden">
+        <span class="arc small"></span>
+        <span id="voice-state">listening…</span>
+        <button id="voice-stop">end conversation</button>
+      </div>
+      <div id="composer">
+        <button id="mic" title="Dictate one message">🎙</button>
+        <button id="voice" title="Voice conversation (hands-free back-and-forth)">🎧</button>
+        <textarea id="input" rows="1" placeholder="Ask Asta… (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="tts" title="Speak replies aloud">🔇</button>
+        <button id="send" title="Send">➤</button>
+      </div>
+    </section>
+
+    <section id="pane-missions" class="pane">
+      <div class="pane-toolbar">
+        <button id="mission-new">+ New mission</button>
+        <span class="dim">plan → approve → implement (copilot/claude) → Claude test pass</span>
+      </div>
+      <div class="card" id="task-card">
+        <h2>Background tasks <span class="dim">(parallel workers — you're notified on WhatsApp/Telegram when each finishes)</span></h2>
+        <div id="task-list"><p class="dim">No background tasks yet. Ask in chat: “delegate a task to …”.</p></div>
+      </div>
+      <div id="missions-wrap">
+        <div id="mission-list"></div>
+        <div id="mission-detail"><p class="dim">Select a mission.</p></div>
+      </div>
+    </section>
+
+    <section id="pane-graph" class="pane">
+      <div class="pane-toolbar">
+        <select id="graph-pick"></select>
+        <a id="graph-open" href="#" target="_blank" rel="noopener">open full page ↗</a>
+      </div>
+      <iframe id="graph-frame" title="graphfy"></iframe>
+    </section>
+
+    <section id="pane-memory" class="pane">
+      <div id="memory-list"></div>
+      <pre id="memory-view"></pre>
+    </section>
+
+    <section id="pane-settings" class="pane">
+      <div class="settings-col">
+        <div class="card">
+          <h2>WhatsApp</h2>
+          <p id="wa-state" class="dim">checking bridge…</p>
+          <div id="wa-qr-wrap" class="hidden">
+            <p>Scan in WhatsApp → Settings → Linked devices:</p>
+            <img id="wa-qr" alt="WhatsApp pairing QR">
+          </div>
+          <div class="field">
+            <label><input type="checkbox" id="wa-enabled"> WhatsApp channel enabled</label>
+          </div>
+          <div class="field">
+            <label for="wa-jid">Chat JID <span class="dim">(the chat Asta talks in — leave empty for the bot number's own “Message yourself” chat)</span></label>
+            <input id="wa-jid" type="text" placeholder="empty = Message-yourself chat">
+          </div>
+          <div class="field">
+            <button id="wa-save">Save</button>
+            <span id="wa-save-msg" class="dim"></span>
+          </div>
+          <p class="dim">Pair with the <b>second (dedicated) number</b> — scan the QR from that
+          phone/account. Your personal WhatsApp then just chats with it like a normal contact;
+          save it as “<span class="wake-name">Asta</span>” in your contacts.</p>
+        </div>
+
+        <div class="card">
+          <h2>Telegram</h2>
+          <p id="tg-state" class="dim">…</p>
+          <p class="dim">Official Bot API — no ban risk. Setup: message <b>@BotFather</b> →
+          <code>/newbot</code>, put the token in <code>.env</code> as
+          <code>TELEGRAM_BOT_TOKEN</code>, restart, then open your bot and send
+          <code>/start &lt;ASTA_TOKEN&gt;</code>. Chat + notifications both work here.</p>
+        </div>
+
+        <div class="card">
+          <h2>Teams bridge (read + send)</h2>
+          <p id="teamsbridge-state" class="dim">…</p>
+          <p class="dim">Uses your Teams <b>web session</b> (Playwright). One-time login:
+          <code>.venv/bin/python -m app.teams_bridge login</code> — complete the Maersk SSO in
+          the window. Then ask in chat: “read my Teams chat with Vinish” or “send Vinish: …”.
+          Sessions expire every few weeks; you'll get a notification to re-login.
+          Meeting-join is deliberately not supported.</p>
+        </div>
+
+        <div class="card">
+          <h2>Performance / token trace</h2>
+          <div id="trace-summary" class="dim">no turns traced yet</div>
+          <div id="trace-list"></div>
+        </div>
+        <div class="card">
+          <h2>Voice</h2>
+          <div class="field">
+            <label><input type="checkbox" id="wake-enabled"> Wake word — say “<span class="wake-name">Asta</span>” to start a voice conversation</label>
+          </div>
+          <div class="field">
+            <label for="tts-voice">Spoken-reply voice</label>
+            <select id="tts-voice"></select>
+            <button id="tts-voice-test" type="button">▶ test</button>
+          </div>
+          <p class="dim">While a reply is being worked on, keep talking — commands are
+          queued and run one by one. Speech needs a real browser (Chrome/Safari) —
+          it won't work in embedded previews.</p>
+        </div>
+        <div class="card">
+          <h2>Teams / Outlook mentions</h2>
+          <p id="teams-state" class="dim">…</p>
+          <p class="dim">Watches macOS notification banners for your name — no M365 API.
+          Enable with <code>TEAMS_WATCHER=1</code> in .env + Full Disk Access, then restart.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/ui/app.js?v=5"></script>
+</body>
+</html>

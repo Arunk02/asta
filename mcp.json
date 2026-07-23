@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "temporal": {
+      "command": "/usr/bin/python3",
+      "args": ["/Users/arun.k.k/temporal-mcp-proxy.py"]
+    },
+    "grafana": {
+      "command": "/usr/bin/python3",
+      "args": ["/Users/arun.k.k/grafana-mcp-proxy.py"],
+      "defer": true
+    },
+    "github": {
+      "command": "mcp-server-github",
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN:-}"
+      }
+    },
+    "context7": {
+      "command": "context7-mcp"
+    },
+    "atlassian": {
+      "url": "https://mcp.atlassian.com/v1/mcp",
+      "auth": "oauth",
+      "defer": true
+    }
+  }
+}

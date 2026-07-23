@@ -1,0 +1,57 @@
+# ─── Secrets — never commit ──────────────────────────────────────────────────
+# NOTE: `.env` alone does NOT cover `.env.bak-*`. The glob below is deliberate.
+.env
+.env.*
+!.env.example
+
+# ─── Runtime state ───────────────────────────────────────────────────────────
+# data/ holds the SQLite DB, Atlassian OAuth tokens (data/oauth/), the Playwright
+# Teams/Outlook SSO profile (data/teams_profile/ — live session cookies, ~500 MB),
+# logs and mission artifacts. None of it belongs in git.
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ─── Learned memory ──────────────────────────────────────────────────────────
+# Facts and episode digests reference internal tickets, services and colleagues.
+memory/
+
+# ─── WhatsApp bridge ─────────────────────────────────────────────────────────
+# auth/ is the Baileys session credential store — publishing this auth state
+# would hand over the linked WhatsApp account. config.json holds a phone number.
+whatsapp/auth/
+whatsapp/config.json
+
+# ─── Machine-local skill symlinks ────────────────────────────────────────────
+# skills/*.md are symlinks into external repos on this laptop; the targets don't
+# exist anywhere else, and the link paths leak internal repo layout.
+skills/*.md
+!skills/README.md
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ─── Node ────────────────────────────────────────────────────────────────────
+node_modules/
+npmcache/
+
+# ─── Editor / OS ─────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ─── Logs & scratch ──────────────────────────────────────────────────────────
+*.log
+scratch/
+tmp/

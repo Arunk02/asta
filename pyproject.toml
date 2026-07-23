@@ -1,0 +1,11 @@
+[project]
+name = "asta"
+version = "0.1.0"
+description = "Personal dev-assistant chatbot: multi-LLM, MCP tools, contmark workspace context, persistent memory"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic-ai-slim[anthropic,openai,mcp]>=2.13",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-dotenv>=1.0",
+]

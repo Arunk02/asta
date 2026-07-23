@@ -436,3 +436,84 @@ def test_matching_sha_is_reported_in_sync(indexed_ws):
     ws.add("proj", indexed_ws)
     stale, _ = asyncio.run(ws.drift("proj"))
     assert stale is False
+
+
+# --- drift must be meaningful, not merely different --------------------------
+
+@pytest.mark.parametrize("path,material", [
+    ("src/app.py", True), ("main.go", True), ("config/routes.yaml", True),
+    ("requirements.txt", True), ("pom.xml", True), ("package.json", True),
+    ("Dockerfile", True), ("src/schema.sql", True),
+    ("tests/fixture.json", False), ("test/data.json", False),
+    ("src/test_helper.py", False), ("src/app.test.ts", False),
+    ("README.md", False), ("docs/guide.md", False), ("CHANGELOG.md", False),
+    ("package-lock.json", False), ("poetry.lock", False),
+    ("assets/logo.png", False), (".gitignore", False), ("", False),
+])
+def test_materiality_rules(path, material):
+    from app.workspace.providers.indexed import is_material
+    assert is_material(path) is material, path
+
+
+def test_indexed_provider_actually_overrides_drift():
+    """Guard against a structural break: if the class body is split, these fall
+    out of the class and calls silently fall through to the base-class stub,
+    which returns (False, "") — i.e. reports every workspace as in sync."""
+    from app.workspace.providers.base import ContextProvider
+    from app.workspace.providers.indexed import IndexedProvider
+    for name in ("drift", "_sha_drift", "_write_manifests", "provision", "resolve"):
+        assert hasattr(IndexedProvider, name), f"{name} is not on the class"
+    assert IndexedProvider.drift is not ContextProvider.drift, "base stub would hide real drift"
+
+
+def _commit(repo: Path, msg: str):
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=t@e.com", "-c", "user.name=T",
+                    "commit", "-qm", msg], cwd=repo, check=True)
+
+
+def _stamp(indexed_ws: Path, repo: str):
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=indexed_ws / repo,
+                          capture_output=True, text=True).stdout.strip()
+    d = indexed_ws / ".asta-context" / "repos" / repo
+    d.mkdir(parents=True, exist_ok=True)
+    d.joinpath("_index.json").write_text(json.dumps({"repo": repo, "verified_against": head}))
+
+
+def test_immaterial_commits_do_not_report_drift(indexed_ws):
+    """Adding a test fixture moves the SHA but cannot invalidate what the
+    context says. Flagging it wastes a whole rebuild."""
+    (indexed_ws / ".asta-context" / "check-drift.js").write_text("console.log('no drift');\n")
+    _stamp(indexed_ws, "svc-a")
+    (indexed_ws / "svc-a" / "tests").mkdir(exist_ok=True)
+    (indexed_ws / "svc-a" / "tests" / "fixture.json").write_text("{}")
+    (indexed_ws / "svc-a" / "README.md").write_text("# docs\n")
+    _commit(indexed_ws / "svc-a", "fixtures and docs")
+    ws.add("proj", indexed_ws)
+    stale, _ = asyncio.run(ws.drift("proj"))
+    assert stale is False
+
+
+def test_material_commits_do_report_drift_and_name_the_files(indexed_ws):
+    (indexed_ws / ".asta-context" / "check-drift.js").write_text("console.log('no drift');\n")
+    _stamp(indexed_ws, "svc-a")
+    (indexed_ws / "svc-a" / "handler.py").write_text("def handle(): pass\n")
+    (indexed_ws / "svc-a" / "README.md").write_text("# docs\n")
+    _commit(indexed_ws / "svc-a", "new handler plus docs")
+    ws.add("proj", indexed_ws)
+    stale, detail = asyncio.run(ws.drift("proj"))
+    assert stale is True
+    assert "handler.py" in detail
+    assert "1 of 2" in detail, "reports how much of the change actually mattered"
+
+
+def test_undiffable_history_is_treated_as_drift(indexed_ws):
+    """An unverifiable SHA gap must not be optimistically called clean."""
+    (indexed_ws / ".asta-context" / "check-drift.js").write_text("console.log('no drift');\n")
+    d = indexed_ws / ".asta-context" / "repos" / "svc-a"
+    d.mkdir(parents=True, exist_ok=True)
+    d.joinpath("_index.json").write_text('{"repo":"svc-a","verified_against":"deadbeefdeadbeef"}')
+    ws.add("proj", indexed_ws)
+    stale, detail = asyncio.run(ws.drift("proj"))
+    assert stale is True
+    assert "could not diff" in detail

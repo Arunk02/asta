@@ -92,6 +92,55 @@ async def _run(cmd: list[str], cwd: Path, timeout: int, ctx_dir: str = "") -> tu
     return proc.returncode or 0, out.decode(errors="replace")
 
 
+#: Changes that cannot alter what the context SAYS about a repo. Rebuilding on
+#: these is pure token waste: the context describes what a service owns, its
+#: entry points and its dependencies — none of which a test fixture, a lockfile
+#: or a typo fix changes. Kept deliberately conservative: when unsure, treat a
+#: file as material, because a missed real change is worse than one extra
+#: rebuild prompt.
+_IMMATERIAL_DIRS = ("test", "tests", "spec", "specs", "__tests__", "fixtures",
+                    "testdata", "test-data", "e2e", "docs", "doc", "examples",
+                    "sample", "samples", ".github", ".idea", ".vscode")
+_IMMATERIAL_NAMES = ("readme.md", "changelog.md", "license", "notice",
+                     ".gitignore", ".gitattributes", ".editorconfig",
+                     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+                     "poetry.lock", "gemfile.lock", "cargo.lock", ".ds_store")
+_IMMATERIAL_SUFFIX = (".md", ".txt", ".rst", ".png", ".jpg", ".jpeg", ".gif",
+                      ".svg", ".ico", ".csv", ".log", ".lock")
+
+#: …except these, which describe the shape of the service and ARE material even
+#: though their extension looks inert.
+_MATERIAL_NAMES = ("pom.xml", "build.gradle", "build.gradle.kts", "package.json",
+                   "requirements.txt", "pyproject.toml", "go.mod", "cargo.toml",
+                   "dockerfile", "docker-compose.yml", "openapi.yaml",
+                   "openapi.json", "schema.sql")
+
+
+def is_material(rel_path: str) -> bool:
+    """Whether a changed file could change what the project context says."""
+    # removeprefix, not lstrip: lstrip("./") strips CHARACTERS, turning
+    # ".gitignore" into "gitignore" and ".github/…" into "github/…", so both
+    # silently stopped matching their immaterial rules.
+    p = rel_path.strip().lower().removeprefix("./")
+    if not p:
+        return False
+    name = p.rsplit("/", 1)[-1]
+    if name in _MATERIAL_NAMES:
+        return True
+    parts = p.split("/")
+    if any(seg in _IMMATERIAL_DIRS for seg in parts[:-1]):
+        return False
+    if name in _IMMATERIAL_NAMES:
+        return False
+    if name.startswith("test_") or name.endswith(("_test.py", "_test.go", ".test.js",
+                                                  ".spec.js", ".test.ts", ".spec.ts")):
+        return False
+    if p.endswith(_IMMATERIAL_SUFFIX):
+        return False
+    return True
+
+
+
 class IndexedProvider(ContextProvider):
     id = "indexed"
     label = "Project context index"
@@ -152,14 +201,23 @@ class IndexedProvider(ContextProvider):
         return f'sh {context_dirname(self.root)}/boot.sh "{safe}"'
 
     async def _sha_drift(self) -> list[str]:
-        """Repos whose recorded SHA no longer matches HEAD.
+        """Repos whose context no longer matches the code, with the noise removed.
 
-        A floor under the script-based check. The script maps drift precisely
-        through each mini-skill's `sources:` front-matter, which is richer — but
-        a context written in a simpler shape has no mini-skills, so the script
-        finds nothing to mark stale and reports CLEAN while the SHAs plainly
-        disagree. A silent false negative is the worst outcome here: the whole
-        point is knowing when to stop trusting the context.
+        Two failure modes to avoid, in tension:
+
+        FALSE NEGATIVE — the drift script maps staleness through each
+          mini-skill's `sources:`, so a context written without mini-skills
+          gives it nothing to flag while the SHAs plainly disagree. It reports
+          CLEAN and you trust stale context forever.
+
+        FALSE POSITIVE — comparing SHAs alone flags every commit. Adding a test
+          fixture or fixing a typo in the README then reads as "your context is
+          wrong", and acting on it rebuilds a whole repo for nothing. That is
+          exactly the token waste this system exists to avoid.
+
+        So: SHA mismatch opens the question, and the changed FILES answer it.
+        Only material changes count (see `is_material`). Immaterial-only commits
+        move the SHA forward without invalidating anything the context claims.
         """
         stale = []
         for repo in self.services():
@@ -175,9 +233,26 @@ class IndexedProvider(ContextProvider):
                 continue
             rc, head = await _run(["git", "rev-parse", "HEAD"], repo_dir, 30)
             head = head.strip()
-            if rc == 0 and head and not head.startswith(recorded[:8]) \
-               and not recorded.startswith(head[:8]):
-                stale.append(f"{repo}: {recorded[:8]}..{head[:8]}")
+            if rc != 0 or not head or head.startswith(recorded[:8]) or recorded.startswith(head[:8]):
+                continue
+
+            rc, out = await _run(
+                ["git", "diff", "--name-only", f"{recorded}..HEAD"], repo_dir, 60)
+            if rc != 0:
+                # Cannot diff (shallow clone, rewritten history) — do not guess
+                # it is fine; an unverifiable SHA gap is real drift.
+                stale.append(f"{repo}: {recorded[:8]}..{head[:8]} (could not diff)")
+                continue
+
+            changed = [f for f in out.splitlines() if f.strip()]
+            material = [f for f in changed if is_material(f)]
+            if not material:
+                continue
+            shown = ", ".join(material[:4]) + (f" +{len(material) - 4} more" if len(material) > 4 else "")
+            stale.append(
+                f"{repo}: {recorded[:8]}..{head[:8]} — "
+                f"{len(material)} of {len(changed)} changed file(s) affect the context "
+                f"({shown})")
         return stale
 
     async def drift(self) -> tuple[bool, str]:

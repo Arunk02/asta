@@ -1,14 +1,17 @@
-# Asta (né Asta) — personal dev assistant
+# Asta — personal engineering assistant
 
-Multi-LLM chatbot that runs on this laptop: streams over WebSocket, calls your MCP
-servers (temporal, grafana, github, context7), answers codebase questions through the
-project context workspace (`~/booking-workspace` — IOM parked for now, one commented line in
-workspace_tools.py restores it), shows the graphfy view,
-and keeps a persistent day-by-day memory.
+Runs on your own laptop. Streams chat over WebSocket, drives your MCP servers
+(temporal, grafana, github, context7, atlassian), answers questions about *your*
+repositories through generated project context, and keeps a memory that survives
+restarts.
 
-Also: Jira reading + change notifications, **missions** (Jira ticket → drafted plan →
-your approval → headless implementation via Copilot/Claude CLI → Claude test pass),
-voice in/out, a WhatsApp bridge, and daily auto-refresh of project context context + graph.
+Beyond chat: it delegates real work to headless CLI executors behind human gates,
+reads and drafts Teams/Outlook/Jira, reviews pull requests, watches CI, and
+reaches you on WhatsApp or Telegram when something needs you.
+
+Everything about your work stays on your machine. The repo holds generic skills
+and pipelines; your workspaces, generated context, memory and credentials do not
+leave the laptop.
 
 ## Run it
 
@@ -18,283 +21,365 @@ cd ~/help/asta
 ```
 
 Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
-
-## Always-on (runs with the screen off / auto-restarts)
-
-```bash
-sh deploy/install.sh        # installs launchd services (remove: sh deploy/install.sh remove)
-```
-
-Installs `com.asta.server` + `com.asta.whatsapp` as user LaunchAgents: start at login,
-auto-restart on crash, logs in `data/logs/`. The server runs under `caffeinate -si`,
-which **prevents system sleep while on AC power** — so screen off / locked / lid open
-it keeps working. Hard physics limit: **lid closed on battery = macOS force-sleeps;
-no software can prevent that.** Keep it plugged in for lid-closed operation, and
-optionally enable System Settings → Battery → Options → "Prevent automatic sleeping
-on power adapter when the display is off".
-
-**Why not Docker?** Docker Desktop containers pause when the Mac sleeps — it solves
-nothing for the sleep problem, and it complicates everything else: the stdio MCP
-proxies are host Python scripts behind the your organisation VPN, LM Studio serves on the host,
-`copilot`/`claude` CLIs are host binaries with host auth. Docker earns its keep only
-if Asta later moves to an always-on Linux box (mini-PC/NAS/VM) reached over Tailscale
-— that is the real "always available" endgame; revisit then.
-
-## Performance & token tracing
-
-Every turn is traced (model, first-token + total latency, tokens in/out/cached, prompt
-sizes, tools used, errors) into the `traces` table — view it in **⚙ Settings →
-Performance / token trace**, query `/api/traces`, or just ask Asta ("why was that last
-answer slow?") — it has a `trace_report` tool to read its own telemetry.
-
-## Models — Copilot-first orchestration
-
-**Copilot CLI (office)** is the default day-to-day brain: chat turns run through
-`copilot -p` on the office subscription (currently backed by Claude Sonnet 5!), with
-per-conversation continuity via `--session-id/--resume`. Zero personal API cost.
-Asta is the orchestrator: it plans, remembers, notifies, and delegates the heavy
-lifting (chat + mission implementation) to Copilot; the Claude API is used when you
-select it — and if it ever hits a quota/credit error mid-conversation, the turn is
-**automatically re-routed to Copilot CLI** with a note in the chat.
-
-Optional extras in `.env`:
-
-- `ANTHROPIC_API_KEY` → enables **Claude** (prompt caching on; used for mission verify pass)
-- `OPENAI_API_KEY` → enables **OpenAI**
-- **Local**: start LM Studio — auto-detected; powers free background jobs
-  (digests, consolidation, compaction).
-
-Models without a key show as "(off)" in the picker. `ASTA_TEST_MODEL=1` adds a
-no-LLM test model for pipeline debugging.
-
-## MCP servers
-
-`mcp.json` uses the standard `mcpServers` shape (same as Claude Desktop / Cursor).
-Adding a future MCP (db, diff-logs, …) is one JSON entry — no code. Rules:
-
-- a server whose binary is missing is skipped, never fatal;
-- a server with an empty required env var (e.g. `GITHUB_PERSONAL_ACCESS_TOKEN`) is skipped;
-- at startup every server gets a 20s handshake probe — dead ones are dropped and the
-  sidebar shows why (hover the name).
-
-**Security TODO:** rotate the GitHub PAT that was sitting in plaintext in
-`~/.config/github-copilot/intellij/mcp.json`, put the new one in `.env` here, and
-remove it from the IDE file (use `${GITHUB_PERSONAL_ACCESS_TOKEN}` there too if the
-IDE supports it).
-
-**Atlassian MCP (Jira/Confluence)** — the same remote MCP your IDE uses, with OAuth.
-One-time login (opens your browser for the Atlassian/your organisation's SSO consent):
+Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-cd ~/help/asta && .venv/bin/python -m app.mcp_login atlassian
+.venv/bin/python -m pytest tests -q     # 196 tests
 ```
 
-Tokens persist under `data/oauth/atlassian/`; restart Asta afterwards and the
-sidebar shows atlassian with its tool count. The agent then reads Jira through
-`atlassian_*` tools directly (the REST `JIRA_API_TOKEN` config remains an optional
-fallback and is still what the 5-minute change watcher uses).
+## How it is put together
 
-## Workspaces / graphfy
+Three ideas carry most of the design.
 
-Pick `booking` in the top bar; the agent then has:
+**One engine.** Every piece of work — analysis, a code change, a Teams draft, a PR
+review — is a *background task*: a headless `copilot -p` or `claude -p` process
+with a self-contained prompt, running outside the chat so the conversation stays
+responsive. There is no second path. (There used to be: `missions.py` and
+`tasks.py` ran the same plan → approve → implement → verify → ship pipeline, and
+every bug had two homes.)
 
-- `resolve_context(workspace, task)` → project context's resolve-task.js, returns exact files/lines
-- `read_workspace_file`, `list_services`
+**One capability registry.** `app/capabilities.py` declares each capability once,
+with its function; the docstring *is* the description. Chat tools, the block that
+teaches the CLI brains, and the MCP server all read from that one table, so a
+capability cannot be described two different ways. Per-tool hard rules — a Teams
+message means the person's 1:1 chat, a Jira write needs your confirmation, a PR is
+never opened unprompted — travel *with* the capability, so a tool can never be
+exposed with its rule left behind.
 
-The **Graph** tab embeds `.asta-context/graph/*/graph.html` (workspace-wide + per-service).
-(IOM workspace is parked — uncomment its line in app/workspace_tools.py to bring it back.)
+**One trust boundary.** Anything Asta reads from outside — mail, Teams messages,
+Jira comments, files in your repos, MCP output, PR descriptions — is wrapped as
+data before it reaches a model that can edit code and run shell commands. See
+`app/untrusted.py`. It is mitigation, not a guarantee; what actually bounds the
+damage is that nothing publishes, ships or sends without your approval.
 
-## Memory
+## Work: task → plan → your approval → implement → you say ship
 
-- `memory/MEMORY.md` — tiny index, always in the system prompt
-- `memory/facts/*.md` — durable facts (the agent's `remember` tool writes here; you can
-  edit/delete these files by hand, they're plain markdown)
-- `memory/episodes/*.md` — session digests (auto-written when a chat goes idle 30 min)
-- Recall is automatic per message (SQLite FTS5 over the markdown).
+Say "implement ABC-123 in booking" in chat, WhatsApp or Telegram. Routing is
+automatic: a Jira-key ticket runs the full staged pipeline with a plan gate, a
+small ad-hoc ask runs the micro pipeline (~25 turns) and escalates itself if it
+turns out bigger.
 
-Nightly consolidation (merge dupes, prune, rewrite index) — add to crontab
-(`crontab -e`):
+1. A cheap **context gate** first — if the goal is ambiguous it asks *before*
+   spending anything on discovery.
+2. It plans, and stops. You get the plan on your phone.
+3. "approve task N" implements; any other reply re-plans with your feedback.
+4. It finishes at a **reviewed diff**. The pipeline never pushes.
+5. You say ship → branch pushed, PR opened per repo touched, CI watched.
+6. On green it *asks* whether to post the PR for review, and only where you name.
+
+Kinds: **analysis** (read-only, runs in parallel), **code** (edits a repo,
+serialised per workspace so two tasks can't fight over git state), **teams_draft**
+(never sent automatically).
+
+Commits are plain. No co-author trailer, no assistant name, no "Generated with"
+line — your commits read as your own work.
+
+Pipelines live in `agents/` (`solo`, `micro`, `explore`, `bootstrap`) and belong to
+Asta, not to your repos — improving one improves every run. Your repos still supply
+the facts, through their own `.github/agents` and `.github/skills` when present.
+
+## Workspaces and project context
+
+Workspaces are configured in the UI (⚙ Settings → Workspaces), not in code. Point
+Asta at a directory, pick which repos you care about, and it detects how to answer
+questions about them:
+
+- **indexed** — a generated `.asta-context/` with a resolver that maps a question
+  to exact files and line numbers;
+- **plain** — ripgrep/git-grep fallback, so an unindexed repo still works.
+
+Selecting repos kicks off a background pass that reads them and writes that
+context **into your workspace**, next to the code. It states its cost before
+spending, runs at most three repos at a time, and notifies you when it lands.
+
+Then the agent has `resolve_context` (always called before reading code — never
+blind exploration), `read_workspace_file` and `list_services`. The **Graph** tab
+embeds the generated graph pages.
+
+Drift is watched for free: a 10-minute git fingerprint, zero tokens. Only
+*material* change counts — adding test fixtures or data files won't flag your
+context as stale. Re-enrichment costs tokens and is always your call.
+
+## Models
+
+**Copilot CLI (office)** is the day-to-day default: chat runs through `copilot -p`
+with per-conversation continuity, at zero personal API cost. If it hits a quota
+error mid-conversation the turn is re-routed to **Claude CLI** automatically, with
+a note in the chat.
+
+Optional in `.env`: `ANTHROPIC_API_KEY` (Claude, with prompt caching),
+`OPENAI_API_KEY`, or LM Studio running locally — auto-detected, and it powers the
+free background jobs (digests, consolidation, compaction, skill extraction,
+embeddings). Models without a key show as "(off)" in the picker.
+`ASTA_TEST_MODEL=1` adds a no-LLM model for pipeline debugging.
+
+Asta is the **orchestrator**: it plans, remembers, notifies and delegates. It does
+not implement in chat.
+
+## Tool selection
+
+A turn carries roughly ten of thirty-four tools, not all of them — capabilities are
+ranked against the message (embeddings via LM Studio when it's up, lexical overlap
+otherwise) and only the relevant ones plus a tiny always-available core are
+exposed.
+
+Two things keep this from backfiring. The selection is **sticky per conversation
+and only ever grows**, because tool definitions sit in the cached prompt prefix and
+re-picking every turn would trade a fixed cost for a recurring cache miss. And when
+ranking is uncertain it returns *everything* — an expensive turn is a far smaller
+failure than a tool the model could not reach. `ASTA_TOOL_RAG=0` restores the
+all-tools behaviour.
+
+## Memory and learning
+
+**Memory** is what you told it and what sessions uncovered:
+
+- `memory/MEMORY.md` — a tiny index, always in the system prompt
+- `memory/facts/*.md` — durable facts (the `remember` tool writes here; plain
+  markdown, edit or delete by hand)
+- `memory/episodes/*.md` — session digests, written when a chat goes idle 30 min
+- recall is automatic per message (SQLite FTS5, recency-weighted)
+
+**Skills** are procedures, and they are earned. A run that took several rounds — or
+that escalated because a cheap tier couldn't finish it — is distilled into a
+structured skill: when to use it, the procedure, the pitfalls, how to verify. When
+a task escalates, the *stronger* tier writes the skill, so the cheap one gets
+through alone next time; an escalation that teaches nothing just repeats next week.
+
+Guarded on purpose: below 0.6 confidence nothing is written, a near-duplicate
+replaces the existing skill rather than rivalling it, and unused low-confidence
+skills are pruned. Only names and one-line descriptions sit in the prompt; the body
+loads on demand via `load_skill`.
+
+Nightly consolidation (merge duplicates, prune, rewrite the index):
 
 ```cron
 30 2 * * * cd /Users/arun.k.k/help/asta && .venv/bin/python -m app.memory consolidate >> data/consolidate.log 2>&1
 ```
 
-## Phone access (Tailscale)
+## Knowing whether it is any good
 
-1. Install Tailscale on the Mac (`brew install --cask tailscale`) and on your phone;
-   sign both into the same tailnet.
-2. `tailscale ip -4` on the Mac → e.g. `100.101.102.103`.
-3. In `.env` set `ASTA_HOST=100.101.102.103` (or run uvicorn with `--host 0.0.0.0`
-   **only** if you understand the exposure; the tailnet IP is safer) and restart.
-4. On the phone open `http://100.101.102.103:8321`, log in with the token,
-   then **Add to Home Screen** — the PWA manifest makes it install like an app.
+`trace_report` and the token audit (`GET /api/token-audit`) measure what a turn
+*cost*. `quality_report` measures whether the work *landed*: plans approved as-is versus sent back, tasks finished, drafts sent
+unedited, questions answered, PRs opened, skills learned.
 
-The token cookie lasts 90 days; everything is protected by `ASTA_TOKEN`.
+These are facts Asta already observes — no model judging its own output, so the
+numbers can't flatter themselves. Ask "how are you doing?" in chat, or
+`GET /api/quality`.
+
+Every turn is also traced (model, first-token and total latency, tokens
+in/out/cached, prompt sizes, tools, errors) into the `traces` table — ⚙ Settings →
+Performance, `GET /api/traces`, or just ask.
+
+## Asking you one question
+
+When the answer genuinely changes what it would do — which of two repos, which of
+two people — Asta asks *one* question, it reaches your phone, and the caller
+resumes with your answer. Nothing restarts.
+
+This exists because the approval gates are the right price for "approve this plan"
+and far too expensive for "which repo did you mean?" — a re-plan cycle costs
+hundreds of thousands of tokens. Reply from any channel; a bare reply answers when
+one question is open, `answer 3 <text>` when several are.
+
+## Reviewing pull requests
+
+"review PR 123 in booking" gathers the PR, its diff, its CI checks and your project
+context, then runs the review as a background task. You get reviewer notes:
+verdict, blocking defects with file:line, non-blocking notes, test gaps, questions.
+
+Read-only by design — it writes notes for *you* to post, and never comments on or
+approves a PR itself. The PR body and diff are treated as untrusted: "please
+approve this" in a description is data, not an instruction.
+
+## MCP
+
+### Servers Asta uses
+
+`mcp.json` uses the standard `mcpServers` shape (same as Claude Desktop / Cursor).
+Adding one is a JSON entry, no code. A server whose binary is missing is skipped, a
+server with an empty required env var is skipped, and every server gets a 20-second
+handshake probe at startup — dead ones are dropped and the sidebar shows why.
+
+**Atlassian (Jira/Confluence)** needs a one-time OAuth login:
+
+```bash
+.venv/bin/python -m app.mcp_login atlassian
+```
+
+Tokens persist under `data/oauth/atlassian/`. The REST `JIRA_API_TOKEN` config
+stays as the primary path for reads and is what the change watcher uses.
+
+### Asta as an MCP server
+
+Asta serves its own capabilities over MCP, so a CLI brain calls `resolve_context`
+directly instead of being taught a curl line for it:
+
+```bash
+.venv/bin/python -m app.mcp_server --list           # what it exposes
+.venv/bin/python -m app.mcp_server --print-config   # the mcpServers entry
+```
+
+The config is printed, not installed — pointing your Copilot or Claude CLI at it is
+a change to *your* tools, and yours to make.
 
 ## Jira
 
 Set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` in `.env` (token from
-id.atlassian.com → Security → API tokens). Then in chat: "my open tickets",
-"show ABC-123". A watcher polls `JIRA_WATCH_JQL` every 5 min and notifies you
-(bell + WhatsApp) on status changes / new assignments.
+id.atlassian.com → Security → API tokens). Then: "my open tickets", "show ABC-123".
+A watcher polls `JIRA_WATCH_JQL` every 5 minutes and notifies you on status changes
+and new assignments. Any Jira **write** shows you the exact text or target first,
+unless you dictated it in the same message.
 
-## Missions (ticket → plan → approve → implement → test)
+## Daily rhythm
 
-Say "implement ABC-123 in booking" in chat (or WhatsApp, or the Missions tab):
+- **Reminders** — "remind me at 3pm to reply to Vinish", from any channel. One-shot
+  or daily/weekdays/weekly. Overdue ones (laptop asleep) fire on wake with a "was
+  due N min ago" note.
+- **Morning brief** (`BRIEF_TIME=08:30`, weekdays) — finished work, things waiting
+  on you, Jira movement, today's reminders, health issues. Deterministic, zero LLM
+  tokens.
+- **Standup draft** (`STANDUP_TIME=09:15`, weekdays) — from yesterday's real git
+  commits across your workspace repos, plus finished work and Jira.
+- **Health check** (6-hourly) — channels, sessions, Copilot, LM Studio, disk.
+  Notifies on a *new* problem and once on recovery; no repeat nagging.
+- **CI watcher** (10-minute poll, `gh` auth from the keychain — no PAT in `.env`) —
+  🔴 on failure, 🟢 on recovery, silent baseline on first run.
+- **Meeting recaps** — on demand only. Paste a transcript and ask.
 
-1. Asta pulls the Jira issue + project context context and drafts a plan;
-2. you get a notification; review the plan in the Missions tab (or reply
-   "approve mission N" from WhatsApp);
-3. on approval the executor implements **headlessly in the repo** —
-   `copilot -p … --allow-all-tools` (default, your Copilot subscription) or
-   `claude -p … --permission-mode acceptEdits` (`ASTA_EXECUTOR` in .env);
-4. an independent **Claude verify pass** reviews the diff and runs tests
-   (`VERDICT: PASS/FAIL`), and you're notified. Review the final diff in IntelliJ.
+Notification etiquette: while you're actually at the laptop, ambient pings are held
+— you'll ask. Direct things (a 1:1 message, an @mention, mail addressed to you) go
+out immediately regardless.
 
-Note: IntelliJ itself can't be remote-controlled reliably — the missions system
-drives the same Copilot brain via its CLI instead, which is scriptable and monitorable.
+## Channels
 
-## Background tasks (the orchestrator layer)
+### Phone access (Tailscale)
 
-Asta can spawn parallel background workers mid-chat, so the main conversation's
-context is never blocked or polluted — say "delegate a task to …" (works from
-web, WhatsApp or Telegram). Each worker is its own headless `copilot -p` process
-with a self-contained prompt; you get a WhatsApp/Telegram/UI notification when
-it finishes. See them in the Missions tab → Background tasks.
+1. Install Tailscale on the Mac (`brew install --cask tailscale`) and your phone;
+   sign both into the same tailnet.
+2. `tailscale ip -4` on the Mac → e.g. `100.101.102.103`.
+3. Set `ASTA_HOST` to that address in `.env` and restart.
+4. Open `http://100.101.102.103:8321` on the phone, log in, then **Add to Home
+   Screen** — the PWA manifest makes it install like an app.
 
-Kinds:
-- **analysis** — read-only investigation/summarization; runs fully in parallel.
-- **code** — edits code in a workspace; serialized per workspace (one writer at
-  a time, so parallel tasks can't fight over git state).
-- **teams_draft** — drafts a Teams reply (set the target chat). The draft is
-  **never sent automatically**: you approve it from the UI, or reply
-  "approve task N" / "reject task N" from your phone.
+The token cookie lasts 90 days; everything is behind `ASTA_TOKEN`.
 
-API: `GET/POST /api/tasks`, `POST /api/tasks/{id}/approve|reject` (bearer auth).
-Both brains know how to use it: the PydanticAI models via the `delegate_task` /
-`list_background_tasks` / `task_result` / `approve_task` tools, the Copilot CLI
-brain via the capability block it gets on each fresh session.
+### Telegram (official API — the recommended channel)
 
-## Daily rhythm: reminders, brief, standup, health, CI
+Zero ban risk, works anywhere. Message **@BotFather** → `/newbot`, put the token in
+`.env` as `TELEGRAM_BOT_TOKEN`, restart, then send `/start <ASTA_TOKEN>` to your bot
+(binds it to your chat; strangers are ignored).
 
-- **Reminders** — "remind me at 3pm to reply to Vinish" (any channel). One-shot or
-  daily/weekdays/weekly; fires to WhatsApp/Telegram/UI; overdue ones (laptop asleep)
-  fire on wake with a "was due N min ago" note.
-- **Morning brief** (`BRIEF_TIME=08:30`, weekdays) — finished tasks/missions, things
-  waiting on you, Jira movement, today's reminders, health issues. Deterministic —
-  zero LLM tokens. On demand: "morning brief" or `POST /api/brief/now`.
-- **Standup draft** (`STANDUP_TIME=09:15`, weekdays) — drafted from yesterday's real
-  git commits across all workspace repos + finished work + Jira; one Copilot call.
-  Fires late (up to 3h) if the laptop was asleep, skips beyond that.
-- **Health check** (6-hourly) — WhatsApp/Telegram/Teams-session/Copilot/LM Studio/disk.
-  Notifies only on a NEW problem and once on full recovery — no repeat nagging.
-- **CI watcher** (10-min poll, `gh` CLI auth from the keychain — no PAT in .env) —
-  watches every workspace repo's GitHub Actions: 🔴 on failure, 🟢 on recovery,
-  silent baseline on first run. On demand: "ci status" or `GET /api/ci`.
-- Missions and code-tasks automatically point their executor at the workspace's own
-  `.github/agents` + `.github/skills` (project context playbooks) so implementation and
-  unit/component tests follow your org's conventions.
-- Meeting recaps: on demand only — paste a transcript and ask.
-
-## Voice
-
-- 🎙 dictates one message (browser speech recognition, auto-sends on pause);
-  the 🔊 toggle speaks replies aloud.
-- 🎧 **voice conversation mode** — fully hands-free back-and-forth: it listens,
-  sends when you pause, speaks the reply, then automatically listens again for
-  your follow-up. Same agent, same memory and tools, so it's a real conversation,
-  not one-shot dictation. Ends via the banner button, the 🎧 toggle, or after
-  ~4 silent rounds. Works in Chrome/Edge/Safari (incl. the phone PWA); speech
-  APIs are blocked inside embedded preview panes.
-
-## WhatsApp
+### WhatsApp
 
 ```bash
-cd whatsapp && npm start     # then open UI → ⚙ Settings to pair
+cd whatsapp && npm start     # then pair from ⚙ Settings
 ```
 
-**Use a second (dedicated) number as the bot account** — your personal account
-carries zero ban risk that way. Pair by scanning the QR in **⚙ Settings** from
-the *second* number's WhatsApp; set "allowed JID" to your personal number
-(`91...@s.whatsapp.net`). Then your personal WhatsApp just chats with Asta like
-a normal contact. Tips: use the new account manually for a few days before
-pairing (fresh accounts get banned faster), keep the SIM alive for re-verification.
-Unofficial protocol (Baileys) — the residual ban risk sits on the throwaway
-number only. Bridge listens on 127.0.0.1:8323.
+**Use a second, dedicated number as the bot account** — your personal account then
+carries no ban risk. Scan the QR from that number, set "allowed JID" to your
+personal number, and your personal WhatsApp chats with Asta like a normal contact.
+Unofficial protocol (Baileys), so the residual risk sits on the throwaway number.
+Bridge listens on 127.0.0.1:8323.
 
-## Telegram (official API — recommended channel)
+### Teams and Outlook (no Azure AD)
 
-Zero ban risk, works from anywhere. Setup (~2 min): message **@BotFather** →
-`/newbot`, put the token in `.env` as `TELEGRAM_BOT_TOKEN`, restart Asta, open
-your bot in Telegram and send `/start <ASTA_TOKEN>` (binds it to your chat —
-strangers are ignored). Full chat + all notifications, same brain and memory
-as the web UI. Status shows in ⚙ Settings.
-
-## Teams bridge (read + send, no Azure AD)
-
-`app/teams_bridge.py` drives **Teams web** through a Playwright browser profile
-holding your session. One-time login (you complete the your organisation's SSO yourself):
+`app/teams_bridge.py` drives Teams web through a Playwright profile holding your
+session. One-time login, where you complete SSO yourself:
 
 ```bash
 .venv/bin/python -m app.teams_bridge login
 ```
 
-Then in chat: "read my Teams chat with Vinish", "send Vinish: running late".
-Deterministic automation — no LLM tokens unless you ask Asta to reason about
-what it read. Sessions expire on your organisation's token policy (every few weeks); Asta
-notifies you to re-login. **Deliberately no meeting-join**: your name would show
-in the participant list while you're absent — use Teams recording/recap and ask
-Asta to summarize the transcript instead. Note the profile dir
-(`data/teams_profile/`) holds corporate session cookies — same exposure class as
-your Edge profile; keep FileVault on.
+Then: "any messages for me", "read my chat with Vinish", "send Vinish: running
+late", "any mail needing my attention", "what meetings do I have". Deterministic
+automation — no tokens unless you ask Asta to reason about what it read.
 
-## Teams / Outlook mentions (no M365 API)
+**Sending is a hard rule**: a person's name means that person's one-to-one chat,
+never a group or channel unless you name the group yourself. Asta always tells you
+which chat it landed in.
 
-`app/msnotify.py` watches the **macOS Notification Center database** for Teams and
-Outlook banners that mention you and raises a Asta notification (bell + WhatsApp).
-Pure-Python filtering — notification text never reaches an LLM, so token cost is zero.
+Sessions expire on your org's token policy; Asta notifies you to re-login.
+Deliberately **no meeting-join**: your name would show in the participant list
+while you're absent. `data/teams_profile/` holds corporate session cookies — same
+exposure class as your browser profile, so keep FileVault on.
 
-Off by default. To enable: grant **Full Disk Access** to the terminal/Python running
-Asta, set `TEAMS_WATCHER=1` (and optionally `TEAMS_WATCH_KEYWORDS=arun,mentioned`)
-in `.env`, keep Teams/Outlook banners on in System Settings, restart. Status shows
-in the ⚙ Settings tab. Limits: it only sees what macOS shows as a banner (muted
-chats are invisible) and only the preview text; it can't reply in Teams. The real
-long-term fix is a Graph API app registration (phase 6 below).
+### macOS notification watcher
 
-## Auto-refresh of context + graph
+`app/msnotify.py` watches the Notification Center database for Teams/Outlook
+banners mentioning you. Pure-Python filtering, so notification text never reaches a
+model. Off by default: grant **Full Disk Access** to the terminal running Asta, set
+`TEAMS_WATCHER=1`, restart. It only sees what macOS shows as a banner, so muted
+chats are invisible — the Teams bridge above covers those.
 
-Follows the project context-workspace skill's model: **detection is free** (`check-drift.js`
-diffs `verified_against..HEAD` — deterministic node, no LLM), **enrichment costs
-tokens** (the evolution loop rewriting mini-skills) and is never run automatically.
+### Voice
 
-- **Change-triggered** (primary): a 10-min git fingerprint (pure `git rev-parse` /
-  `status`, zero tokens) fires a refresh only when a repo got new commits or 40+
-  dirty files — i.e. a feature actually landed.
-- **Weekly baseline**: every `REFRESH_EVERY_DAYS` (default 7) at `REFRESH_AT`, as a
-  safety net. Set `REFRESH_EVERY_DAYS=0` to disable the baseline entirely.
-- **Quiet when clean**: notifications only on drift or failure; when drift is found
-  the notification tells you to say "update the stale context" — the token-costly
-  enrichment is always your call.
-- Set `GRAPHIFY_CMD` in `.env` to regenerate graphify too ("{workspace}" placeholder).
-- On demand: "refresh booking context" in chat, or `POST /api/refresh/booking`.
+🎙 dictates one message; 🔊 speaks replies. 🎧 is hands-free conversation mode: it
+listens, sends when you pause, speaks the reply, then listens again — same agent,
+same memory and tools. Ends via the banner, the toggle, or after ~4 silent rounds.
+Works in Chrome/Edge/Safari including the phone PWA.
 
-## Later (phase 6)
+## Always-on
 
-- **Teams / Outlook / meetings**: needs an Azure AD app registration in the your organisation
-  tenant with Microsoft Graph scopes (Mail.Read, Chat.Read, Calendars.Read, Send).
-  When approved, add a Graph MCP server to `mcp.json` and it plugs straight in.
-- Telegram companion bot for push notifications.
-- Voice in/out (Whisper + TTS).
+```bash
+sh deploy/install.sh        # remove with: sh deploy/install.sh remove
+```
+
+Installs `com.asta.server` and `com.asta.whatsapp` as user LaunchAgents: start at
+login, auto-restart on crash, logs in `data/logs/`. The server runs under
+`caffeinate -si`, which prevents system sleep **on AC power** — screen off, locked,
+lid open, it keeps working.
+
+Hard physics limit: **lid closed on battery, macOS force-sleeps.** No software
+prevents that. Keep it plugged in for lid-closed operation.
+
+**Why not Docker?** Docker Desktop containers pause when the Mac sleeps, so it
+solves nothing here and complicates everything: the stdio MCP proxies are host
+Python scripts behind the corporate VPN, LM Studio serves on the host, and
+`copilot`/`claude` are host binaries with host auth. Docker earns its keep only if
+Asta moves to an always-on Linux box reached over Tailscale — that's the real
+endgame; revisit then.
+
+## Security notes
+
+- Credentials live in `.env`, which is gitignored, as are `data/`, `memory/`,
+  workspace config and the WhatsApp/Teams session directories.
+- The API is behind a single bearer token with no expiry or scoping. That is
+  acceptable for one user on a tailnet; it needs scoping and rotation before this
+  is exposed any wider.
+- Rotate the GitHub PAT if one is sitting in plaintext in
+  `~/.config/github-copilot/intellij/mcp.json`, and reference it as
+  `${GITHUB_PERSONAL_ACCESS_TOKEN}` there instead.
 
 ## Layout
 
 ```
 app/main.py             FastAPI: WS chat, REST, graph hosting, auth
-app/agent.py            PydanticAI agent, model registry, persona
+app/agent.py            the agent, model registry, persona
+app/capabilities.py     ONE registry — chat tools, CLI teaching, MCP all read it
+app/tool_index.py       ranks capabilities per message; sticky per conversation
+app/mcp_server.py       serves Asta's capabilities over MCP
+app/tasks.py            the one work engine (plan → gate → implement → ship)
+app/repo_ops.py         git, branch naming, repo playbooks
+app/agents.py           loads the pipelines in agents/
+app/untrusted.py        the trust boundary
+app/learn.py            runs → structured skills; escalation teaches the cheap tier
+app/quality.py          did the work land
+app/asking.py           ask_user: one question, no pipeline restart
+app/review.py           pull request review
 app/memory.py           remember/recall, digests, consolidation, compaction
+app/workspace/          registry + context providers (indexed / plain)
+app/context_build.py    generates project context into YOUR workspace
 app/mcp_loader.py       mcp.json -> toolsets (skip/probe logic)
-app/workspace_tools.py  project context resolve/read/list + graph pages
-app/store.py            SQLite: chats, usage, FTS5 memory index
+app/store.py            SQLite: chats, tasks, usage, outcomes, FTS5 memory index
+agents/                 solo, micro, explore, bootstrap pipelines
+skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
+tests/                  196 tests
 ```
+
+`ARCHITECTURE-REVIEW-2026-07.md` holds the comparison against Odysseus and the
+roadmap this is being built against. Still ahead of it: one scheduler replacing the
+background loops, detached runs that survive a closed tab, adaptive context
+compaction, a people/contacts model, meeting and call capture, and deep research.

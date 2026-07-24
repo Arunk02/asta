@@ -110,7 +110,7 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     runs once per CLI session (the CLI remembers the rest), so the index tail is
     what keeps a later message in the same session reachable.
     """
-    from . import capabilities, tool_index
+    from . import capabilities, skills, tool_index
     name = os.environ.get("ASSISTANT_NAME", "Asta")
     parts = [
         f"You are acting as {name}, Arun's assistant, via {via}. Be concise and direct.",
@@ -118,6 +118,12 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     idx = memory.index_text().strip()
     if idx:
         parts.append("Arun's memory index (for orientation):\n" + idx[:1500])
+    # The skill catalogue is progressive disclosure: only these one-liners ride in
+    # the prompt; the CLI pulls a skill's full body with GET /api/skills/{name}
+    # (load_skill) when its one-liner matches — parity with the in-process brain.
+    sk = skills.index_block()
+    if sk:
+        parts.append(sk)
     port = os.environ.get("ASTA_PORT", "8321")
     if mcp_cli_enabled():
         # Tools, descriptions and rules all arrive over MCP, so the ~2k-token
@@ -133,6 +139,18 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     recap = _switch_recap(conv, via)
     if recap:
         parts.append(recap)
+    cid = conv.get("id", "")
+    parts.append(
+        f'AUTONOMOUS LOOP — this conversation\'s id is "{cid}". You do not have to stop '
+        "and wait for Arun between steps. When the task isn't finished and you already "
+        "know the next step, make your LAST action a call to POST /api/loop/continue "
+        f'{{"conv_id":"{cid}","next_step":"<one line>"}} — Asta runs it immediately, with no '
+        "message from Arun, and keeps looping until the work is done. Anything you would "
+        "send OUTSIDE this chat (a Teams reply, email, Jira comment, PR body, a message to a "
+        "person) must NEVER be sent directly: POST /api/loop/prepare-send "
+        f'{{"conv_id":"{cid}","what":"<draft>","to":"<who>","channel":"teams|email|jira|pr|chat"}} '
+        "and Asta shows Arun the draft and asks before it goes out. Stop the loop only when "
+        "the task is done or you genuinely need his decision.")
     parts.append(
         "CODE WORK — the flow Arun expects, with a message to him at EVERY step:\n"
         "1. Spawn a code task (kind 'code', workspace set). Routing is automatic: Jira-key "

@@ -148,3 +148,12 @@ def test_async_capabilities_are_declared_correctly():
     for name, cap in capabilities.registry().items():
         if inspect.iscoroutinefunction(cap.fn):
             assert cap.fn.__name__ == name
+
+
+def test_read_file_carries_the_resolve_first_rule():
+    """The 'resolve before reading' rule must travel WITH the read tool, not only on
+    resolve_context — else a turn that selects read_workspace_file alone loses it and
+    reads blind (the BLIND_READ token sink the auditor flags)."""
+    note = capabilities.get("read_workspace_file").note.lower()
+    assert "resolve" in note
+    assert "resolve" in capabilities.notes_block(["read_workspace_file"]).lower()

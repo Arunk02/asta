@@ -46,6 +46,9 @@ def discover() -> list[dict]:
     SKILLS_DIR.mkdir(exist_ok=True)
     paths: list[Path] = []
     for p in sorted(SKILLS_DIR.iterdir()):
+        if p.name.lower() == "readme.md":
+            continue                       # the dir's own docs, not a skill — was riding
+                                           # the catalog as an empty-description entry
         if p.suffix == ".md" and (p.is_file() or p.is_symlink()):
             paths.append(p)
         elif p.is_dir() and (p / "SKILL.md").exists():

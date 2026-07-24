@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 
 import httpx
@@ -33,6 +34,14 @@ Role: you are the ORCHESTRATOR. Arun's office pays for Copilot, so hands-on impl
 is delegated to the CLI executors (via background tasks) rather than burned on API tokens; you
 plan, coordinate, verify, and keep the memory. When Claude tokens run out, routine chat is
 automatically re-routed to Copilot CLI — never refuse work because of that.
+
+Working loop: you don't have to stop and wait for Arun between steps. When a task isn't finished
+and you already know the next step, call continue_working(next_step) as your LAST action — Asta
+runs it immediately, no message needed — and keep going until the work is genuinely done. The one
+exception is anything that leaves this chat: a Teams reply, an email, a Jira comment, a PR body, a
+message to a person. NEVER send those directly — draft the content and call prepare_to_send, and
+Asta will show Arun the draft and ask "can I send this?" before anything goes out. Stop the loop
+only when the task is complete or you truly need his decision.
 
 Memory: use the remember tool whenever Arun corrects you, states a preference, or a debugging
 session uncovers a root cause / fix / environment gotcha worth keeping. Do it silently as part
@@ -431,13 +440,34 @@ def get_model(name: str):
     raise ValueError(f"Unknown model '{name}'")
 
 
+def thinking_budget() -> int:
+    """Extended-thinking budget for the API path, in tokens. 0 = off (the default).
+
+    Thinking is deliberately opt-in: it buys deeper reasoning but bills the thinking
+    tokens on every turn, which fights the token-wastage goal — so it is off unless
+    Arun turns it on. ASTA_THINKING accepts on|1 (a modest 2048 default) or an
+    explicit token budget. CLI brains reason via the effort ladder instead, so this
+    only affects the in-process (Claude API) brain."""
+    raw = os.environ.get("ASTA_THINKING", "").strip().lower()
+    if raw in ("", "0", "false", "no", "off"):
+        return 0
+    if raw in ("1", "true", "yes", "on"):
+        return 2048
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
 def model_settings(name: str):
     if name == "claude":
         # Cache the stable prefix (instructions + tool defs) -> ~90% cheaper repeat turns.
-        return AnthropicModelSettings(
-            anthropic_cache_instructions=True,
-            anthropic_cache_tool_definitions=True,
-        )
+        kw = dict(anthropic_cache_instructions=True,
+                  anthropic_cache_tool_definitions=True)
+        budget = thinking_budget()
+        if budget:
+            kw["anthropic_thinking"] = {"type": "enabled", "budget_tokens": budget}
+        return AnthropicModelSettings(**kw)
     return None
 
 
@@ -597,6 +627,28 @@ def trace_report(limit: int = 15) -> str:
     return "\n".join(lines)
 
 
+def token_audit(hours: float = 24) -> str:
+    """Where recent worker sessions actually BURNED tokens, ranked, with the fix for
+    each and whether waste is trending down. Reads the executors' own session logs and
+    classifies avoidable spend (duplicate/full reads, fat cache-amplified outputs, over-
+    grepping, narration, re-plan re-caching) — no model call. Use when Arun asks where
+    tokens are going or how to make a run leaner; trace_report is the raw cost, this is
+    the diagnosis + the fix."""
+    from . import token_audit as ta
+    rep = ta.audit_recent(hours)
+    if not rep.get("sessions_audited"):
+        return (f"No worker sessions to audit in the last {hours:g}h. "
+                "Waste analysis runs on delegated code/analysis tasks; run one and ask again.")
+    lines = [f"Token audit — {rep['sessions_audited']} worker sessions, waste ratio "
+             f"{rep['aggregate_waste_ratio']:.1%} (~{rep['aggregate_avoidable_tokens']:,} "
+             f"avoidable tokens). Trend: {rep['trend_vs_previous']}."]
+    if rep.get("top_fix_categories"):
+        lines.append("Top fixes (most avoidable tokens first):")
+        for cat, tok in rep["top_fix_categories"]:
+            lines.append(f"  • {cat}: ~{tok:,} tok")
+    return "\n".join(lines)
+
+
 async def set_reminder(text: str, due_iso: str, repeat: str = "") -> str:
     """Set a reminder. due_iso: LOCAL time ISO format e.g. '2026-07-19T15:00'.
     repeat: '' (once) | daily | weekdays | weekly. It fires to whichever phone
@@ -681,6 +733,41 @@ async def ask_user(question: str) -> str:
     do not use it when a sensible assumption you can state would do."""
     from . import asking
     return await asking.ask(question, source="chat")
+
+
+def continue_working(next_step: str) -> str:
+    """Keep working autonomously instead of ending the turn and waiting for Arun.
+
+    Call this as the LAST thing you do in a turn when the task is NOT finished and you
+    already know the next step — you have what you need to proceed, or you're mid-task.
+    `next_step` is one line naming what you'll do next; Arun sees it as the loop's
+    thinking, and Asta runs that step immediately without waiting for a message. Do NOT
+    use it to send anything outward (use prepare_to_send), and do NOT call it when the
+    work is actually done or you genuinely need his decision."""
+    from . import tasks, loop
+    cid = tasks.current_conversation()
+    if not cid:
+        return "No active conversation to continue — finish this turn normally."
+    loop.set_continue(cid, next_step)
+    return f"Continuing automatically: {next_step or 'next step'}"
+
+
+def prepare_to_send(what: str, to: str = "", channel: str = "chat") -> str:
+    """Stage an outward-facing message for Arun to approve BEFORE it is sent.
+
+    Use this whenever you've drafted something to send outside this chat — a Teams
+    reply, an email, a Jira comment, a PR description, a message to a person. `what` is
+    the full draft, `to` the recipient/target, `channel` one of teams|email|jira|pr|chat.
+    Asta shows Arun the draft and asks "can I send this?" — it is NEVER sent until he
+    confirms. This is the ONLY approved way to send on his behalf; never send outward
+    through any other tool without staging it here first."""
+    from . import tasks, loop
+    cid = tasks.current_conversation()
+    if not cid:
+        return "No active conversation — cannot stage a send."
+    loop.set_pending_send(cid, what, to, channel)
+    tgt = f" to {to}" if to else ""
+    return f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
 
 
 def delegate_task(title: str, prompt: str, kind: str = "analysis",
@@ -820,6 +907,126 @@ async def outlook_meetings() -> str:
         if "SESSION_EXPIRED" in str(exc):
             return "Outlook session expired — Arun must rerun: python -m app.teams_bridge login"
         return f"Calendar read failed: {exc}"
+
+
+def _pick_meeting(meetings: list[dict], title: str) -> dict | None:
+    """The meeting to prep: a title match, else the next 'speaking' meeting (one where
+    Arun has to say something), else just the next one."""
+    from .briefing import _SPEAKING_MEETING
+    if title.strip():
+        t = title.strip().lower()
+        return next((m for m in meetings if t in (m.get("title") or "").lower()), None)
+    speaking = next((m for m in meetings if _SPEAKING_MEETING.search(m.get("title") or "")), None)
+    return speaking or (meetings[0] if meetings else None)
+
+
+def _prep_prompt(ev: dict, open_items: str) -> str:
+    import re as _re
+    org = f", organised by {ev['organizer']}" if ev.get("organizer") else ""
+    is_11 = bool(_re.search(r"1[:-]?1|one[- ]on[- ]one|catch[- ]?up", ev.get("title", ""), _re.I))
+    kind = "a 1:1" if is_11 else "a meeting"
+    focus = ("Focus on his updates since last time, blockers to surface, and any asks or "
+             "decisions he needs from the other person." if is_11 else
+             "Focus on what he should raise, decisions needed, and risks to flag.")
+    items = f"\nArun's open work items (for grounding):\n{open_items[:1500]}\n" if open_items.strip() else ""
+    return (f"You are Arun's assistant, prepping him for {kind}.\n"
+            f"Meeting: {ev.get('title', '')} at {ev.get('start', '')}{org}.{items}\n"
+            "Write a tight prep as three short bulleted sections — **Talking points**, "
+            f"**Questions to ask**, **Watch-outs**. No preamble. {focus}")
+
+
+def _prep_skeleton(ev: dict) -> str:
+    return ("_(local model offline — blank checklist)_\n"
+            "**Talking points**\n- \n\n**Questions to ask**\n- \n\n**Watch-outs**\n- ")
+
+
+async def meeting_prep(title: str = "") -> str:
+    """Draft prep for a meeting or 1:1 from today's calendar + your open work: talking
+    points, questions to ask, and watch-outs. `title` matches a meeting by name; empty =
+    the next meeting you have to speak in. Best-effort, local-model-first (cheap). This
+    only DRAFTS — stage it with prepare_to_send if you want it sent to anyone."""
+    import asyncio as _aio
+    from . import briefing
+    try:
+        meetings = await briefing._cached_meetings()
+    except Exception as exc:
+        return f"Couldn't read the calendar: {exc}"
+    if not meetings:
+        return "No meetings on today's calendar to prep."
+    ev = _pick_meeting(meetings, title)
+    if not ev:
+        avail = ", ".join((m.get("title") or "?") for m in meetings[:6])
+        return f"No meeting matching '{title}' today. On today: {avail}"
+    open_items = ""
+    try:
+        open_items = await jira_my_issues()
+    except Exception:
+        pass
+    body = await _aio.to_thread(memory.local_llm_complete, _prep_prompt(ev, open_items), 400)
+    body = (body or "").strip() or _prep_skeleton(ev)
+    org = f" (with {ev['organizer']})" if ev.get("organizer") else ""
+    return f"📝 Prep — {ev.get('title', 'meeting')} at {ev.get('start', '')}{org}:\n\n{body}"
+
+
+def _recap_needs_arun(body: str) -> bool:
+    """True when the recap has an action item flagged for Arun."""
+    return "ARUN:" in (body or "").upper()
+
+
+async def meeting_recap(transcript: str, title: str = "") -> str:
+    """Summarize a meeting/call transcript into a recap for Arun: TL;DR, decisions,
+    action items (flagging any that need HIM), and open questions. Pass the transcript
+    text — e.g. from Teams' own recording/recap. Use after a call he missed or wants
+    summarized. Local-model-first (cheap). If an item needs Arun, he's pinged."""
+    import asyncio as _aio
+    from . import notify
+    t = (transcript or "").strip()
+    if len(t) < 40:
+        return ("Give me the transcript text (from Teams' recording/recap for the meeting) "
+                "and I'll summarize it — decisions, action items, and anything that needs you.")
+    prompt = ("Summarize this meeting transcript for Arun, who missed it. Four short "
+              "sections: **TL;DR** (≤2 lines), **Decisions**, **Action items** (prefix any "
+              "that are Arun's with 'ARUN:'), **Open questions**. Be concise, no preamble.\n\n"
+              "TRANSCRIPT:\n" + t[:12000])
+    body = (await _aio.to_thread(memory.local_llm_complete, prompt, 700) or "").strip()
+    if not body:
+        return "Local model offline — start LM Studio (or set a hosted key) and retry the recap."
+    head = f" — {title}" if title else ""
+    recap = f"📋 Recap{head}:\n\n{body}"
+    if _recap_needs_arun(body):
+        with contextlib.suppress(Exception):
+            await notify.notify(f"📋 A meeting recap needs you{head}:\n\n{body[:600]}",
+                                "meeting", urgency="direct")
+    return recap
+
+
+async def draft_teams_reply(chat: str, question: str = "") -> str:
+    """Draft a reply to a person's Teams question, grounded in Arun's memory + open work,
+    for HIM to review. Reads the recent thread with `chat` for context. DRAFT ONLY — stage
+    it with prepare_to_send (channel 'teams') so nothing goes out in his name without his yes.
+    Use when someone pings Arun on Teams with a question and he wants a head start."""
+    import asyncio as _aio
+    from . import teams_bridge
+    thread: list[str] = []
+    try:
+        if teams_bridge.enabled() and teams_bridge.logged_in_once():
+            thread = await teams_bridge.read_chat(chat, 12)
+    except Exception:
+        pass
+    q = (question or "").strip() or "\n".join(thread[-6:])
+    if not q.strip():
+        return f"No question found in the thread with {chat}. Tell me what they asked."
+    ground = ""
+    with contextlib.suppress(Exception):
+        ground = (memory.recall_block(q) or "")[:1000]
+    prompt = (f"A colleague ({chat}) asked Arun this on Teams:\n{q}\n\n"
+              + (f"Relevant context Arun has:\n{ground}\n\n" if ground else "")
+              + "Draft Arun's reply in his voice — direct, brief, helpful. If you genuinely "
+                "lack the information, say what you'd need instead of guessing. No greeting fluff.")
+    draft = (await _aio.to_thread(memory.local_llm_complete, prompt, 400) or "").strip()
+    if not draft:
+        return "Couldn't draft (local model offline). Start LM Studio, or answer manually."
+    return f"✍️ Draft reply to {chat} (review, then say 'send' to post it):\n\n{draft}"
 
 
 async def teams_send_message(chat: str, text: str, to_group: bool = False) -> str:

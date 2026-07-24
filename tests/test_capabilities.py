@@ -84,6 +84,55 @@ def test_cli_block_covers_every_http_and_shell_row():
     assert len(reachable) > 20, "most capabilities should be reachable from a CLI brain"
 
 
+def test_every_capability_is_reachable_from_a_cli_brain():
+    """Parity: a tool with neither http nor shell is invisible to copilot/claude,
+    so 'remember this' silently did nothing there. Every capability must have an
+    endpoint — otherwise the reachable set depends on which brain answered."""
+    orphans = [n for n, c in capabilities.registry().items()
+               if not c.http and not c.shell]
+    assert orphans == [], f"endpoint-less (unreachable from a CLI brain): {orphans}"
+
+
+def test_narrowed_cli_block_is_smaller_but_hides_nothing():
+    """Selecting a few tools expands only those, yet every reachable tool is
+    still named somewhere — a mis-rank costs a round-trip, never a capability."""
+    reg = capabilities.registry()
+    full = capabilities.cli_block("8321", "", None)
+    narrow = capabilities.cli_block("8321", "", ["jira_comment"])
+    assert len(narrow) < len(full)
+    for name, cap in reg.items():
+        if cap.http or cap.shell:                       # reachable from a CLI brain
+            assert name in narrow, f"{name} vanished from the narrowed block"
+
+
+def test_narrowing_keeps_the_always_floor_and_whole_groups():
+    block = capabilities.cli_block("8321", "", ["jira_comment"])
+    # the whole jira group is expanded with its endpoint, not just the one asked
+    jira = {n for n, c in capabilities.registry().items() if c.group == "jira"}
+    for n in jira:
+        cap = capabilities.get(n)
+        if cap.http:
+            assert f"{n} — {cap.http}" in block, f"{n} not fully expanded"
+
+
+def test_narrowed_block_never_advertises_an_unreachable_tool():
+    """The 'Also available' tail must not list an in-process-only tool: a CLI
+    brain cannot curl it, so telling it to ask for the endpoint sends it
+    chasing something that does not exist."""
+    block = capabilities.cli_block("8321", "", ["set_reminder"])
+    tail = block.split("Also available")[-1] if "Also available" in block else ""
+    for name, cap in capabilities.registry().items():
+        if not cap.http and not cap.shell:
+            assert name not in tail, f"{name} has no endpoint yet was advertised"
+
+
+def test_no_selection_is_the_old_full_block():
+    """None means 'no ranking' — the un-narrowed block, so the fallback path is
+    byte-for-byte what shipped before."""
+    block = capabilities.cli_block("8321", "", None)
+    assert "Also available" not in block, "the full block has no leftover tail"
+
+
 def test_chat_agent_builds_from_the_registry():
     from app import agent
     a = agent.build_agent(["jira_issue"])

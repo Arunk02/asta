@@ -62,9 +62,12 @@ class Capability:
 # would make this module import agent, and agent imports this one.
 _TABLE: tuple[Capability, ...] = (
     # --- memory -------------------------------------------------------------
-    Capability("remember", "memory"),
-    Capability("search_memory", "memory"),
-    Capability("load_skill", "memory"),
+    Capability("remember", "memory",
+               http='POST /api/memory {"title":"…","fact":"…","kind":"fact"}',
+               note="Durable memory across ALL conversations. kind: fact | preference "
+                    "| gotcha | fix. Save corrections and preferences, not chatter."),
+    Capability("search_memory", "memory", http="GET /api/memory/search?q={query}"),
+    Capability("load_skill", "memory", http="GET /api/skills/{name}"),
     # --- asking -------------------------------------------------------------
     Capability("ask_user", "ask", http="POST /api/ask",
                note="One question, pushed to Arun's phone; the caller blocks until he "
@@ -75,7 +78,8 @@ _TABLE: tuple[Capability, ...] = (
                note="ALWAYS resolve before reading code. Never explore a repo blindly."),
     Capability("read_workspace_file", "workspace",
                http="GET /api/workspaces/{workspace}/file?path={rel_path}"),
-    Capability("list_services", "workspace"),
+    Capability("list_services", "workspace",
+               http="GET /api/workspaces/{workspace}/services"),
     Capability("refresh_context", "workspace", http="POST /api/refresh/{workspace}"),
     # --- jira ----------------------------------------------------------------
     Capability("jira_search", "jira", http="GET /api/jira/search?jql={urlencoded}"),
@@ -198,16 +202,31 @@ def notes_block(selected: list[str] | tuple[str, ...] | None = None) -> str:
     return "## Rules that apply to these tools\n" + "\n".join(lines) if lines else ""
 
 
-def cli_block(port: str = "8321", root: str = "") -> str:
+def cli_block(port: str = "8321", root: str = "",
+              selected: list[str] | tuple[str, ...] | None = None) -> str:
     """How a CLI brain reaches these same capabilities.
 
     Generated from the table, so a new tool is taught to Copilot and Claude the
     moment it is added to chat — no second description to update, and no stale
     copilot session to clear.
+
+    `selected` narrows the FULL spec (name + endpoint + summary) to the tools
+    this turn is likely to need — the same per-turn ranking the in-process agent
+    gets, which for CLI brains was previously thrown away, so every turn paid for
+    all ~34. It is a hint, not a fence: everything omitted is still listed by
+    name and one line at the bottom, so a mis-rank costs a little indirection
+    (the brain reads the index, then asks), never a capability it cannot reach.
+    None means "no ranking" — the old full block.
     """
     reg = registry()
-    http = [c for c in reg.values() if c.http]
-    shell = [c for c in reg.values() if c.shell]
+    if selected is None:
+        chosen = set(reg)
+    else:
+        chosen = set(selected) & set(reg)
+        chosen |= set(ALWAYS)                          # the floor is never dropped
+        chosen |= _complete_groups(chosen)             # half a group is a trap
+    http = [c for c in reg.values() if c.http and c.name in chosen]
+    shell = [c for c in reg.values() if c.shell and c.name in chosen]
     parts: list[str] = []
     if http:
         rows = "\n".join(f"  {c.name} — {c.http}\n      {c.summary}" for c in http)
@@ -221,10 +240,33 @@ def cli_block(port: str = "8321", root: str = "") -> str:
         parts.append(
             "Shell capabilities (browser automation on Arun's logged-in session, "
             "~10-25s each):\n" + rows)
-    rules = [f"- {c.name}: {c.note}" for c in reg.values() if c.note]
+    # Anything not expanded above is still discoverable by name + one line, so
+    # nothing is truly hidden — the brain can ask for the endpoint of a listed
+    # tool. Endpoint-less tools (in-process only, e.g. memory) are omitted: a CLI
+    # brain cannot curl them, so listing one to "ask for its endpoint" would send
+    # it chasing something that does not exist.
+    rest = [c for c in reg.values()
+            if c.name not in chosen and (c.http or c.shell)]
+    if rest:
+        rows = "\n".join(f"  {c.name} — {c.summary}" for c in rest)
+        parts.append(
+            "Also available (ask for the exact endpoint/command when you need one):\n" + rows)
+    # Rules travel with the tool they constrain: showing a rule for a tool that
+    # was not expanded is noise, so the RULES block narrows with the selection.
+    rules = [f"- {c.name}: {c.note}" for c in reg.values()
+             if c.note and c.name in chosen]
     if rules:
         parts.append("RULES (these are the expensive ones to get wrong):\n" + "\n".join(rules))
     return "\n\n".join(parts)
+
+
+def _complete_groups(names: set[str]) -> set[str]:
+    """Every capability sharing a group with a selected one. A brain that can
+    read a Jira issue but not comment on it improvises something worse than
+    asking, so groups travel whole — the same rule the in-process selector uses."""
+    reg = registry()
+    groups = {reg[n].group for n in names if n in reg}
+    return {n for n, c in reg.items() if c.group in groups}
 
 
 def index_block(selected: list[str] | tuple[str, ...] | None = None) -> str:

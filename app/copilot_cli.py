@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -19,6 +20,15 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from . import memory, store, untrusted, workspace_tools
+
+COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
+
+
+def mcp_cli_enabled() -> bool:
+    """Whether CLI brains reach Asta's capabilities as native MCP tools rather
+    than by curling the API. Off by default: the curl path is proven, and this is
+    the opt-in cutover (ASTA_CLI_MCP=1), flipped only after a real-turn test."""
+    return os.environ.get("ASTA_CLI_MCP", "0").lower() in ("1", "true", "yes", "on")
 
 ROOT = Path(__file__).resolve().parent.parent
 TURN_TIMEOUT = 10 * 60
@@ -46,7 +56,40 @@ def _cwd(conv: dict) -> str:
     return str(ROOT)
 
 
-def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
+def _switch_recap(conv: dict, via: str) -> str:
+    """A recap of the conversation so far — ONLY when switching brains mid-thread.
+
+    A fresh CLI session is not a fresh conversation. Each brain keeps its own
+    session (the formats can't be shared), so switching the model picker used to
+    drop the new brain in blind — it answered with no idea what the other brain
+    had just discussed. This bridges that.
+
+    The trigger is precise: recap only when the OTHER brain has a live session for
+    this conversation. A real "new chat" clears BOTH sessions (rotate_sessions),
+    so this correctly stays silent then — there is nothing to continue, and the
+    durable bits were already digested into memory and resurface via recall.
+    """
+    other = "claude_session" if "Copilot" in via else "copilot_session"
+    if not (store.kv_get(f"{other}:{conv['id']}") or "").strip():
+        return ""
+    msgs = store.list_ui_messages(conv["id"])
+    if msgs and msgs[-1].get("role") == "user":
+        msgs = msgs[:-1]                        # drop the current turn (already stored)
+    if not msgs:
+        return ""
+    lines = []
+    for m in msgs[-6:]:
+        who = "Arun" if m.get("role") == "user" else "You"
+        text = " ".join((m.get("content") or "").split())[:400]
+        if text:
+            lines.append(f"{who}: {text}")
+    if not lines:
+        return ""
+    return ("Conversation so far (you're continuing it after a model switch — pick "
+            "up where it left off, don't restart):\n" + "\n".join(lines))
+
+
+def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "") -> str:
     """Orientation block for a fresh CLI session (it has no Asta memory).
 
     The capability list is GENERATED from the same registry that gives the chat
@@ -58,8 +101,16 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
     CLI underneath differs, so `via` is the one thing that changes.
 
     CLI brains never see agent.PERSONA, so the safety policy rides here.
+
+    The full capability spec is ranked against this first message and narrowed to
+    what the turn likely needs — the same per-turn selection the in-process agent
+    already gets, which the CLI paths were throwing away and so paid for all ~34
+    every session. Safe because cli_block still lists every un-expanded tool by
+    name: a mis-rank costs one round-trip to ask, never a lost capability. This
+    runs once per CLI session (the CLI remembers the rest), so the index tail is
+    what keeps a later message in the same session reachable.
     """
-    from . import capabilities
+    from . import capabilities, tool_index
     name = os.environ.get("ASSISTANT_NAME", "Asta")
     parts = [
         f"You are acting as {name}, Arun's assistant, via {via}. Be concise and direct.",
@@ -68,7 +119,20 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI") -> str:
     if idx:
         parts.append("Arun's memory index (for orientation):\n" + idx[:1500])
     port = os.environ.get("ASTA_PORT", "8321")
-    parts.append(capabilities.cli_block(port, str(ROOT)))
+    if mcp_cli_enabled():
+        # Tools, descriptions and rules all arrive over MCP, so the ~2k-token
+        # curl catalogue is dead weight — this is the orientation's biggest line.
+        parts.append(
+            "Arun's capabilities are native MCP tools on the `asta` server "
+            "(remember, set_reminder, teams_activity, jira_issue, delegate_task, "
+            "ask_user, review_pr, …). Call them directly — do NOT curl the HTTP API "
+            "or shell out for them. Each tool's own description carries its rules.")
+    else:
+        selected = tool_index.select(user_text) if user_text else None
+        parts.append(capabilities.cli_block(port, str(ROOT), selected))
+    recap = _switch_recap(conv, via)
+    if recap:
+        parts.append(recap)
     parts.append(
         "CODE WORK — the flow Arun expects, with a message to him at EVERY step:\n"
         "1. Spawn a code task (kind 'code', workspace set). Routing is automatic: Jira-key "
@@ -173,6 +237,7 @@ async def _outlook_context(user_text: str) -> str:
 
 def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]:
     sid, is_new = _session_id(conv["id"])
+    ranking_text = user_text            # the bare message, before prefixes muddy it
     # Every turn carries the current local time — long-lived sessions otherwise
     # drift days behind, which breaks "remind me at 3pm" style requests.
     import datetime as _dt
@@ -182,7 +247,7 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
         user_text = f"{extra_context}\n\n{user_text}"
     prompt = user_text
     if is_new:
-        prompt = _first_turn_context(conv) + "\n\n---\n\n" + user_text
+        prompt = _first_turn_context(conv, user_text=ranking_text) + "\n\n---\n\n" + user_text
     else:
         # The orientation block only rides on turn 1; recall keeps long-lived
         # sessions anchored to memory on every later turn (Copilot is flat-rate).
@@ -202,6 +267,14 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
         # enough: it grants file access, not execution.
         "--allow-all-paths",
     ]
+    # Native asta tools instead of curl, when enabled. Copilot takes the config
+    # as inline JSON (its flag differs from Claude's --mcp-config). --allow-all-
+    # tools above already clears the MCP tools. Kept in lockstep with the shared
+    # orientation swap, so the flag never tells copilot to use tools it lacks.
+    if mcp_cli_enabled():
+        import json as _json
+        from . import mcp_server
+        cmd += ["--additional-mcp-config", _json.dumps(mcp_server.config_entry())]
     model = os.environ.get("COPILOT_CLI_MODEL")
     if model:
         cmd += ["--model", model]
@@ -276,6 +349,47 @@ async def run_turn(conv: dict, user_text: str,
             return await run_turn(conv, user_text, on_delta)
         raise RuntimeError(f"Copilot CLI exited {rc}: {err or out[-300:] or 'no output'}")
     return out or "(Copilot returned no output)"
+
+
+def last_turn_usage(conv: dict, reply_chars: int = 0):
+    """Real input tokens for the turn just finished, from Copilot's own log.
+
+    Copilot exposes no per-message usage — the fields token_audit once parsed are
+    gone from the current CLI build. But every `copilot -p` process writes a
+    `session.shutdown` with `currentTokens`: the full context it carried, which
+    IS the input for that turn (a chat model re-sends its whole context each
+    turn). Measured recently at ~24.6k per turn, of which ~14.5k is tool
+    definitions — the bloat, now visible instead of guessed.
+
+    Output tokens Copilot does not report, so those stay a char-count estimate;
+    input is the dominant cost and the honest thing to measure. Read post-turn:
+    run_turn has already awaited the process, so the snapshot is on disk.
+
+    The shared CLI path picks this up by attribute, so any executor that grows a
+    last_turn_usage gets real numbers with no change there — same contract as
+    on_tool / on_usage.
+    """
+    from . import llm_meter
+    sid = store.kv_get(f"copilot_session:{conv['id']}")
+    if not sid:
+        return llm_meter.Usage()
+    path = COPILOT_SESSIONS / sid / "events.jsonl"
+    current = 0
+    try:
+        for line in path.read_text().splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") == "session.shutdown":
+                current = (e.get("data") or {}).get("currentTokens") or current
+    except OSError:
+        return llm_meter.Usage()
+    if not current:
+        return llm_meter.Usage()      # no snapshot yet → caller falls back to estimate
+    return llm_meter.Usage(input=int(current),
+                           output=reply_chars // llm_meter.CHARS_PER_TOKEN,
+                           measured=True)
 
 
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,

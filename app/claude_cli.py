@@ -146,13 +146,15 @@ def _build_cmd(conv: dict, user_text: str) -> list[str]:
     import datetime as _dt
 
     sid, is_new = _session_id(conv["id"])
+    ranking_text = user_text            # the bare message, before the [now:] prefix
     now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M %a")
     user_text = f"[now: {now}]\n{user_text}"
     prompt = user_text
     if is_new:
         # Reuse the Copilot orientation block verbatim — same assistant, same
         # tools, same rules; only the CLI underneath differs.
-        prompt = copilot_cli._first_turn_context(conv, via="Claude Code CLI") + "\n\n---\n\n" + user_text
+        prompt = copilot_cli._first_turn_context(
+            conv, via="Claude Code CLI", user_text=ranking_text) + "\n\n---\n\n" + user_text
     else:
         rb = memory.recall_block(user_text)
         if rb:
@@ -166,6 +168,13 @@ def _build_cmd(conv: dict, user_text: str) -> list[str]:
         "--verbose",                       # required for stream-json
         "--permission-mode", "bypassPermissions",
     ]
+    # Native tools instead of curl, when enabled: Claude Code spawns Asta's MCP
+    # server and calls capabilities as `mcp__asta__*` tools that forward to the
+    # running server. Off by default — the curl path is the proven one, and this
+    # is the opt-in cutover, flipped only after a real-turn test.
+    if copilot_cli.mcp_cli_enabled():
+        from . import mcp_server
+        cmd += ["--mcp-config", str(mcp_server.write_config()), "--strict-mcp-config"]
     model = os.environ.get("ASTA_CLAUDE_CLI_MODEL", "")
     if model:
         cmd += ["--model", model]
@@ -177,7 +186,8 @@ def _build_cmd(conv: dict, user_text: str) -> list[str]:
 
 async def run_turn(conv: dict, user_text: str,
                    on_delta: Callable[[str], Awaitable[None]] | None = None,
-                   on_tool: Callable[[str], Awaitable[None]] | None = None) -> str:
+                   on_tool: Callable[[str], Awaitable[None]] | None = None,
+                   on_usage: Callable[[object], None] | None = None) -> str:
     """One chat turn through Claude Code CLI, streaming text deltas to on_delta.
 
     stream-json gives token-level deltas plus tool_use events, so the UI shows
@@ -194,9 +204,15 @@ async def run_turn(conv: dict, user_text: str,
     final = ""
     err_msg = ""
     limited = False
+    # A CLI turn is a whole agent loop — many model calls, each with its own
+    # usage block. Summing them is the point: the expensive turns are the ones
+    # that looped, and a turn that only reported its last call would hide that.
+    from . import llm_meter
+    usage = llm_meter.Usage()
+    seen_usage: set[str] = set()
 
     async def _pump() -> None:
-        nonlocal final, err_msg, limited
+        nonlocal final, err_msg, limited, usage
         assert proc.stdout
         buf = b""
         while True:
@@ -225,26 +241,51 @@ async def run_turn(conv: dict, user_text: str,
                                 chunks.append(text)
                                 if on_delta:
                                     await on_delta(text)
-                elif t == "assistant" and on_tool:
-                    for part in ((e.get("message") or {}).get("content") or []):
-                        if isinstance(part, dict) and part.get("type") == "tool_use":
-                            with contextlib.suppress(Exception):
-                                await on_tool(part.get("name") or "tool")
+                elif t == "assistant":
+                    message = e.get("message") or {}
+                    # The same assistant message is emitted more than once in a
+                    # stream (partials, then the settled copy). Counting its
+                    # usage twice would roughly double every reported figure, so
+                    # each message id contributes exactly once.
+                    mid = message.get("id") or ""
+                    if mid not in seen_usage:
+                        seen_usage.add(mid)
+                        usage = usage + llm_meter.from_anthropic(message.get("usage"))
+                    if on_tool:
+                        for part in (message.get("content") or []):
+                            if isinstance(part, dict) and part.get("type") == "tool_use":
+                                with contextlib.suppress(Exception):
+                                    await on_tool(part.get("name") or "tool")
                 elif t == "rate_limit_event":
                     info = e.get("rate_limit_info") or {}
                     if info.get("status") not in ("allowed", None):
                         limited = True
                 elif t == "result":
+                    # The CLI's own tally of the whole turn. On a subscription
+                    # this is 0, which is honest — the token columns are what
+                    # compares across brains.
+                    usage.cost_usd = float(e.get("total_cost_usd") or 0.0)
                     if e.get("is_error"):
                         err_msg = str(e.get("result") or e.get("api_error_status") or "")[:400]
                     else:
                         final = (e.get("result") or "").strip()
+
+    def _report() -> None:
+        """Hand back whatever was spent — including on the paths that failed.
+
+        A timed-out or redirected turn has already burned its tokens; those are
+        the turns most worth seeing, so reporting only on success would blind
+        the meter to the worst cases."""
+        if on_usage:
+            with contextlib.suppress(Exception):
+                on_usage(usage)
 
     try:
         await asyncio.wait_for(_pump(), timeout=TURN_TIMEOUT)
         rc = await proc.wait()
     except asyncio.TimeoutError:
         proc.kill()
+        _report()
         raise RuntimeError(f"Claude CLI turn timed out after {TURN_TIMEOUT}s")
     except asyncio.CancelledError:
         # Arun redirected mid-answer. Killing the process is the point: it stops
@@ -252,7 +293,9 @@ async def run_turn(conv: dict, user_text: str,
         proc.kill()
         with contextlib.suppress(Exception):
             await proc.wait()
+        _report()
         raise
+    _report()
 
     # Prefer the streamed text: `result` repeats it, and re-sending it would
     # duplicate everything the UI already rendered.
@@ -264,6 +307,9 @@ async def run_turn(conv: dict, user_text: str,
         # A dead --resume session (cleaned store / expired) gets one fresh retry.
         if not out and store.kv_get(f"claude_session:{conv['id']}"):
             store.kv_del(f"claude_session:{conv['id']}")
-            return await run_turn(conv, user_text, on_delta, on_tool)
+            # The dead attempt already reported what it spent; the retry reports
+            # its own. The caller accumulates, so a wasted session shows up as
+            # the extra cost it really is rather than being written off.
+            return await run_turn(conv, user_text, on_delta, on_tool, on_usage)
         raise RuntimeError(f"Claude CLI exited {rc}: {err_msg or stderr or out[-300:] or 'no output'}")
     return out or "(Claude returned no output)"

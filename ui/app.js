@@ -744,13 +744,28 @@ function wakeWord() { return ($("#brand-name").textContent || "Asta").trim().toL
 function normName(s) { return s.toLowerCase().replace(/h/g, "").replace(/(.)\1+/g, "$1"); }
 function heardWakeWord(heard) { return normName(heard).includes(normName(wakeWord())); }
 
+/* Wake state is shown, not swallowed. The old loop failed silently — a denied
+   mic just set state.wake=false with no word to the user, so "hey Asta does
+   nothing" had no explanation on screen. Now every state has a line. */
+function setWakeState(msg) {
+  const el = $("#wake-state");
+  if (el) el.textContent = msg;
+}
+let wakeBackoff = 800;
+const WAKE_BACKOFF_MAX = 8000;
+
 function wakeLoop() {
-  if (!SR || !state.wake || state.voiceMode || rec || mediaRec || wakeRec) return;
+  if (!SR) { setWakeState("This browser has no always-on recognizer — use the mic button, or Chrome for the wake word."); return; }
+  if (!state.wake) { setWakeState(""); return; }
+  // Don't stack recognizers: a live one, an active dictation, or voice mode all
+  // own the mic already.
+  if (state.voiceMode || rec || mediaRec || wakeRec) return;
   wakeWanted = true;
   wakeRec = new SR();
   wakeRec.lang = "en-IN";
   wakeRec.continuous = true;
   wakeRec.interimResults = false;
+  wakeRec.onstart = () => { wakeBackoff = 800; setWakeState(`Listening for “${wakeWord()}”…`); };
   wakeRec.onresult = (e) => {
     if (micBlocked()) return; // don't let Asta wake herself by saying her own name
     const heard = [...e.results].map((r) => r[0].transcript).join(" ").toLowerCase();
@@ -761,21 +776,53 @@ function wakeLoop() {
       startVoiceMode();
     }
   };
-  wakeRec.onend = () => { wakeRec = null; if (wakeWanted) setTimeout(wakeLoop, 800); };
-  wakeRec.onerror = (e) => { if (e.error === "not-allowed") { state.wake = false; renderWake(); } };
-  try { wakeRec.start(); } catch {}
+  // Chrome ends a continuous session on its own (silence, a network blip); the
+  // whole point of the wake word is that it comes straight back. Restart with a
+  // growing gap so a hard-failing recognizer can't become a spin loop.
+  wakeRec.onend = () => {
+    wakeRec = null;
+    if (!wakeWanted) return;
+    setTimeout(wakeLoop, wakeBackoff);
+    wakeBackoff = Math.min(wakeBackoff * 2, WAKE_BACKOFF_MAX);
+  };
+  wakeRec.onerror = (e) => {
+    // A denied mic is terminal and must be said out loud; everything else
+    // (no-speech, aborted, network) is transient — let onend restart it.
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      wakeWanted = false;
+      state.wake = false;
+      renderWake();
+      setWakeState("Microphone blocked. Allow mic access for this site, then re-enable the wake word.");
+    }
+  };
+  try { wakeRec.start(); }
+  catch { wakeRec = null; setTimeout(wakeLoop, wakeBackoff); }
 }
 
 function pauseWake() {
   wakeWanted = false;
   if (wakeRec) { try { wakeRec.stop(); } catch {} wakeRec = null; }
 }
-function resumeWake() { if (state.wake) setTimeout(wakeLoop, 300); }
+function resumeWake() { if (state.wake) { wakeBackoff = 800; setTimeout(wakeLoop, 300); } }
 
 function renderWake() {
   const cb = $("#wake-enabled");
   if (cb) cb.checked = state.wake;
+  if (!state.wake) setWakeState("");
 }
+
+/* Two ways the wake word silently dies that a one-shot start can't survive:
+   the recognizer stops and its onend restart also fails, or Chrome suspends it
+   while the tab is in the background. A cheap watchdog covers both — if the
+   wake word is meant to be on but nothing is listening, bring it back. */
+setInterval(() => {
+  if (state.wake && wakeWanted && !wakeRec && !state.voiceMode && !rec && !mediaRec) {
+    wakeLoop();
+  }
+}, 4000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) resumeWake();   // refocus → resume; Chrome throttles hidden tabs
+});
 
 /* Voice conversation mode: listen → send → reply spoken aloud → listen again,
    until you end it. The agent keeps full context, so it's a real back-and-forth. */

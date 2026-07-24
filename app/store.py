@@ -121,6 +121,17 @@ CREATE TABLE IF NOT EXISTS traces (
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cached_tokens INTEGER NOT NULL DEFAULT 0,
+    -- Cache WRITES bill at 1.25x and were previously invisible; on a first turn
+    -- they are the single largest line. Without this column a fat orientation
+    -- block looks free, which is exactly the mistake that made traces useless.
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    -- What the executor itself says the turn cost. CLI turns run on a
+    -- subscription rather than per-token billing, so this is 0 there — the token
+    -- columns are the comparable measure across brains.
+    cost_usd REAL NOT NULL DEFAULT 0,
+    -- 1 when the numbers came from the executor, 0 when they are a char-count
+    -- estimate. Mixing the two silently is how a trend line starts lying.
+    measured INTEGER NOT NULL DEFAULT 0,
     instructions_chars INTEGER NOT NULL DEFAULT 0,
     prompt_chars INTEGER NOT NULL DEFAULT 0,
     tools TEXT NOT NULL DEFAULT '[]',
@@ -128,6 +139,24 @@ CREATE TABLE IF NOT EXISTS traces (
     created_at REAL NOT NULL
 );
 """
+
+# Columns added after the table shipped. CREATE TABLE IF NOT EXISTS leaves an
+# existing table alone, so a plain schema edit reaches new installs only — the
+# one machine that actually has the history would keep the old shape.
+_ADDED_COLUMNS = {
+    "traces": (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
+               ("cost_usd", "REAL NOT NULL DEFAULT 0"),
+               ("measured", "INTEGER NOT NULL DEFAULT 0")),
+    "usage": (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),),
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def _connect() -> sqlite3.Connection:
@@ -141,6 +170,7 @@ def _connect() -> sqlite3.Connection:
 def init() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
 
 
 # --- conversations -----------------------------------------------------------
@@ -226,12 +256,13 @@ def list_ui_messages(conv_id: str) -> list[dict]:
 
 # --- usage -------------------------------------------------------------------
 
-def add_usage(conv_id: str, model: str, input_tokens: int, output_tokens: int, cache_read: int) -> None:
+def add_usage(conv_id: str, model: str, input_tokens: int, output_tokens: int,
+              cache_read: int, cache_write: int = 0) -> None:
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO usage (conv_id, model, input_tokens, output_tokens, cache_read_tokens, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (conv_id, model, input_tokens, output_tokens, cache_read, time.time()),
+            "INSERT INTO usage (conv_id, model, input_tokens, output_tokens, cache_read_tokens, "
+            "cache_write_tokens, created_at) VALUES (?,?,?,?,?,?,?)",
+            (conv_id, model, input_tokens, output_tokens, cache_read, cache_write, time.time()),
         )
 
 
@@ -251,14 +282,18 @@ def usage_summary(days: int = 7) -> list[dict]:
 
 def add_trace(conv_id: str, model: str, channel: str, first_token_ms: int | None,
               total_ms: int, input_tokens: int, output_tokens: int, cached_tokens: int,
-              instructions_chars: int, prompt_chars: int, tools: list, error: str = "") -> None:
+              instructions_chars: int, prompt_chars: int, tools: list, error: str = "",
+              cache_write_tokens: int = 0, cost_usd: float = 0.0,
+              measured: bool = False) -> None:
     with _connect() as conn:
         conn.execute(
             "INSERT INTO traces (conv_id, model, channel, first_token_ms, total_ms, input_tokens, "
-            "output_tokens, cached_tokens, instructions_chars, prompt_chars, tools, error, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "output_tokens, cached_tokens, cache_write_tokens, cost_usd, measured, "
+            "instructions_chars, prompt_chars, tools, error, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (conv_id, model, channel, first_token_ms, total_ms, input_tokens, output_tokens,
-             cached_tokens, instructions_chars, prompt_chars, json.dumps(tools), error[:500], time.time()),
+             cached_tokens, cache_write_tokens, cost_usd, int(measured),
+             instructions_chars, prompt_chars, json.dumps(tools), error[:500], time.time()),
         )
         conn.execute(  # keep the table bounded
             "DELETE FROM traces WHERE id NOT IN (SELECT id FROM traces ORDER BY id DESC LIMIT 500)")

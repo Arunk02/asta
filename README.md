@@ -24,7 +24,7 @@ Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
 Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-.venv/bin/python -m pytest tests -q     # 196 tests
+.venv/bin/python -m pytest tests -q     # 315 tests
 ```
 
 ## How it is put together
@@ -78,6 +78,25 @@ Pipelines live in `agents/` (`solo`, `micro`, `explore`, `bootstrap`) and belong
 Asta, not to your repos — improving one improves every run. Your repos still supply
 the facts, through their own `.github/agents` and `.github/skills` when present.
 
+## The conductor loop — it keeps working instead of idling
+
+A chat turn used to end the moment the model stopped typing, and nothing happened
+until you sent the next message. The loop (`app/loop.py`) lets a turn hand back one
+of two signals instead:
+
+- **continue** — the model isn't done and named the next step. Asta runs that step
+  itself, without waiting for you, bounded by `ASTA_LOOP_MAX_STEPS` so a confused
+  model can't spin forever.
+- **send** — the model drafted something outward (a Teams reply, a Jira comment, a
+  PR body). It is **staged, never sent**: Asta shows you the draft and asks "can I
+  send this?" A bare "yes" sends it through the real channel tool; anything else is
+  a revision. This is the one hard gate, and it holds for every channel.
+
+On by default (`ASTA_LOOP`); bounded and gated is what keeps on-by-default safe.
+It works for the in-process and CLI brains alike. `ASTA_THINKING` adds opt-in
+extended thinking on the API brain — off by default, because thinking tokens work
+against the token-efficiency everything else here is chasing.
+
 ## Workspaces and project context
 
 Workspaces are configured in the UI (⚙ Settings → Workspaces), not in code. Point
@@ -116,9 +135,15 @@ embeddings). Models without a key show as "(off)" in the picker.
 Asta is the **orchestrator**: it plans, remembers, notifies and delegates. It does
 not implement in chat.
 
+**Local-first routing** (`app/router.py`, `ASTA_ROUTER`, on by default): a pure
+pleasantry — "hi", "thanks", "great" — is answered on the free local model or a
+canned line, instead of spawning a paid CLI (~24k tokens) to say hello. Conservative
+by design: only self-contained social turns are diverted; anything with real content
+always reaches the brain you picked.
+
 ## Tool selection
 
-A turn carries roughly ten of thirty-four tools, not all of them — capabilities are
+A turn carries roughly ten of forty tools, not all of them — capabilities are
 ranked against the message (embeddings via LM Studio when it's up, lexical overlap
 otherwise) and only the relevant ones plus a tiny always-available core are
 exposed.
@@ -149,7 +174,14 @@ through alone next time; an escalation that teaches nothing just repeats next we
 Guarded on purpose: below 0.6 confidence nothing is written, a near-duplicate
 replaces the existing skill rather than rivalling it, and unused low-confidence
 skills are pruned. Only names and one-line descriptions sit in the prompt; the body
-loads on demand via `load_skill`.
+loads on demand via `load_skill` — the CLI brains get that same index, so a skill is
+reachable everywhere, not just in-process.
+
+**Self-improvement closes the loop** (`app/skill_evolution.py`). The token audit
+classifies where a worker wasted tokens; when a waste category *recurs* across runs
+— reading files blind, dumping fat outputs, re-planning — Asta writes a curated
+fix-skill for it, once, so the next worker avoids it. Measure → improve, without you
+in the loop.
 
 Nightly consolidation (merge duplicates, prune, rewrite the index):
 
@@ -245,7 +277,13 @@ unless you dictated it in the same message.
   Notifies on a *new* problem and once on recovery; no repeat nagging.
 - **CI watcher** (10-minute poll, `gh` auth from the keychain — no PAT in `.env`) —
   🔴 on failure, 🟢 on recovery, silent baseline on first run.
-- **Meeting recaps** — on demand only. Paste a transcript and ask.
+- **Meeting prep** — a pre-meeting heads-up ~30 min out. A standup gets the standup
+  draft; a 1:1, sync or review gets prep *specific to that meeting* — talking points,
+  questions to ask, watch-outs, grounded in your open work. Ask "prep me for the 3pm"
+  any time (`meeting_prep`).
+- **Meeting recaps** — paste a transcript (from Teams' own recording/recap) and Asta
+  summarizes it: decisions, action items with yours flagged, open questions — and
+  pings you if something needs you (`meeting_recap`).
 
 Notification etiquette: while you're actually at the laptop, ambient pings are held
 — you'll ask. Direct things (a 1:1 message, an @mention, mail addressed to you) go
@@ -299,10 +337,19 @@ automation — no tokens unless you ask Asta to reason about what it read.
 never a group or channel unless you name the group yourself. Asta always tells you
 which chat it landed in.
 
-Sessions expire on your org's token policy; Asta notifies you to re-login.
-Deliberately **no meeting-join**: your name would show in the participant list
-while you're absent. `data/teams_profile/` holds corporate session cookies — same
-exposure class as your browser profile, so keep FileVault on.
+When someone pings you with a question, `draft_teams_reply` reads the thread and
+drafts an answer grounded in your memory and open work — **draft only**. It can only
+reach the send tool through the "can I send this?" gate, so nothing goes out in your
+name unprompted.
+
+Deliberately **no live-call join**. Asta will not silently sit in a call: that means
+recording other participants without their consent, on a corporate tenant, and
+answering as you with no way to confirm each word. The supported path is *after* the
+call — feed it the transcript from Teams' own recording (the one with the recording
+banner everyone sees) and it recaps + flags your actions. Sessions expire on your
+org's token policy; Asta notifies you to re-login. `data/teams_profile/` holds
+corporate session cookies — same exposure class as your browser profile, so keep
+FileVault on.
 
 ### macOS notification watcher
 
@@ -360,10 +407,14 @@ app/capabilities.py     ONE registry — chat tools, CLI teaching, MCP all read 
 app/tool_index.py       ranks capabilities per message; sticky per conversation
 app/mcp_server.py       serves Asta's capabilities over MCP
 app/tasks.py            the one work engine (plan → gate → implement → ship)
+app/loop.py             the conductor loop: continue / staged-send gate
+app/router.py           local-first routing for trivial turns
 app/repo_ops.py         git, branch naming, repo playbooks
 app/agents.py           loads the pipelines in agents/
 app/untrusted.py        the trust boundary
 app/learn.py            runs → structured skills; escalation teaches the cheap tier
+app/token_audit.py      classifies token waste per run (feeds the evolution loop)
+app/skill_evolution.py  recurring waste → a curated fix-skill, once
 app/quality.py          did the work land
 app/asking.py           ask_user: one question, no pipeline restart
 app/review.py           pull request review
@@ -376,7 +427,7 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  196 tests
+tests/                  315 tests
 ```
 
 `ARCHITECTURE-REVIEW-2026-07.md` holds the comparison against Odysseus and the

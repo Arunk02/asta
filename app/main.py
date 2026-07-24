@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, health, jira, llm_meter, mcp_loader, memory, msnotify, notify, outlook, refresh, reminders, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
+from . import activity, asking, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, health, jira, llm_meter, loop, mcp_loader, memory, msnotify, notify, outlook, refresh, reminders, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -475,6 +475,30 @@ async def api_answer(qid: int, request: Request):
     return {"ok": True}
 
 
+# The loop signals, reachable by a CLI brain over HTTP as well as by the
+# in-process tools. A CLI brain runs in its own subprocess with no turn context,
+# so it passes conv_id explicitly; the in-process tool reads it from the turn.
+@app.post("/api/loop/continue", dependencies=[Depends(require_auth)])
+async def api_loop_continue(request: Request):
+    b = await request.json()
+    cid = b.get("conv_id") or tasks.current_conversation()
+    if not cid:
+        raise HTTPException(400, "no conversation to continue")
+    loop.set_continue(cid, (b.get("next_step") or "").strip())
+    return {"ok": True}
+
+
+@app.post("/api/loop/prepare-send", dependencies=[Depends(require_auth)])
+async def api_loop_prepare_send(request: Request):
+    b = await request.json()
+    cid = b.get("conv_id") or tasks.current_conversation()
+    if not cid:
+        raise HTTPException(400, "no conversation")
+    loop.set_pending_send(cid, b.get("what") or "", b.get("to") or "",
+                          b.get("channel") or "chat")
+    return {"ok": True}
+
+
 @app.get("/api/missions", dependencies=[Depends(require_auth)])
 def api_missions():
     """Legacy mission history, read-only.
@@ -609,6 +633,25 @@ def api_token_audit(hours: float = 24, task: int = 0):
             raise HTTPException(404, f"no worker session found for task #{task}")
         return rep
     return {**token_audit.audit_recent(hours), "trend": token_audit.trend_series()}
+
+
+@app.get("/api/meeting-prep", dependencies=[Depends(require_auth)])
+async def api_meeting_prep(title: str = ""):
+    from . import agent as agent_mod
+    return {"prep": await agent_mod.meeting_prep(title)}
+
+
+@app.post("/api/meeting-recap", dependencies=[Depends(require_auth)])
+async def api_meeting_recap(body: dict):
+    from . import agent as agent_mod
+    return {"recap": await agent_mod.meeting_recap(
+        (body or {}).get("transcript", ""), (body or {}).get("title", ""))}
+
+
+@app.get("/api/teams-draft", dependencies=[Depends(require_auth)])
+async def api_teams_draft(chat: str, question: str = ""):
+    from . import agent as agent_mod
+    return {"draft": await agent_mod.draft_teams_reply(chat, question)}
 
 
 @app.post("/api/tasks", dependencies=[Depends(require_auth)])
@@ -1126,6 +1169,16 @@ async def _run_turn(out, conv: dict, user_text: str, channel: str = "web") -> No
         await out.send({"type": "done", "tools": []})
         return
 
+    # A pure pleasantry ("hi", "thanks", "great") answered on the free local brain —
+    # never spawn a paid CLI (~24k tokens) to say you're welcome. Real content, and
+    # anything longer than a few words, falls straight through to the picked brain.
+    if router.enabled() and router.is_trivial(user_text):
+        r = await router.reply(user_text)
+        await out.send({"type": "delta", "text": r})
+        store.add_ui_message(conv["id"], "assistant", r, {"via": "local-router", "channel": channel})
+        await out.send({"type": "done", "tools": []})
+        return
+
     # Any CLI-backed model (Copilot, Claude Code, and anything added to the
     # spec table later) runs through the same path — the table says which module
     # drives it, so no new branch is needed per model.
@@ -1307,11 +1360,17 @@ def _start_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task:
 
 
 async def _conducted_turn(conv0: dict, first_text: str, sink, channel: str) -> None:
-    """Run a turn, then fold in anything buffered while it ran. The just-finished
-    work is already in the persisted history, so the augment builds on top with
-    nothing re-sent and the cache prefix byte-stable."""
+    """Run a turn, then fold in anything buffered while it ran — and, when nothing
+    is buffered, drive the model's own next step instead of idling. The just-finished
+    work is already in the persisted history, so each continuation builds on top with
+    nothing re-sent and the cache prefix byte-stable.
+
+    Order of precedence after every turn: a staged outward send interrupts to ask
+    Arun first; then his own interjections (augments, follow-ups) always win; and only
+    if he left nothing does the loop auto-continue, bounded by ASTA_LOOP_MAX_STEPS."""
     cid = conv0["id"]
     text = first_text
+    loop.reset_steps(cid)                        # the step budget is per user message
     while True:
         conv = store.get_conversation(cid) or conv0
         conv["model"] = conv0["model"]          # honour the model picked for THIS message
@@ -1322,8 +1381,19 @@ async def _conducted_turn(conv0: dict, first_text: str, sink, channel: str) -> N
             except asyncio.CancelledError:
                 raise
             except Exception as exc:            # a tool/model failure must not kill the socket
+                loop.clear(cid)                 # a failed turn ends the loop, doesn't spin
                 with contextlib.suppress(Exception):
                     await sink.send({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+
+        intent = loop.take(cid) if loop.enabled() else None
+
+        # A drafted outward send is the one thing that interrupts everything: show it
+        # and wait for his yes/no — nothing leaves the machine unconfirmed.
+        if intent and intent["kind"] == "send":
+            loop.stage(cid, intent)
+            await _present_staged_send(sink, cid, intent, channel)
+            return
+
         pending = _addenda.pop(cid, None)
         if pending:
             text = ("While you were working, add / adjust the following on top of what "
@@ -1337,10 +1407,42 @@ async def _conducted_turn(conv0: dict, first_text: str, sink, channel: str) -> N
             if not queued:
                 _followups.pop(cid, None)
             continue
+
+        # Arun left nothing to do — so if the model said it wasn't finished, run its
+        # next step itself rather than stopping and waiting for a message.
+        if intent and intent["kind"] == "continue":
+            if loop.budget_left(cid):
+                loop.bump_steps(cid)
+                step = intent["next_step"] or "continue the task"
+                await sink.send({"type": "note", "text": f"🔁 {step}"})
+                text = (f"Continue now — do not wait for me. The next step you named: {step}\n"
+                        "Keep going until the whole task is done. If you draft anything to send "
+                        "outside this chat, stage it with prepare_to_send instead of sending it.")
+                continue
+            await sink.send({"type": "note", "text":
+                             "⏸ Auto-continued a few steps and paused so it can't run away. "
+                             "Say “continue” to keep going."})
         return
 
 
+async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> None:
+    """Show Arun a drafted outward message and ask before it is sent. The draft is
+    persisted as an assistant turn so it survives in history, and the loop waits:
+    his next message is routed as the yes/no (see _dispatch)."""
+    to = f" to *{intent['to']}*" if intent.get("to") else ""
+    body = (f"📤 Ready to send{to} on **{intent.get('channel', 'chat')}** — can I send this?\n\n"
+            f"———\n{intent.get('what', '')}\n———\n\n"
+            "Reply “send” to confirm, or tell me what to change.")
+    store.add_ui_message(cid, "assistant", body, {"via": "loop-confirm-send", "channel": channel})
+    await sink.send({"type": "delta", "text": body})
+    if channel == "web":
+        await sink.send({"type": "done", "tools": []})
+
+
 _ANSWER_CMD = re.compile(r"^\s*answer\s+#?(\d+)\s+(.+)$", re.I | re.S)
+# A bare yes to "can I send this?" — anything else is treated as change-requests.
+_AFFIRM = re.compile(r"^\s*(send( it)?|yes|yep|yeah|y|ok(ay)?( send| do it)?|go( ahead)?|"
+                     r"confirm|do it|👍|✅)\s*[.!]*\s*$", re.I)
 
 
 async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> asyncio.Task | None:
@@ -1357,6 +1459,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         dropped = rotate_sessions(cid)
         _addenda.pop(cid, None)
         _followups.pop(cid, None)
+        loop.clear(cid)
         await sink.send({"type": "note", "text":
                          "🧹 Fresh start — new session from here. "
                          + ("Previous context is digested into memory, so anything "
@@ -1365,6 +1468,23 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None
+
+    # A drafted outward send is waiting on "can I send this?" — his next message is
+    # the answer. A bare yes sends it (via the model's real send tool, so the send
+    # itself still runs through that tool's own rules); anything else is revision.
+    staged = loop.awaiting(cid)
+    if staged and (user_text or "").strip():
+        loop.clear_awaiting(cid)
+        if _AFFIRM.match(user_text):
+            prompt = (f"Arun approved sending this. Send it now using the right tool for "
+                      f"channel '{staged.get('channel', 'chat')}'"
+                      + (f" to {staged['to']}" if staged.get("to") else "")
+                      + f":\n\n{staged.get('what', '')}\n\nAfter it's sent, confirm in one line.")
+        else:
+            prompt = (f"Arun did NOT approve sending the draft as-is. His feedback:\n"
+                      f"{user_text.strip()}\n\nRevise accordingly. When it's ready to send "
+                      f"again, stage it with prepare_to_send; otherwise just continue the work.")
+        return _start_turn(conv, prompt, sink, channel)
 
     # An open ask_user question owns the next message. Explicit form first
     # ("answer 3 the second one"), then the bare reply — which is how a person

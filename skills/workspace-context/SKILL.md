@@ -324,3 +324,10 @@ graphify (code-wiki) stays **optional** enrichment only; never a hard dependency
 - No `CONSTITUTION.md`; no `[INLINE]`/`[SPLIT]`; no 200-token cap. Hard cap 150 lines per mini-skill.
 - Single mode commits `.asta-context/`; workspace mode never writes inside any repo.
 - `primary_for` vs `mentions` is the precision contract. Honour it.
+- **Resolve before you read — always.** `resolve-task.js` returns the ~350 tokens that
+  matter (routed matches at `source:line`); opening whole files without resolving first
+  loads entire classes into context and is the single biggest avoidable token sink. Asta's
+  runtime audits this as a `BLIND_READ` signal (`app/token_audit.py`), and the
+  `read_workspace_file` capability carries the same rule so it travels even when tool
+  selection narrows. Read only the `$matches` a resolve returned, at `source:line`, never
+  the file whole unless a bound is genuinely needed.

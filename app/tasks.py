@@ -150,6 +150,13 @@ def bind_conversation(conv_id: str | None) -> None:
     _TURN_CONV.set(conv_id or None)
 
 
+def current_conversation() -> str | None:
+    """The conversation the running turn belongs to — how a tool called inside a
+    turn (loop signals, task links) finds its conversation without it being an
+    argument the model has to fill."""
+    return _TURN_CONV.get()
+
+
 def link_task(conv_id: str, task_id: int) -> None:
     """Attach a task to the conversation that spawned it.
 
@@ -350,15 +357,25 @@ def _audit_note(task_id: int) -> str:
     and, when a run was wasteful, appends a one-line flag to the notification so
     it's visible without asking. Never lets an audit failure break completion."""
     try:
-        from . import token_audit
+        from . import token_audit, skill_evolution
         rep = token_audit.audit_task(task_id)
         if not rep:
             return ""
         if rep["waste_ratio"] >= 0.12:
-            return (f"\n\n⚠️ token audit: {rep['waste_ratio']:.0%} avoidable "
+            note = (f"\n\n⚠️ token audit: {rep['waste_ratio']:.0%} avoidable "
                     f"(~{rep['avoidable_tokens']:,} tok), biggest = {rep['top_fix']}. "
                     f"Grade {rep['grade']}.")
-        return f"\n\n📉 token audit: {rep['waste_ratio']:.0%} waste, grade {rep['grade']}."
+        else:
+            note = f"\n\n📉 token audit: {rep['waste_ratio']:.0%} waste, grade {rep['grade']}."
+        # Close the loop: a waste category that RECURS across runs becomes a durable
+        # fix-skill, so the next worker avoids it instead of the meter just noting it.
+        try:
+            evolved = skill_evolution.evolve()
+        except Exception:
+            evolved = []
+        if evolved:
+            note += "\n🧬 learned a skill to stop it: " + ", ".join(e["skill"] for e in evolved) + "."
+        return note
     except Exception:
         return ""
 

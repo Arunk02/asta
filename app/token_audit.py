@@ -18,8 +18,6 @@ fixed, and measures whether the fixes worked.
 from __future__ import annotations
 
 import json
-import os
-import re
 import time
 from pathlib import Path
 

@@ -253,8 +253,14 @@ async def premeeting_loop() -> None:
                     who = f" (by {ev['organizer']})" if ev["organizer"] else ""
                     head = f"📅 In {lead} min — {ev['title']}{who}, {ev['start']}"
                     if _SPEAKING_MEETING.search(ev["title"]):
-                        draft = await standup_draft()
-                        await notify.notify(f"{head}\n\n🧍 Draft for it:\n\n{draft}",
+                        # Standups get the standup draft; a 1:1/sync/review gets prep
+                        # specific to THAT meeting (talking points, watch-outs).
+                        if re.search(r"stand[- ]?up|scrum|daily", ev["title"], re.I):
+                            draft = await standup_draft()
+                        else:
+                            from . import agent as agent_mod
+                            draft = await agent_mod.meeting_prep(ev["title"])
+                        await notify.notify(f"{head}\n\n📝 Draft for it:\n\n{draft}",
                                             "premeeting", urgency="direct")
                     else:
                         await notify.notify(

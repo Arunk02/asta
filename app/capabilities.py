@@ -29,7 +29,8 @@ from typing import Callable
 #: about. Deliberately tiny — this is the set that lets the model recover when
 #: retrieval picked wrong: it can remember, look something up, ask, or delegate.
 ALWAYS = ("remember", "search_memory", "load_skill", "ask_user",
-          "delegate_task", "list_background_tasks")
+          "delegate_task", "list_background_tasks",
+          "continue_working", "prepare_to_send")
 
 
 @dataclass(frozen=True)
@@ -72,12 +73,26 @@ _TABLE: tuple[Capability, ...] = (
     Capability("ask_user", "ask", http="POST /api/ask",
                note="One question, pushed to Arun's phone; the caller blocks until he "
                     "answers. Cheaper than stopping a whole pipeline for a re-plan."),
+    # --- autonomous loop -----------------------------------------------------
+    Capability("continue_working", "loop",
+               http='POST /api/loop/continue {"next_step":"…"}',
+               note="Call as your LAST action when the task isn't done and you know the "
+                    "next step — Asta runs it without waiting for Arun. Not for sending "
+                    "anything outward; stop instead when the work is actually finished."),
+    Capability("prepare_to_send", "loop",
+               http='POST /api/loop/prepare-send {"what":"…","to":"…","channel":"teams|email|jira|pr|chat"}',
+               note="The ONLY approved way to send on Arun's behalf: it STAGES the draft "
+                    "and asks him to confirm — nothing goes out until he says yes. Never "
+                    "send outward through any other tool without staging it here first."),
     # --- workspace / code context -------------------------------------------
     Capability("resolve_context", "workspace",
                http="GET /api/workspaces/{workspace}/resolve?q={question}",
                note="ALWAYS resolve before reading code. Never explore a repo blindly."),
     Capability("read_workspace_file", "workspace",
-               http="GET /api/workspaces/{workspace}/file?path={rel_path}"),
+               http="GET /api/workspaces/{workspace}/file?path={rel_path}",
+               note="resolve_context FIRST — it routes you to the ~350 tokens that matter. "
+                    "Reading files blind loads whole classes into context and is the #1 "
+                    "avoidable token sink (the auditor flags it as BLIND_READ)."),
     Capability("list_services", "workspace",
                http="GET /api/workspaces/{workspace}/services"),
     Capability("refresh_context", "workspace", http="POST /api/refresh/{workspace}"),
@@ -111,9 +126,21 @@ _TABLE: tuple[Capability, ...] = (
                     "add --group). A 1:1 message once landed in a team channel — never "
                     "again. Repeat the 'sent to: <chat>' line back to Arun; if it printed "
                     "ERROR, say it did NOT send."),
+    Capability("draft_teams_reply", "teams",
+               http="GET /api/teams-draft?chat={chat}&question={question}",
+               note="DRAFT only — read + draft an answer to a person's Teams question. To "
+                    "actually reply, stage it with prepare_to_send (channel teams); never "
+                    "sends in Arun's name unprompted."),
     Capability("outlook_mail", "outlook",
                shell="python -m app.outlook mail [limit]  ·  python -m app.outlook attention"),
     Capability("outlook_meetings", "outlook", shell="python -m app.outlook meetings"),
+    Capability("meeting_prep", "outlook", http="GET /api/meeting-prep?title={title}",
+               note="Drafts prep for a meeting/1:1 (talking points, questions, watch-outs). "
+                    "Draft only — stage with prepare_to_send to actually send it to anyone."),
+    Capability("meeting_recap", "outlook",
+               http='POST /api/meeting-recap {"transcript":"…","title":"…"}',
+               note="Summarizes a call/meeting transcript (from Teams' own recording/recap) "
+                    "into decisions + action items + open questions; pings Arun if an item is his."),
     # --- the work engine -----------------------------------------------------
     Capability("delegate_task", "tasks",
                http='POST /api/tasks {"title":"…","prompt":"full SELF-CONTAINED '
@@ -147,6 +174,7 @@ _TABLE: tuple[Capability, ...] = (
     Capability("health_check", "ops", http="GET /api/health"),
     Capability("ci_status", "ops", http="GET /api/ci"),
     Capability("trace_report", "ops", http="GET /api/traces"),
+    Capability("token_audit", "ops", http="GET /api/token-audit?hours={hours}"),
     Capability("quality_report", "ops", http="GET /api/quality",
                note="The evidence for 'is Asta getting better'. Cite it rather than "
                     "asserting an improvement."),

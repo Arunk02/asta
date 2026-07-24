@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 
 import httpx
 
@@ -70,7 +71,7 @@ HELD_KEY = "held_ambient_notifications"
 HELD_MAX = 40
 
 
-async def notify(text: str, level: str = "info", urgency: str = "direct") -> None:
+async def notify(text: str, level: str = "info", urgency: str = "direct") -> dict:
     """Record for the UI bell and fan out to WhatsApp + Telegram.
 
     urgency="direct"  — someone is actually addressing Arun (1:1 message, @mention,
@@ -79,6 +80,11 @@ async def notify(text: str, level: str = "info", urgency: str = "direct") -> Non
         traffic). Delivered only when he's AWAY from the laptop; while he's sitting
         there it is held, because he'd rather ask than be pinged. Held items are
         released the moment he steps away, and are always in the UI bell meanwhile.
+
+    Returns which channels actually took it. This used to return None, so a fire
+    that reached NOBODY (both channels down) looked identical to one delivered —
+    which is exactly how reminders "sent" for days while landing only in a bell
+    no one was looking at.
     """
     store.add_notification(text, level)  # the bell always gets everything
     if urgency == "ambient":
@@ -87,9 +93,31 @@ async def notify(text: str, level: str = "info", urgency: str = "direct") -> Non
             held = json.loads(store.kv_get(HELD_KEY) or "[]")
             held.append(text)
             store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))
-            return
-    await wa_send(text)
-    await telegram.send(text)
+            return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
+    wa = await wa_send(text)
+    tg = await telegram.send(text)
+    if not (wa or tg):
+        # Delivered to the bell and nowhere else. Record it so health can surface
+        # a mute assistant instead of it being silently swallowed.
+        store.kv_set("last_push_failure",
+                     json.dumps({"at": time.time(), "text": text[:120]}))
+    return {"bell": True, "held": False, "whatsapp": wa, "telegram": tg}
+
+
+async def live_push_channels() -> list[str]:
+    """Which phone channels are actually connected right now (a real probe, not
+    just configured). Used to tell the truth at the moment a reminder is set,
+    rather than promising delivery that cannot happen."""
+    out: list[str] = []
+    try:
+        st = await wa_status()
+        if st.get("up") and st.get("paired"):
+            out.append("WhatsApp")
+    except Exception:
+        pass
+    if telegram.enabled() and telegram.chat_id():
+        out.append("Telegram")
+    return out
 
 
 async def flush_held() -> None:

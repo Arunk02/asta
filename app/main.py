@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, briefing, ci_watch, claude_cli, context_build, copilot_cli, health, jira, mcp_loader, memory, msnotify, notify, outlook, refresh, reminders, quality, store, tasks, teams_bridge, telegram, tool_index, workspace, workspace_tools
+from . import activity, asking, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, health, jira, llm_meter, mcp_loader, memory, msnotify, notify, outlook, refresh, reminders, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -121,6 +121,19 @@ async def startup() -> None:
     asyncio.create_task(health.loop())
     asyncio.create_task(ci_watch.loop())
     asyncio.create_task(notify.held_watch_loop())
+    # The WhatsApp bridge is a child of Asta's lifecycle now, not a manual step:
+    # it starts with the server and is restarted on crash, so "no bridge" stops
+    # being the default after every restart.
+    if wa_bridge.enabled():
+        asyncio.create_task(wa_bridge.supervise())
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    # Stop only the bridge WE started; a hand-started or launchd bridge is left
+    # running. Without this, a restart would orphan the Node child and the next
+    # start would find the port taken.
+    await wa_bridge.stop()
 
 
 async def _probe_mcp() -> None:
@@ -220,6 +233,7 @@ def api_status():
         "teams_watcher": msnotify.status(),
         "telegram": telegram.status(),
         "teams_bridge": teams_bridge.status(),
+        "wa_bridge": wa_bridge.status(),
         "ci_watch": ci_watch.status(),
         "reminders_pending": len(store.list_reminders()),
         "health_problems": json.loads(store.kv_get("health_problems") or "[]"),
@@ -255,6 +269,71 @@ def api_memory_file(path: str):
     if text is None:
         raise HTTPException(404)
     return {"path": path, "content": text}
+
+
+# These four capabilities had no endpoint, so a CLI brain (copilot/claude) could
+# not reach them — "remember this" silently did nothing there while the API/local
+# brains could. Giving them HTTP closes that parity gap: every brain now has the
+# same reachable capability set. Each delegates to the SAME agent function the
+# in-process tool calls, so there is one behaviour, not two.
+
+@app.post("/api/memory", dependencies=[Depends(require_auth)])
+def api_remember(body: dict):
+    title = (body or {}).get("title", "").strip()
+    fact = (body or {}).get("fact", "").strip()
+    if not title or not fact:
+        raise HTTPException(400, "title and fact are required")
+    return {"result": agent_mod.remember(title, fact, (body or {}).get("kind", "fact"))}
+
+
+@app.get("/api/memory/search", dependencies=[Depends(require_auth)])
+def api_search_memory(q: str):
+    if not q.strip():
+        raise HTTPException(400, "q is required")
+    return {"result": agent_mod.search_memory(q)}
+
+
+@app.get("/api/skills/{name}", dependencies=[Depends(require_auth)])
+def api_load_skill(name: str):
+    return {"result": agent_mod.load_skill(name)}
+
+
+@app.get("/api/workspaces/{name}/services", dependencies=[Depends(require_auth)])
+def api_list_services(name: str):
+    return {"result": agent_mod.list_services(name)}
+
+
+@app.post("/api/_invoke", dependencies=[Depends(require_auth)])
+async def api_invoke(body: dict):
+    """Run one capability BY NAME, in this (the live server) process.
+
+    This is the seam that lets a CLI brain use native MCP tool calls instead of
+    curling the API: Asta's MCP server forwards each tool call here, so the
+    function runs where the server's in-process state lives. That is the whole
+    point — `delegate_task` spawns its worker on THIS event loop, and `ask_user`
+    waits on a future THIS process will resolve. Run the same functions in the MCP
+    subprocess and both silently break (the worker dies with the subprocess, the
+    answer never reaches the orphaned future).
+
+    Generic on purpose: one endpoint, every capability, no per-tool wiring and no
+    parsing of the human-readable `http` specs. It is not new authority — the
+    bearer token already reaches every endpoint these functions back.
+    """
+    import inspect
+    name = (body or {}).get("tool", "")
+    args = (body or {}).get("args") or {}
+    cap = capabilities.get(name)
+    if cap is None or cap.fn is None:
+        raise HTTPException(404, f"no capability '{name}'")
+    if not isinstance(args, dict):
+        raise HTTPException(400, "args must be an object")
+    try:
+        result = cap.fn(**args)
+        if inspect.isawaitable(result):
+            result = await result
+    except TypeError as exc:
+        raise HTTPException(400, f"bad arguments for {name}: {exc}")
+    return {"result": result}
 
 
 @app.get("/api/graphs/{workspace}", dependencies=[Depends(require_auth)])
@@ -945,13 +1024,44 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
     # others just stream stdout. Ask the function itself rather than the name,
     # so a CLI added later gets tool activity for free if it supports it.
     import inspect
-    kwargs = ({"on_tool": on_tool}
-              if "on_tool" in inspect.signature(cli.run_turn).parameters else {})
+    accepts = inspect.signature(cli.run_turn).parameters
+    kwargs = {}
+    if "on_tool" in accepts:
+        kwargs["on_tool"] = on_tool
+
+    # Same contract for usage. A turn is a whole agent loop, and a CLI may
+    # report more than once (a dead session retried, for instance), so these
+    # accumulate rather than overwrite.
+    spent = llm_meter.Usage()
+
+    def on_usage(u) -> None:
+        nonlocal spent
+        spent = spent + u
+
+    if "on_usage" in accepts:
+        kwargs["on_usage"] = on_usage
+
     reply = await cli.run_turn(conv, user_text, on_delta, **kwargs)
     await out.send({"type": "tool", "status": "done", "name": tool_name})
+    # A CLI that reports usage only after the turn (Copilot's session snapshot,
+    # vs Claude's live on_usage stream) exposes last_turn_usage. Same
+    # attribute-not-name contract as on_tool/on_usage: a brain added later gets
+    # real numbers for free the day it grows this.
+    if not spent.measured and hasattr(cli, "last_turn_usage"):
+        with contextlib.suppress(Exception):
+            spent = spent + cli.last_turn_usage(conv, len(reply))
+    # A brain that reports nothing still must not read as free — estimate it and
+    # flag it, so it stays visible without polluting measured comparisons.
+    if not spent.measured:
+        spent = spent + llm_meter.estimated(len(user_text), len(reply))
     store.add_trace(conv["id"], via, channel, first_token_ms,
-                    int((time.monotonic() - t0) * 1000), 0, 0, 0,
-                    0, len(user_text), [tool_name])
+                    int((time.monotonic() - t0) * 1000),
+                    spent.input, spent.output, spent.cache_read,
+                    0, len(user_text), [tool_name],
+                    cache_write_tokens=spent.cache_write, cost_usd=spent.cost_usd,
+                    measured=spent.measured)
+    store.add_usage(conv["id"], via, spent.input, spent.output,
+                    spent.cache_read, spent.cache_write)
     store.add_ui_message(conv["id"], "assistant", reply,
                          {"tools": [tool_name], "via": via, "channel": channel})
     await out.send({"type": "done", "tools": [tool_name]})
@@ -1060,7 +1170,7 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     tools_used: list[str] = []
     t0 = time.monotonic()
     first_token_ms: int | None = None
-    trace_usage = {"input": 0, "output": 0, "cached": 0}
+    trace_usage = {"input": 0, "output": 0, "cached": 0, "cache_write": 0}
 
     async with turn_agent.run_stream_events(
         prompt,
@@ -1100,9 +1210,14 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
                     "input": getattr(usage, "input_tokens", 0) or 0,
                     "output": getattr(usage, "output_tokens", 0) or 0,
                     "cached": getattr(usage, "cache_read_tokens", 0) or 0,
+                    # Cache writes bill at 1.25x and were being dropped here, so
+                    # the one path that DID measure still under-reported its
+                    # most expensive first turn.
+                    "cache_write": getattr(usage, "cache_write_tokens", 0) or 0,
                 }
                 store.add_usage(conv["id"], model_name, trace_usage["input"],
-                                trace_usage["output"], trace_usage["cached"])
+                                trace_usage["output"], trace_usage["cached"],
+                                trace_usage["cache_write"])
                 all_msgs = result.all_messages()
                 summary = conv["summary"]
                 if len(all_msgs) > memory.KEEP_RECENT_MSGS * 2:
@@ -1120,7 +1235,9 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     store.add_trace(conv["id"], model_name, channel, first_token_ms,
                     int((time.monotonic() - t0) * 1000),
                     trace_usage["input"], trace_usage["output"], trace_usage["cached"],
-                    len(instructions), len(prompt), tools_used)
+                    len(instructions), len(prompt), tools_used,
+                    cache_write_tokens=trace_usage["cache_write"],
+                    measured=bool(trace_usage["input"] or trace_usage["output"]))
     store.add_ui_message(conv["id"], "assistant", assistant_text, {"tools": tools_used, "channel": channel})
     await out.send({"type": "done", "tools": tools_used})
 

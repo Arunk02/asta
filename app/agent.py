@@ -597,17 +597,26 @@ def trace_report(limit: int = 15) -> str:
     return "\n".join(lines)
 
 
-def set_reminder(text: str, due_iso: str, repeat: str = "") -> str:
-    """Set a reminder that fires on WhatsApp/Telegram/UI. due_iso: LOCAL time ISO format
-    e.g. '2026-07-19T15:00'. repeat: '' (once) | daily | weekdays | weekly."""
-    from . import reminders
+async def set_reminder(text: str, due_iso: str, repeat: str = "") -> str:
+    """Set a reminder. due_iso: LOCAL time ISO format e.g. '2026-07-19T15:00'.
+    repeat: '' (once) | daily | weekdays | weekly. It fires to whichever phone
+    channel is connected, and always to the in-app bell. Do NOT promise WhatsApp
+    or Telegram yourself — this reply states which channels are actually live."""
+    from . import reminders, notify
     try:
         r = reminders.create(text, due_iso, repeat)
     except ValueError as exc:
         return f"Couldn't set reminder: {exc}"
     import datetime as dt
     when = dt.datetime.fromtimestamp(r["due_at"]).strftime("%a %d %b %H:%M")
-    return f"Reminder #{r['id']} set for {when}" + (f" (repeats {repeat})" if repeat else "")
+    head = f"Reminder #{r['id']} set for {when}" + (f" (repeats {repeat})" if repeat else "")
+    # Tell the truth about delivery now, so a reminder can't silently fire into a
+    # channel that is down. This is the fix for "it writes but doesn't send".
+    live = await notify.live_push_channels()
+    if live:
+        return f"{head} — I'll ping you on {' and '.join(live)}."
+    return (f"{head}. ⚠️ No phone channel is connected right now, so it will only "
+            f"show in the app. Link WhatsApp or Telegram to get it on your phone.")
 
 
 def list_my_reminders() -> str:

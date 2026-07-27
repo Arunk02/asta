@@ -78,3 +78,51 @@ def test_an_unparseable_time_answers_rather_than_500s(client):
     r = client.post("/api/meetings", json={"subject": "x", "when": "thursday"}, headers=H)
     assert r.status_code == 200 and "Can't build" in r.json()["message"]
     assert offers.pending() is None
+
+
+# --- staged means staged ------------------------------------------------------
+#
+# Found by probing the running server, not by the unit tests: every staging
+# endpoint hardcoded staged:true and put the real outcome in the message. So a
+# refusal came back flagged as staged, and a brain that believes the flag tells
+# Arun something is waiting for his yes when nothing is.
+
+def test_a_refused_invite_is_not_reported_as_staged(client):
+    r = client.post("/api/meetings", json={"subject": "x", "when": "thursday"}, headers=H)
+    assert r.json()["staged"] is False
+    assert "Can't build" in r.json()["message"]
+    assert offers.pending() is None
+
+
+def test_a_refused_leave_request_is_not_reported_as_staged(client):
+    r = client.post("/api/leave", json={"start_date": "2026-02-30"}, headers=H)
+    assert r.json()["staged"] is False
+    assert offers.pending() is None
+
+
+def test_a_refused_review_is_not_reported_as_staged(client):
+    r = client.post("/api/pr-review", json={"pr": "31", "action": "merge"}, headers=H)
+    assert r.json()["staged"] is False
+
+
+def test_an_unconfigured_jira_comment_is_not_reported_as_staged(client, monkeypatch):
+    monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+    r = client.post("/api/jira/issue/P-1/comment", json={"text": "x"}, headers=H)
+    assert r.json()["staged"] is False
+    assert "not configured" in r.json()["message"]
+
+
+def test_a_real_invite_is_reported_as_staged(client):
+    r = client.post("/api/meetings",
+                    json={"subject": "Design sync", "when": "2026-07-30 15:00"}, headers=H)
+    assert r.json()["staged"] is True
+    assert offers.pending() is not None
+
+
+def test_a_refusal_does_not_claim_an_unrelated_older_offer(client):
+    """The subtle one: an offer was already open from something else. A refusal
+    must not look at 'is anything pending?' and answer yes."""
+    offers.propose("older", "ctx", "Do that?", "do that")
+    r = client.post("/api/meetings", json={"subject": "x", "when": "thursday"}, headers=H)
+    assert r.json()["staged"] is False
+    assert offers.pending().subject == "older"        # and it is left alone

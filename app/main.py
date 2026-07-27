@@ -617,7 +617,8 @@ async def api_jira_comment(key: str, request: Request):
     b = await request.json()
     if not b.get("text"):
         raise HTTPException(400, "text is required")
-    return {"staged": True, "message": await agent_mod.jira_comment(key, b["text"])}
+    before = offers.pending()
+    return _staged(await agent_mod.jira_comment(key, b["text"]), before)
 
 
 @app.get("/api/jira/issue/{key}/transitions", dependencies=[Depends(require_auth)])
@@ -636,7 +637,8 @@ async def api_jira_transition(key: str, request: Request):
     b = await request.json()
     if not b.get("status"):
         raise HTTPException(400, "status is required")
-    return {"staged": True, "message": await agent_mod.jira_transition(key, b["status"])}
+    before = offers.pending()
+    return _staged(await agent_mod.jira_transition(key, b["status"]), before)
 
 
 @app.get("/api/jira/sprint", dependencies=[Depends(require_auth)])
@@ -655,25 +657,35 @@ async def api_pr_review(request: Request):
     b = await request.json()
     if not b.get("pr") or not b.get("action"):
         raise HTTPException(400, "pr and action are required")
-    return {"staged": True, "message": await agent_mod.pr_review_post(
+    before = offers.pending()
+    return _staged(await agent_mod.pr_review_post(
         str(b["pr"]), b["action"], b.get("body", ""),
-        b.get("workspace", ""), b.get("repo", ""))}
+        b.get("workspace", ""), b.get("repo", "")), before)
+
+
+def _staged(message: str, before) -> dict:
+    """Report whether something is REALLY waiting on Arun, not that we tried.
+
+    These endpoints used to hardcode staged:true and put the outcome in the
+    message — so a refusal ("time must be YYYY-MM-DD HH:MM, got 'thursday'") came
+    back flagged as staged. A brain resolves that contradiction by believing the
+    flag, tells Arun an invite is waiting for his yes, and there is nothing there.
+    The flag is derived from the offer actually changing.
+    """
+    now = offers.pending()
+    return {"staged": now is not None and (before is None or now.id != before.id),
+            "message": message}
 
 
 @app.post("/api/propose-next", dependencies=[Depends(require_auth)])
 async def api_propose_next(request: Request):
-    """A CLI brain offering Arun its next step — the same offer the chat tool makes.
-
-    `offered` reports what actually happened rather than that the call was made.
-    A blank step used to come back as offered:true with a message explaining it
-    had been rejected, which is the kind of contradiction a brain resolves by
-    believing the flag and telling Arun a question is waiting that is not.
-    """
+    """A CLI brain offering Arun its next step — the same offer the chat tool makes."""
     b = await request.json()
     if not (b.get("next_step") or "").strip():
         raise HTTPException(400, "next_step is required")
+    before = offers.pending()
     message = agent_mod.propose_next(b["next_step"], b.get("why", ""))
-    return {"offered": offers.pending() is not None, "message": message}
+    return {"offered": _staged(message, before)["staged"], "message": message}
 
 
 @app.get("/api/teams/presence", dependencies=[Depends(require_auth)])
@@ -695,9 +707,10 @@ async def api_create_meeting(request: Request):
     b = await request.json()
     if not b.get("subject") or not b.get("when"):
         raise HTTPException(400, "subject and when are required")
-    return {"staged": True, "message": await agent_mod.create_meeting(
+    before = offers.pending()
+    return _staged(await agent_mod.create_meeting(
         b["subject"], b["when"], int(b.get("minutes", 30)),
-        b.get("attendees", ""), b.get("agenda", ""))}
+        b.get("attendees", ""), b.get("agenda", "")), before)
 
 
 @app.post("/api/leave", dependencies=[Depends(require_auth)])
@@ -706,8 +719,9 @@ async def api_request_leave(request: Request):
     b = await request.json()
     if not b.get("start_date"):
         raise HTTPException(400, "start_date is required")
-    return {"staged": True, "message": await agent_mod.request_leave(
-        b["start_date"], b.get("end_date", ""), b.get("reason", ""), b.get("to", ""))}
+    before = offers.pending()
+    return _staged(await agent_mod.request_leave(
+        b["start_date"], b.get("end_date", ""), b.get("reason", ""), b.get("to", "")), before)
 
 
 @app.post("/api/meetings/join", dependencies=[Depends(require_auth)])

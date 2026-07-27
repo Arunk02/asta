@@ -60,10 +60,16 @@ def test_selection_never_drops_a_hard_rule():
     assert "jira" not in notes.lower(), "unrelated rules should not ride along"
 
 
-def test_write_capabilities_carry_a_rule_or_are_obviously_safe():
-    for name, cap in capabilities.registry().items():
-        if cap.write and name != "reject_task":
-            assert cap.note, f"{name} changes the outside world with no stated rule"
+def test_every_write_capability_carries_its_rule():
+    """A `write` row with no note teaches a brain that it may post, comment,
+    approve or throw work away, and says nothing about when. The rules are the
+    expensive half — the part a docstring never conveys — and notes_block silently
+    drops a capability that has none, so the omission is invisible in review.
+
+    reject_task used to be exempt here on the grounds of being obviously safe. It
+    deletes a branch and its diff, which is not obviously safe at all."""
+    silent = [n for n, c in capabilities.registry().items() if c.write and not c.note]
+    assert silent == [], f"write capabilities with no rule: {silent}"
 
 
 def test_cli_block_is_generated_not_written():
@@ -139,7 +145,7 @@ def test_chat_agent_builds_from_the_registry():
     assert a is not None
     # …and the narrowed instruction set carries the matching rules.
     text = agent.build_instructions("", "", None, "web", ["jira_comment"])
-    assert "confirmation first" in text
+    assert "STAGES, does not post" in text
 
 
 def test_async_capabilities_are_declared_correctly():
@@ -157,3 +163,5 @@ def test_read_file_carries_the_resolve_first_rule():
     note = capabilities.get("read_workspace_file").note.lower()
     assert "resolve" in note
     assert "resolve" in capabilities.notes_block(["read_workspace_file"]).lower()
+
+

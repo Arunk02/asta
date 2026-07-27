@@ -88,11 +88,14 @@ def test_a_huge_diff_is_trimmed_and_says_so():
 
 
 def test_review_never_writes_to_the_pr():
+    """review_pr reads and reports. Posting is a different capability, and the
+    rule travelling with this one has to point at it — otherwise a brain told
+    'read-only' invents its own way to post."""
     cap = capabilities.get("review_pr")
     assert cap is not None
     assert not cap.write
     assert "never comment" in cap.description.lower()
-    assert "his to give" in cap.note
+    assert "pr_review_post" in cap.note
 
 
 def test_a_workspace_without_context_still_reviews(_gh, monkeypatch):
@@ -101,3 +104,66 @@ def test_a_workspace_without_context_still_reviews(_gh, monkeypatch):
     monkeypatch.setattr("app.workspace.resolve_context", boom)
     text, _ = asyncio.run(review.brief("123", "ws"))
     assert "VERDICT" in text
+
+
+# --- posting it (outward, and therefore staged) -------------------------------
+#
+# Reading a PR costs nothing. Approving one puts Arun's name on somebody else's
+# change, visible to the whole team the moment it lands, and there is no quiet
+# way to take it back. So the two halves are separated and only one of them can
+# happen without him saying so.
+
+def test_posting_a_review_stages_it_and_posts_nothing():
+    from app import agent, offers
+    out = asyncio.run(agent.pr_review_post("31", "approve", "LGTM", "iom", "api"))
+    o = offers.pending()
+    assert "waiting for Arun" in out
+    assert o and o.mechanical() and o.op["name"] == "pr_review"
+    assert o.op["args"]["action"] == "approve"
+
+
+def test_the_staged_review_carries_the_exact_words():
+    from app import agent, offers
+    body = "Blocking: the retry loop has no ceiling — see client.py:88."
+    asyncio.run(agent.pr_review_post("31", "request_changes", body))
+    assert offers.pending().op["args"]["body"] == body
+
+
+def test_he_sees_the_review_body_before_approving_it():
+    from app import agent, offers
+    asyncio.run(agent.pr_review_post("31", "comment", "One nit on naming."))
+    assert "One nit on naming" in offers.pending().context
+
+
+def test_an_unknown_verb_never_becomes_a_staged_review():
+    """A malformed action must not be passed through — 'merge' quietly becoming
+    an approval is the whole class of bug this table prevents."""
+    from app import agent, offers
+    out = asyncio.run(agent.pr_review_post("31", "merge", "ship it"))
+    assert "must be one of" in out
+    assert offers.pending() is None
+
+
+def test_a_comment_with_no_body_is_refused_before_he_is_asked():
+    from app import agent, offers
+    assert "needs a body" in asyncio.run(agent.pr_review_post("31", "comment", ""))
+    assert offers.pending() is None
+
+
+def test_an_approval_may_carry_no_body():
+    from app import agent, offers
+    asyncio.run(agent.pr_review_post("31", "approve"))
+    assert offers.pending() is not None
+
+
+def test_post_review_refuses_a_verb_outside_the_table():
+    with pytest.raises(RuntimeError, match="unknown review action"):
+        asyncio.run(review.post_review("31", "iom", "", "merge", "x"))
+
+
+def test_post_review_maps_each_verb_to_its_own_gh_flag():
+    """One flag per verb, checked here rather than discovered in production when
+    a 'comment' turns out to have approved something."""
+    assert review.ACTIONS["approve"] == "--approve"
+    assert review.ACTIONS["comment"] == "--comment"
+    assert review.ACTIONS["request_changes"] == "--request-changes"

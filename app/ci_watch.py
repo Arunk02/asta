@@ -74,6 +74,7 @@ def status() -> dict:
         "authed": authed,
         "repos": len(repos()),
         "only_runs_by": store.kv_get("gh_login") or "(resolving…)",
+        "also_watching": [s["match"] for s in subscriptions()],
         "hint": ("install GitHub CLI: brew install gh" if not shutil.which("gh")
                  else ("run once: gh auth login" if authed is False
                        else ("checking auth…" if authed is None else "ok"))),
@@ -90,6 +91,78 @@ async def my_login() -> str:
     if login:
         store.kv_set("gh_login", login)
     return login
+
+
+SUBS_KEY = "ci_watch_subs"
+
+
+def subscriptions() -> list[dict]:
+    """Builds he explicitly asked to be told about, beyond his own work."""
+    try:
+        subs = json.loads(store.kv_get(SUBS_KEY) or "[]")
+        return [s for s in subs if isinstance(s, dict) and s.get("match")]
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def watch(what: str, repo: str = "") -> str:
+    """Subscribe to a workflow, branch, or repo he does not own runs on.
+
+    The default is deliberately narrow — his own work only — because the noisy
+    version of this feature is the one that gets muted, and a muted watcher tells
+    him nothing when it matters. This is the escape hatch for the release branch
+    he cares about this week.
+    """
+    what = (what or "").strip()
+    if not what:
+        return "Name a workflow, branch or repo to watch."
+    subs = subscriptions()
+    if any(s["match"].lower() == what.lower() and s.get("repo", "") == repo for s in subs):
+        return f"Already watching “{what}”."
+    subs.append({"match": what, "repo": repo, "added": time.time()})
+    store.kv_set(SUBS_KEY, json.dumps(subs[-20:]))
+    where = f" in {repo}" if repo else ""
+    return f"👁 Watching “{what}”{where} — I'll tell you when it goes red or recovers."
+
+
+def unwatch(what: str) -> str:
+    subs = subscriptions()
+    kept = [s for s in subs if s["match"].lower() != (what or "").strip().lower()]
+    store.kv_set(SUBS_KEY, json.dumps(kept))
+    return (f"Stopped watching “{what}”." if len(kept) != len(subs)
+            else f"Wasn't watching “{what}”.")
+
+
+def _subscribed(repo: str, run: dict) -> bool:
+    """Does an explicit subscription cover this run?
+
+    Matched loosely against the repo, workflow and branch, because he says "watch
+    the release build", not a fully-qualified triple.
+    """
+    haystack = " ".join((repo, run.get("workflowName", ""), run.get("headBranch", ""))).lower()
+    for sub in subscriptions():
+        if sub.get("repo") and sub["repo"] != repo:
+            continue
+        if sub["match"].lower() in haystack:
+            return True
+    return False
+
+
+async def _my_branches(repo: str) -> set[str]:
+    """Head branches of the open PRs he authored.
+
+    "Runs he triggered" is not the same set as "his PRs", and the gap is where it
+    hurt: a colleague pushes a fix to his branch, CI goes red on HIS pull request,
+    and the actor filter drops it because the push was not his.
+    """
+    rc, out = await _run_gh("pr", "list", "-R", repo, "--author", "@me",
+                            "--state", "open", "--json", "headRefName", timeout=20)
+    if rc != 0:
+        return set()
+    try:
+        return {p.get("headRefName", "") for p in json.loads(out or "[]")}
+    except json.JSONDecodeError:
+        return set()
 
 
 def _prev_state(entry) -> tuple[str, int]:
@@ -120,7 +193,11 @@ async def _poll_repo(repo: str) -> list[str]:
             "run", "list", "-R", repo, "--limit", "10", "--user", me, "--json", "databaseId")
         if rc2 == 0:
             mine = {str(r["databaseId"]) for r in json.loads(out2 or "[]")}
-            runs = [r for r in runs if str(r["databaseId"]) in mine]
+            branches = await _my_branches(repo)
+            runs = [r for r in runs
+                    if str(r["databaseId"]) in mine
+                    or r.get("headBranch") in branches
+                    or _subscribed(repo, r)]
     seen_key, wb_key = f"ci_seen:{repo}", f"ci_wb:{repo}"
     seen = json.loads(store.kv_get(seen_key) or "{}")
     wb = json.loads(store.kv_get(wb_key) or "{}")
@@ -181,7 +258,7 @@ async def recent_runs(limit: int = 8) -> str:
 
 
 async def loop() -> None:
-    from . import notify
+    from . import notify, offers
     while True:
         try:
             if not await gh_ok():
@@ -190,7 +267,16 @@ async def loop() -> None:
             for note in await check_all():
                 # His own pipelines, but still not something addressed TO him:
                 # held while he's at the laptop, delivered when he steps away.
-                await notify.notify(note, "ci", urgency="ambient")
+                if note.startswith("🔴"):
+                    # A red pipeline is worth an offer, not just a report: he can
+                    # reply "yes" from his phone and the investigation starts
+                    # without him opening a laptop. Nothing runs unasked.
+                    o = offers.offer("analyse", note.split("\n")[0],
+                                     "\n".join(note.split("\n")[1:]),
+                                     "Want me to analyse the failure?")
+                    await notify.notify(o.render(), "ci", urgency="ambient")
+                else:
+                    await notify.notify(note, "ci", urgency="ambient")
         except Exception:
             pass
         await asyncio.sleep(POLL_SECONDS)

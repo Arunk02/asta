@@ -31,7 +31,23 @@ def mcp_cli_enabled() -> bool:
     return os.environ.get("ASTA_CLI_MCP", "0").lower() in ("1", "true", "yes", "on")
 
 ROOT = Path(__file__).resolve().parent.parent
-TURN_TIMEOUT = 10 * 60
+
+
+def turn_timeout() -> int:
+    """How long ONE CLI turn may run before it is abandoned.
+
+    Was a hard 10 minutes, which is most of why a reply could take twenty: a wedged
+    brain held the conversation for the full window before anyone found out. Five
+    minutes is longer than any turn that was ever going to succeed, so the only
+    thing the shorter ceiling costs is the waiting.
+    """
+    try:
+        return max(30, int(os.environ.get("ASTA_TURN_TIMEOUT", "300")))
+    except ValueError:
+        return 300
+
+
+TURN_TIMEOUT = 10 * 60          # legacy constant; live callers use turn_timeout()
 
 
 def available() -> bool:
@@ -345,12 +361,13 @@ async def run_turn(conv: dict, user_text: str,
             if on_delta:
                 await on_delta(text)
 
+    limit = turn_timeout()
     try:
-        await asyncio.wait_for(_pump(), timeout=TURN_TIMEOUT)
+        await asyncio.wait_for(_pump(), timeout=limit)
         rc = await proc.wait()
     except asyncio.TimeoutError:
         proc.kill()
-        raise RuntimeError(f"Copilot CLI turn timed out after {TURN_TIMEOUT}s")
+        raise RuntimeError(f"Copilot CLI turn timed out after {limit}s")
     except asyncio.CancelledError:
         # Arun corrected course mid-answer. Killing the process is the point:
         # it stops the wrong line of investigation from billing any further.

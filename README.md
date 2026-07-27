@@ -9,6 +9,11 @@ Beyond chat: it delegates real work to headless CLI executors behind human gates
 reads and drafts Teams/Outlook/Jira, reviews pull requests, watches CI, and
 reaches you on WhatsApp or Telegram when something needs you.
 
+The shape of it is **offers, not autonomy**. Asta reports what it found with enough
+context to decide, names the one thing it would do next, and waits — a bare "yes"
+from any channel runs it. Anything that leaves the machine is staged with its exact
+contents first, so what you approved is what goes out.
+
 Everything about your work stays on your machine. The repo holds generic skills
 and pipelines; your workspaces, generated context, memory and credentials do not
 leave the laptop.
@@ -85,17 +90,75 @@ until you sent the next message. The loop (`app/loop.py`) lets a turn hand back 
 of two signals instead:
 
 - **continue** — the model isn't done and named the next step. Asta runs that step
-  itself, without waiting for you, bounded by `ASTA_LOOP_MAX_STEPS` so a confused
-  model can't spin forever.
+  itself, without waiting for you.
 - **send** — the model drafted something outward (a Teams reply, a Jira comment, a
   PR body). It is **staged, never sent**: Asta shows you the draft and asks "can I
   send this?" A bare "yes" sends it through the real channel tool; anything else is
   a revision. This is the one hard gate, and it holds for every channel.
 
+**Bounded by the clock, not just by steps.** A step count cannot bound latency when
+each step is a whole CLI turn of unknown length — four auto-steps of a ten-minute
+ceiling is forty minutes of silence, which is not "working autonomously", it is
+unusable. So there are three limits and the wall-clock one is the real guarantee:
+`ASTA_TURN_TIMEOUT` (5 min per CLI turn, shared by every brain), `ASTA_LOOP_MAX_STEPS`
+(2), and `ASTA_LOOP_DEADLINE` (10 min for everything one message triggers). The
+deadline is enforced brain-agnostically, so a brain added later inherits it. When a
+budget runs out Asta says *which* one — "been at this 10 min" tells you whether to
+push or rethink; a bare "paused" reads like a bug.
+
 On by default (`ASTA_LOOP`); bounded and gated is what keeps on-by-default safe.
 It works for the in-process and CLI brains alike. `ASTA_THINKING` adds opt-in
 extended thinking on the API brain — off by default, because thinking tokens work
 against the token-efficiency everything else here is chasing.
+
+## Offers — "here's what I'd do next; shall I?"
+
+The loop covers a turn. Offers (`app/offers.py`) cover everything after it.
+
+Asta sits between two bad extremes: stay silent until asked, and a red pipeline
+sits there all evening; act on everything it notices, and it burns tokens on things
+you already knew about. The middle is an **offer** — report the thing with enough
+context to decide, name what it would do next, and wait. A bare "yes" from *any*
+channel runs it. Offers are persisted and expiring (`ASTA_OFFER_TTL`, 6h): the
+question went to your phone and you may answer twenty minutes later from Telegram
+after a restart, but a "yes" tomorrow must not kick off work you've forgotten
+proposing. One is open at a time, because two plus a bare "yes" is ambiguous.
+
+An offer carries its own next step, in one of two forms:
+
+- **a prompt** — written by the model itself via `propose_next`, so any flow
+  continues: implement this ticket, chase that review, follow up, update a status.
+  Not a fixed list of three CI steps.
+- **a recorded call** — the exact API call, run in Python when you say yes. No
+  brain between the yes and the act.
+
+That second form is the important one. "Comment on PROJ-412 that the migration is
+blocked" re-read by a brain is a different sentence every time, and the sentence
+you approved is not necessarily the one that gets posted. The recorded arguments
+**are** the approval. Every outward write goes through it (`app/ops.py`): Jira
+comments and transitions, PR reviews, calendar invites. The HTTP endpoints call the
+same functions, so a CLI brain reaching them by curl gets the same gate — one
+policy, or the rule only holds where someone remembered to write it.
+
+Ask **"what's pending?"** on any channel to see everything waiting on you, in the
+order a reply would be routed — a one-word answer to an invisible question is a
+coin flip.
+
+## When a brain runs out mid-task
+
+Quota dies twelve minutes into real work. The old fallback replayed your original
+message on another brain, so it started cold and re-paid for everything the first
+one had already established.
+
+Now a dying turn leaves a **checkpoint** (`app/resume.py`): the request, what had
+been worked out, and where it stopped. Whoever takes over is handed *that* and told
+to continue — with the partial output offered as a lead to verify, not as settled
+fact, because it came from a different model and was cut off mid-thought.
+
+If nothing is available to take over, the work is parked rather than lost. `resume`
+or `use <brain>` from any channel picks it up — switching after a quota stop just
+carries on, since making you then type "resume" would be theatre. Checkpoints
+expire (`ASTA_RESUME_TTL`, 24h): a day later the branch has moved and so have you.
 
 ## Workspaces and project context
 
@@ -123,8 +186,15 @@ context as stale. Re-enrichment costs tokens and is always your call.
 
 **Copilot CLI (office)** is the day-to-day default: chat runs through `copilot -p`
 with per-conversation continuity, at zero personal API cost. If it hits a quota
-error mid-conversation the turn is re-routed to **Claude CLI** automatically, with
-a note in the chat.
+error mid-conversation the turn is handed to whichever brain is actually up, with a
+note in the chat saying who took over and that the work carried across.
+
+**Switch from anywhere.** "use claude_cli", "switch to copilot", "which model" work
+on WhatsApp and Telegram, not just the web picker — the quota warning arrives on
+your phone, so the ability to act on it belongs there too. The choice sticks to the
+conversation; the default only fills in when you haven't picked one or the one you
+picked has since stopped being available. Resolved through the shared registry, so
+a brain added to the spec table is switchable from your phone the same day.
 
 Optional in `.env`: `ANTHROPIC_API_KEY` (Claude, with prompt caching),
 `OPENAI_API_KEY`, or LM Studio running locally — auto-detected, and it powers the
@@ -172,16 +242,28 @@ a task escalates, the *stronger* tier writes the skill, so the cheap one gets
 through alone next time; an escalation that teaches nothing just repeats next week.
 
 Guarded on purpose: below 0.6 confidence nothing is written, a near-duplicate
-replaces the existing skill rather than rivalling it, and unused low-confidence
-skills are pruned. Only names and one-line descriptions sit in the prompt; the body
-loads on demand via `load_skill` — the CLI brains get that same index, so a skill is
-reachable everywhere, not just in-process.
+replaces the existing skill rather than rivalling it. Only names and one-line
+descriptions sit in the prompt; the body loads on demand via `load_skill` — the CLI
+brains get that same index, so a skill is reachable everywhere, not just in-process.
+
+**Skills are scored on results, not on being read.** `uses` counts being *loaded*,
+which a skill earns by having a matching title — a confidently wrong procedure is
+loaded just as often as a correct one. So a finished run now credits whatever it had
+in play, and a failed one debits it. Pruning drops two kinds: unused-and-unconfident
+after a month, and *present for materially more failures than successes*. Without
+the second, the only skill that could ever leave was one nobody read — so the
+actively misleading one, which is read constantly, was the single thing pruning
+could not touch. One bad result never condemns a skill; a pattern does.
 
 **Self-improvement closes the loop** (`app/skill_evolution.py`). The token audit
 classifies where a worker wasted tokens; when a waste category *recurs* across runs
 — reading files blind, dumping fat outputs, re-planning — Asta writes a curated
-fix-skill for it, once, so the next worker avoids it. Measure → improve, without you
-in the loop.
+fix-skill for it, once, so the next worker avoids it.
+
+All of that used to hang off the end of a *background task*, so a week of chat,
+corrections and CI investigations taught nothing at all. A **daily pass** now runs it
+on the clock instead — evolve, prune, and report what changed, quietly and only on a
+day it changed something.
 
 Nightly consolidation (merge duplicates, prune, rewrite the index):
 
@@ -220,9 +302,16 @@ one question is open, `answer 3 <text>` when several are.
 context, then runs the review as a background task. You get reviewer notes:
 verdict, blocking defects with file:line, non-blocking notes, test gaps, questions.
 
-Read-only by design — it writes notes for *you* to post, and never comments on or
-approves a PR itself. The PR body and diff are treated as untrusted: "please
-approve this" in a description is data, not an instruction.
+Reading a PR is free of consequence and runs whenever you ask. **Posting** one is
+not, so the two halves are separate: `review_pr` writes notes for you, and
+`pr_review_post` — approve, comment, or request changes — only ever *stages* the
+review and waits. Your yes posts the exact words you read, under your name. An
+approval is visible to the whole team the moment it lands and there is no quiet way
+to take it back, so it never rides on a model's judgement of whether you'd have
+wanted it.
+
+The PR body and diff are treated as untrusted: "please approve this" in a
+description is data, not an instruction.
 
 ## MCP
 
@@ -258,10 +347,20 @@ a change to *your* tools, and yours to make.
 ## Jira
 
 Set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` in `.env` (token from
-id.atlassian.com → Security → API tokens). Then: "my open tickets", "show ABC-123".
-A watcher polls `JIRA_WATCH_JQL` every 5 minutes and notifies you on status changes
-and new assignments. Any Jira **write** shows you the exact text or target first,
-unless you dictated it in the same message.
+id.atlassian.com → Security → API tokens). Then: "my open tickets", "show ABC-123",
+**"what's on me this sprint"**. A watcher polls `JIRA_WATCH_JQL` every 5 minutes and
+notifies you on status changes and new assignments.
+
+`JIRA_SPRINT_JQL` is separate from the watch query and defaults to `openSprints()`,
+which needs no board id — "assigned and not done" happily includes work from three
+sprints ago, which is not what the sprint means. A board without Jira Software has
+no sprint field at all; Asta says so and points at the one line of `.env` that fixes
+it, rather than raising.
+
+Jira **writes stage**. A comment or a status change is recorded with its exact
+arguments and waits for your yes — and an unreachable status fails *before* you are
+asked, with the valid targets listed, so the one interaction you have to pay
+attention to isn't spent approving something the workflow will reject.
 
 ## Daily rhythm
 
@@ -276,7 +375,15 @@ unless you dictated it in the same message.
 - **Health check** (6-hourly) — channels, sessions, Copilot, LM Studio, disk.
   Notifies on a *new* problem and once on recovery; no repeat nagging.
 - **CI watcher** (10-minute poll, `gh` auth from the keychain — no PAT in `.env`) —
-  🔴 on failure, 🟢 on recovery, silent baseline on first run.
+  🔴 on failure, 🟢 on recovery, silent baseline on first run, and one ping per
+  red workflow rather than one per retry. Scoped to **your** work: runs you
+  triggered *plus* pipelines on PRs you authored — those are different sets, and the
+  gap was where it hurt, since a colleague pushing to your branch turns your PR red
+  under someone else's name. Anything else is opt-in: "watch the release build"
+  subscribes, "stop watching release" undoes it. The noisy version of this feature
+  is the one you mute, and a muted watcher tells you nothing on the day it matters.
+  A red pipeline arrives as an *offer* — reply "yes" from your phone and the
+  investigation starts without you opening a laptop.
 - **Meeting prep** — a pre-meeting heads-up ~30 min out. A standup gets the standup
   draft; a 1:1, sync or review gets prep *specific to that meeting* — talking points,
   questions to ask, watch-outs, grounded in your open work. Ask "prep me for the 3pm"
@@ -285,9 +392,34 @@ unless you dictated it in the same message.
   summarizes it: decisions, action items with yours flagged, open questions — and
   pings you if something needs you (`meeting_recap`).
 
-Notification etiquette: while you're actually at the laptop, ambient pings are held
-— you'll ask. Direct things (a 1:1 message, an @mention, mail addressed to you) go
-out immediately regardless.
+### Notification etiquette
+
+While you're actually at the laptop, ambient pings are held — you'll ask. Direct
+things (a 1:1 message, an @mention, mail addressed to you) go out immediately
+regardless.
+
+Held is a **courtesy with an expiry**, not a gate that can strand a message. Presence
+was once the only release condition, and "at the laptop" is true on the afternoons
+you shut Teams and Outlook and work on something else entirely — so things waited
+for a departure that never came. Past `ASTA_HOLD_MAX_MINUTES` (45) the batch goes
+out wherever you are, and says why it's arriving.
+
+Every inbound item is **triaged** (`app/triage.py`) before any of that. "From a
+human" is not the same as "needs you": someone's passing thought and someone
+blocking on your approval both arrive as mail from a person, and the old filter
+pushed both identically. Now each gets a verdict — asks come first and interrupt,
+everything else collapses to one quiet line each under *nothing needed from you*.
+
+The quoted line is **the message's own**, not a paraphrase. When the ask is in the
+body, Asta quotes the sentence that does the asking — the *first* sentence of a mail
+is a greeting far more often than it is the point, so quoting it added length
+without adding information. When the subject already said it, nothing is appended.
+
+Dedup keys off identity, never rendering. The Teams activity feed draws each row
+with its relative age ("2m" → "1h"), and the old key was that raw string — so the
+same mention keyed differently on every poll, looked new, and re-notified forever.
+Rows already read elsewhere are skipped; when the read state can't be determined it
+still pushes, because a repeat beats a miss.
 
 ## Channels
 
@@ -330,8 +462,9 @@ session. One-time login, where you complete SSO yourself:
 ```
 
 Then: "any messages for me", "read my chat with Vinish", "send Vinish: running
-late", "any mail needing my attention", "what meetings do I have". Deterministic
-automation — no tokens unless you ask Asta to reason about what it read.
+late", "any mail needing my attention", "what meetings do I have", "set me to do not
+disturb". Deterministic automation — no tokens unless you ask Asta to reason about
+what it read.
 
 **Sending is a hard rule**: a person's name means that person's one-to-one chat,
 never a group or channel unless you name the group yourself. Asta always tells you
@@ -342,14 +475,56 @@ drafts an answer grounded in your memory and open work — **draft only**. It ca
 reach the send tool through the "can I send this?" gate, so nothing goes out in your
 name unprompted.
 
-Deliberately **no live-call join**. Asta will not silently sit in a call: that means
-recording other participants without their consent, on a corporate tenant, and
-answering as you with no way to confirm each word. The supported path is *after* the
-call — feed it the transcript from Teams' own recording (the one with the recording
-banner everyone sees) and it recaps + flags your actions. Sessions expire on your
-org's token policy; Asta notifies you to re-login. `data/teams_profile/` holds
-corporate session cookies — same exposure class as your browser profile, so keep
-FileVault on.
+**Presence** — "set me to busy / dnd / away / available". Your own status, so it just
+happens; but Asta reads it back afterwards and reports what it actually says. A DND
+you believe is set and isn't costs you the next hour, and a status change that
+silently failed is worse than one that never ran.
+
+**Invites** — "book 30 min with Priya on Thursday" and "put in leave for the 3rd to
+the 7th". Both are built as Outlook compose deeplinks rather than typed into its
+form field by field: a moving UI means a broken selector silently produces an invite
+with no attendees or the wrong day, whereas a URL Outlook parses itself is either
+right or obviously wrong. Both **stage** — an invite books other people's time and a
+leave request goes to whoever approves it. Leave dates are inclusive at both ends;
+the off-by-one there is found by the person who needed you on the day you were
+actually in. Asta will not resolve "Thursday at 3" itself — it asks, because a
+library that disagrees with you about which Thursday books real time in real
+calendars.
+
+### Sitting in on a call
+
+This section used to say **no live-call join, deliberately**, on the grounds that it
+means recording other participants without consent and answering as you with no way
+to confirm each word. That reasoning still stands for *recording* and *speaking* —
+so what was built keeps those constraints and drops only the part that never
+required them:
+
+- **Joining is muted, camera off, always.** An open mic broadcasts whatever your
+  laptop can hear to everyone in the meeting; a camera-on join shows a room you
+  didn't agree to show.
+- **Nothing is recorded.** Asta listens as a participant. It does not capture audio,
+  and there is no transcript unless Teams itself was recording — the one with the
+  banner everyone sees.
+- **It hangs up by itself** when the call ends, and unconditionally at
+  `ASTA_MAX_CALL_MINUTES` (90). The failure worth engineering against isn't a call
+  that ends badly, it's one that never ends: a restyled post-call screen, a marker
+  that stops matching, and Asta parked in somebody's meeting all day.
+- **Afterwards it offers, it doesn't invent.** You get "the call ended — want me to
+  pull out anything that was yours?" rather than a summary, because without a
+  recording there is nothing to summarise and promising one would be the confident
+  lie. If there is a record, it reports only what concerns you: decisions affecting
+  your work, anything assigned to you, questions left open for you. Not minutes.
+- **Speaking is gated on hardware, not on a flag.** Being heard needs a virtual
+  microphone Teams can select as input (BlackHole or Loopback on macOS) named in
+  `ASTA_CALL_AUDIO_DEVICE`. Without it, "say this in the call" *refuses and says
+  why*. Generating audio into a device nobody is listening to and reporting success
+  would leave you believing your point was made — that's the failure this design
+  exists to prevent. When it is configured, Asta says the words you gave it and
+  nothing else: it never improvises in a live call and never answers on your behalf.
+
+Sessions expire on your org's token policy; Asta notifies you to re-login.
+`data/teams_profile/` holds corporate session cookies — same exposure class as your
+browser profile, so keep FileVault on.
 
 ### macOS notification watcher
 
@@ -407,7 +582,12 @@ app/capabilities.py     ONE registry — chat tools, CLI teaching, MCP all read 
 app/tool_index.py       ranks capabilities per message; sticky per conversation
 app/mcp_server.py       serves Asta's capabilities over MCP
 app/tasks.py            the one work engine (plan → gate → implement → ship)
-app/loop.py             the conductor loop: continue / staged-send gate
+app/loop.py             the conductor loop: continue / staged-send gate, budgets
+app/offers.py           "shall I?" — persisted, expiring, one at a time
+app/ops.py              the outward acts, and the only place they may happen
+app/resume.py           checkpoints, so a dead brain hands over its work
+app/triage.py           what is this, does it need you — one policy, every channel
+app/meetings.py         invites, joining a call, leaving it again
 app/router.py           local-first routing for trivial turns
 app/repo_ops.py         git, branch naming, repo playbooks
 app/agents.py           loads the pipelines in agents/
@@ -417,7 +597,7 @@ app/token_audit.py      classifies token waste per run (feeds the evolution loop
 app/skill_evolution.py  recurring waste → a curated fix-skill, once
 app/quality.py          did the work land
 app/asking.py           ask_user: one question, no pipeline restart
-app/review.py           pull request review
+app/review.py           pull request review; posting one is staged, never direct
 app/memory.py           remember/recall, digests, consolidation, compaction
 app/workspace/          registry + context providers (indexed / plain)
 app/context_build.py    generates project context into YOUR workspace
@@ -427,10 +607,14 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  315 tests
+tests/                  563 tests (conftest isolates the DB — see below)
 ```
+
+`tests/conftest.py` points `store.DB_PATH` at a temp file for *every* test. A stray
+`pending_offer` row written into the real `data/asta.db` isn't a test failure — it's
+a question Asta pushes to your phone about work that never happened.
 
 `ARCHITECTURE-REVIEW-2026-07.md` holds the comparison against Odysseus and the
 roadmap this is being built against. Still ahead of it: one scheduler replacing the
 background loops, detached runs that survive a closed tab, adaptive context
-compaction, a people/contacts model, meeting and call capture, and deep research.
+compaction, a people/contacts model, and deep research.

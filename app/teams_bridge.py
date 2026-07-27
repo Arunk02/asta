@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -261,9 +262,144 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
             await pw.stop()
 
 
-async def read_activity(limit: int = 25) -> list[str]:
-    """Scrape the Teams Activity feed (mentions, replies, calls — muted chats
-    included). Returns one-line strings, newest first. Zero LLM tokens."""
+# --- presence ----------------------------------------------------------------
+#
+# Teams' own words, lowercased. Matched on the menu's ACCESSIBLE TEXT rather than
+# a data-tid, because the me-control's internal ids have changed twice in the life
+# of this file while the visible labels have not. Aliases are what Arun actually
+# says — "dnd", "away", "brb" — mapped to the label the menu shows.
+PRESENCE_STATES = {
+    "available": "Available",
+    "online": "Available",
+    "free": "Available",
+    "busy": "Busy",
+    "in a meeting": "Busy",
+    "dnd": "Do not disturb",
+    "do not disturb": "Do not disturb",
+    "focus": "Do not disturb",
+    "brb": "Be right back",
+    "be right back": "Be right back",
+    "away": "Appear away",
+    "appear away": "Appear away",
+    "offline": "Appear offline",
+    "appear offline": "Appear offline",
+}
+
+# Finds a clickable element by its visible or accessible text. Kept as one JS
+# helper because every presence step is the same shape: open a menu, click the
+# item that says X.
+_CLICK_BY_TEXT = """
+(want) => {
+    const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const target = norm(want);
+    const nodes = document.querySelectorAll(
+        'button, [role="menuitem"], [role="menuitemradio"], [role="option"], a');
+    for (const el of nodes) {
+        const label = norm(el.getAttribute('aria-label')) || norm(el.innerText);
+        if (label === target || label.startsWith(target)) { el.click(); return true; }
+    }
+    return false;
+}
+"""
+
+_ME_CONTROL = ('[data-tid="me-control-avatar"], #idna-me-control, '
+               '[data-tid="me-control"], button[aria-label*="profile" i], '
+               'button[aria-label*="your profile" i]')
+
+
+def presence_label(wanted: str) -> str:
+    """Map what he said to the label Teams shows. Raises on anything unknown.
+
+    Refusing beats guessing here: silently setting "Busy" when he asked for
+    something this doesn't recognise would make him look available to nobody and
+    unavailable to everybody, and he would have no reason to check.
+    """
+    key = re.sub(r"\s+", " ", (wanted or "").strip().lower())
+    if key in PRESENCE_STATES:
+        return PRESENCE_STATES[key]
+    raise RuntimeError(f"'{wanted}' isn't a Teams status — one of: "
+                       + ", ".join(sorted(set(PRESENCE_STATES.values()))))
+
+
+async def read_presence() -> str:
+    """His current Teams status, as Teams reports it ("" when undetermined)."""
+    async with _lock:
+        pw, ctx = await _launch()
+        try:
+            page = await _open_teams(ctx)
+            return await page.evaluate(
+                """() => {
+                    const el = document.querySelector(
+                        '[data-tid="me-control-avatar"], #idna-me-control, [data-tid="me-control"]');
+                    const label = (el && el.getAttribute('aria-label')) || '';
+                    const m = label.match(
+                        /(Available|Busy|Do not disturb|Be right back|Away|Offline)/i);
+                    return m ? m[1] : '';
+                }""")
+        finally:
+            await ctx.close()
+            await pw.stop()
+
+
+async def set_presence(wanted: str) -> str:
+    """Set his Teams status. Returns what it actually reads afterwards.
+
+    Verified, not assumed — the same rule send_message follows. A status change
+    that silently failed is worse than one that never ran: he thinks he is on Do
+    Not Disturb and takes the call he was avoiding.
+    """
+    label = presence_label(wanted)
+    async with _lock:
+        pw, ctx = await _launch()
+        try:
+            page = await _open_teams(ctx)
+            opened = False
+            for sel in _ME_CONTROL.split(", "):
+                try:
+                    await (await page.wait_for_selector(sel, timeout=4000)).click()
+                    opened = True
+                    break
+                except Exception:
+                    continue
+            if not opened:
+                raise RuntimeError("couldn't open the Teams profile menu — UI changed")
+            await asyncio.sleep(1.2)
+            # The menu shows the CURRENT status as the submenu trigger, so the
+            # target label may need one hop through whatever it currently says.
+            if not await page.evaluate(_CLICK_BY_TEXT, label):
+                for trigger in ("Available", "Busy", "Do not disturb", "Be right back",
+                                "Away", "Offline", "Set status"):
+                    if await page.evaluate(_CLICK_BY_TEXT, trigger):
+                        await asyncio.sleep(1.0)
+                        break
+                if not await page.evaluate(_CLICK_BY_TEXT, label):
+                    raise RuntimeError(f"couldn't find '{label}' in the status menu")
+            await asyncio.sleep(2.0)
+            now = await page.evaluate(
+                """() => {
+                    const el = document.querySelector(
+                        '[data-tid="me-control-avatar"], #idna-me-control, [data-tid="me-control"]');
+                    const m = ((el && el.getAttribute('aria-label')) || '').match(
+                        /(Available|Busy|Do not disturb|Be right back|Away|Offline)/i);
+                    return m ? m[1] : '';
+                }""")
+            store.kv_set("teams_session_ok", "1")
+            if now and now.lower() not in label.lower():
+                raise RuntimeError(
+                    f"asked for {label} but Teams still reads {now} — treat as NOT set")
+            return now or label
+        finally:
+            await ctx.close()
+            await pw.stop()
+
+
+async def read_activity_rows(limit: int = 25) -> list[dict]:
+    """Activity feed rows as {text, unread}, newest first. Zero LLM tokens.
+
+    Read state matters because he reads Teams on his phone too: a mention he has
+    already opened must stop being pushed. `unread` is None when the page gave no
+    usable signal — the caller must then suppress nothing.
+    """
     async with _lock:
         pw, ctx = await _launch()
         try:
@@ -272,7 +408,7 @@ async def read_activity(limit: int = 25) -> list[str]:
             await btn.click()
             await page.wait_for_selector('[data-tid="activity-list-container"]', timeout=20000)
             await asyncio.sleep(3)  # virtualized feed renders after the header
-            items = await page.evaluate(
+            rows = await page.evaluate(
                 """() => {
                     const boxes = Array.from(document.querySelectorAll('[role="listbox"]'))
                       .filter(b => !b.closest('[data-tid="ms-searchux-popup"]')
@@ -284,15 +420,36 @@ async def read_activity(limit: int = 25) -> list[str]:
                     const out = [];
                     for (const n of nodes) {
                       const lines = n.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
-                      if (lines.length >= 2) out.push(lines.slice(0, 4).join(' — '));
+                      if (lines.length < 2) continue;
+                      // Teams marks an unread row several ways depending on build:
+                      // the accessible name, an explicit unread test-id, or the
+                      // little dot. Any of them counts; none of them => unknown.
+                      const label = (n.getAttribute('aria-label') || '') + ' ' +
+                                    (n.getAttribute('aria-describedby') || '');
+                      const marked = /unread/i.test(label)
+                        || !!n.querySelector('[data-tid*="unread" i], [class*="unread" i]');
+                      out.push({text: lines.slice(0, 4).join(' — '), unread: marked});
                     }
                     return out;
                 }""")
             store.kv_set("teams_session_ok", "1")
-            return items[:limit]
+            rows = rows[:limit]
+            # If NOTHING is marked unread the selectors probably just missed on this
+            # build — that is unknown, not "he has read everything". Saying unknown
+            # keeps the old behaviour (push it) instead of going silent on him.
+            if rows and not any(r.get("unread") for r in rows):
+                for r in rows:
+                    r["unread"] = None
+            return rows
         finally:
             await ctx.close()
             await pw.stop()
+
+
+async def read_activity(limit: int = 25) -> list[str]:
+    """Scrape the Teams Activity feed (mentions, replies, calls — muted chats
+    included). Returns one-line strings, newest first. Zero LLM tokens."""
+    return [r["text"] for r in await read_activity_rows(limit)]
 
 
 # Background poll is the SAFETY NET (so a mention can reach you on WhatsApp when
@@ -308,7 +465,17 @@ _DIRECT_MARKERS = ("mentioned you", "missed call", "in chat with you", "replied 
 
 
 def _activity_key(item: str) -> str:
-    return item[:150]
+    """Dedup identity for a feed row.
+
+    Was `item[:150]` — the raw rendering, which carries the item's relative age
+    ("2m", "1h", "Yesterday"). That drifts on its own, so the same mention keyed
+    differently on every poll, looked new each time, and was pushed again for as
+    long as it sat in the feed. Keying on the time-stripped text ends that.
+    """
+    from . import triage
+    return triage.stable_key(item)
+
+
 
 
 def _activity_wanted(item: str) -> bool:
@@ -319,6 +486,25 @@ def _activity_wanted(item: str) -> bool:
         return True
     from . import msnotify
     return any(k in t for k in msnotify.keywords())
+
+
+async def _push_activity(notify, wanted: list[str]) -> None:
+    """One Teams message: real asks first, everything else a quiet line each.
+
+    Being @mentioned is not the same as being asked for something, so the split is
+    now on whether anyone actually wants a move from him — not merely on whether
+    his name appeared.
+    """
+    from . import triage
+    verdicts = []
+    for it in wanted[:12]:
+        who, _, rest = it.partition(" — ")
+        addressed = any(m in it.lower() for m in _DIRECT_MARKERS)
+        v = triage.classify(who, rest or it, addressed=addressed)
+        verdicts.append(await triage.refine(v, who, rest or it))
+    text, needs = triage.summarize(verdicts, "💬 Teams")
+    if text:
+        await notify.notify(text, "teams", urgency="direct" if needs else "ambient")
 
 
 async def activity_watch_loop() -> None:
@@ -334,11 +520,12 @@ async def activity_watch_loop() -> None:
         if not (enabled() and logged_in_once() and store.kv_get("teams_session_ok") != "0"):
             continue
         try:
-            items = await read_activity()
+            rows = await read_activity_rows()
         except Exception:
             continue  # transient (session probe will flag real expiry)
-        if not items:
+        if not rows:
             continue
+        items = [r["text"] for r in rows]
         raw = store.kv_get(ACTIVITY_SEEN_KEY)
         seen: set[str] | None = set(_json.loads(raw)) if raw else None
         fresh = [] if seen is None else [it for it in items if _activity_key(it) not in seen]
@@ -346,21 +533,14 @@ async def activity_watch_loop() -> None:
         if seen is not None:
             keys = keys + [k for k in seen if k not in keys][:300 - len(keys)]
         store.kv_set(ACTIVITY_SEEN_KEY, _json.dumps(keys[:300]))
+        # He reads Teams on his phone too — anything he has already opened is
+        # settled, and pushing it again is exactly the noise he complained about.
+        opened = {_activity_key(r["text"]) for r in rows if r.get("unread") is False}
+        fresh = [it for it in fresh if _activity_key(it) not in opened]
         wanted = [it for it in fresh if _activity_wanted(it)]
         if not wanted:
             continue
-        # Split by who it's aimed at: personal pings interrupt him immediately,
-        # channel-wide traffic waits until he's away from the laptop.
-        direct = [w for w in wanted if any(m in w.lower() for m in _DIRECT_MARKERS)]
-        ambient = [w for w in wanted if w not in direct]
-        if direct:
-            await notify.notify(
-                "💬 Teams — someone needs you:\n" + "\n".join("• " + w[:250] for w in direct[:6]),
-                "teams", urgency="direct")
-        if ambient:
-            await notify.notify(
-                "💬 Teams activity:\n" + "\n".join("• " + w[:250] for w in ambient[:6]),
-                "teams", urgency="ambient")
+        await _push_activity(notify, wanted)
 
 
 async def check_session() -> bool:

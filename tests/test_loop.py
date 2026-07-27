@@ -41,11 +41,11 @@ def test_enabled_defaults_on_and_respects_off(monkeypatch):
 
 
 def test_max_steps_parses_and_falls_back(monkeypatch):
-    assert loop.max_steps() == 4
+    assert loop.max_steps() == 2
     monkeypatch.setenv("ASTA_LOOP_MAX_STEPS", "7")
     assert loop.max_steps() == 7
     monkeypatch.setenv("ASTA_LOOP_MAX_STEPS", "garbage")
-    assert loop.max_steps() == 4          # never crash the loop on a bad value
+    assert loop.max_steps() == 2          # never crash the loop on a bad value
 
 
 def test_continue_intent_round_trips_and_take_clears():
@@ -275,3 +275,94 @@ def test_thinking_is_off_by_default_and_switchable(monkeypatch):
     monkeypatch.setenv("ASTA_THINKING", "junk")
     assert agent.thinking_budget() == 0            # a bad value never crashes a turn
     assert agent.model_settings("nonclaude") is None
+
+
+# --- fix 3: latency is bounded by the CLOCK, not by a step count -------------
+# A step count cannot bound a wait: each step is a whole CLI turn of unknown
+# length, so "at most 4 steps" quietly meant "at most forty minutes". These pin
+# the budget he actually experiences.
+
+def test_step_ceiling_dropped_to_two(monkeypatch):
+    monkeypatch.delenv("ASTA_LOOP_MAX_STEPS", raising=False)
+    assert loop.max_steps() == 2
+    monkeypatch.setenv("ASTA_LOOP_MAX_STEPS", "junk")
+    assert loop.max_steps() == 2                   # a bad value never unbounds it
+
+
+def test_deadline_defaults_to_ten_minutes_and_is_tunable(monkeypatch):
+    monkeypatch.delenv("ASTA_LOOP_DEADLINE", raising=False)
+    assert loop.deadline_seconds() == 600
+    monkeypatch.setenv("ASTA_LOOP_DEADLINE", "300")
+    assert loop.deadline_seconds() == 300
+    monkeypatch.setenv("ASTA_LOOP_DEADLINE", "junk")
+    assert loop.deadline_seconds() == 600
+
+
+def test_budget_runs_out_on_time_even_with_steps_to_spare(monkeypatch):
+    """The regression that made replies take 20 minutes: plenty of steps left,
+    but the clock had already eaten his afternoon."""
+    monkeypatch.setenv("ASTA_LOOP_MAX_STEPS", "9")
+    monkeypatch.setenv("ASTA_LOOP_DEADLINE", "600")
+    loop.reset_steps("c1")
+    assert loop.budget_left("c1")                  # fresh message: go
+
+    monkeypatch.setattr(loop.time, "monotonic",
+                        lambda: loop._started["c1"] + 601)
+    assert not loop.time_left("c1")
+    assert not loop.budget_left("c1")              # time gone, steps irrelevant
+
+
+def test_budget_runs_out_on_steps_even_with_time_to_spare(monkeypatch):
+    monkeypatch.setenv("ASTA_LOOP_MAX_STEPS", "2")
+    monkeypatch.setenv("ASTA_LOOP_DEADLINE", "600")
+    loop.reset_steps("c2")
+    loop.bump_steps("c2")
+    assert loop.budget_left("c2")
+    loop.bump_steps("c2")
+    assert loop.time_left("c2")                    # clock is fine...
+    assert not loop.budget_left("c2")              # ...but the steps are spent
+
+
+def test_a_new_message_resets_the_clock(monkeypatch):
+    """Each thing he says buys a fresh budget — the deadline is per message,
+    not a lifetime cap on the conversation."""
+    monkeypatch.setenv("ASTA_LOOP_DEADLINE", "600")
+    loop.reset_steps("c3")
+    monkeypatch.setattr(loop.time, "monotonic", lambda: loop._started["c3"] + 601)
+    assert not loop.budget_left("c3")
+    monkeypatch.undo()
+    monkeypatch.setenv("ASTA_LOOP_DEADLINE", "600")
+    loop.reset_steps("c3")                         # he speaks again
+    assert loop.budget_left("c3")
+
+
+def test_deadline_zero_disables_the_clock(monkeypatch):
+    monkeypatch.setenv("ASTA_LOOP_DEADLINE", "0")
+    loop.reset_steps("c4")
+    monkeypatch.setattr(loop.time, "monotonic", lambda: loop._started["c4"] + 99999)
+    assert loop.time_left("c4")                    # opt out explicitly, never by accident
+
+
+def test_clear_forgets_the_clock_too():
+    loop.reset_steps("c5")
+    assert "c5" in loop._started
+    loop.clear("c5")
+    assert "c5" not in loop._started
+
+
+# --- one ceiling, every brain -----------------------------------------------
+
+def test_turn_timeout_is_five_minutes_and_shared_by_every_cli_brain(monkeypatch):
+    """The 20-minute bug was `TURN_TIMEOUT = 10 * 60` copy-pasted per brain, so a
+    fix to one left the other slow. One function, every brain calls it."""
+    from app import copilot_cli, claude_cli
+    monkeypatch.delenv("ASTA_TURN_TIMEOUT", raising=False)
+    assert copilot_cli.turn_timeout() == 300
+    assert claude_cli.turn_timeout() == copilot_cli.turn_timeout()
+
+    monkeypatch.setenv("ASTA_TURN_TIMEOUT", "120")
+    assert copilot_cli.turn_timeout() == 120
+    assert claude_cli.turn_timeout() == 120        # moves together, always
+
+    monkeypatch.setenv("ASTA_TURN_TIMEOUT", "junk")
+    assert copilot_cli.turn_timeout() == 300

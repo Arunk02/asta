@@ -10,8 +10,15 @@ the workspace resolver already maps a question to the exact files. All that was
 missing was putting them in one place.
 
 Shape: gather the facts in Python (deterministic, cheap), then hand a
-self-contained brief to the normal analysis pipeline. Read-only throughout —
-this produces review notes for Arun to post, and never comments on a PR itself.
+self-contained brief to the normal analysis pipeline.
+
+Reading a PR is free of consequence and runs whenever asked. POSTING one is not:
+an approval carries Arun's name on someone else's change, and is visible to the
+whole team the moment it lands. So the two halves are deliberately separated —
+`brief` produces notes, `post_review` performs the outward act, and nothing calls
+`post_review` directly off a model's say-so. It is reached through a staged offer
+(see offers.staged_write), which means what he approved is the exact API call,
+not an instruction to go and make one.
 """
 
 from __future__ import annotations
@@ -148,3 +155,43 @@ async def brief(pr: str, workspace: str, repo: str = "") -> tuple[str, dict]:
         diff=untrusted.wrap(_trim_diff(meta["diff"]), f"diff of PR #{meta['number']}"),
     )
     return text, meta
+
+
+# --- posting it (outward — only ever reached through an approved offer) -------
+
+#: verb -> gh flag. A verb outside this table is refused rather than passed
+#: through, so a malformed op can never turn a comment into an approval.
+ACTIONS = {
+    "approve": "--approve",
+    "comment": "--comment",
+    "request_changes": "--request-changes",
+}
+
+
+async def post_review(pr: str, workspace: str, repo: str = "",
+                      action: str = "comment", body: str = "") -> str:
+    """Post a review on a PR. Returns a one-line confirmation.
+
+    `gh` rejects an empty body for comment and request-changes, and the error it
+    gives is not obvious, so that is checked here where the message can say what
+    to do about it. An approval with no body is fine and common.
+    """
+    flag = ACTIONS.get(action)
+    if flag is None:
+        raise RuntimeError(f"unknown review action '{action}' — one of: "
+                           + ", ".join(sorted(ACTIONS)))
+    body = (body or "").strip()
+    if not body and action != "approve":
+        raise RuntimeError(f"a '{action}' review needs a body — write the comment first")
+    cwd = _repo_dir(workspace, repo)
+    if not (cwd / ".git").is_dir():
+        raise RuntimeError(f"{cwd} is not a git repository — name the repo as well.")
+    args = ["pr", "review", pr, flag]
+    if body:
+        args += ["--body", body]
+    rc, out = await _gh(cwd, *args)
+    if rc != 0:
+        raise RuntimeError(f"gh pr review failed: {out[:300]}")
+    verb = {"approve": "Approved", "comment": "Commented on",
+            "request_changes": "Requested changes on"}[action]
+    return f"{verb} PR #{pr.lstrip('#')}"

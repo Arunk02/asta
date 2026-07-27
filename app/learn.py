@@ -106,12 +106,58 @@ def _save_usage(data: dict) -> None:
 
 
 def record_use(name: str) -> None:
-    """Called when a skill is actually loaded — the only evidence it earns its place."""
+    """Called when a skill is actually loaded."""
     data = _usage()
     entry = data.setdefault(name, {"uses": 0, "confidence": 1.0, "created": time.time()})
     entry["uses"] = int(entry.get("uses", 0)) + 1
     entry["last_used"] = time.time()
     _save_usage(data)
+
+
+#: A skill loaded within this window of a run finishing is treated as having been
+#: in play for it. Wide enough for a long task, narrow enough that yesterday's
+#: reading does not get the credit for today's result.
+CREDIT_WINDOW = 3 * 3600
+
+
+def credit(status: str, since: float, window: float = CREDIT_WINDOW) -> list[str]:
+    """Record whether the skills in play actually helped. Returns the ones judged.
+
+    `uses` alone was never evidence of worth — it counts being LOADED, which a
+    skill earns by having a matching title, not by being right. A wrong procedure
+    followed confidently is loaded just as often as a correct one, and scored
+    identically, so the archive could only ever grow.
+
+    This is the missing signal: a run that finished credits what it read, a run
+    that failed debits it. Nothing is deleted on one bad result — a skill can be
+    loaded for a task that was doomed for unrelated reasons — but a procedure that
+    keeps being present when things go wrong stops being protected from pruning.
+    """
+    good = status in ("done", "sent", "shipped")
+    cutoff = max(0.0, since - 60)      # a skill read just before the clock started counts
+    data, judged = _usage(), []
+    for name, entry in data.items():
+        last = float(entry.get("last_used") or 0)
+        if last < cutoff or time.time() - last > window:
+            continue
+        key = "helped" if good else "missed"
+        entry[key] = int(entry.get(key, 0)) + 1
+        judged.append(name)
+    if judged:
+        _save_usage(data)
+    return judged
+
+
+def scoreboard() -> list[dict]:
+    """Every skill with its evidence, worst first — what to read before trusting one."""
+    rows = []
+    for name, e in _usage().items():
+        helped, missed = int(e.get("helped", 0)), int(e.get("missed", 0))
+        rows.append({"name": name, "uses": int(e.get("uses", 0)),
+                     "helped": helped, "missed": missed,
+                     "confidence": float(e.get("confidence", 1.0)),
+                     "net": helped - missed})
+    return sorted(rows, key=lambda r: (r["net"], -r["missed"]))
 
 
 def stats() -> dict:
@@ -240,17 +286,32 @@ async def extract(title: str, transcript: str, *, outcome: str = "done",
         return None
 
 
+#: Loaded this many more times on runs that failed than on runs that worked, and
+#: the skill is actively misleading rather than merely unused.
+HARMFUL_NET = -2
+
+
 def prune() -> list[str]:
-    """Drop skills that never earned their place. Returns what was removed."""
+    """Drop skills that never earned their place, or that earned the wrong one.
+
+    Two grounds, and the second is the one that makes this a learning loop rather
+    than a garbage collector: unused-and-unconfident after a month, OR present for
+    materially more failures than successes. Without the second, the only skill
+    that could ever leave was one nobody read — so a confidently wrong procedure,
+    which is read constantly, was the single thing pruning could not touch.
+    """
     usage, removed = _usage(), []
     cutoff = time.time() - PRUNE_AFTER_DAYS * 86400
     for name, entry in list(usage.items()):
-        if entry.get("uses", 0) > 0:
-            continue
-        if float(entry.get("confidence", 1.0)) >= PRUNE_CONFIDENCE:
-            continue
-        if float(entry.get("created", time.time())) > cutoff:
-            continue
+        helped, missed = int(entry.get("helped", 0)), int(entry.get("missed", 0))
+        harmful = (helped - missed) <= HARMFUL_NET
+        if not harmful:
+            if entry.get("uses", 0) > 0:
+                continue
+            if float(entry.get("confidence", 1.0)) >= PRUNE_CONFIDENCE:
+                continue
+            if float(entry.get("created", time.time())) > cutoff:
+                continue
         path = skills.SKILLS_DIR / f"{name}.md"
         if path.exists():
             path.unlink()
@@ -259,3 +320,37 @@ def prune() -> list[str]:
     if removed:
         _save_usage(usage)
     return removed
+
+
+async def daily_pass() -> str:
+    """The once-a-day learning pass. Returns one line, or "" when nothing changed.
+
+    It exists because every learning path was previously hung off the end of a
+    BACKGROUND TASK — so a week of chat, corrections, and CI investigations taught
+    nothing at all, and the archive only moved on days he happened to delegate
+    something. Waste patterns recur across everything, not just delegated work, so
+    this runs on the whole recent history regardless of what produced it.
+
+    Never raises: this is housekeeping, and housekeeping that can break the
+    morning brief is worse than housekeeping that quietly skips a day.
+    """
+    from . import skill_evolution
+    parts = []
+    try:
+        evolved = skill_evolution.evolve()
+        if evolved:
+            parts.append("learned " + ", ".join(e["skill"] for e in evolved))
+    except Exception:
+        pass
+    try:
+        dropped = prune()
+        if dropped:
+            parts.append(f"dropped {len(dropped)} that weren't earning it "
+                         f"({', '.join(dropped[:3])})")
+    except Exception:
+        pass
+    if not parts:
+        return ""
+    line = "🧬 " + "; ".join(parts) + "."
+    store.record_outcome("learning", "daily_pass", detail=line[:200])
+    return line

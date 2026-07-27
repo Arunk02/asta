@@ -79,6 +79,12 @@ _TABLE: tuple[Capability, ...] = (
                note="Call as your LAST action when the task isn't done and you know the "
                     "next step — Asta runs it without waiting for Arun. Not for sending "
                     "anything outward; stop instead when the work is actually finished."),
+    Capability("propose_next", "loop",
+               http='POST /api/propose-next {"next_step":"…","why":"…"}',
+               note="How ANY flow continues past one turn: name the next move concretely "
+                    "and stop. His yes runs it, from any channel, hours later if need be. "
+                    "Use it instead of asking 'shall I?' in prose — prose is lost when the "
+                    "turn ends. Not for anything leaving the chat: that is prepare_to_send."),
     Capability("prepare_to_send", "loop",
                http='POST /api/loop/prepare-send {"what":"…","to":"…","channel":"teams|email|jira|pr|chat"}',
                note="The ONLY approved way to send on Arun's behalf: it STAGES the draft "
@@ -102,15 +108,20 @@ _TABLE: tuple[Capability, ...] = (
                http="GET /api/jira/search?jql=assignee = currentUser() AND "
                     "statusCategory != Done ORDER BY updated DESC"),
     Capability("jira_issue", "jira", http="GET /api/jira/issue/{key}"),
+    Capability("jira_sprint", "jira", http="GET /api/jira/sprint",
+               note="The CURRENT sprint, not everything assigned — use this for 'what's on "
+                    "me this sprint', standup, and before offering to pick work up."),
     Capability("jira_comment", "jira", http='POST /api/jira/issue/{key}/comment {"text":"…"}',
                write=True,
-               note="WRITE: show Arun the exact text and get his confirmation first, "
-                    "unless he dictated it in the same message."),
+               note="STAGES, does not post. Write the EXACT finished comment — Arun's yes "
+                    "posts those words unchanged, so it must read as the comment itself, "
+                    "not a description of one. Tell him it's waiting."),
     Capability("jira_transition", "jira",
                http='GET /api/jira/issue/{key}/transitions to list, then '
                     'POST /api/jira/issue/{key}/transition {"status":"<name>"}',
                write=True,
-               note="WRITE: confirm the target status with Arun first."),
+               note="STAGES, does not move it. An unreachable status fails immediately "
+                    "with the valid targets — offer those to Arun rather than guessing."),
     # --- teams / outlook (browser automation, no endpoint) -------------------
     Capability("teams_activity", "teams",
                shell="python -m app.teams_bridge activity [limit]",
@@ -131,12 +142,43 @@ _TABLE: tuple[Capability, ...] = (
                note="DRAFT only — read + draft an answer to a person's Teams question. To "
                     "actually reply, stage it with prepare_to_send (channel teams); never "
                     "sends in Arun's name unprompted."),
+    Capability("teams_status", "teams", http="GET /api/teams/presence to read, "
+                                            'POST /api/teams/presence {"status":"dnd"} to set',
+               write=True,
+               note="His OWN status, so just do it when he asks — but report what it reads "
+                    "back afterwards. A DND he thinks is set and isn't costs him the hour."),
+    Capability("join_meeting", "teams",
+               http='POST /api/meetings/join {"join_url":"…","title":""}',
+               write=True,
+               note="Joins MUTED with the camera off, always. Joining is listening only; "
+                    "say so, and never imply anything was said on his behalf. It hangs up "
+                    "by itself when the call ends — reply to Arun immediately, don't wait."),
+    Capability("leave_meeting", "teams", http="POST /api/meetings/leave", write=True,
+               note="Hangs up. Safe to call when not in a call — it says so."),
+    Capability("say_in_call", "teams", http='POST /api/meetings/say {"text":"…"}',
+               write=True,
+               note="ONLY the words Arun gave you, never improvised and never an answer on "
+                    "his behalf. Usually unavailable (needs a virtual mic); when it is, it "
+                    "tells you nothing was said rather than pretending."),
     Capability("outlook_mail", "outlook",
                shell="python -m app.outlook mail [limit]  ·  python -m app.outlook attention"),
     Capability("outlook_meetings", "outlook", shell="python -m app.outlook meetings"),
     Capability("meeting_prep", "outlook", http="GET /api/meeting-prep?title={title}",
                note="Drafts prep for a meeting/1:1 (talking points, questions, watch-outs). "
                     "Draft only — stage with prepare_to_send to actually send it to anyone."),
+    Capability("create_meeting", "outlook",
+               http='POST /api/meetings {"subject":"…","when":"YYYY-MM-DD HH:MM",'
+                    '"minutes":30,"attendees":"a@b.com,c@d.com","agenda":"…"}',
+               write=True,
+               note="STAGES the invite; his yes sends it. Resolve 'Thursday at 3' to a real "
+                    "date YOURSELF and ask if unsure — a wrong day books other people's time."),
+    Capability("request_leave", "outlook",
+               http='POST /api/leave {"start_date":"YYYY-MM-DD","end_date":"",'
+                    '"reason":"…","to":"manager@company.com"}',
+               write=True,
+               note="STAGES an all-day leave invite. Both dates INCLUSIVE — one day off is "
+                    "the same date twice or no end date. Goes to whoever approves it, so it "
+                    "never sends on your judgement."),
     Capability("meeting_recap", "outlook",
                http='POST /api/meeting-recap {"transcript":"…","title":"…"}',
                note="Summarizes a call/meeting transcript (from Teams' own recording/recap) "
@@ -151,8 +193,15 @@ _TABLE: tuple[Capability, ...] = (
                     'Optional "executor":"claude"|"copilot" — set only when Arun names one. '
                     "Reply to Arun with the task id immediately; do NOT wait for it."),
     Capability("review_pr", "tasks", http='POST /api/review {"pr":"123","workspace":"…","repo":""}',
-               note="Produces notes for ARUN to post. Never comment on or approve a PR "
-                    "yourself — the review is his to give."),
+               note="Produces notes for ARUN. Read-only — to actually post them, use "
+                    "pr_review_post, and only when he asked you to."),
+    Capability("pr_review_post", "tasks",
+               http='POST /api/pr-review {"pr":"123","action":"approve|comment|'
+                    'request_changes","body":"…","workspace":"…","repo":""}',
+               write=True,
+               note="STAGES a review under Arun's name; his yes posts it verbatim. Only "
+                    "when he explicitly says to post/approve — an approval is visible to "
+                    "the whole team and cannot be taken back quietly."),
     Capability("list_background_tasks", "tasks", http="GET /api/tasks"),
     Capability("task_result", "tasks", http="GET /api/tasks/{id}"),
     Capability("approve_task", "tasks", http="POST /api/tasks/{id}/approve", write=True,
@@ -161,7 +210,10 @@ _TABLE: tuple[Capability, ...] = (
     Capability("ship_task", "tasks", http="POST /api/tasks/{id}/ship", write=True,
                note="Pushes the branch and opens the PR. The pipeline NEVER does this "
                     "itself — only when Arun has seen the diff and said ship."),
-    Capability("reject_task", "tasks", http="POST /api/tasks/{id}/reject", write=True),
+    Capability("reject_task", "tasks", http="POST /api/tasks/{id}/reject", write=True,
+               note="Throws the work away — the branch and its diff go with it. Only when "
+                    "Arun says to drop it; if he is merely unhappy with the result, reply "
+                    "with the feedback instead so the pipeline re-plans."),
     # --- rhythm / ops --------------------------------------------------------
     Capability("set_reminder", "reminders",
                http='POST /api/reminders {"text":"…","due":"<LOCAL ISO>","repeat":""}',
@@ -173,6 +225,9 @@ _TABLE: tuple[Capability, ...] = (
     Capability("standup_draft", "rhythm", http="POST /api/standup/now"),
     Capability("health_check", "ops", http="GET /api/health"),
     Capability("ci_status", "ops", http="GET /api/ci"),
+    Capability("watch_ci", "ops", http='POST /api/ci/watch {"what":"release","repo":""}',
+               note="The watcher is quiet by design — only runs Arun triggered and PRs he "
+                    "authored. Use this when he names a build he wants followed anyway."),
     Capability("trace_report", "ops", http="GET /api/traces"),
     Capability("token_audit", "ops", http="GET /api/token-audit?hours={hours}"),
     Capability("quality_report", "ops", http="GET /api/quality",

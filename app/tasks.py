@@ -598,6 +598,13 @@ def _learn_from(task_id: int, title: str, result: str, status: str = "done") -> 
     # "did the work land" is the measurement, and it needs the boring runs too.
     store.record_outcome("task", status, subject=str(task_id),
                          detail=f"rounds={_rounds(task_id)} escalated={_escalated(task_id)}")
+    # Whatever skills this run had loaded now have a result attached to them.
+    # Being read is not evidence a procedure is right; being read on runs that
+    # keep working is the closest thing to it available here.
+    row = store.get_task(task_id) or {}
+    started = float(row.get("started_at") or row.get("created_at") or 0)
+    if started:
+        learn.credit(status, since=started)
     if not learn.should_extract(_rounds(task_id), _escalated(task_id), status):
         return
     asyncio.create_task(learn.extract(title, result, outcome=status,

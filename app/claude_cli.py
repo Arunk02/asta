@@ -27,8 +27,14 @@ from . import store
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Same ceiling as the Copilot chat path — a turn that runs past this is wedged.
-TURN_TIMEOUT = 10 * 60
+# Same ceiling as the other CLI chat path — a turn past this is wedged, not slow.
+TURN_TIMEOUT = 10 * 60          # legacy constant; live callers use turn_timeout()
+
+
+def turn_timeout() -> int:
+    """Shared ceiling for one CLI turn (ASTA_TURN_TIMEOUT, default 5 min)."""
+    from . import copilot_cli
+    return copilot_cli.turn_timeout()
 
 
 def available() -> bool:
@@ -280,13 +286,14 @@ async def run_turn(conv: dict, user_text: str,
             with contextlib.suppress(Exception):
                 on_usage(usage)
 
+    limit = turn_timeout()
     try:
-        await asyncio.wait_for(_pump(), timeout=TURN_TIMEOUT)
+        await asyncio.wait_for(_pump(), timeout=limit)
         rc = await proc.wait()
     except asyncio.TimeoutError:
         proc.kill()
         _report()
-        raise RuntimeError(f"Claude CLI turn timed out after {TURN_TIMEOUT}s")
+        raise RuntimeError(f"CLI turn timed out after {limit}s")
     except asyncio.CancelledError:
         # Arun redirected mid-answer. Killing the process is the point: it stops
         # the wrong line of work from consuming any more of the session quota.

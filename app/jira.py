@@ -64,6 +64,37 @@ async def search(jql: str, limit: int = 15) -> list[dict]:
         return [_fmt_issue(i) for i in r.json().get("issues", [])]
 
 
+def sprint_jql() -> str:
+    """What "the current sprint" means here.
+
+    JQL rather than the Agile REST API on purpose: `openSprints()` needs no board
+    id, so this works on a fresh install with nothing configured beyond the
+    credentials. Instances without Jira Software have no sprint field at all —
+    `current_sprint` turns that error into a sentence instead of a stack trace.
+    """
+    return os.environ.get(
+        "JIRA_SPRINT_JQL",
+        "sprint in openSprints() AND assignee = currentUser() ORDER BY status ASC")
+
+
+async def current_sprint(limit: int = 30) -> list[dict]:
+    """Everything assigned to him in the open sprint — the board, not the backlog.
+
+    Distinct from `JIRA_WATCH_JQL`, which is "assigned and not done" and happily
+    includes work from three sprints ago. Standup and "what's on me this sprint"
+    want the committed set.
+    """
+    try:
+        return await search(sprint_jql(), limit=limit)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 400:
+            raise RuntimeError(
+                "This Jira project has no sprints (or the JQL is not valid here) — "
+                "set JIRA_SPRINT_JQL in .env to whatever 'current work' means for "
+                "your board.") from exc
+        raise
+
+
 def _adf_to_text(node) -> str:
     """Flatten Atlassian Document Format to plain text."""
     if node is None:

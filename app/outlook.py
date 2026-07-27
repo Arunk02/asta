@@ -354,6 +354,39 @@ async def todays_meetings(structured: bool = False):
     return events if structured else [e["line"] for e in events]
 
 
+def mail_key(m: dict) -> str:
+    """Dedup identity for a mail — deliberately NOT the rendered row.
+
+    Sender + subject with the volatile parts stripped, so the same mail keys the
+    same however Outlook chooses to render its age this time round.
+    """
+    from . import triage
+    return triage.stable_key(f"{m.get('sender', '')} {m.get('subject', '')}")
+
+
+async def _push_mail(notify, fresh: list[dict]) -> None:
+    """One message, asks first, FYI collapsed to a quiet line each.
+
+    Every mail used to go out identically with a 180-character preview attached,
+    so a colleague's passing thought interrupted exactly like a blocker. Now each
+    is judged: only real asks are marked as needing him, and the rest are simply
+    stated once so he has the context without being asked for anything.
+    """
+    from . import triage
+    verdicts = []
+    for m in fresh[:12]:
+        v = triage.classify(m.get("sender", ""), m.get("subject", ""),
+                            m.get("preview", ""))
+        verdicts.append(await triage.refine(v, m.get("sender", ""),
+                                            m.get("subject", ""), m.get("preview", "")))
+    text, needs = triage.summarize(verdicts, "📧 Outlook")
+    if not text:
+        return
+    # Only a genuine ask earns an immediate interrupt. Pure FYI rides the ambient
+    # path, so it waits for a natural moment instead of buzzing his pocket.
+    await notify.notify(text, "outlook", urgency="direct" if needs else "ambient")
+
+
 async def watch_loop() -> None:
     """Poll the inbox and push NEW mail that looks like it needs Arun."""
     import os
@@ -371,19 +404,14 @@ async def watch_loop() -> None:
         except Exception:
             continue
         wanted = needs_attention(mails)
-        keys = [f"{m['sender']}|{m['subject']}" for m in wanted]
+        keys = [mail_key(m) for m in wanted]
         raw = store.kv_get(SEEN_KEY)
         seen: set[str] | None = set(_json.loads(raw)) if raw else None
         fresh = [] if seen is None else [m for m, k in zip(wanted, keys) if k not in seen]
         allk = keys + [k for k in (seen or set()) if k not in keys]
         store.kv_set(SEEN_KEY, _json.dumps(allk[:300]))
         if fresh:
-            # Mail from a real person is addressed to him — goes out immediately
-            # (the bulk/alert traffic never reaches here; needs_attention drops it).
-            await notify.notify(
-                "📧 Outlook — needs you:\n"
-                + "\n".join("• " + fmt_mail(m, context=True) for m in fresh[:6]),
-                "outlook", urgency="direct")
+            await _push_mail(notify, fresh)
 
         # Alerts are held, not sent: only the ones still unrecovered after the
         # window survive. Self-healing IOM noise never reaches the phone at all.

@@ -549,24 +549,232 @@ async def jira_issue(key: str) -> str:
         i["description"] or "(no description)", f"Jira {i['key']}")
 
 
-async def jira_comment(key: str, text: str) -> str:
-    """Post a comment on a Jira issue. Confirm the wording with Arun first unless he
-    dictated the exact text."""
+async def jira_sprint() -> str:
+    """What Arun has committed to in the CURRENT sprint — the board, not the backlog.
+
+    Different from jira_my_issues, which is everything assigned and not done and happily
+    includes work from three sprints ago. Use for 'what's on me this sprint', standup, and
+    before offering to pick something up."""
     from . import jira
-    r = await jira.add_comment(key, text)
-    return f"Comment posted on {r['key']} (id {r['comment_id']})."
+    try:
+        issues = await jira.current_sprint()
+    except RuntimeError as exc:
+        return str(exc)
+    if not issues:
+        return "Nothing assigned to you in the open sprint."
+    return "\n".join(f"{i['key']} [{i['status']}] {i['summary']}" for i in issues)
+
+
+async def jira_comment(key: str, text: str) -> str:
+    """Propose a comment on a Jira issue. Write the exact wording you mean to post.
+
+    This does NOT post. It stages the comment and asks Arun; his yes posts the exact text
+    you wrote here, unchanged. So write it as the finished comment, not as a description of
+    one, and tell him in your reply that it is waiting for his go-ahead."""
+    from . import jira, offers
+    if not jira.configured():
+        return "Jira is not configured — set JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN in .env"
+    offers.staged_write(
+        "jira_comment", {"key": key, "text": text},
+        f"💬 Comment on {key}", text.strip()[:900],
+        f"Post this comment on {key}?", kind="jira_write")
+    return f"Staged the comment on {key} — waiting for Arun's yes. Nothing posted yet."
 
 
 async def jira_transition(key: str, to_status: str) -> str:
-    """Move a Jira issue to another status by name (e.g. 'In Progress', 'Ready for Retest').
-    Confirm with Arun first unless he stated the exact target status. If the status isn't
-    reachable, the error lists the valid targets — offer those to Arun."""
-    from . import jira
+    """Propose moving a Jira issue to another status (e.g. 'In Progress', 'Ready for Retest').
+
+    This does NOT move it. The valid targets are checked now, so an impossible status fails
+    here rather than after he has approved it; then the move is staged for his yes."""
+    from . import jira, offers
+    if not jira.configured():
+        return "Jira is not configured — set JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN in .env"
     try:
-        r = await jira.transition_issue(key, to_status)
-    except RuntimeError as e:
-        return str(e)
-    return f"{r['key']} moved to {r['status']}."
+        valid = await jira.list_transitions(key)
+    except Exception as exc:
+        return f"Could not read {key}'s workflow: {exc}"
+    if not any(v.lower() == to_status.strip().lower() for v in valid):
+        return (f"{key} cannot move to '{to_status}' — valid targets: "
+                f"{', '.join(valid) or 'none'}. Offer those to Arun.")
+    offers.staged_write(
+        "jira_transition", {"key": key, "to_status": to_status},
+        f"✏️ Move {key} → {to_status}", f"Status change on {key}.",
+        f"Move {key} to {to_status}?", kind="jira_write")
+    return f"Staged the move of {key} to {to_status} — waiting for Arun's yes."
+
+
+async def pr_review_post(pr: str, action: str, body: str = "",
+                         workspace: str = "", repo: str = "") -> str:
+    """Propose posting a review on a pull request. Only when Arun asked you to.
+
+    action: 'approve', 'comment', or 'request_changes'. body: the review text, written as
+    the finished comment — his yes posts exactly these words under his name, so write them
+    for the PR author to read, not for Arun.
+
+    This does NOT post. Approving someone's change is visible to the whole team the moment
+    it lands, so it always waits for his explicit yes. Use review_pr first to form the
+    opinion; use this only when he says to post it."""
+    from . import offers, review
+    if action not in review.ACTIONS:
+        return f"action must be one of: {', '.join(sorted(review.ACTIONS))}"
+    if action != "approve" and not (body or "").strip():
+        return f"a '{action}' review needs a body — write the comment first"
+    verb = {"approve": "Approve", "comment": "Comment on",
+            "request_changes": "Request changes on"}[action]
+    offers.staged_write(
+        "pr_review", {"pr": pr, "workspace": workspace, "repo": repo,
+                      "action": action, "body": body},
+        f"🔎 {verb} PR #{str(pr).lstrip('#')}",
+        (body or "(no comment body — approval only)").strip()[:900],
+        f"{verb} PR #{str(pr).lstrip('#')} as you?", kind="pr_write")
+    return f"Staged the {action.replace('_', ' ')} on PR #{str(pr).lstrip('#')} — waiting for Arun's yes."
+
+
+async def teams_status(status: str = "") -> str:
+    """Read or set Arun's Teams presence.
+
+    status: leave empty to read it; or one of available / busy / do not disturb / be right
+    back / away / offline (he also says 'dnd', 'brb', 'free'). Do it when he asks — this is
+    his own status, not a message to anyone — but say what it reads afterwards, because a
+    status he thinks is DND and isn't will cost him the next hour."""
+    from . import teams_bridge
+    if not teams_bridge.enabled():
+        return "Teams bridge is off — " + teams_bridge.status()["hint"]
+    try:
+        if not (status or "").strip():
+            now = await teams_bridge.read_presence()
+            return f"Teams status: {now}" if now else "Couldn't read your Teams status."
+        return f"Teams status is now {await teams_bridge.set_presence(status)}."
+    except RuntimeError as exc:
+        return f"Didn't change it — {exc}"
+
+
+async def create_meeting(subject: str, when: str, minutes: int = 30,
+                         attendees: str = "", agenda: str = "") -> str:
+    """Propose a meeting invite. Does NOT send it.
+
+    when: 'YYYY-MM-DD HH:MM' in his local time — resolve 'Thursday at 3' to an actual date
+    yourself before calling, and if you are not sure which day he means, ask. attendees:
+    comma-separated email addresses.
+
+    The invite is built and staged; his yes sends it. An invite books time in other
+    people's calendars, so it never goes out on your judgement alone."""
+    from . import meetings, offers
+    try:
+        invite = meetings.meeting_invite(
+            subject, when, minutes,
+            [a for a in (attendees or "").split(",") if a.strip()], agenda)
+    except RuntimeError as exc:
+        return f"Can't build that invite — {exc}"
+    offers.staged_write(
+        "calendar_send", {"url": invite["url"], "summary": invite["subject"]},
+        "📅 Meeting invite", meetings.describe(invite),
+        "Send this invite?", kind="calendar")
+    return f"Staged the invite — waiting for Arun's yes.\n{meetings.describe(invite)}"
+
+
+async def request_leave(start_date: str, end_date: str = "", reason: str = "",
+                        to: str = "") -> str:
+    """Propose an all-day leave / out-of-office invite. Does NOT send it.
+
+    start_date and end_date: 'YYYY-MM-DD', both inclusive — one day off means passing the
+    same date twice or leaving end_date empty. to: comma-separated addresses (his manager,
+    his team). Staged for his yes, because this one goes to the people who approve it."""
+    from . import meetings, offers
+    try:
+        invite = meetings.leave_invite(
+            start_date, end_date, reason,
+            [a for a in (to or "").split(",") if a.strip()])
+    except RuntimeError as exc:
+        return f"Can't build that leave request — {exc}"
+    offers.staged_write(
+        "calendar_send", {"url": invite["url"], "summary": invite["subject"]},
+        "🌴 Leave request", meetings.describe(invite),
+        "Send this leave invite?", kind="calendar")
+    return f"Staged the leave request — waiting for Arun's yes.\n{meetings.describe(invite)}"
+
+
+async def join_meeting(join_url: str, title: str = "") -> str:
+    """Join a Teams meeting from its join link, muted with the camera off.
+
+    Use when Arun says to sit in on a call he cannot attend. Joining is listening only —
+    to actually say something you need say_in_call, which is separate and usually not
+    available. Tell him he is joined and that you are only listening.
+
+    Asta stays in the call and hangs up by itself when it ends, then offers to pull out
+    anything that concerned him. Don't wait for that: reply to him now."""
+    import asyncio as _asyncio
+
+    from . import meetings
+    try:
+        result = await meetings.join(join_url)
+    except RuntimeError as exc:
+        return f"Didn't join — {exc}"
+    # The watcher outlives this turn on purpose — a meeting lasts far longer than
+    # any reasonable turn, and holding the conversation open for it would make the
+    # whole assistant unresponsive for an hour.
+    _asyncio.create_task(meetings.watch_and_report(title))
+    return (f"{result}. I'll stay on and hang up when it ends, then offer you "
+            f"anything from it that's yours. I'm only listening — I won't speak.")
+
+
+async def leave_meeting() -> str:
+    """Hang up on the call Asta is sitting in. Use when Arun says to drop off."""
+    from . import meetings
+    return await meetings.leave()
+
+
+async def say_in_call(text: str) -> str:
+    """Say something out loud in the call, in Arun's voice. ONLY when he gave you the words.
+
+    Never improvise in a live call and never answer a question on his behalf: say what he
+    told you to say, nothing else. Usually unavailable — it needs a virtual microphone
+    configured on the machine — and when it is, this returns the reason rather than
+    pretending something was said."""
+    from . import meetings
+    try:
+        return await meetings.say_in_call(text)
+    except RuntimeError as exc:
+        return f"Said nothing — {exc}"
+
+
+def watch_ci(what: str, repo: str = "") -> str:
+    """Also watch a build that isn't Arun's own work — a release branch, a workflow, a repo.
+
+    By default the CI watcher only reports runs he triggered and pipelines on PRs he
+    authored, which is what keeps it quiet enough to be worth reading. Use this when he
+    says 'keep an eye on the release build' or names a specific pipeline. Prefix with
+    'stop ' to unsubscribe."""
+    from . import ci_watch
+    what = (what or "").strip()
+    if what.lower().startswith("stop "):
+        return ci_watch.unwatch(what[5:])
+    return ci_watch.watch(what, repo)
+
+
+def propose_next(next_step: str, why: str = "") -> str:
+    """Offer Arun a next step and stop, instead of doing it or ending the conversation.
+
+    This is how any flow continues: you have finished a piece of work, there is an obvious
+    next move, and it is his call whether you take it. Say what you would do, concretely
+    enough that 'yes' is unambiguous — 'implement PROJ-412 on a branch and run the tests',
+    not 'continue'. He can answer from his phone hours later and it will still run.
+
+    next_step: what you would do, as an instruction to yourself.
+    why: one line on why it is the right next move.
+
+    Use it for: after analysing a bug, after reading a ticket, after a follow-up lands,
+    after a review — anywhere you would otherwise ask 'shall I?' in prose and lose it when
+    the turn ends. Do NOT use it for something you can just do, or for a message leaving
+    this chat (that is prepare_to_send)."""
+    from . import offers
+    step = (next_step or "").strip()
+    if not step:
+        return "propose_next needs a concrete next step."
+    offers.propose(subject="▶ Next step", context=(why or "").strip(),
+                   question=step, action=step)
+    return ("Offered it to Arun — his yes runs it, from any channel. "
+            "Now finish your reply; do not do the step yourself.")
 
 
 async def refresh_context(workspace: str) -> str:

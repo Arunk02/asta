@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, health, jira, llm_meter, loop, mcp_loader, memory, msnotify, notify, outlook, refresh, reminders, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
+from . import activity, asking, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, resume, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -121,6 +121,7 @@ async def startup() -> None:
     asyncio.create_task(health.loop())
     asyncio.create_task(ci_watch.loop())
     asyncio.create_task(notify.held_watch_loop())
+    asyncio.create_task(_learning_loop())
     # The WhatsApp bridge is a child of Asta's lifecycle now, not a manual step:
     # it starts with the server and is restarted on crash, so "no bridge" stops
     # being the default after every restart.
@@ -171,6 +172,30 @@ async def _digest_loop() -> None:
                 rotate_sessions(conv["id"])
         except Exception:
             pass
+
+
+async def _learning_loop() -> None:
+    """Once a day, actually learn something — evolve recurring waste into skills
+    and drop the ones the evidence says are not helping.
+
+    Both halves already existed but only ever ran at the end of a background task,
+    so a week of chat, CI investigations and corrections moved nothing. Hanging it
+    off the clock instead means the archive improves on the days he never
+    delegates anything, which is most of them.
+
+    Quiet by design: it reports through the same ambient path as everything else
+    that is not addressed to him, and says nothing at all on a day it changed
+    nothing.
+    """
+    await asyncio.sleep(300)          # let startup settle before doing housekeeping
+    while True:
+        try:
+            line = await learn.daily_pass()
+            if line:
+                await notify.notify(line, "learning", urgency="ambient")
+        except Exception:
+            pass
+        await asyncio.sleep(86400)
 
 
 def rotate_sessions(conv_id: str) -> list[str]:
@@ -585,15 +610,14 @@ async def api_jira_issue(key: str):
 
 @app.post("/api/jira/issue/{key}/comment", dependencies=[Depends(require_auth)])
 async def api_jira_comment(key: str, request: Request):
+    """Stage a comment for Arun's yes. Deliberately the SAME function the chat tool
+    calls: a CLI brain reaching this by curl must not get a write path that the
+    in-process brain doesn't have. One policy, or the rule only holds where
+    someone remembered to write it."""
     b = await request.json()
     if not b.get("text"):
         raise HTTPException(400, "text is required")
-    try:
-        return await jira.add_comment(key, b["text"])
-    except RuntimeError as e:
-        raise HTTPException(400, str(e))
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(e.response.status_code, f"Jira: {e.response.status_code} for {e.request.url.path}")
+    return {"staged": True, "message": await agent_mod.jira_comment(key, b["text"])}
 
 
 @app.get("/api/jira/issue/{key}/transitions", dependencies=[Depends(require_auth)])
@@ -608,15 +632,111 @@ async def api_jira_transitions(key: str):
 
 @app.post("/api/jira/issue/{key}/transition", dependencies=[Depends(require_auth)])
 async def api_jira_transition(key: str, request: Request):
+    """Stage a status change for Arun's yes — same function as the chat tool."""
     b = await request.json()
     if not b.get("status"):
         raise HTTPException(400, "status is required")
+    return {"staged": True, "message": await agent_mod.jira_transition(key, b["status"])}
+
+
+@app.get("/api/jira/sprint", dependencies=[Depends(require_auth)])
+async def api_jira_sprint(limit: int = 30):
     try:
-        return await jira.transition_issue(key, b["status"])
+        return {"issues": await jira.current_sprint(limit)}
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except httpx.HTTPStatusError as e:
         raise HTTPException(e.response.status_code, f"Jira: {e.response.status_code} for {e.request.url.path}")
+
+
+@app.post("/api/pr-review", dependencies=[Depends(require_auth)])
+async def api_pr_review(request: Request):
+    """Stage a review on a PR for Arun's yes. Never posts."""
+    b = await request.json()
+    if not b.get("pr") or not b.get("action"):
+        raise HTTPException(400, "pr and action are required")
+    return {"staged": True, "message": await agent_mod.pr_review_post(
+        str(b["pr"]), b["action"], b.get("body", ""),
+        b.get("workspace", ""), b.get("repo", ""))}
+
+
+@app.post("/api/propose-next", dependencies=[Depends(require_auth)])
+async def api_propose_next(request: Request):
+    """A CLI brain offering Arun its next step — the same offer the chat tool makes.
+
+    `offered` reports what actually happened rather than that the call was made.
+    A blank step used to come back as offered:true with a message explaining it
+    had been rejected, which is the kind of contradiction a brain resolves by
+    believing the flag and telling Arun a question is waiting that is not.
+    """
+    b = await request.json()
+    if not (b.get("next_step") or "").strip():
+        raise HTTPException(400, "next_step is required")
+    message = agent_mod.propose_next(b["next_step"], b.get("why", ""))
+    return {"offered": offers.pending() is not None, "message": message}
+
+
+@app.get("/api/teams/presence", dependencies=[Depends(require_auth)])
+async def api_teams_presence():
+    return {"message": await agent_mod.teams_status()}
+
+
+@app.post("/api/teams/presence", dependencies=[Depends(require_auth)])
+async def api_set_teams_presence(request: Request):
+    b = await request.json()
+    if not b.get("status"):
+        raise HTTPException(400, "status is required")
+    return {"message": await agent_mod.teams_status(b["status"])}
+
+
+@app.post("/api/meetings", dependencies=[Depends(require_auth)])
+async def api_create_meeting(request: Request):
+    """Stage a meeting invite for Arun's yes. Never sends."""
+    b = await request.json()
+    if not b.get("subject") or not b.get("when"):
+        raise HTTPException(400, "subject and when are required")
+    return {"staged": True, "message": await agent_mod.create_meeting(
+        b["subject"], b["when"], int(b.get("minutes", 30)),
+        b.get("attendees", ""), b.get("agenda", ""))}
+
+
+@app.post("/api/leave", dependencies=[Depends(require_auth)])
+async def api_request_leave(request: Request):
+    """Stage an all-day leave invite for Arun's yes. Never sends."""
+    b = await request.json()
+    if not b.get("start_date"):
+        raise HTTPException(400, "start_date is required")
+    return {"staged": True, "message": await agent_mod.request_leave(
+        b["start_date"], b.get("end_date", ""), b.get("reason", ""), b.get("to", ""))}
+
+
+@app.post("/api/meetings/join", dependencies=[Depends(require_auth)])
+async def api_join_meeting(request: Request):
+    b = await request.json()
+    if not b.get("join_url"):
+        raise HTTPException(400, "join_url is required")
+    return {"message": await agent_mod.join_meeting(b["join_url"], b.get("title", ""))}
+
+
+@app.post("/api/meetings/leave", dependencies=[Depends(require_auth)])
+async def api_leave_meeting():
+    return {"message": await agent_mod.leave_meeting()}
+
+
+@app.post("/api/meetings/say", dependencies=[Depends(require_auth)])
+async def api_say_in_call(request: Request):
+    b = await request.json()
+    if not b.get("text"):
+        raise HTTPException(400, "text is required")
+    return {"message": await agent_mod.say_in_call(b["text"])}
+
+
+@app.post("/api/ci/watch", dependencies=[Depends(require_auth)])
+async def api_ci_watch(request: Request):
+    b = await request.json()
+    if not b.get("what"):
+        raise HTTPException(400, "what is required")
+    return {"message": agent_mod.watch_ci(b["what"], b.get("repo", ""))}
 
 
 @app.get("/api/tasks", dependencies=[Depends(require_auth)])
@@ -823,6 +943,22 @@ async def api_wa_config(request: Request):
     return result
 
 
+def _channel_model(conv: dict) -> str:
+    """Which brain answers on a phone channel.
+
+    Both channels used to pin this to default_chat_model() on every message,
+    which quietly overrode any choice he had made — so "use claude" on WhatsApp
+    would appear to work and then answer on Copilot anyway. His choice wins; the
+    default only fills in when there is none, or when the one he picked has since
+    stopped being available (a key removed, LM Studio closed), because failing the
+    message is worse than answering it on something that works.
+    """
+    picked = (conv.get("model") or "").strip()
+    if picked and agent_mod.model_registry().get(picked, {}).get("available"):
+        return picked
+    return agent_mod.default_chat_model()
+
+
 @app.post("/api/wa/incoming", dependencies=[Depends(require_auth)])
 async def api_wa_incoming(request: Request):
     """The WhatsApp bridge posts user messages here; reply goes back to the same chat."""
@@ -835,7 +971,7 @@ async def api_wa_incoming(request: Request):
         conv = store.create_conversation(model=agent_mod.default_chat_model(), workspace=None)
         store.update_conversation(conv["id"], title="WhatsApp")
         store.kv_set("wa_conversation", conv["id"])
-    conv["model"] = agent_mod.default_chat_model()
+    conv["model"] = _channel_model(conv)
     # The bridge uses this HTTP reply as the answer, so a quick turn comes back
     # in-band. A long one would hold the request past the bridge's timeout and
     # look like a dead channel — so past the deadline we ack and push the answer.
@@ -858,7 +994,7 @@ async def _telegram_turn(text: str) -> str:
         conv = store.create_conversation(model=agent_mod.default_chat_model(), workspace=None)
         store.update_conversation(conv["id"], title="Telegram")
         store.kv_set("telegram_conversation", conv["id"])
-    conv["model"] = agent_mod.default_chat_model()
+    conv["model"] = _channel_model(conv)
     # Fire through the shared conductor; the reply (and any augment/redirect ack)
     # is pushed to the Telegram chat by the sink, so we return "" here and let the
     # poll loop keep reading — that's what lets a follow-up land mid-turn.
@@ -1084,7 +1220,15 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
     if "on_usage" in accepts:
         kwargs["on_usage"] = on_usage
 
-    reply = await cli.run_turn(conv, user_text, on_delta, **kwargs)
+    try:
+        reply = await cli.run_turn(conv, user_text, on_delta, **kwargs)
+    except Exception as exc:
+        # Whatever it managed to stream before dying is the only record of how far
+        # it got — the CLI session itself is gone. Save it here, where `parts`
+        # still exists, so a handoff can continue instead of starting over.
+        if _is_quota_error(exc):
+            resume.save(conv["id"], user_text, via, "".join(parts), channel)
+        raise
     await out.send({"type": "tool", "status": "done", "name": tool_name})
     # A CLI that reports usage only after the turn (Copilot's session snapshot,
     # vs Claude's live on_usage stream) exposes last_turn_usage. Same
@@ -1127,23 +1271,35 @@ async def _cli_fallback(out, conv: dict, user_text: str, failed: str, channel: s
 
     Any model can be picked at any time, so the fallback is chosen from what is
     actually up rather than a fixed pair.
+
+    What is handed over is the CHECKPOINT, not the original message. Passing the
+    message alone made the second brain start from nothing and pay again for
+    everything the first one had already established; twelve minutes in, that is
+    most of the cost of the task.
     """
     why = _QUOTA_WORDING.get(failed, f"{failed} unavailable")
     store.kv_set(_QUOTA_KV.get(failed, f"{failed}_quota_down"), str(time.time()))
+    point = resume.get(conv["id"]) or resume.save(conv["id"], user_text, failed,
+                                                  channel=channel, why=why)
+    point["why"] = why          # the CLI saved the checkpoint; only here knows the wording
     for alt in agent_mod.EXECUTORS:
         if alt != failed and agent_mod.available(alt):
-            await _run_turn_cli(out, conv, user_text, agent_mod.runner(alt), alt,
-                                note=f"⚡ {why} — handing this turn to {alt}", channel=channel)
+            resume.clear(conv["id"])
+            await _run_turn_cli(out, conv, resume.handoff_prompt(point, alt),
+                                agent_mod.runner(alt), alt,
+                                note=resume.note(point, alt), channel=channel)
             return
     try:
         fb = agent_mod.best_model_name()
     except RuntimeError:
-        await out.send({"type": "error", "message":
-                        f"{why} and no fallback brain is up — start LM Studio "
-                        "(free, local) or add an API key in .env."})
+        # Nothing can take over. The checkpoint deliberately survives: "resume"
+        # or a switch picks it up later, from any channel, rather than the work
+        # dying with the turn.
+        await out.send({"type": "note", "text": resume.parked_note(point)})
         return
-    await out.send({"type": "note", "text": f"⚡ {why} — falling back to {fb}"})
-    await _run_turn_streaming(out, conv, user_text, fb, channel)
+    resume.clear(conv["id"])
+    await out.send({"type": "note", "text": resume.note(point, fb)})
+    await _run_turn_streaming(out, conv, resume.handoff_prompt(point, fb), fb, channel)
 
 
 async def _run_turn(out, conv: dict, user_text: str, channel: str = "web") -> None:
@@ -1197,11 +1353,11 @@ async def _run_turn(out, conv: dict, user_text: str, channel: str = "web") -> No
     except Exception as exc:
         store.add_trace(conv["id"], model_name, channel, None, 0, 0, 0, 0, 0,
                         len(user_text), [], error=str(exc))
-        if _is_quota_error(exc) and copilot_cli.available():
-            await _run_turn_copilot(
-                out, conv, user_text, channel=channel,
-                note=f"⚡ {model_name} unavailable ({type(exc).__name__}) — handing this turn to Copilot CLI",
-            )
+        if _is_quota_error(exc):
+            # Same handoff policy as the CLI brains — one function decides who
+            # takes over and what they are told, so an API model running dry
+            # behaves identically to a CLI one running dry.
+            await _cli_fallback(out, conv, user_text, model_name, channel)
             return
         raise
 
@@ -1419,8 +1575,13 @@ async def _conducted_turn(conv0: dict, first_text: str, sink, channel: str) -> N
                         "Keep going until the whole task is done. If you draft anything to send "
                         "outside this chat, stage it with prepare_to_send instead of sending it.")
                 continue
+            # Say WHICH budget ran out. "Paused" with no reason reads like a bug;
+            # "I've been at this 10 minutes" tells him whether to push or rethink.
+            reason = (f"been at this {int(loop.elapsed(cid) // 60)} min"
+                      if not loop.time_left(cid) else
+                      f"auto-continued {loop.max_steps()} steps")
             await sink.send({"type": "note", "text":
-                             "⏸ Auto-continued a few steps and paused so it can't run away. "
+                             f"⏸ Paused — {reason}, so it can't run away with your time. "
                              "Say “continue” to keep going."})
         return
 
@@ -1440,9 +1601,156 @@ async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> No
 
 
 _ANSWER_CMD = re.compile(r"^\s*answer\s+#?(\d+)\s+(.+)$", re.I | re.S)
+# A clear no to an offer — so "not now" closes it instead of being mistaken for
+# the destination in the share-the-build step.
+_DECLINE = re.compile(r"^\s*(no|nope|nah|not now|later|skip|ignore|drop it|leave it|"
+                      r"don'?t|stop|👎|❌)\s*[.!]*\s*$", re.I)
+
+
+def _offer_prompt(o, where: str = "") -> str:
+    """Turn an accepted offer into the instruction that does the work.
+
+    Each step ends by staging the NEXT offer, which is what makes the chain run:
+    analyse → fix → share, with his yes between every pair.
+
+    An offer that brought its own `action` uses it. That is what lets the loop
+    cover work nobody wrote a branch for — implement this ticket, chase that
+    review, update the status — instead of only the three CI steps below.
+    """
+    ctx = f"Context:\n{o.context}\n\n"
+    if o.action:
+        extra = f"\n\nHis answer: {where}" if where else ""
+        return (f"{ctx}Arun approved this next step:\n{o.action}{extra}\n\n"
+                f"Carry it out now — do not wait for further confirmation on the step "
+                f"itself. If anything you produce needs to leave this chat, stage it with "
+                f"prepare_to_send. When you are done, report in a few lines and, if there "
+                f"is an obvious next step, offer it with propose_next rather than doing it.")
+    if o.kind == "analyse":
+        return (f"{ctx}Arun approved analysing this CI failure. Investigate it now: pull the "
+                f"failing job's log, find the actual cause, and report it in a few lines — what "
+                f"broke, why, and the smallest fix. Do not change any code yet. End by asking "
+                f"whether to fix it and raise the PR.")
+    if o.kind == "raise_pr":
+        return (f"{ctx}Arun approved the fix. Make the change on a branch, run the tests, and "
+                f"raise the PR from his personal account. Report the PR link in one line, then "
+                f"ask where he wants the build shared for approval.")
+    if o.kind == "share_build":
+        dest = where or "wherever he just named"
+        return (f"{ctx}Arun wants the build shared with: {dest}. Draft the message announcing it "
+                f"(include the PR link and what changed), then stage it with prepare_to_send — "
+                f"do NOT send it yourself.")
+    return f"{ctx}Arun approved: {o.prompt}. Carry it out, then report back in one line."
 # A bare yes to "can I send this?" — anything else is treated as change-requests.
 _AFFIRM = re.compile(r"^\s*(send( it)?|yes|yep|yeah|y|ok(ay)?( send| do it)?|go( ahead)?|"
                      r"confirm|do it|👍|✅)\s*[.!]*\s*$", re.I)
+
+
+async def _run_staged_op(o, cid: str, sink, channel: str) -> None:
+    """Execute an approved outward write and say what happened, either way.
+
+    A failure here is reported in full rather than swallowed. He said yes to a
+    comment going onto a ticket; if it never landed, silence would leave him
+    believing it had — and he would find out from the colleague who never got it.
+    """
+    try:
+        line = await ops.run(o.op)
+    except Exception as exc:
+        line = f"⚠️ Couldn't do it — {type(exc).__name__}: {exc}"
+    store.add_ui_message(cid, "assistant", line, {"via": "offer-op", "channel": channel})
+    await sink.send({"type": "note", "text": line})
+    if channel == "web":
+        await sink.send({"type": "done", "tools": []})
+
+
+# "use copilot", "switch to claude", "which model" — the model picker the web UI
+# has as a dropdown. Phone channels had no equivalent, which meant the one place
+# he actually reads a quota warning was the one place he could not act on it.
+_MODEL_CMD = re.compile(r"^\s*(?:use|switch to|swap to|change to|model)\s+([\w.\- ]{2,40})\s*[.!]*\s*$", re.I)
+_MODEL_ASK = re.compile(r"^\s*(which model|what model|models|list models|brains?)\s*\??\s*$", re.I)
+
+# Deliberately NOT a bare "continue": that word already belongs to the conductor
+# loop's pause, and stealing it would break the more common of the two.
+_RESUME_CMD = re.compile(
+    r"^\s*(resume|carry on|pick (it )?up|(continue|carry on|pick up) (from )?where you "
+    r"(left off|stopped)|continue where you left off)\s*[.!]*\s*$", re.I)
+
+
+# "what's pending", "anything waiting on me" — the missing half of a yes/no
+# interface. Four separate mechanisms can own his next message (a staged send, an
+# offer, an open question, a live task) and until now nothing could tell him
+# which. A one-word answer to an invisible question is a coin flip.
+_PENDING_ASK = re.compile(
+    r"^\s*(what'?s? pending|pending|anything (waiting|pending)( on me)?|"
+    r"what (are you |you )?waiting (on|for)|open (questions?|items?))\s*\??\s*[.!]*\s*$", re.I)
+
+
+def _pending_summary(cid: str) -> str:
+    """Everything currently waiting on him, in the order a reply would be routed.
+
+    The order is not cosmetic — it IS the dispatch precedence below. Showing them
+    in any other order would be a plausible-looking lie about what "yes" does.
+    """
+    lines: list[str] = []
+    staged = loop.awaiting(cid)
+    if staged:
+        to = f" to {staged['to']}" if staged.get("to") else ""
+        lines.append(f"1. 📤 A message{to} on {staged.get('channel', 'chat')} is drafted "
+                     f"and waiting — “send” posts it.")
+    o = offers.pending()
+    if o:
+        # What will RUN, not what was asked. The question was phrased for the
+        # moment it was sent ("Implement it?"); hours later on a different channel
+        # that sentence no longer says what "it" is.
+        what = ops.describe(o.op) if o.mechanical() else (o.action or o.prompt)
+        lines.append(f"{len(lines) + 1}. ▶ {o.subject} — “yes” means: {what}")
+    q = asking.pending_for_reply()
+    if q:
+        lines.append(f"{len(lines) + 1}. ❓ {q['text'][:100]}")
+    live = tasks.live_tasks_for(cid)
+    for tid in live:
+        title = (store.get_task(tid) or {}).get("title", "")[:45]
+        lines.append(f"{len(lines) + 1}. ⚙️ task #{tid} running — {title}")
+    if not lines:
+        return "Nothing is waiting on you."
+    return ("Waiting on you (a bare “yes” answers the first one):\n"
+            + "\n".join(lines))
+
+
+def _model_listing(current: str) -> str:
+    """Every brain, whether it is up, and which one is answering right now."""
+    lines = []
+    for name, info in agent_mod.model_registry().items():
+        mark = "→" if name == current else ("·" if info.get("available") else "×")
+        state = "" if info.get("available") else f"  — {info.get('detail') or 'not configured'}"
+        lines.append(f" {mark} {name}: {info.get('label') or name}{state}")
+    return ("Brains:\n" + "\n".join(lines) +
+            "\n\nSay “use <name>” to switch. The switch sticks for this chat.")
+
+
+def _switch_model(conv: dict, wanted: str) -> str:
+    """Point this conversation at another brain. Returns what to tell him.
+
+    Resolved through the shared registry rather than a hardcoded list, so a brain
+    added to the spec table is switchable from his phone the same day — the whole
+    point of not special-casing per model.
+    """
+    registry = agent_mod.model_registry()
+    want = agent_mod.normalize_model(wanted.strip().lower().replace(" ", "_"))
+    if want not in registry:
+        hit = [n for n in registry if want in n or n in want]
+        if len(hit) != 1:
+            return (f"I don't have a brain called “{wanted.strip()}”.\n\n"
+                    + _model_listing(conv.get("model", "")))
+        want = hit[0]
+    info = registry[want]
+    store.update_conversation(conv["id"], model=want)
+    conv["model"] = want
+    if not info.get("available"):
+        # Switched anyway: he may be about to add the key, and refusing a choice
+        # he stated is more annoying than a warning he can ignore.
+        return (f"Switched to {want}, but it isn't configured yet — "
+                f"{info.get('label', want)} needs its key or CLI before it can answer.")
+    return f"✅ Now using {info.get('label') or want} for this chat."
 
 
 async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> asyncio.Task | None:
@@ -1469,6 +1777,52 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             await sink.send({"type": "done", "tools": []})
         return None
 
+    # Meta-commands, answered here on every channel. They deliberately run BEFORE
+    # the yes/no routing below and leave any open question standing: picking a
+    # different brain, or checking what he owes an answer to, is not an answer to
+    # the question and must not be mistaken for changing the subject.
+    if _MODEL_ASK.match(user_text or ""):
+        await sink.send({"type": "note", "text": _model_listing(conv.get("model", ""))})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+    switch = _MODEL_CMD.match(user_text or "")
+    if switch:
+        before = conv.get("model", "")
+        await sink.send({"type": "note", "text": _switch_model(conv, switch.group(1))})
+        # He switched because something ran dry — which is the whole reason he
+        # asked for this. Carrying on is what he meant; making him then type
+        # "resume" would be theatre.
+        point = resume.get(cid) if conv.get("model") != before else None
+        if point is not None:
+            resume.clear(cid)
+            await sink.send({"type": "note", "text":
+                             f"↩️ Carrying on from where {point.get('brain', 'it')} stopped."})
+            return _start_turn(conv, resume.handoff_prompt(point, conv["model"]),
+                               sink, channel)
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+    if _PENDING_ASK.match(user_text or ""):
+        await sink.send({"type": "note", "text": _pending_summary(cid)})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+    # "resume" only means anything when something is actually parked. With no
+    # checkpoint this falls THROUGH to the ordinary path rather than answering
+    # "nothing to resume" — otherwise it would eat a perfectly normal "carry on"
+    # aimed at the conductor loop's pause.
+    if _RESUME_CMD.match(user_text or ""):
+        point = resume.get(cid)
+        if point is not None:
+            resume.clear(cid)
+            await sink.send({"type": "note", "text":
+                             f"↩️ Picking up where {point.get('brain', 'it')} stopped "
+                             f"{resume.age_minutes(point)} min ago, "
+                             f"on {conv.get('model', 'this brain')}."})
+            return _start_turn(conv, resume.handoff_prompt(point, conv.get("model", "")),
+                               sink, channel)
+
     # A drafted outward send is waiting on "can I send this?" — his next message is
     # the answer. A bare yes sends it (via the model's real send tool, so the send
     # itself still runs through that tool's own rules); anything else is revision.
@@ -1485,6 +1839,37 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                       f"{user_text.strip()}\n\nRevise accordingly. When it's ready to send "
                       f"again, stage it with prepare_to_send; otherwise just continue the work.")
         return _start_turn(conv, prompt, sink, channel)
+
+    # Asta offered to go do something ("CI failed — want me to analyse?"). His yes
+    # is what starts the work: nothing was investigated unasked, and nothing is
+    # dropped either. Answerable from any channel, because the question went to
+    # his phone and the answer usually comes back the same way.
+    open_offer = offers.pending()
+    if open_offer and (user_text or "").strip():
+        if _AFFIRM.match(user_text):
+            offers.accept()
+            # An outward write was staged with its exact arguments. Run THAT,
+            # rather than asking a brain to perform the thing it described — the
+            # words he approved are the words that go out.
+            if open_offer.mechanical():
+                await _run_staged_op(open_offer, cid, sink, channel)
+                return None
+            return _start_turn(conv, _offer_prompt(open_offer), sink, channel)
+        if _DECLINE.match(user_text):
+            offers.decline()
+            await sink.send({"type": "note", "text": "👍 Dropped it."})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+        # The share-the-build step ASKS for a destination, so his reply is the
+        # answer rather than a change of subject.
+        if open_offer.kind == "share_build":
+            offers.accept()
+            return _start_turn(conv, _offer_prompt(open_offer, where=user_text.strip()),
+                               sink, channel)
+        # Anything else: he moved on. Drop the offer instead of holding a stale
+        # question that would misread a much later "yes".
+        offers.clear()
 
     # An open ask_user question owns the next message. Explicit form first
     # ("answer 3 the second one"), then the bare reply — which is how a person

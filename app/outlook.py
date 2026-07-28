@@ -171,14 +171,36 @@ _IDISH = re.compile(r"\b((?:INC|CHG|PRB|ALERT)[0-9]{4,}|[A-Z][A-Z0-9]{1,9}-\d+)\
 
 
 def alert_key(m: dict) -> str:
+    """What the alert is ABOUT, so a recovery joins to its own firing.
+
+    The punctuation strip is load-bearing, not tidiness. Removing the recovery
+    word from "RESOLVED: Error Reporting :: Booking" leaves a dangling colon, and
+    that one character made the recovery key differ from the firing key — so
+    nothing was ever cancelled, every self-healing alert survived the hold window,
+    and Arun got "still broken after 20 min" about things that had healed in two.
+    The whole mechanism was silently inverted by a leftover ":".
+    """
     subj = m.get("subject", "")
     ids = _IDISH.findall(subj)
     if ids:
         return ids[0].upper()
     core = re.sub(r"\b(re|fw|fwd)\b[: ]*", "", subj, flags=re.I)
-    core = _RECOVERY.sub("", core)
-    core = re.sub(r"[0-9]{2,}", "", core)          # timestamps, counts, run numbers
+    core = _RECOVERY.sub(" ", core)
+    core = re.sub(r"[0-9]{2,}", " ", core)         # timestamps, counts, run numbers
+    core = re.sub(r"[^\w\s]+", " ", core)          # ALL punctuation, not some of it
     return " ".join(core.lower().split())[:60]
+
+
+def _mail_instance(m: dict) -> str:
+    """Identity of ONE mail within an incident, for counting without double-count.
+
+    Deliberately not `mail_key`, which strips exactly the things that distinguish
+    two mails of the same alert — that is its job for dedup, and the wrong job
+    here. The arrival time plus a slice of the body separates "fired again at
+    09:19" from the 09:14 mail, while staying identical across the polls that
+    re-read the same inbox row every fifteen minutes.
+    """
+    return f"{m.get('when', '')}|{' '.join((m.get('preview') or '').split())[:80]}"
 
 
 def _load_holds() -> dict:
@@ -188,33 +210,101 @@ def _load_holds() -> dict:
         return {}
 
 
+# The line in an alert body that actually says what broke. Monitoring subjects
+# name the CHANNEL ("Error Reporting :: Booking side work"), never the fault, so
+# the subject alone is unactionable — which is exactly the complaint this answers.
+# A sentence carrying a number, a status code, a service or an error word is the
+# one worth quoting; a greeting or a "view in Grafana" footer is not.
+_DIAGNOSTIC = re.compile(
+    r"\b\d+(\.\d+)?\s*(%|ms|s|m|req|rps|errors?|failures?|times?)\b"
+    r"|\b[45]\d{2}\b"
+    r"|\b(threshold|exceeded|breach(ed)?|timeout|timed out|refused|unavailable|"
+    r"exception|stack ?trace|null|deadlock|out of memory|oom|5xx|4xx|"
+    r"connection|latency|error rate|failed to)\b",
+    re.I)
+_ALERT_NOISE = re.compile(
+    r"^\s*(view (it )?in|open in|click here|unsubscribe|this is an automated|"
+    r"do not reply|sent by|powered by)\b", re.I)
+
+
+def alert_detail(preview: str, limit: int = 160) -> str:
+    """The one line from the alert body that says what actually broke.
+
+    Prefers a sentence with real evidence in it — a rate, a status code, a
+    threshold, an exception — over the first sentence, because the first sentence
+    of a monitoring mail is usually a restatement of the subject he has already
+    read. Returns "" when the body carries nothing diagnostic, so the caller can
+    say so honestly instead of padding the alert with a footer.
+    """
+    body = " ".join((preview or "").split())
+    if not body:
+        return ""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?;])\s+|\s*\|\s*", body) if s.strip()]
+    usable = [s for s in sentences if not _ALERT_NOISE.match(s) and len(s) > 8]
+    best = next((s for s in usable if _DIAGNOSTIC.search(s)), None) or (
+        usable[0] if usable else "")
+    if len(best) > limit:
+        best = best[:limit].rsplit(" ", 1)[0] + "…"
+    return best
+
+
 def triage_alerts(mails: list[dict], now: float | None = None) -> tuple[list[dict], list[str]]:
     """Split alert-class mail into (release now, cancelled as self-healed).
 
     Firing alerts are parked. A later recovery for the same key drops BOTH — the
     firing never reaches Arun at all, which is the whole point. Anything still
     unrecovered once the window passes is released.
+
+    What gets PARKED is the evidence, not just the subject. The ledger used to
+    keep `subject` alone, so an escalation could only ever repeat a line naming
+    the alert channel — "Error Reporting :: Booking side work" — which says
+    nothing about what broke. The sender, the diagnostic line and how many times
+    it has fired are all already in hand when the mail is read; throwing them away
+    and then asking him to open Outlook is the avoidable half of the interruption.
     """
     now = now or time.time()
     holds = _load_holds()
     release, cancelled = [], []
 
     for m in mails:
-        subj = m.get("subject", "")
-        if not _ALERTY.search(subj) and not _RECOVERY.search(subj):
+        if not goes_to_hold(m):
             continue
+        subj = m.get("subject", "")
         key = alert_key(m)
         if _RECOVERY.search(subj):
-            if key in holds:
+            if key in holds and not holds[key].get("done"):
                 holds.pop(key, None)
                 cancelled.append(key)
             else:
                 # Recovery for something never held — nothing to tell him about.
                 holds[key] = {"first": now, "done": True}
             m["_alert"] = "recovery"
-        elif key not in holds:
-            holds[key] = {"first": now, "subject": subj[:120]}
+            continue
+        info = holds.get(key)
+        if info is None:
+            holds[key] = {
+                "first": now, "subject": subj[:120],
+                "sender": (m.get("sender") or "")[:60],
+                "detail": alert_detail(m.get("preview", "")),
+                "seen": [_mail_instance(m)],
+            }
             m["_alert"] = "held"
+            continue
+        if info.get("done"):
+            continue
+        # A repeat of an alert already parked. Count it — one mail and fifteen
+        # mails in twenty minutes are different problems, and the count is the
+        # cheapest signal of which one this is.
+        mk = _mail_instance(m)
+        seen = info.setdefault("seen", [])
+        if mk not in seen:
+            seen.append(mk)
+            del seen[:-20]
+            # A later mail in the same incident usually carries better detail than
+            # the first ("now at 40%"), so take it when the first had none.
+            if not info.get("detail"):
+                info["detail"] = alert_detail(m.get("preview", ""))
+        m["_alert"] = "held"
 
     for key, info in list(holds.items()):
         if info.get("done"):
@@ -224,7 +314,13 @@ def triage_alerts(mails: list[dict], now: float | None = None) -> tuple[list[dic
         if now - info.get("first", now) >= HOLD_MINUTES * 60:
             if not info.get("released"):
                 info["released"] = True
-                release.append({"subject": info.get("subject", key), "key": key})
+                release.append({
+                    "subject": info.get("subject", key), "key": key,
+                    "sender": info.get("sender", ""),
+                    "detail": info.get("detail", ""),
+                    "count": len(info.get("seen") or []) or 1,
+                    "minutes": int((now - info.get("first", now)) // 60),
+                })
         if now - info.get("first", now) > 24 * 3600:
             holds.pop(key, None)
 
@@ -232,9 +328,56 @@ def triage_alerts(mails: list[dict], now: float | None = None) -> tuple[list[dic
     return release, cancelled
 
 
+def fmt_alert(r: dict) -> str:
+    """One released alert, written so he can decide without opening Outlook.
+
+    Four facts, in the order he needs them: what it is, what actually broke, who
+    said so, and how long/how often. The middle one is the whole point — a subject
+    line naming a monitoring channel told him nothing, and "still broken" without
+    it is an interruption that can only be answered by going and looking.
+    """
+    lines = [f"• {r['subject']}"]
+    detail = (r.get("detail") or "").strip()
+    lines.append(f"  {detail}" if detail
+                 else "  (the mail carries no detail beyond the subject — open Outlook)")
+    facts = []
+    if r.get("sender"):
+        facts.append(r["sender"])
+    n = int(r.get("count") or 1)
+    facts.append(f"{n} mails" if n > 1 else "1 mail")
+    facts.append(f"first seen {r.get('minutes', HOLD_MINUTES)} min ago")
+    lines.append("  " + " · ".join(facts))
+    return "\n".join(lines)
+
+
 def is_alerty(m: dict) -> bool:
     subj = m.get("subject", "")
     return bool(_ALERTY.search(subj) or _RECOVERY.search(subj))
+
+
+def goes_to_hold(m: dict) -> bool:
+    """Does this mail belong in the hold window at all?
+
+    The one predicate both paths agree on, because the alternative was a mail
+    landing in BOTH and being announced twice by different mechanisms. The live
+    ledger showed exactly that: `[…/telikos-booking-service] run failed` sitting
+    there as a held alert, having already been pushed by the CI watcher — which
+    knows the run, the branch and the recovery, and is strictly the better report.
+    Same for a ServiceNow incident assigned to his group: `needs_attention` keeps
+    it as real work, and the hold window was independently re-announcing it twenty
+    minutes later as "still broken".
+
+    Kept next to `needs_attention` and sharing its tests, so the two can never
+    drift into disagreeing about who owns a mail.
+    """
+    subj, sender = m.get("subject", ""), m.get("sender", "")
+    if not is_alerty(m):
+        return False
+    if _CI_MAIL.search(subj):
+        return False                    # ci_watch owns this one, with better detail
+    if _SERVICENOW.search(sender + " " + subj) and not SUPPRESS_SERVICENOW:
+        return False                    # needs_attention keeps it: work, not a blip
+    return True
 
 
 # Arun's own CI failures already reach him via ci_watch's push, which is the
@@ -260,17 +403,21 @@ def needs_attention(mails: list[dict]) -> list[dict]:
         if not m["unread"]:
             continue
         subj, sender = m.get("subject", ""), m.get("sender", "")
+        # ServiceNow is checked FIRST because it is the deliberate exception, and
+        # an exception tested after the rule that swallows it is dead code. That
+        # is what this was: `_BULK_SENDER` matches "servicenow", so every incident
+        # was dropped here and the branch below never ran. They still reached him
+        # — as a "still broken after 20 min" alert with nothing but a subject,
+        # twenty minutes late — which is the worst of both paths.
+        if _SERVICENOW.search(sender + " " + subj):
+            # A ticket ASSIGNED to Arun's group is work, not a self-healing blip.
+            if not SUPPRESS_SERVICENOW:
+                out.append(m)
+            continue
         if _BULK_SENDER.search(sender) or _BULK_SUBJECT.search(subj):
             continue
         if _CI_MAIL.search(subj):
             continue                               # ci_watch already pushed it
-        if _SERVICENOW.search(sender + " " + subj):
-            # A ticket ASSIGNED to Arun's group is work, not a self-healing blip,
-            # so it skips the hold window entirely — the word "Incident" would
-            # otherwise make _ALERTY swallow it. Suppress only on explicit opt-in.
-            if not SUPPRESS_SERVICENOW:
-                out.append(m)
-            continue
         if is_alerty(m):
             continue                               # goes through the hold window
         out.append(m)
@@ -416,13 +563,14 @@ async def watch_loop() -> None:
         # Alerts are held, not sent: only the ones still unrecovered after the
         # window survive. Self-healing IOM noise never reaches the phone at all.
         try:
-            release, cancelled = triage_alerts(mails)
+            release, _healed = triage_alerts(mails)
         except Exception:
-            release, cancelled = [], []
+            release = []
         if release:
+            head = (f"🚨 Still broken after {HOLD_MINUTES} min"
+                    + (f" ({len(release)})" if len(release) > 1 else "") + ":")
             await notify.notify(
-                f"🚨 Still broken after {HOLD_MINUTES} min:\n"
-                + "\n".join("• " + r["subject"] for r in release[:6]),
+                head + "\n\n" + "\n\n".join(fmt_alert(r) for r in release[:6]),
                 "outlook", urgency="direct")
 
 

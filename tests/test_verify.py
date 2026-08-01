@@ -100,6 +100,24 @@ def test_tail_is_bounded(tmp_path):
     assert len(r.tail) <= verify._MAX_TAIL
 
 
+def test_signature_ignores_digits_so_same_failure_matches():
+    """A plateau is 'the same KIND of failure again' — line numbers and values
+    change, the failure doesn't."""
+    a = verify.signature("tests/foo.py:40: assert 1 == 2")
+    b = verify.signature("tests/foo.py:51: assert 3 == 4")
+    assert a == b
+
+
+def test_signature_separates_genuinely_different_failures():
+    a = verify.signature("ImportError: no module named foo")
+    b = verify.signature("assert response.status == ok")
+    assert a != b
+
+
+def test_empty_tail_has_a_stable_signature():
+    assert verify.signature("") == verify.signature("")
+
+
 def test_failure_feedback_carries_the_delta_not_history():
     r = verify.VerifyResult(ran=True, ok=False, command="pytest -q", code=1,
                             tail="E   assert 1 == 2")

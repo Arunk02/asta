@@ -103,9 +103,13 @@ def test_red_then_green_loops_once_then_done(wired, monkeypatch):
     assert store.kv_get(f"task_escalated:{wired['tid']}") == "1"
 
 
-def test_stuck_check_parks_for_arun_never_infinite(wired, monkeypatch):
-    monkeypatch.setenv("ASTA_VERIFY_CMD", "false")     # never goes green
+def test_nonplateau_uses_full_budget_then_parks(wired, monkeypatch):
+    """Genuinely DIFFERENT failures each round (progress) exhaust the round budget,
+    then park. Signature is stubbed unique-per-call so it never reads as a plateau."""
+    monkeypatch.setenv("ASTA_VERIFY_CMD", "false")
     monkeypatch.setenv("ASTA_VERIFY_MAX_ROUNDS", "2")
+    seq = iter(range(100))
+    monkeypatch.setattr("app.verify.signature", lambda tail: f"sig{next(seq)}")
     asyncio.run(tasks._finish_code(wired["tid"], wired["t"], "done result", 0))
 
     task = store.get_task(wired["tid"])
@@ -113,4 +117,32 @@ def test_stuck_check_parks_for_arun_never_infinite(wired, monkeypatch):
     assert wired["calls"]["legs"] == 2                 # bounded by max_rounds, not infinite
     assert store.kv_get(f"task_gate:{wired['tid']}") == "verify"
     assert _counts("verify").get("unresolved") == 1
-    assert any("STILL failing" in n for n in wired["notes"])
+    assert any("still failing after 2" in n for n in wired["notes"])
+
+
+def test_plateau_parks_early_when_no_stronger_brain(wired, monkeypatch):
+    """The SAME failure twice with no brain to escalate to is a dead end — park at
+    once instead of burning the remaining rounds re-failing identically."""
+    monkeypatch.setenv("ASTA_VERIFY_CMD", "false")     # identical empty failure each round
+    monkeypatch.setenv("ASTA_VERIFY_MAX_ROUNDS", "5")  # plenty of budget left...
+    monkeypatch.setattr(tasks, "_stronger_executor", lambda tid: "")
+    asyncio.run(tasks._finish_code(wired["tid"], wired["t"], "done result", 0))
+
+    assert store.get_task(wired["tid"])["status"] == "awaiting_approval"
+    assert wired["calls"]["legs"] == 1                 # ...but stopped after ONE, on plateau
+    assert any("stuck on the same failure" in n for n in wired["notes"])
+
+
+def test_plateau_escalates_to_a_stronger_brain_once(wired, monkeypatch):
+    """The same failure twice, with a stronger brain available, switches executor
+    for one fresh attempt — the resilience multiplier."""
+    monkeypatch.setenv("ASTA_VERIFY_CMD", "false")     # never green -> plateau, then escalate, then park
+    monkeypatch.setenv("ASTA_VERIFY_MAX_ROUNDS", "5")
+    monkeypatch.setattr(tasks, "_stronger_executor", lambda tid: "claude")
+    asyncio.run(tasks._finish_code(wired["tid"], wired["t"], "done result", 0))
+
+    assert store.kv_get(f"task_executor:{wired['tid']}") == "claude"   # switched brains
+    assert store.kv_get(f"task_verify_escbrain:{wired['tid']}") == "1" # exactly once
+    assert _counts("verify_round").get("escalated") == 1
+    assert any("escalating to claude" in n for n in wired["notes"])
+    assert store.get_task(wired["tid"])["status"] == "awaiting_approval"  # still parks if it can't fix it

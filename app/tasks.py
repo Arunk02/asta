@@ -649,6 +649,66 @@ def _learn_from(task_id: int, title: str, result: str, status: str = "done") -> 
                                       escalated=_escalated(task_id)))
 
 
+def _stronger_executor(task_id: int) -> str:
+    """A higher-capability code brain than the task's current one, available and
+    not quota-down — or '' when the current brain is already the best option.
+
+    Mirrors the copilot→claude failover already in _run_code_leg (claude carries
+    the higher rank/context in the traits table): when the cheap brain keeps
+    reproducing the same failure, a stronger one gets one bounded shot before Arun
+    is bothered."""
+    from . import agent as agent_mod
+    cur = _resolve_executor(task_id)
+    if cur != "claude" and "claude" in _executor_names() \
+            and claude_cli.available() and not agent_mod.quota_down("claude_cli"):
+        return "claude"
+    return ""
+
+
+async def _escalate_brain_and_retry(task_id: int, t: dict, outcome, hops: int,
+                                    cwd: str, stronger: str) -> bool:
+    """Plateau escape: switch to a stronger brain and take ONE fresh attempt.
+
+    The fresh session is deliberate — the stuck brain's context is exactly what
+    plateaued, so it is dropped rather than resumed. Guarded to happen at most once
+    per task (task_verify_escbrain), and the goal + failure seed the new run."""
+    from . import notify, verify
+    store.kv_set(f"task_verify_escbrain:{task_id}", "1")
+    store.kv_set(f"task_executor:{task_id}", stronger)
+    store.kv_set(f"task_escalated:{task_id}", "1")
+    store.kv_set(f"task_verify_rounds:{task_id}", str(_verify_rounds(task_id) + 1))
+    for ex in _executor_names():
+        store.kv_del(f"task_session:{task_id}:{ex}")
+    store.record_outcome("verify_round", "escalated", subject=str(task_id), detail=stronger)
+    await notify.notify(
+        f"⤴️ #{task_id} {t['title']} — stuck on the same failure, escalating to "
+        f"{stronger} for a fresh attempt…", "task")
+    result2 = await _run_code_leg(
+        task_id, t["prompt"] + verify.failure_feedback(outcome) + CODE_OVERRIDES, cwd,
+        resume=False, effort=_impl_effort(stronger), workspace=t["workspace"])
+    if (store.get_task(task_id) or {}).get("status") in FINAL:
+        return True
+    await _finish_code(task_id, t, result2, hops)
+    return True
+
+
+async def _park_verify(task_id: int, t: dict, result: str, outcome, reason: str) -> bool:
+    """Hand a failing check to Arun — bounded, never infinite, never a green-looking
+    'done' over a red check. The single exit for every give-up path in the gate."""
+    from . import notify
+    store.kv_set(f"task_gate:{task_id}", "verify")
+    store.record_outcome("verify", "unresolved", subject=str(task_id),
+                         detail=f"{reason}: {outcome.command[:140]}")
+    parked = result + "\n\n--- verification still failing ---\n" + outcome.tail
+    store.update_task(task_id, status="awaiting_approval", result=parked)
+    await notify.notify(
+        f"🔴 #{task_id} {t['title']} — check {reason}:\n\n"
+        f"{_phone_text(outcome.tail, 700)}\n\n"
+        f"Reply with a hint, 'approve task {task_id}' to accept as-is, or "
+        f"'reject task {task_id}'.", "task")
+    return True
+
+
 async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
     """The objective bar before a code task calls itself done.
 
@@ -675,20 +735,39 @@ async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
     if not outcome.ran:
         return False   # no usable oracle — behave exactly as today
     if outcome.ok:
-        store.record_outcome("verify", "passed", subject=str(task_id), detail=cmd[:200])
+        # fix_rounds in the detail feeds the convergence metric (quality.verify_convergence):
+        # a rate that climbs while this average falls is the loop genuinely learning.
+        store.record_outcome("verify", "passed", subject=str(task_id),
+                             detail=f"fix_rounds={_verify_rounds(task_id)} cmd={cmd[:140]}")
         return False   # green: the normal done path runs, and now learns from a VERIFIED win
-    # Red. Loop to fix, bounded — never silently ship a failing check.
+
+    # Red. Decide between three moves: retry the same brain, escalate to a stronger
+    # one, or park. The signature tells progress from a plateau.
+    sig = verify.signature(outcome.tail)
+    prev_sig = store.kv_get(f"task_verify_sig:{task_id}")
+    store.kv_set(f"task_verify_sig:{task_id}", sig)
+    plateaued = bool(prev_sig) and sig == prev_sig
     vr = _verify_rounds(task_id)
+    # A fix round is telemetry (is the loop converging?), kept OUT of the "verify"
+    # kind so it never dilutes the terminal pass-rate.
+    store.record_outcome("verify_round", "failed", subject=str(task_id),
+                         detail=f"round {vr + 1}: {cmd[:160]}")
+
+    # Plateau: the fix reproduced the SAME failure. Retrying the same brain just
+    # repeats it — escalate to a stronger brain once (cheap-first, then pay up), or
+    # stop wasting rounds and hand it to Arun.
+    if plateaued:
+        stronger = _stronger_executor(task_id)
+        if stronger and store.kv_get(f"task_verify_escbrain:{task_id}") != "1":
+            return await _escalate_brain_and_retry(task_id, t, outcome, hops, cwd, stronger)
+        return await _park_verify(task_id, t, result, outcome,
+                                  reason=f"stuck on the same failure after {vr} attempt(s)")
+
+    # Making progress (a different failure) and budget left — resume the same brain
+    # with only the failure fed back.
     if vr < verify.max_rounds():
         store.kv_set(f"task_verify_rounds:{task_id}", str(vr + 1))
-        # A first attempt that failed its own check and a fix that rescues it is
-        # exactly an escalation to teach from — the teacher half writes the skill
-        # so the next similar task passes on the first try.
         store.kv_set(f"task_escalated:{task_id}", "1")
-        # A fix round is telemetry (is the loop converging?), kept OUT of the
-        # "verify" kind so it never dilutes the terminal pass-rate.
-        store.record_outcome("verify_round", "failed", subject=str(task_id),
-                             detail=f"round {vr + 1}: {cmd[:160]}")
         await notify.notify(
             f"🔴 #{task_id} {t['title']} — its own check failed, fixing "
             f"(round {vr + 1}/{verify.max_rounds()})…", "task")
@@ -700,18 +779,9 @@ async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
             return True
         await _finish_code(task_id, t, result2, hops)
         return True
-    # Out of fix budget — park for Arun with the failure. Bounded, never infinite,
-    # never a green-looking "done" over a red check.
-    store.kv_set(f"task_gate:{task_id}", "verify")
-    store.record_outcome("verify", "unresolved", subject=str(task_id), detail=cmd[:200])
-    parked = result + "\n\n--- verification still failing ---\n" + outcome.tail
-    store.update_task(task_id, status="awaiting_approval", result=parked)
-    await notify.notify(
-        f"🔴 #{task_id} {t['title']} — its own check is STILL failing after "
-        f"{verify.max_rounds()} fix attempts:\n\n{_phone_text(outcome.tail, 700)}\n\n"
-        f"Reply with a hint, 'approve task {task_id}' to accept as-is, or "
-        f"'reject task {task_id}'.", "task")
-    return True
+
+    return await _park_verify(task_id, t, result, outcome,
+                              reason=f"still failing after {verify.max_rounds()} fix attempts")
 
 
 async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:

@@ -21,6 +21,7 @@ a claim — so a rate that climbs is the loop genuinely converging.
 
 from __future__ import annotations
 
+import re
 import time
 
 from . import store
@@ -60,6 +61,30 @@ def summary(days: int = 7) -> dict:
     return {"days": days, "kinds": out}
 
 
+def verify_convergence(days: int = 7) -> dict:
+    """Average fix-rounds a code task needed to reach a passing check, over the
+    window — the number that shows the loop LEARNING rather than merely passing.
+
+    The pass-rate says work clears the bar; this says how HARD it was to get there.
+    As skills accumulate, this should fall even while the pass-rate holds or climbs
+    (more tasks passing on the first try). Empty when nothing has passed yet."""
+    since = time.time() - days * 86400
+    rounds: list[int] = []
+    for r in store.recent_outcomes(500):
+        if r.get("kind") != "verify" or r.get("outcome") != "passed":
+            continue
+        if float(r.get("created_at") or 0) < since:
+            continue
+        m = re.search(r"fix_rounds=(\d+)", r.get("detail") or "")
+        if m:
+            rounds.append(int(m.group(1)))
+    if not rounds:
+        return {}
+    return {"passed": len(rounds),
+            "avg_fix_rounds": round(sum(rounds) / len(rounds), 2),
+            "first_try": sum(1 for n in rounds if n == 0)}
+
+
 def report(days: int = 7) -> str:
     """The same thing as text, for chat and the morning brief."""
     data = summary(days)
@@ -80,7 +105,12 @@ def report(days: int = 7) -> str:
                          f"({detail})")
         else:
             lines.append(f"  {label}: {detail}")
-    unknown = set(kinds) - set(LABEL)
+        if kind == "verify":
+            conv = verify_convergence(days)
+            if conv:
+                lines.append(f"    → avg {conv['avg_fix_rounds']} fix-round(s) to green, "
+                             f"{conv['first_try']}/{conv['passed']} first-try")
+    unknown = set(kinds) - set(LABEL) - {"verify_round"}   # internal fix-round telemetry
     for kind in sorted(unknown):
         lines.append(f"  {kind}: " + ", ".join(f"{k} {v}" for k, v in kinds[kind]["counts"].items()))
     return "\n".join(lines)

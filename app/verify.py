@@ -26,7 +26,9 @@ Design rules that keep it safe and additive:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -180,6 +182,23 @@ def failure_feedback(result: VerifyResult) -> str:
         "Fix the CAUSE of this failure and stop. Do not re-plan, do not re-run "
         "discovery — resume from where you are, make the check pass, then finish."
     )
+
+
+_SIG_DIGITS = re.compile(r"\d+")
+_SIG_WS = re.compile(r"\s+")
+
+
+def signature(tail: str) -> str:
+    """A stable fingerprint of a failure, so the gate can detect a PLATEAU — the
+    fix leg reproducing the same failure instead of making progress.
+
+    Digits (line numbers, counts, addresses, timings) and whitespace are stripped,
+    so 'assert 1 == 2' at line 40 and 'assert 3 == 4' at line 51 fingerprint the
+    same: the same KIND of failure. The tail carries the actual error, so we key on
+    the end of the normalised text, not the whole log. Empty tail is its own stable
+    signature (a check that fails silently still plateaus if it keeps doing so)."""
+    norm = _SIG_WS.sub(" ", _SIG_DIGITS.sub("", (tail or "").lower())).strip()
+    return hashlib.sha1(norm[-800:].encode()).hexdigest()[:16]
 
 
 class _suppress:

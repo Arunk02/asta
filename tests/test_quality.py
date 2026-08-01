@@ -47,6 +47,21 @@ def test_verify_rate_measures_passing_its_own_check():
     assert "75% passed their own check" in quality.report()
 
 
+def test_verify_convergence_measures_how_hard_green_was():
+    """The learning number: avg fix-rounds to green, and how many passed first try."""
+    store.record_outcome("verify", "passed", detail="fix_rounds=0 cmd=pytest")
+    store.record_outcome("verify", "passed", detail="fix_rounds=0 cmd=pytest")
+    store.record_outcome("verify", "passed", detail="fix_rounds=2 cmd=pytest")
+    conv = quality.verify_convergence()
+    assert conv == {"passed": 3, "avg_fix_rounds": round(2 / 3, 2), "first_try": 2}
+    assert "fix-round(s) to green, 2/3 first-try" in quality.report()
+
+
+def test_verify_convergence_empty_when_nothing_passed():
+    store.record_outcome("verify", "unresolved", detail="stuck")
+    assert quality.verify_convergence() == {}
+
+
 def test_old_outcomes_fall_outside_the_window():
     store.record_outcome("task", "done")
     with store._connect() as conn:

@@ -11,9 +11,12 @@ Arun already makes:
   ship     PR opened                                     → work that reached a PR
   ask      answered, or timed out                        → were the questions worth asking
   skill    written                                       → is the learning loop producing
+  verify   passed its own check, or parked unresolved    → did the work clear the bar
 
 Deliberately not an LLM judge: these are facts Asta already observes, so they
-cost nothing to record and cannot be flattered.
+cost nothing to record and cannot be flattered. The verify signal is the newest
+and the hardest of all to fake — its "good" outcome is a subprocess exit code, not
+a claim — so a rate that climbs is the loop genuinely converging.
 """
 
 from __future__ import annotations
@@ -28,11 +31,13 @@ GOOD = {
     "task": ("done", "tasks finished"),
     "draft": ("sent_unedited", "drafts sent unedited"),
     "ask": ("answered", "questions answered"),
+    "verify": ("passed", "passed their own check"),
 }
 
 LABEL = {
     "plan": "Planning", "task": "Tasks", "draft": "Drafts",
     "ask": "Questions", "ship": "Shipping", "skill": "Learning",
+    "verify": "Verification",
 }
 
 
@@ -63,7 +68,7 @@ def report(days: int = 7) -> str:
         return (f"No outcomes recorded in the last {days} days — nothing has finished, "
                 f"or this is running before the first measured task.")
     lines = [f"Quality, last {days} days:"]
-    for kind in ("plan", "task", "draft", "ask", "ship", "skill"):
+    for kind in ("plan", "task", "draft", "ask", "ship", "skill", "verify"):
         entry = kinds.get(kind)
         if not entry:
             continue

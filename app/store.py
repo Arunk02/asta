@@ -578,15 +578,44 @@ def memory_reindex(docs: list[dict]) -> None:
         )
 
 
+# Words too generic to recall on. The match is an OR of every token, so ONE of
+# these matching pulls an unrelated memory in by coincidence: "what is this error"
+# matched a ten-day-old "IAM token error" note on the word "error" alone, and the
+# model — handed it as a "relevant memory" — answered about that instead of the
+# question actually asked. These carry no topic, so dropping them removes the
+# false positives at no cost. A real query keeps its nouns ("grafana proxy error"
+# still matches on grafana/proxy); only a pure meta-question ("what is this
+# error") empties out — and then there genuinely is nothing to recall.
+_RECALL_STOPWORDS = {
+    "what", "why", "how", "when", "where", "who", "which", "whom", "whose",
+    "this", "that", "these", "those", "there", "here", "then",
+    "the", "and", "for", "are", "was", "were", "been", "being", "with", "from",
+    "does", "did", "can", "could", "would", "should", "will", "shall", "have",
+    "has", "had", "you", "your", "yours", "our", "ours", "its", "not",
+    "please", "tell", "show", "explain", "mean", "means", "meaning", "say",
+    "thing", "things", "something", "anything", "some", "any", "about", "into",
+    "error", "errors", "issue", "issues", "bug", "bugs", "problem", "problems",
+    "wrong", "fix", "fixing", "fixed", "help", "again", "now", "still", "just",
+    "happening", "going", "getting", "like", "want", "need", "give", "make",
+}
+
+
 def memory_search(query: str, k: int = 4) -> list[dict]:
-    # Sanitize into an OR query of bare words so user text can't break FTS syntax.
-    words = [w for w in "".join(c if c.isalnum() else " " for c in query).split() if len(w) > 2]
+    """FTS candidate memories for `query`, best bm25 first, each carrying `score`.
+
+    Generic words are stripped before matching (see _RECALL_STOPWORDS). If nothing
+    distinctive survives, there is nothing to recall on — return empty rather than
+    matching on noise. `score` is the FTS5 bm25 rank (more negative = stronger),
+    exposed so the semantic layer can gate on it when no embedder is available.
+    """
+    words = [w for w in "".join(c if c.isalnum() else " " for c in query.lower()).split()
+             if len(w) > 2 and w not in _RECALL_STOPWORDS]
     if not words:
         return []
     match = " OR ".join(dict.fromkeys(words[:12]))
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT path, title, mtype, date, "
+            "SELECT path, title, mtype, date, rank AS score, "
             "snippet(memory_fts, 4, '', '', ' … ', 40) AS snippet "
             "FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
             (match, k),

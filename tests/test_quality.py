@@ -37,6 +37,16 @@ def test_report_reads_as_evidence():
     assert "Shipping" in text
 
 
+def test_verify_rate_measures_passing_its_own_check():
+    """The un-fakeable signal: 'good' is a passing check, and a stuck run that
+    parked unresolved counts against the rate — not per-round fix telemetry."""
+    for outcome in ("passed", "passed", "passed", "unresolved"):
+        store.record_outcome("verify", outcome)
+    data = quality.summary()
+    assert data["kinds"]["verify"]["rate"] == 0.75
+    assert "75% passed their own check" in quality.report()
+
+
 def test_old_outcomes_fall_outside_the_window():
     store.record_outcome("task", "done")
     with store._connect() as conn:

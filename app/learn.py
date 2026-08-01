@@ -241,22 +241,16 @@ def _parse(raw: str) -> dict | None:
 
 
 async def _distil(prompt: str) -> str | None:
-    """Cheapest brain that can do the job. Local first — this fires after every
-    substantial task, and paying an API call each time would make the learning
-    loop something you'd want to switch off."""
-    import asyncio
+    """Cheapest brain that can do the job.
 
-    local = await asyncio.to_thread(memory.local_llm_complete, prompt, 900)
-    if local and local.strip():
-        return local
-    from . import agent as agent_mod
-    try:
-        from pydantic_ai import Agent
-        model = agent_mod.get_model(agent_mod.best_model_name())
-        result = await Agent(model=model).run(prompt)
-        return result.output
-    except Exception:
-        return None
+    Local first — this fires after every substantial task, and paying an API call
+    each time would make the learning loop something you'd want to switch off. But
+    it does not stop at local: `should_extract` has already decided this run taught
+    something (two rounds, or an escalation), and refusing to spend anything on the
+    one lesson worth keeping is how an archive that "learns day by day" ends up
+    learning on the few days LM Studio happened to be running.
+    """
+    return await memory.cheap_complete(prompt, 900, paid_ok=True)
 
 
 async def extract(title: str, transcript: str, *, outcome: str = "done",

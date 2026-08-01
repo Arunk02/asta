@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import datetime as _dt
 import json as _json
 import os
 import re
@@ -27,6 +28,23 @@ import uuid
 from pathlib import Path
 
 from . import agents, claude_cli, copilot_cli, repo_ops, store, workspace_tools
+
+
+class _LimitPaused(Exception):
+    """A leg stopped because its brain hit a transient usage limit (session
+    window, monthly quota, rate limit) — a pause to resume, not a failure to
+    report. Carries who stopped and, if the message said so, when it lifts."""
+
+    def __init__(self, brain: str, reset_at: float | None, raw: str):
+        super().__init__(raw)
+        self.brain = brain
+        self.reset_at = reset_at
+        self.raw = raw
+
+
+# Wake a touch AFTER the stated reset, never exactly on it — a clock a minute
+# fast would otherwise resume into the same wall and re-pause.
+_RESUME_BUFFER = 120
 
 ROOT = Path(__file__).resolve().parent.parent
 TASK_TIMEOUT = {"analysis": 900, "code": 1800, "teams_draft": 300}
@@ -203,6 +221,12 @@ def live_task_for(conv_id: str) -> int | None:
     must then ask which one rather than guessing (that guess was the bug)."""
     alive = live_tasks_for(conv_id)
     return alive[0] if len(alive) == 1 else None
+
+
+def paused_tasks_for(conv_id: str) -> list[int]:
+    """Tasks from this conversation parked on a usage limit, waiting to resume."""
+    return [i for i in _linked_ids(conv_id)
+            if (store.get_task(i) or {}).get("status") == "paused"]
 
 
 def augment(task_id: int, text: str) -> str:
@@ -419,16 +443,12 @@ def _impl_effort(executor: str = "") -> str:
     return agent_mod.effort_for(agent_mod.from_exec_name(ex), "CODE")
 
 
-_QUOTA_DOWN_KEY = "copilot_quota_down"     # timestamp of last quota refusal
-_QUOTA_DOWN_TTL = 48 * 3600                # self-heals after the monthly reset
-
-
 def _copilot_quota_down() -> bool:
-    ts = store.kv_get(_QUOTA_DOWN_KEY)
-    try:
-        return bool(ts) and time.time() - float(ts) < _QUOTA_DOWN_TTL
-    except ValueError:
-        return False
+    """One quota table for the whole app. This used to keep its own key + 48h TTL
+    while the model picker read agent.quota_down("copilot") with a different TTL —
+    same fact, two answers. Now everyone reads the one policy."""
+    from . import agent as agent_mod
+    return agent_mod.quota_down("copilot")
 
 
 def _resolve_executor(task_id: int) -> str:
@@ -471,10 +491,6 @@ def _agent_file(kind: str, pipeline: str = "full") -> str:
     """Path to the pipeline body, for executors that take a file."""
     p = agents.path_for(_pipeline_name(kind, pipeline))
     return str(p) if p else ""
-
-
-def _is_quota_err(exc: Exception) -> bool:
-    return "quota" in str(exc).lower()
 
 
 # Phone updates, not a live feed. Three thumbs-up pings across a whole code task
@@ -526,11 +542,21 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         store.kv_set(sid_key, sid)
     watcher = _progress_watcher(task_id, (store.get_task(task_id) or {}).get("title", ""))
     pipeline = _pipeline_name("code", _pipeline_for(task_id))
+    from . import agent as agent_mod
     if ex == "claude":
-        return await claude_cli.one_shot(
-            prompt, cwd=cwd, timeout=TASK_TIMEOUT["code"],
-            agent_file=_agent_file("code", _pipeline_for(task_id)),
-            effort=effort, session_id=sid, resume=resume, on_progress=watcher)
+        try:
+            return await claude_cli.one_shot(
+                prompt, cwd=cwd, timeout=TASK_TIMEOUT["code"],
+                agent_file=_agent_file("code", _pipeline_for(task_id)),
+                effort=effort, session_id=sid, resume=resume, on_progress=watcher)
+        except RuntimeError as exc:
+            # Claude's session (the pinned --resume thread) can't move to another
+            # brain, so a limit here is always a pause — the wait is cheap because
+            # resuming re-attaches this same session and re-derives nothing.
+            if agent_mod.transient_limit(str(exc)):
+                raise _LimitPaused("claude", agent_mod.limit_reset_at(str(exc)),
+                                   str(exc)) from exc
+            raise
     try:
         # Copilot's --agent resolves a name from the workspace's own agent
         # directory. Asta owns the pipeline now, so the body rides in the
@@ -539,17 +565,20 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
             _with_pipeline(pipeline, prompt), cwd=cwd, timeout=TASK_TIMEOUT["code"],
             effort=effort, session_id=sid, resume=resume, on_progress=watcher)
     except RuntimeError as exc:
-        if not _is_quota_err(exc):
+        if not agent_mod.transient_limit(str(exc)):
             raise
-        store.kv_set(_QUOTA_DOWN_KEY, str(time.time()))
-        if resume or not claude_cli.available():
-            raise RuntimeError(
-                "Copilot quota exhausted mid-task — reject this task and respawn "
-                "it; new tasks run on claude automatically.") from exc
-        store.kv_set(f"task_executor:{task_id}", "claude")
-        store.kv_del(sid_key)
-        return await _run_code_leg(task_id, prompt, cwd, resume=False,
-                                   effort=effort, workspace=workspace)
+        agent_mod.mark_quota_down("copilot")
+        # A FRESH leg with claude up can fail over transparently — no session
+        # context exists yet to lose. Mid-pipeline (resume) or with nothing to
+        # switch to, the run PAUSES and waits instead of dying: the old
+        # "reject and respawn" threw away everything discovered so far.
+        if not resume and claude_cli.available() and not agent_mod.quota_down("claude_cli"):
+            store.kv_set(f"task_executor:{task_id}", "claude")
+            store.kv_del(sid_key)
+            return await _run_code_leg(task_id, prompt, cwd, resume=False,
+                                       effort=effort, workspace=workspace)
+        raise _LimitPaused("copilot", agent_mod.limit_reset_at(str(exc)),
+                           str(exc)) from exc
 
 
 async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
@@ -568,9 +597,10 @@ async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
         return await copilot_cli.one_shot(_with_pipeline(pipeline, prompt),
                                           cwd=cwd, timeout=tout, effort=eff)
     except RuntimeError as exc:
-        if not _is_quota_err(exc) or not claude_cli.available():
+        from . import agent as agent_mod
+        if not agent_mod.transient_limit(str(exc)) or not claude_cli.available():
             raise
-        store.kv_set(_QUOTA_DOWN_KEY, str(time.time()))
+        agent_mod.mark_quota_down("copilot")
         store.kv_set(f"task_executor:{task_id}", "claude")
         return await claude_cli.one_shot(prompt, cwd=cwd, timeout=tout,
                                          agent_file=agent_file, effort=eff)
@@ -585,6 +615,14 @@ def _rounds(task_id: int) -> int:
 
 def _escalated(task_id: int) -> bool:
     return (store.kv_get(f"task_escalated:{task_id}") or "") == "1"
+
+
+def _verify_rounds(task_id: int) -> int:
+    """How many times this task has already looped to fix a failing check."""
+    try:
+        return int(store.kv_get(f"task_verify_rounds:{task_id}") or 0)
+    except ValueError:
+        return 0
 
 
 def _learn_from(task_id: int, title: str, result: str, status: str = "done") -> None:
@@ -609,6 +647,71 @@ def _learn_from(task_id: int, title: str, result: str, status: str = "done") -> 
         return
     asyncio.create_task(learn.extract(title, result, outcome=status,
                                       escalated=_escalated(task_id)))
+
+
+async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
+    """The objective bar before a code task calls itself done.
+
+    Every other stop signal in Asta is the model declaring "done" about itself; a
+    model will do that while the tests are red, and the learner then learns from a
+    self-declared win. This runs the repo's OWN check (zero model tokens) and, on
+    failure, loops to fix — bounded — instead of shipping a green-looking "done"
+    over a red suite. That is the whole of "resilient".
+
+    Returns True when this gate finalized the task (looped then re-finished, or
+    parked for Arun); False to let the normal done path run. A repo with no
+    resolvable check, a broken check, or the gate disabled is a pure NO-OP: the
+    task finishes exactly as it did before this existed — this can never make a
+    task that used to complete stop completing.
+    """
+    from . import verify, notify
+    if not verify.enabled():
+        return False
+    cwd = _cwd(t["workspace"])
+    cmd = verify.resolve_command(cwd, t["workspace"])
+    if not cmd:
+        return False
+    outcome = await verify.run(cwd, cmd)
+    if not outcome.ran:
+        return False   # no usable oracle — behave exactly as today
+    if outcome.ok:
+        store.record_outcome("verify", "passed", subject=str(task_id), detail=cmd[:200])
+        return False   # green: the normal done path runs, and now learns from a VERIFIED win
+    # Red. Loop to fix, bounded — never silently ship a failing check.
+    vr = _verify_rounds(task_id)
+    if vr < verify.max_rounds():
+        store.kv_set(f"task_verify_rounds:{task_id}", str(vr + 1))
+        # A first attempt that failed its own check and a fix that rescues it is
+        # exactly an escalation to teach from — the teacher half writes the skill
+        # so the next similar task passes on the first try.
+        store.kv_set(f"task_escalated:{task_id}", "1")
+        # A fix round is telemetry (is the loop converging?), kept OUT of the
+        # "verify" kind so it never dilutes the terminal pass-rate.
+        store.record_outcome("verify_round", "failed", subject=str(task_id),
+                             detail=f"round {vr + 1}: {cmd[:160]}")
+        await notify.notify(
+            f"🔴 #{task_id} {t['title']} — its own check failed, fixing "
+            f"(round {vr + 1}/{verify.max_rounds()})…", "task")
+        result2 = await _run_code_leg(
+            task_id, verify.failure_feedback(outcome) + CODE_OVERRIDES, cwd,
+            resume=True, effort=_impl_effort(_resolve_executor(task_id)),
+            workspace=t["workspace"])
+        if (store.get_task(task_id) or {}).get("status") in FINAL:
+            return True
+        await _finish_code(task_id, t, result2, hops)
+        return True
+    # Out of fix budget — park for Arun with the failure. Bounded, never infinite,
+    # never a green-looking "done" over a red check.
+    store.kv_set(f"task_gate:{task_id}", "verify")
+    store.record_outcome("verify", "unresolved", subject=str(task_id), detail=cmd[:200])
+    parked = result + "\n\n--- verification still failing ---\n" + outcome.tail
+    store.update_task(task_id, status="awaiting_approval", result=parked)
+    await notify.notify(
+        f"🔴 #{task_id} {t['title']} — its own check is STILL failing after "
+        f"{verify.max_rounds()} fix attempts:\n\n{_phone_text(outcome.tail, 700)}\n\n"
+        f"Reply with a hint, 'approve task {task_id}' to accept as-is, or "
+        f"'reject task {task_id}'.", "task")
+    return True
 
 
 async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
@@ -674,6 +777,8 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         if (store.get_task(task_id) or {}).get("status") in FINAL:
             return
         await _finish_code(task_id, t, result2, hops + 1)
+        return
+    if await _verify_gate(task_id, t, result, hops):
         return
     store.update_task(task_id, status="done", result=result, finished_at=time.time())
     _learn_from(task_id, t["title"], result)
@@ -746,6 +851,10 @@ async def _worker(task_id: int) -> None:
     except asyncio.CancelledError:
         # cancel() owns the status and the notification; just stop cleanly.
         raise
+    except _LimitPaused as exc:
+        if (store.get_task(task_id) or {}).get("status") in FINAL:
+            return
+        await _pause_task(task_id, t, exc)
     except Exception as exc:
         if (store.get_task(task_id) or {}).get("status") in FINAL:
             return
@@ -798,12 +907,154 @@ async def _resume_worker(task_id: int, text: str, approved: bool = False) -> Non
         await _finish_code(task_id, t, result, hops=0)
     except asyncio.CancelledError:
         raise
+    except _LimitPaused as exc:
+        if (store.get_task(task_id) or {}).get("status") in FINAL:
+            return
+        await _pause_task(task_id, t, exc)
     except Exception as exc:
         if (store.get_task(task_id) or {}).get("status") in FINAL:
             return
         store.update_task(task_id, status="failed", error=str(exc)[:500],
                           finished_at=time.time())
         await notify.notify(f"❌ Task #{task_id} failed — {t['title']}: {str(exc)[:200]}", "task")
+
+
+def _switchable_brains(exclude: str) -> list[str]:
+    """Other executors worth switching a paused task to right now — installed and
+    not themselves limited. Empty means waiting is the only option."""
+    from . import agent as agent_mod
+    out = []
+    for spec_name in agent_mod.EXECUTORS:
+        ex = agent_mod.exec_name(spec_name)
+        if ex == exclude or ex in out:
+            continue
+        if agent_mod.available(spec_name) and not agent_mod.quota_down(spec_name):
+            out.append(ex)
+    return out
+
+
+def _resolve_switch(name: str) -> str:
+    """Map a brain name Arun typed ('copilot', 'claude', 'gpt') to an executor
+    Asta can actually run a task on, or '' if it names none."""
+    n = (name or "").strip().lower()
+    if n in _executor_names():
+        return n
+    from . import agent as agent_mod
+    spec = agent_mod.normalize_model(n.replace(" ", "_")) if n else ""
+    ex = agent_mod.exec_name(spec) if spec else ""
+    return ex if ex in _executor_names() else ""
+
+
+async def _pause_task(task_id: int, t: dict, exc: _LimitPaused) -> None:
+    """A leg hit a transient usage limit. Keep the pinned session and everything
+    already done, mark the task paused, and both (a) schedule a durable
+    auto-resume for when the brain renews and (b) tell Arun, offering to switch
+    brains instead of waiting. The auto-resume survives a restart because the due
+    time is persisted, not held in memory — a pause at 3:40pm that a crash would
+    otherwise strand still fires."""
+    from . import notify
+    reset_at = exc.reset_at
+    store.kv_set(f"task_paused:{task_id}", _json.dumps(
+        {"brain": exc.brain, "reset_at": reset_at, "raw": exc.raw[:300], "at": time.time()}))
+    # Auto-resume ONLY when the limit said when it lifts. Claude's session window
+    # does ("resets 3:40pm"); Copilot's monthly pool doesn't. Retrying blindly
+    # against a pool that won't refill for weeks would just ping Arun every half
+    # hour, so a limit with no stated reset waits for him to resume or switch.
+    when = ""
+    if reset_at:
+        store.kv_set(f"task_resume_at:{task_id}", str(reset_at + _RESUME_BUFFER))
+        with contextlib.suppress(Exception):
+            when = _dt.datetime.fromtimestamp(reset_at).strftime("%-I:%M%p").lower()
+    else:
+        store.kv_del(f"task_resume_at:{task_id}")
+    store.update_task(task_id, status="paused", error=exc.raw[:500])
+    alts = _switchable_brains(exc.brain)
+    switch_line = (f"\nOr reply “task {task_id} use {alts[0]}” to switch brains and carry "
+                   f"on now (a fresh session on {alts[0]} — it rebuilds context from the "
+                   f"repo)." if alts else "")
+    lead = (f"Nothing is lost. I'll auto-resume on {exc.brain} at ~{when} and pick up "
+            f"exactly where it stopped. Say “resume task {task_id}” to try sooner." if when
+            else f"Nothing is lost — the pinned session is kept. Say “resume task {task_id}” "
+                 f"when {exc.brain} is back and I'll pick up exactly where it stopped.")
+    await notify.notify(
+        f"⏸ Task #{task_id} paused — {exc.brain} hit its usage limit"
+        + (f" (renews ~{when})" if when else "") + ".\n" + lead + switch_line, "task")
+
+
+async def resume_task(task_id: int, switch_to: str = "") -> str:
+    """Resume a paused (or transiently-failed) code task from where it stopped.
+
+    Same brain → re-attaches the pinned CLI session with --resume, so nothing is
+    re-discovered. switch_to → moves it to another brain first; that brain can't
+    inherit the old session, so it starts fresh and rebuilds context from the
+    repo (handoff.md / todos.md / git), which is still far better than dropping
+    the task. Used by both the manual command and the auto-resume sweep."""
+    t = store.get_task(task_id)
+    if not t:
+        raise ValueError(f"no task #{task_id}")
+    if t["kind"] != "code":
+        raise ValueError(f"task #{task_id} isn't a resumable code task ({t['kind']})")
+    if t["status"] not in ("paused", "failed"):
+        raise ValueError(f"task #{task_id} is {t['status']} — nothing to resume")
+    if is_running(task_id):
+        return f"Task #{task_id} is already running."
+    note = ""
+    if switch_to:
+        ex = _resolve_switch(switch_to)
+        if not ex:
+            raise ValueError(f"“{switch_to}” isn't a brain I can run tasks on")
+        store.kv_set(f"task_executor:{task_id}", ex)   # a fresh session opens for it
+        note = f" on {ex}"
+    store.kv_del(f"task_resume_at:{task_id}")
+    store.kv_del(f"task_paused:{task_id}")
+    store.update_task(task_id, status="running", error="")
+    prompt = ("Resume: your session was paused mid-task when the brain hit a usage "
+              "limit — this is the same task continuing, not a new one. Check "
+              "`git log --oneline -5` and `git status` first so you don't redo "
+              "finished work, then carry on from the next unfinished step.")
+    job = asyncio.create_task(_resume_worker(task_id, prompt, approved=True))
+    _running[task_id] = job
+    job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
+    return f"Task #{task_id}: resuming{note} from where it stopped."
+
+
+async def _resume_due(now: float | None = None) -> list[int]:
+    """Auto-resume every paused task whose brain-limit has now lifted; returns the
+    ids kicked. Split from the loop so it can be driven directly in a test."""
+    from . import notify
+    now = time.time() if now is None else now
+    kicked: list[int] = []
+    for t in store.list_tasks(limit=50):
+        if t["status"] != "paused" or is_running(t["id"]):
+            continue
+        raw = store.kv_get(f"task_resume_at:{t['id']}")
+        try:
+            due = float(raw) if raw else None
+        except (TypeError, ValueError):
+            due = None
+        if due is None or now < due:
+            continue
+        kicked.append(t["id"])
+        with contextlib.suppress(Exception):
+            await notify.notify(
+                f"▶️ Auto-resuming task #{t['id']} — {t['title'][:50]} (brain renewed).", "task")
+        with contextlib.suppress(Exception):
+            await resume_task(t["id"])
+    return kicked
+
+
+async def resume_paused_loop(interval: int = 60) -> None:
+    """Background sweep: resume paused tasks once their brain is back. Durable —
+    the due time lives in the store, so a task paused before a restart is still
+    picked up after one."""
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            await _resume_due()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
 
 
 async def approve(task_id: int) -> str:

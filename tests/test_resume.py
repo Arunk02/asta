@@ -194,3 +194,48 @@ def test_with_nothing_available_the_work_is_parked_not_lost(monkeypatch):
     said = " ".join(str(p) for p in sink.sent)
     assert "kept the place" in said
     assert resume.get("c1")["request"] == "the real request"   # survives for later
+
+
+# --- the fallback CHAIN: claude out -> copilot -> local, skip the dry ones ----
+
+def test_the_chain_is_ordered_by_cost_and_excludes_the_failed_brain(monkeypatch):
+    monkeypatch.setattr(main.agent_mod, "EXECUTORS", ("copilot", "claude_cli"))
+    monkeypatch.setattr(main.agent_mod, "available", lambda n: True)
+    monkeypatch.setattr(main.agent_mod, "quota_down", lambda n: False)
+    # subscription CLIs first, then the free local model, then metered API keys
+    assert main._fallback_chain("claude_cli") == ["copilot", "local", "claude", "openai"]
+
+
+def test_the_chain_skips_a_brain_that_is_itself_out_of_quota(monkeypatch):
+    """The gap this closes: the old fallback checked availability but not quota,
+    so a dead Copilot got handed a turn Claude had just failed on."""
+    monkeypatch.setattr(main.agent_mod, "EXECUTORS", ("copilot", "claude_cli"))
+    monkeypatch.setattr(main.agent_mod, "available", lambda n: n in ("copilot", "local"))
+    monkeypatch.setattr(main.agent_mod, "quota_down", lambda n: n == "copilot")
+    assert main._fallback_chain("claude_cli") == ["local"]   # copilot dry -> straight to local
+
+
+def test_a_fallback_that_also_dies_rolls_on_to_the_next(monkeypatch):
+    """Claude out -> Copilot, but Copilot is dry too -> the local model finishes
+    it. A second dead brain used to surface as a hard error and drop the turn."""
+    tried: list[str] = []
+
+    async def fake_cli(out, conv, text, cli, via, note=None, channel="web"):
+        tried.append(via)
+        raise RuntimeError("copilot exited 1: quota exhausted")     # copilot also out
+
+    async def fake_stream(out, conv, text, model, channel="web"):
+        tried.append(model)                                         # local succeeds
+
+    monkeypatch.setattr(main, "_run_turn_cli", fake_cli)
+    monkeypatch.setattr(main, "_run_turn_streaming", fake_stream)
+    monkeypatch.setattr(main.agent_mod, "EXECUTORS", ("copilot", "claude_cli"))
+    monkeypatch.setattr(main.agent_mod, "available", lambda n: n in ("copilot", "local"))
+    monkeypatch.setattr(main.agent_mod, "quota_down", lambda n: False)
+    monkeypatch.setattr(main.agent_mod, "is_cli", lambda n: n in ("copilot", "claude_cli"))
+    monkeypatch.setattr(main.agent_mod, "runner", lambda n: object())
+    resume.save("cA", "fix the sync bug", "claude_cli", partial="it's the ETA mapping")
+
+    asyncio.run(main._cli_fallback(_Sink(), {"id": "cA"}, "fix the sync bug", "claude_cli", "whatsapp"))
+    assert tried == ["copilot", "local"]        # rolled Copilot -> local, no error surfaced
+    assert resume.get("cA") is None             # local finished -> checkpoint consumed

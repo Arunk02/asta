@@ -307,8 +307,12 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     # orientation swap, so the flag never tells copilot to use tools it lacks.
     if mcp_cli_enabled():
         import json as _json
-        from . import mcp_server
-        cmd += ["--additional-mcp-config", _json.dumps(mcp_server.config_entry())]
+        from . import mcp_server, tool_index
+        # Same context-aware narrowing as the Claude path (one selector, both
+        # brains): the ~handful the message needs, or the full set when ambiguous.
+        selected = tool_index.select_sticky(conv["id"], ranking_text)
+        cmd += ["--additional-mcp-config",
+                _json.dumps(mcp_server.config_entry(tools=selected))]
     model = os.environ.get("COPILOT_CLI_MODEL")
     if model:
         cmd += ["--model", model]
@@ -334,15 +338,37 @@ def _budget_flags(effort: str, credits: str) -> list[str]:
     return flags
 
 
+# Reading Teams/Outlook drives a real browser, so it can wedge on a dead session
+# or a stuck page. It used to be awaited with no ceiling at all, and — because it
+# happens BEFORE the brain is even spawned — a wedge there looked exactly like a
+# thinking model: no output, no error, no end. Context is a nice-to-have; the
+# answer is not. Past the ceiling we go without it.
+PREFETCH_TIMEOUT = float(os.environ.get("ASTA_PREFETCH_TIMEOUT", "25"))
+
+
+async def _prefetch(user_text: str) -> str:
+    """Teams + Outlook context for this message, or "" if it can't be had in time."""
+    async def _both() -> str:
+        return "\n\n".join(b for b in (await _teams_activity_context(user_text),
+                                       await _outlook_context(user_text)) if b)
+    try:
+        return await asyncio.wait_for(_both(), timeout=PREFETCH_TIMEOUT)
+    except (asyncio.TimeoutError, TimeoutError, Exception):
+        return ""
+
+
 async def run_turn(conv: dict, user_text: str,
-                   on_delta: Callable[[str], Awaitable[None]] | None = None) -> str:
+                   on_delta: Callable[[str], Awaitable[None]] | None = None,
+                   _retried: bool = False) -> str:
     """One chat turn through Copilot CLI, streaming stdout chunks to on_delta."""
     if not available():
         raise RuntimeError("Copilot CLI is not installed/authenticated (run: copilot login)")
+    # Under MCP the brain reads Teams/Outlook via native tools on demand, so the
+    # ~25s pre-read that blocks every turn is redundant. Kept for the MCP-off
+    # fallback, where the brain can't reliably reach those itself.
+    prefetched = "" if mcp_cli_enabled() else await _prefetch(user_text)
     proc = await asyncio.create_subprocess_exec(
-        *_build_cmd(conv, user_text, "\n\n".join(
-            b for b in (await _teams_activity_context(user_text),
-                        await _outlook_context(user_text)) if b)),
+        *_build_cmd(conv, user_text, prefetched),
         cwd=_cwd(conv),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -364,7 +390,10 @@ async def run_turn(conv: dict, user_text: str,
     limit = turn_timeout()
     try:
         await asyncio.wait_for(_pump(), timeout=limit)
-        rc = await proc.wait()
+        # Closing stdout is not the same as exiting. A copilot that streamed its
+        # answer and then hung on shutdown held this await forever, outside the
+        # ceiling above — the turn was finished and Arun still heard nothing.
+        rc = await asyncio.wait_for(proc.wait(), timeout=30)
     except asyncio.TimeoutError:
         proc.kill()
         raise RuntimeError(f"Copilot CLI turn timed out after {limit}s")
@@ -379,9 +408,18 @@ async def run_turn(conv: dict, user_text: str,
     if rc != 0:
         err = (await proc.stderr.read()).decode(errors="replace")[-500:] if proc.stderr else ""
         # A dead --resume session (e.g. cleaned store) gets one fresh retry.
-        if not out and store.kv_get(f"copilot_session:{conv['id']}"):
+        #
+        # "One" has to be enforced by a flag, not by the session key: _session_id
+        # WRITES a new key whenever it finds none, so deleting it here guaranteed
+        # the very same condition was true again on the next failure. Anything
+        # that fails for a reason a new session cannot fix — an exhausted monthly
+        # quota, most of all — retried forever, roughly every 20 seconds, each
+        # attempt leaving a fresh session directory behind. That is what left
+        # 7,851 of them on disk, and why a WhatsApp message could be answered
+        # with silence for three hours: the turn never returned to report it.
+        if not _retried and not out and store.kv_get(f"copilot_session:{conv['id']}"):
             store.kv_del(f"copilot_session:{conv['id']}")
-            return await run_turn(conv, user_text, on_delta)
+            return await run_turn(conv, user_text, on_delta, _retried=True)
         raise RuntimeError(f"Copilot CLI exited {rc}: {err or out[-300:] or 'no output'}")
     return out or "(Copilot returned no output)"
 

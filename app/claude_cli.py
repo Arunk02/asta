@@ -147,28 +147,38 @@ def _cwd(conv: dict) -> str:
     return str(ROOT)
 
 
-def _build_cmd(conv: dict, user_text: str) -> list[str]:
+def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     from . import copilot_cli, memory
     import datetime as _dt
 
     sid, is_new = _session_id(conv["id"])
     ranking_text = user_text            # the bare message, before the [now:] prefix
     now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M %a")
-    user_text = f"[now: {now}]\n{user_text}"
-    prompt = user_text
-    if is_new:
-        # Reuse the Copilot orientation block verbatim — same assistant, same
-        # tools, same rules; only the CLI underneath differs.
-        prompt = copilot_cli._first_turn_context(
-            conv, via="Claude Code CLI", user_text=ranking_text) + "\n\n---\n\n" + user_text
-    else:
+    umsg = f"[now: {now}]\n{user_text}"
+    if prefetched:
+        # Live Teams/Outlook context, exactly as Copilot gets it. Same assistant,
+        # same rules — a brain that answers "any messages for me?" from a real
+        # inbox on one CLI and guesses on the other is two assistants.
+        umsg = f"{prefetched}\n\n{umsg}"
+    if not is_new:
         rb = memory.recall_block(user_text)
         if rb:
-            prompt = f"[{rb}]\n\n{user_text}"
+            umsg = f"[{rb}]\n\n{umsg}"
+    # Asta's identity, capabilities and rules go in the SYSTEM prompt, NOT the
+    # user message. Delivered as user text (the old way), a strong model read its
+    # own operating manual as untrusted injected content and refused to act as
+    # Asta at all — "I'm just Claude Code, I don't have those tools" — the exact
+    # failure Arun hit. As a system prompt it is authoritative, the same way the
+    # task pipeline (--append-system-prompt) always worked where chat didn't.
+    # Re-sent every turn (a stable system prompt is nearly free under prompt
+    # caching) so a resumed session never drifts back to plain Claude Code.
+    system = copilot_cli._first_turn_context(
+        conv, via="Claude Code CLI", user_text=ranking_text)
     cmd = [
         "claude",
         "--resume" if not is_new else "--session-id", sid,
-        "-p", prompt,
+        "--append-system-prompt", system,
+        "-p", umsg,
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",                       # required for stream-json
@@ -179,8 +189,18 @@ def _build_cmd(conv: dict, user_text: str) -> list[str]:
     # running server. Off by default — the curl path is the proven one, and this
     # is the opt-in cutover, flipped only after a real-turn test.
     if copilot_cli.mcp_cli_enabled():
-        from . import mcp_server
-        cmd += ["--mcp-config", str(mcp_server.write_config()), "--strict-mcp-config"]
+        import json as _json
+        from . import mcp_server, tool_index
+        # Context-aware: expose the ~handful of tools this message needs (+ the
+        # ALWAYS floor), not all 50 schemas. select_sticky returns None for an
+        # ambiguous message → the full set (safe default), and the floor only for
+        # a conversational one. INLINE JSON, not a file: `claude --mcp-config`
+        # takes "files or strings", so passing the config directly avoids a
+        # per-conversation file on disk (each held a copy of the token and leaked
+        # when a chat was deleted) and matches the Copilot path exactly.
+        selected = tool_index.select_sticky(conv["id"], ranking_text)
+        cmd += ["--mcp-config", _json.dumps(mcp_server.config_entry(tools=selected)),
+                "--strict-mcp-config"]
     model = os.environ.get("ASTA_CLAUDE_CLI_MODEL", "")
     if model:
         cmd += ["--model", model]
@@ -201,8 +221,16 @@ async def run_turn(conv: dict, user_text: str,
     """
     if not available():
         raise RuntimeError("claude CLI is not installed (get it: https://claude.com/claude-code)")
+    from . import copilot_cli
+    # The Teams/Outlook pre-fetch existed because a CLI brain couldn't reliably
+    # reach Asta to read them itself. With native MCP tools it can (and does), so
+    # the pre-read is redundant AND costly — it blocks the turn ~25s BEFORE the
+    # brain even starts. Under MCP the brain calls teams_activity/outlook_mail on
+    # demand instead; the curl-era pre-fetch stays only for the MCP-off fallback.
+    prefetched = "" if copilot_cli.mcp_cli_enabled() else await copilot_cli._prefetch(user_text)
     proc = await asyncio.create_subprocess_exec(
-        *_build_cmd(conv, user_text), cwd=_cwd(conv),
+        *_build_cmd(conv, user_text, prefetched),
+        cwd=_cwd(conv),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         env=_subprocess_env(),
     )
@@ -289,7 +317,9 @@ async def run_turn(conv: dict, user_text: str,
     limit = turn_timeout()
     try:
         await asyncio.wait_for(_pump(), timeout=limit)
-        rc = await proc.wait()
+        # Same reason as copilot_cli: end-of-output is not end-of-process, and an
+        # unbounded wait here holds a finished turn open indefinitely.
+        rc = await asyncio.wait_for(proc.wait(), timeout=30)
     except asyncio.TimeoutError:
         proc.kill()
         _report()
@@ -308,7 +338,12 @@ async def run_turn(conv: dict, user_text: str,
     # duplicate everything the UI already rendered.
     out = ("".join(chunks).strip() or final).strip()
     if limited:
-        store.kv_set("claude_quota_down", str(int(asyncio.get_event_loop().time())))
+        # ONE quota table, keyed the same way for every brain. This used to write
+        # "claude_quota_down", a key nothing read — the picker and fallback both
+        # consult agent.quota_down("claude_cli") (i.e. "claude_cli_quota_down"),
+        # so the interactive rate-limit signal was silently dropped.
+        from . import agent as agent_mod
+        agent_mod.mark_quota_down("claude_cli")
     if rc != 0 or (err_msg and not out):
         stderr = (await proc.stderr.read()).decode(errors="replace")[-500:] if proc.stderr else ""
         # A dead --resume session (cleaned store / expired) gets one fresh retry.

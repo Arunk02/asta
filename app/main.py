@@ -120,6 +120,7 @@ async def startup() -> None:
     asyncio.create_task(briefing.scheduler_loop())
     asyncio.create_task(health.loop())
     asyncio.create_task(ci_watch.loop())
+    asyncio.create_task(tasks.resume_paused_loop())
     asyncio.create_task(notify.held_watch_loop())
     asyncio.create_task(_learning_loop())
     # The WhatsApp bridge is a child of Asta's lifecycle now, not a manual step:
@@ -845,6 +846,15 @@ async def api_reject_task(task_id: int):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/tasks/{task_id}/resume", dependencies=[Depends(require_auth)])
+async def api_resume_task(task_id: int, request: Request):
+    b = await request.json() if request.headers.get("content-length") else {}
+    try:
+        return {"ok": True, "detail": await tasks.resume_task(task_id, b.get("switch_to", ""))}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/reminders", dependencies=[Depends(require_auth)])
 def api_reminders(all: bool = False):
     return store.list_reminders(pending_only=not all)
@@ -1058,7 +1068,8 @@ def _is_quota_error(exc: Exception) -> bool:
     return any(s in text for s in ("credit balance", "quota", "rate limit", "billing",
                                    "overloaded", "api key", "api_key",
                                    # Claude Code CLI wording for subscription caps
-                                   "usage limit", "limit reached", "limit exceeded"))
+                                   "usage limit", "session limit", "too many requests",
+                                   "limit reached", "limit exceeded"))
 
 
 class Emitter:
@@ -1084,6 +1095,10 @@ class Emitter:
             await self.ws.send_json({**payload, "conversation_id": self.conv_id})
         except Exception:
             self.alive = False
+
+    async def close(self) -> None:
+        """Nothing buffered — the socket got every event as it happened."""
+        return
 
 
 # How long the WhatsApp bridge's request may wait for an in-band answer before we
@@ -1134,6 +1149,26 @@ class HybridSink:
         """Turn ran long — everything from here goes out via push instead."""
         self._pushing = True
 
+    async def close(self) -> None:
+        """Flush whatever is buffered, even though no "done" ever arrived.
+
+        This is the fix for three hours of silence. A turn that FAILS never sends
+        "done" — it sends {"type": "error"} and returns — and a turn that pauses,
+        or stages a send on a phone channel, returns without one too. All three
+        buffered their text here and then dropped it on the floor, so the answer
+        to "⏳ on it" was nothing, forever, with no way to tell a dead brain from
+        a slow one.
+
+        Delivery cannot depend on the happy path being taken. Whatever is left
+        when the turn ends goes out.
+        """
+        if not self._pushing:
+            return          # still in-band: the HTTP reply carries it
+        out = self.text()
+        if out:
+            with contextlib.suppress(Exception):
+                await self._send(out[:4000])
+
 
 class PushSink:
     """Sink for headless channels (Telegram/WhatsApp). Same interface as Emitter,
@@ -1165,6 +1200,12 @@ class PushSink:
             if text:
                 with contextlib.suppress(Exception):
                     await self._send(text[:4000])
+
+    async def close(self) -> None:
+        """Same guarantee as HybridSink: a turn that ends without "done" still
+        delivers what it produced. Notes and errors already went out as they
+        happened here, so this only catches half-streamed deltas."""
+        await self.send({"type": "done"})
 
 
 # One turn at a time per conversation (a Copilot session can't be resumed twice
@@ -1274,46 +1315,66 @@ async def _run_turn_copilot(out, conv: dict, user_text: str,
 
 
 # Why a model ran out differs, and the message should say which — Copilot's is a
-# monthly credit pool, Claude's a rolling five-hour window.
-_QUOTA_KV = {"copilot": "copilot_quota_down", "claude_cli": "claude_quota_down"}
+# monthly credit pool, Claude's a rolling five-hour window. Where that fact is
+# RECORDED lives in agent.py, so the picker and the fallback read one table: this
+# used to write a key nothing else consulted, which is why a dead Copilot went on
+# being handed every new conversation.
 _QUOTA_WORDING = {"copilot": "Copilot quota exhausted",
                   "claude_cli": "Claude subscription limit hit"}
 
 
+def _fallback_chain(failed: str) -> list[str]:
+    """Who can take over a dried-up turn, best first — the order is the trait
+    table's `rank` (subscription CLIs → free local → metered API keys), so adding
+    a brain to the chain is a spec value, not a code edit here. A brain is a
+    candidate only if it is installed/keyed AND not itself known to be out of
+    quota — the old fallback checked availability but not quota, so a dead Copilot
+    got handed the turn a Claude had just failed on, and it died too."""
+    return [brain for brain in agent_mod.fallback_order()
+            if brain != failed
+            and agent_mod.available(brain) and not agent_mod.quota_down(brain)]
+
+
 async def _cli_fallback(out, conv: dict, user_text: str, failed: str, channel: str) -> None:
-    """A CLI model ran dry — hand the turn to another CLI, else an API/local brain.
+    """A brain ran dry mid-turn — hand the turn on, and keep handing it on until
+    one brain finishes or none is left. Claude's window closes → Copilot; Copilot
+    also out → the local LM Studio model; and so on down the chain.
 
-    Any model can be picked at any time, so the fallback is chosen from what is
-    actually up rather than a fixed pair.
-
-    What is handed over is the CHECKPOINT, not the original message. Passing the
-    message alone made the second brain start from nothing and pay again for
-    everything the first one had already established; twelve minutes in, that is
-    most of the cost of the task.
+    What is handed over is the CHECKPOINT, not the original message, so each brain
+    continues rather than re-deriving what the last one already established. If a
+    fallback ALSO runs dry it is marked down and the next one is tried — a second
+    dead brain used to surface as a hard error. When the chain is exhausted the
+    checkpoint deliberately survives, so "resume"/a manual switch picks it up
+    later from any channel.
     """
     why = _QUOTA_WORDING.get(failed, f"{failed} unavailable")
-    store.kv_set(_QUOTA_KV.get(failed, f"{failed}_quota_down"), str(time.time()))
+    agent_mod.mark_quota_down(failed)
     point = resume.get(conv["id"]) or resume.save(conv["id"], user_text, failed,
                                                   channel=channel, why=why)
     point["why"] = why          # the CLI saved the checkpoint; only here knows the wording
-    for alt in agent_mod.EXECUTORS:
-        if alt != failed and agent_mod.available(alt):
-            resume.clear(conv["id"])
-            await _run_turn_cli(out, conv, resume.handoff_prompt(point, alt),
-                                agent_mod.runner(alt), alt,
-                                note=resume.note(point, alt), channel=channel)
+    for brain in _fallback_chain(failed):
+        try:
+            if agent_mod.is_cli(brain):
+                await _run_turn_cli(out, conv, resume.handoff_prompt(point, brain),
+                                    agent_mod.runner(brain), brain,
+                                    note=resume.note(point, brain), channel=channel)
+            else:
+                await out.send({"type": "note", "text": resume.note(point, brain)})
+                await _run_turn_streaming(out, conv, resume.handoff_prompt(point, brain),
+                                          brain, channel)
+            resume.clear(conv["id"])      # taken and finished — consume the checkpoint
             return
-    try:
-        fb = agent_mod.best_model_name()
-    except RuntimeError:
-        # Nothing can take over. The checkpoint deliberately survives: "resume"
-        # or a switch picks it up later, from any channel, rather than the work
-        # dying with the turn.
-        await out.send({"type": "note", "text": resume.parked_note(point)})
-        return
-    resume.clear(conv["id"])
-    await out.send({"type": "note", "text": resume.note(point, fb)})
-    await _run_turn_streaming(out, conv, resume.handoff_prompt(point, fb), fb, channel)
+        except Exception as exc:
+            if not _is_quota_error(exc):
+                raise
+            # This fallback ran dry too. Mark it, refresh the checkpoint (a CLI
+            # re-saves its own partial), and try the next brain instead of erroring.
+            agent_mod.mark_quota_down(brain)
+            why = _QUOTA_WORDING.get(brain, f"{brain} unavailable")
+            point = resume.get(conv["id"]) or point
+            point["why"] = why
+    # Nothing could take it. The checkpoint survives for a later resume/switch.
+    await out.send({"type": "note", "text": resume.parked_note(point)})
 
 
 async def _run_turn(out, conv: dict, user_text: str, channel: str = "web") -> None:
@@ -1530,6 +1591,31 @@ def _start_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task:
 
 
 async def _conducted_turn(conv0: dict, first_text: str, sink, channel: str) -> None:
+    """Wrapper that guarantees delivery. See _conduct for the actual loop.
+
+    Whatever happens in there — a raise, a pause, a staged send, a backstop
+    firing — the sink is closed on the way out, so anything it buffered reaches
+    the channel. Nothing about "did the turn succeed" may decide "did he hear
+    back", because the case where he most needs to hear back is the failure."""
+    try:
+        await _conduct(conv0, first_text, sink, channel)
+    finally:
+        if hasattr(sink, "close"):
+            with contextlib.suppress(Exception):
+                await sink.close()
+
+
+# A single turn may not exceed this, whatever it is doing. The CLI brains have
+# their own 300s ceiling, but it covers only the part where output is being
+# pumped — the Teams/Outlook pre-fetch before the process spawns, and the wait
+# for it to exit afterwards, both sat outside every timeout. That is how one
+# message went unanswered for three hours. This is the backstop: deliberately
+# above the CLI's own limit, so the brain's clearer error normally wins and this
+# only catches a hang nobody anticipated.
+TURN_CEILING = float(os.environ.get("ASTA_TURN_CEILING", "420"))
+
+
+async def _conduct(conv0: dict, first_text: str, sink, channel: str) -> None:
     """Run a turn, then fold in anything buffered while it ran — and, when nothing
     is buffered, drive the model's own next step instead of idling. The just-finished
     work is already in the persisted history, so each continuation builds on top with
@@ -1547,9 +1633,23 @@ async def _conducted_turn(conv0: dict, first_text: str, sink, channel: str) -> N
         conv["workspace"] = conv0.get("workspace")
         async with _turn_lock(cid):
             try:
-                await _run_turn(sink, conv, text, channel)
+                await asyncio.wait_for(_run_turn(sink, conv, text, channel),
+                                       timeout=TURN_CEILING)
             except asyncio.CancelledError:
                 raise
+            except (asyncio.TimeoutError, TimeoutError):
+                loop.clear(cid)
+                # Say it in the words the failure actually has for him: the brain
+                # stopped answering, here is how to get moving again. A checkpoint
+                # is saved so switching picks up rather than starting over.
+                resume.save(cid, text, conv.get("model", "brain"), "", channel,
+                            why=f"{conv.get('model', 'the brain')} stopped responding")
+                with contextlib.suppress(Exception):
+                    await sink.send({"type": "error", "message":
+                                     f"{conv.get('model', 'That brain')} stopped responding after "
+                                     f"{int(TURN_CEILING // 60)} min, so I gave up on it rather "
+                                     f"than leave you waiting. Say “use claude cli” (or another "
+                                     f"brain) and I'll carry on from here."})
             except Exception as exc:            # a tool/model failure must not kill the socket
                 loop.clear(cid)                 # a failed turn ends the loop, doesn't spin
                 with contextlib.suppress(Exception):
@@ -1640,14 +1740,30 @@ def _offer_prompt(o, where: str = "") -> str:
                 f"prepare_to_send. When you are done, report in a few lines and, if there "
                 f"is an obvious next step, offer it with propose_next rather than doing it.")
     if o.kind == "analyse":
-        return (f"{ctx}Arun approved analysing this CI failure. Investigate it now: pull the "
-                f"failing job's log, find the actual cause, and report it in a few lines — what "
-                f"broke, why, and the smallest fix. Do not change any code yet. End by asking "
-                f"whether to fix it and raise the PR.")
+        return (f"{ctx}Arun approved analysing this failure. Work it as a senior engineer on THIS "
+                f"codebase, not a log reader:\n"
+                f"1. Pull the failing job's log (gh run view) and find the exact failing "
+                f"step / test / assertion — the real error, not the summary line.\n"
+                f"2. Open the actual code and this project's context/conventions, and trace the "
+                f"failure to its ROOT CAUSE in the code — the thing that, if changed, stops it. "
+                f"Not the symptom in the log.\n"
+                f"3. If you cannot be sure without reproducing it, SAY SO and write the smallest "
+                f"failing test (or mock) that reproduces it — a confirmed repro is how we know "
+                f"it's the real bug and not a guess. Tell Arun that's what you're doing.\n"
+                f"4. Report in a few lines: what broke, the root cause (file:line), how it "
+                f"reproduces, and the smallest correct fix that fits how this codebase already "
+                f"does things.\n"
+                f"Do NOT change production code yet. End by asking whether to fix it and raise the PR.")
     if o.kind == "raise_pr":
-        return (f"{ctx}Arun approved the fix. Make the change on a branch, run the tests, and "
-                f"raise the PR from his personal account. Report the PR link in one line, then "
-                f"ask where he wants the build shared for approval.")
+        return (f"{ctx}Arun approved the fix. Do it the way a careful engineer would:\n"
+                f"1. On a branch, first make sure a test reproduces the bug and FAILS for the "
+                f"right reason (write it if the analysis didn't already).\n"
+                f"2. Make the smallest fix that follows this codebase's existing patterns.\n"
+                f"3. Confirm that test now passes AND the wider suite is still green — if it "
+                f"isn't, stop and report, don't paper over it.\n"
+                f"4. Raise the PR from his personal account; title and body state the root cause "
+                f"and the fix in plain terms.\n"
+                f"Report the PR link in one line, then ask where he wants the build shared for approval.")
     if o.kind == "share_build":
         dest = where or "wherever he just named"
         return (f"{ctx}Arun wants the build shared with: {dest}. Draft the message announcing it "
@@ -1679,7 +1795,23 @@ async def _run_staged_op(o, cid: str, sink, channel: str) -> None:
 # "use copilot", "switch to claude", "which model" — the model picker the web UI
 # has as a dropdown. Phone channels had no equivalent, which meant the one place
 # he actually reads a quota warning was the one place he could not act on it.
+# Unambiguous phrasing: this IS a request to change brains, whatever it names —
+# so an unknown name gets the list of real ones rather than being run as a
+# message.
 _MODEL_CMD = re.compile(r"^\s*(?:use|switch to|swap to|change to|model)\s+([\w.\- ]{2,40})\s*[.!]*\s*$", re.I)
+
+# "Change the LLM model to Claude cli" matched none of the above — the verb had
+# to be followed immediately by "to", and his was followed by "the LLM model". So
+# the one message that could have rescued a dead brain was queued behind the dead
+# brain. This absorbs whatever he calls it ("the model", "llm", "brain").
+#
+# It is deliberately only half a rule: it is loose enough to also match "change
+# the ticket status to done", so a hit here counts ONLY when the name resolves to
+# a brain that exists. Loose about how he says it, strict about what he names.
+_MODEL_CMD_LOOSE = re.compile(
+    r"^\s*(?:use|switch|swap|change|set)\s+"
+    r"(?:the|my)?\s*(?:llm|ai|chat)?\s*(?:model|brain)\s*(?:to|=)?\s+"
+    r"([\w.\- ]{2,40})\s*[.!]*\s*$", re.I)
 _MODEL_ASK = re.compile(r"^\s*(which model|what model|models|list models|brains?)\s*\??\s*$", re.I)
 
 # Deliberately NOT a bare "continue": that word already belongs to the conductor
@@ -1687,6 +1819,17 @@ _MODEL_ASK = re.compile(r"^\s*(which model|what model|models|list models|brains?
 _RESUME_CMD = re.compile(
     r"^\s*(resume|carry on|pick (it )?up|(continue|carry on|pick up) (from )?where you "
     r"(left off|stopped)|continue where you left off)\s*[.!]*\s*$", re.I)
+
+# "resume task 53", "retry task 7", "continue task 12" — pick a paused delegated
+# task back up. Handled here (not via a brain tool) so it works even when the
+# chat brain is itself limited or has lost the task from its context.
+_RESUME_TASK = re.compile(
+    r"^\s*(?:resume|retry|restart|continue|carry on|pick (?:it )?up)\s+"
+    r"(?:task\s*)?#?(\d{1,5})\b", re.I)
+# "task 53 use copilot", "53 switch to claude" — resume, but on a different brain.
+_TASK_SWITCH = re.compile(
+    r"^\s*(?:task\s*)?#?(\d{1,5})\b.*?\b(?:use|switch to|run on)\s+([\w.\-]{2,30})\s*[.!]*\s*$",
+    re.I)
 
 
 # "what's pending", "anything waiting on me" — the missing half of a yes/no
@@ -1739,6 +1882,46 @@ def _model_listing(current: str) -> str:
         lines.append(f" {mark} {name}: {info.get('label') or name}{state}")
     return ("Brains:\n" + "\n".join(lines) +
             "\n\nSay “use <name>” to switch. The switch sticks for this chat.")
+
+
+def _resolve_brain(wanted: str) -> str:
+    """The registry name `wanted` refers to, or "" if it names no brain.
+
+    Shares its resolution with _switch_model so "does this name a brain?" and
+    "which brain is it?" can never disagree.
+    """
+    registry = agent_mod.model_registry()
+    want = agent_mod.normalize_model((wanted or "").strip().lower().replace(" ", "_"))
+    if want in registry:
+        return want
+    hit = [n for n in registry if want and (want in n or n in want)]
+    return hit[0] if len(hit) == 1 else ""
+
+
+def _model_request(text: str) -> str:
+    """The brain name this message asks for, or "" if it isn't asking.
+
+    Unambiguous phrasing counts even when the name is unknown — "use frobnicator"
+    is still a request to change brains, and answering it with the list of real
+    ones is more use than running it as a message. Loose phrasing has to name a
+    brain that exists, or "change the ticket status to done" becomes a model
+    switch. Both roads lead to _switch_model, which does the resolving.
+    """
+    m = _MODEL_CMD.match(text or "")
+    if m:
+        name = m.group(1).strip()
+        # "use X" is only a brain request when X could BE a brain name. This
+        # pattern predates the bug and quietly ate "use it for the standup notes"
+        # — answered with "I don't have a brain called 'it for the standup
+        # notes'" instead of doing the thing. A name nobody has is still worth
+        # the list; a sentence is not a name.
+        if _resolve_brain(name) or len(name.split()) <= 2:
+            return name
+        return ""
+    m = _MODEL_CMD_LOOSE.match(text or "")
+    if m and _resolve_brain(m.group(1)):
+        return m.group(1).strip()
+    return ""
 
 
 def _switch_model(conv: dict, wanted: str) -> str:
@@ -1800,10 +1983,29 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None
-    switch = _MODEL_CMD.match(user_text or "")
+    # Picking a paused/failed delegated task back up. Resolved BEFORE the
+    # conversation-level "use <brain>" switch, so "task 53 use copilot" steers
+    # that task rather than repointing the whole chat's brain.
+    _mrt = _RESUME_TASK.match(user_text or "")
+    _mts = None if _mrt else _TASK_SWITCH.match(user_text or "")
+    if _mrt or _mts:
+        _tid = int((_mrt or _mts).group(1))
+        _rt = store.get_task(_tid)
+        if _rt and _rt["kind"] == "code" and _rt["status"] in ("paused", "failed"):
+            try:
+                _detail = await tasks.resume_task(_tid, _mts.group(2).strip() if _mts else "")
+            except ValueError as exc:
+                _detail = str(exc)
+            await sink.send({"type": "note", "text": "▶️ " + _detail})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+        # A number that names no paused task falls through — it may be a live task
+        # to augment, or just an ordinary message.
+    switch = _model_request(user_text or "")
     if switch:
         before = conv.get("model", "")
-        await sink.send({"type": "note", "text": _switch_model(conv, switch.group(1))})
+        await sink.send({"type": "note", "text": _switch_model(conv, switch)})
         # He switched because something ran dry — which is the whole reason he
         # asked for this. Carrying on is what he meant; making him then type
         # "resume" would be theatre.
@@ -1836,6 +2038,18 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                              f"on {conv.get('model', 'this brain')}."})
             return _start_turn(conv, resume.handoff_prompt(point, conv.get("model", "")),
                                sink, channel)
+        # No conversation checkpoint, but a delegated task parked on a usage limit
+        # is exactly what a bare "resume" means when there's just one of them.
+        paused = tasks.paused_tasks_for(cid)
+        if len(paused) == 1:
+            try:
+                detail = await tasks.resume_task(paused[0])
+            except ValueError as exc:
+                detail = str(exc)
+            await sink.send({"type": "note", "text": "▶️ " + detail})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
 
     # A drafted outward send is waiting on "can I send this?" — his next message is
     # the answer. A bare yes sends it (via the model's real send tool, so the send
@@ -1868,6 +2082,15 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             if open_offer.mechanical():
                 await _run_staged_op(open_offer, cid, sink, channel)
                 return None
+            # A CI-failure offer carries the workspace its repo lives in. Adopt it
+            # for the conversation so the analysis — and the fix and PR that follow
+            # from it — run against that project's code and context, not Asta's own
+            # repo. Persisted so the later steps in the chain inherit it too.
+            ws_name = (open_offer.payload or {}).get("workspace")
+            if ws_name and conv.get("workspace") != ws_name:
+                conv["workspace"] = ws_name
+                with contextlib.suppress(Exception):
+                    store.update_conversation(cid, workspace=ws_name)
             return _start_turn(conv, _offer_prompt(open_offer), sink, channel)
         if _DECLINE.match(user_text):
             offers.decline()

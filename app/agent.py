@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as _dt
 import os
+import re as _re
+import time
 
 import httpx
 from pydantic_ai import Agent
@@ -11,7 +14,7 @@ from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from . import memory, skills, untrusted, workspace_tools
+from . import memory, skills, store, untrusted, workspace_tools
 
 def assistant_name() -> str:
     return os.environ.get("ASSISTANT_NAME", "Asta")
@@ -267,10 +270,25 @@ async def _intent_local(text: str) -> str | None:
 #             project context pipeline needs a tool-using agent that edits the repo and
 #             runs builds, which a plain chat completion cannot do.
 #   effort    honours the low|medium|high|xhigh|max ladder.
+# Per-brain TRAITS live here, in one table, so a brain's differences are DECLARED
+# DATA rather than scattered `if model == …` branches — the whole point of the
+# consistency work. Adding a model is a row here plus its runner, nothing else.
+#   identity  how its operating prompt is delivered: "system" (a real system
+#             prompt — CLI --append-system-prompt, or PydanticAI instructions) or
+#             "prefix" (folded into the user message; Copilot has no system flag).
+#   tools     how it reaches Asta's capabilities: "mcp" (CLI brains, native
+#             mcp__asta__* forwarding to /api/_invoke) or "in_process" (the agent
+#             calls the Python functions directly).
+#   context   approximate usable context window — the budget the token/local work
+#             reads to decide how many tool schemas to expose. Local is the small
+#             one, and therefore the forcing function for leanness.
+#   rank      failover order, lowest tried first: subscription CLIs (no marginal
+#             $, strong) → free local → metered API keys last.
 _SPECS: dict[str, dict] = {
     # Office-paid workhorse, default for day-to-day chat.
     "copilot":    {"kind": "cli", "runner": "copilot_cli", "executes": True,  "effort": True,
                    "exec_name": "copilot",
+                   "identity": "prefix", "tools": "mcp", "context": 128000, "rank": 10,
                    "label": "Copilot CLI (office)", "hint": "install/auth: copilot login"},
     # Runs on the Claude subscription Arun already pays for — listed above the
     # API-key "claude" entry, which bills a second prepaid account for the same model.
@@ -279,12 +297,16 @@ _SPECS: dict[str, dict] = {
     # table carries both names rather than migrating live data.
     "claude_cli": {"kind": "cli", "runner": "claude_cli", "executes": True,  "effort": True,
                    "exec_name": "claude",
+                   "identity": "system", "tools": "mcp", "context": 200000, "rank": 20,
                    "label": "Claude CLI (subscription)", "hint": "install/auth: claude login"},
     "claude":     {"kind": "api", "env": "ANTHROPIC_API_KEY", "executes": False, "effort": False,
+                   "identity": "system", "tools": "in_process", "context": 200000, "rank": 40,
                    "model_env": ("ASTA_CLAUDE_MODEL", "claude-sonnet-5"), "label": "Claude"},
     "openai":     {"kind": "api", "env": "OPENAI_API_KEY", "executes": False, "effort": True,
+                   "identity": "system", "tools": "in_process", "context": 128000, "rank": 50,
                    "model_env": ("ASTA_OPENAI_MODEL", "gpt-4o"), "label": "OpenAI"},
     "local":      {"kind": "api", "env": "", "executes": False, "effort": False,
+                   "identity": "system", "tools": "in_process", "context": 8192, "rank": 30,
                    "model_env": ("", ""), "label": "Local"},
 }
 
@@ -320,6 +342,26 @@ def exec_name(name: str) -> str:
 
 def spec(name: str) -> dict:
     return _SPECS.get(name, {})
+
+
+#: Trait defaults for a brain the table hasn't fully described yet — safe,
+#: conservative values so a half-declared model still behaves.
+_TRAIT_DEFAULTS = {"identity": "prefix", "tools": "in_process", "context": 8192, "rank": 999}
+
+
+def brain_traits(name: str) -> dict:
+    """The declared traits of a brain (identity/tools/context/rank), one lookup
+    for every caller that needs to know how a model differs — so those
+    differences stay DATA in the spec table, never re-hardcoded at the call site."""
+    s = spec(normalize_model(name))
+    return {k: s.get(k, d) for k, d in _TRAIT_DEFAULTS.items()}
+
+
+def fallback_order() -> list[str]:
+    """Brains in the order a dried-up turn should try them — lowest rank first
+    (subscription CLIs → free local → metered API keys). Derived from the trait
+    table so adding a model to the chain is a `rank` value, not a code edit."""
+    return [n for _, n in sorted((brain_traits(n)["rank"], n) for n in _SPECS)]
 
 
 def is_cli(name: str) -> bool:
@@ -374,6 +416,99 @@ def effort_for(model: str, stage: str) -> str:
     return _STAGE_DEFAULT.get(stage, "")
 
 
+# A subscription brain that has run out is INSTALLED and USELESS, and `available()`
+# only ever answered the first half. So `default_chat_model()` kept handing every
+# new conversation to Copilot after its monthly quota was gone — the switch had to
+# be made by hand, per conversation, for a brain that could not answer any of them.
+#
+# The cooldown is how it comes back on its own: Copilot's pool is monthly and we
+# are not told the reset date, so it is retried every few hours rather than being
+# written off; Claude's is a rolling five-hour window, so it matches that window.
+# One table, consulted by every caller — a per-brain constant somewhere else is
+# how two parts of this file end up disagreeing about who is up.
+QUOTA_COOLDOWN = {"copilot": 6 * 3600, "claude_cli": 5 * 3600}
+
+
+def quota_kv(name: str) -> str:
+    return f"{name}_quota_down"
+
+
+def mark_quota_down(name: str) -> None:
+    store.kv_set(quota_kv(name), str(time.time()))
+
+
+def quota_down(name: str) -> bool:
+    """True while `name` is known to be out of quota and not yet worth retrying."""
+    raw = store.kv_get(quota_kv(name))
+    if not raw:
+        return False
+    try:
+        since = float(raw)
+    except (TypeError, ValueError):
+        return False
+    if time.time() - since < QUOTA_COOLDOWN.get(name, 3600):
+        return True
+    store.kv_del(quota_kv(name))     # cooldown served — let it prove itself again
+    return False
+
+
+# A brain stops for one of two reasons that look alike in an error string but
+# want opposite handling. It CRASHED — a bug, a bad prompt, a dead session — and
+# resuming just repeats the failure. Or it hit a usage ceiling that lifts on its
+# own: Copilot's monthly quota, Claude's rolling session window, an API rate
+# limit. The second is a PAUSE, not a failure — keep the work, come back when it
+# clears. One classifier, so every brain is paused and resumed by the same rule
+# rather than each caller inventing its own substring test (which is exactly how
+# "session limit" slipped past a test that only looked for "quota").
+_TRANSIENT_LIMIT_MARKERS = (
+    "quota",
+    "session limit",
+    "usage limit",
+    "rate limit", "rate-limit", "ratelimit",
+    "too many requests",
+    "overloaded",
+    "limit reached", "reached your limit", "hit your limit", "hit your session",
+    "resets ", "resets at", "try again later",
+)
+
+
+def transient_limit(msg: str) -> bool:
+    """True when a brain stopped on a temporary usage/rate/session limit — a
+    'come back later' condition rather than a crash. A drained PREPAID balance
+    ('credit balance is too low') is excluded: that account does not self-heal,
+    so pausing to wait for it would wait forever."""
+    m = (msg or "").lower()
+    if "credit balance" in m:
+        return False
+    return any(k in m for k in _TRANSIENT_LIMIT_MARKERS)
+
+
+_RESET_TIME = _re.compile(
+    r"reset[s]?(?:\s+(?:at|on))?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?", _re.I)
+
+
+def limit_reset_at(msg: str, now: float | None = None) -> float | None:
+    """Best-effort epoch when a limit message says it lifts, else None. Claude
+    prints e.g. 'resets 3:40pm (Asia/Calcutta)'; the server runs on that same
+    machine, so its local clock is the right one to read the time against."""
+    m = _RESET_TIME.search(msg or "")
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2) or 0)
+    ampm = (m.group(3) or "").lower().replace(".", "")
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return None
+    base = _dt.datetime.now() if now is None else _dt.datetime.fromtimestamp(now)
+    target = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= base:                       # the named time is later today, or tomorrow
+        target += _dt.timedelta(days=1)
+    return target.timestamp()
+
+
 def model_registry() -> dict[str, dict]:
     """name -> {label, available, detail}. Availability drives the UI picker."""
     local_id = _lmstudio_model_id()
@@ -389,6 +524,8 @@ def model_registry() -> dict[str, dict]:
             env_var, default = s["model_env"]
             label = f"{s['label']} ({os.environ.get(env_var, default)})"
             hint = f"set {s['env']} in .env"
+        if ok and quota_down(name):
+            ok, hint = False, "quota exhausted — it'll be retried automatically"
         registry[name] = {"label": label, "available": ok, "detail": "" if ok else hint}
     if os.environ.get("ASTA_TEST_MODEL"):
         registry["test"] = {"label": "Test (no LLM)", "available": True, "detail": ""}
@@ -409,10 +546,17 @@ def best_model_name() -> str:
 
 
 def default_chat_model() -> str:
-    """Day-to-day default: Copilot CLI (office-paid) when present, else best API model."""
+    """Day-to-day default: the cheapest CLI subscription that can actually answer.
+
+    Order is by what it costs Arun, not by preference: Copilot is office-paid, so
+    it goes first — but only while it has quota. `model_registry()` folds that in,
+    so a brain that is installed and exhausted no longer counts as available and
+    the next one takes over on its own.
+    """
     reg = model_registry()
-    if reg.get("copilot", {}).get("available"):
-        return "copilot"
+    for name in EXECUTORS:
+        if reg.get(name, {}).get("available"):
+            return name
     return best_model_name()
 
 
@@ -1143,9 +1287,12 @@ def _prep_prompt(ev: dict, open_items: str) -> str:
             f"**Questions to ask**, **Watch-outs**. No preamble. {focus}")
 
 
-def _prep_skeleton(ev: dict) -> str:
-    return ("_(local model offline — blank checklist)_\n"
-            "**Talking points**\n- \n\n**Questions to ask**\n- \n\n**Watch-outs**\n- ")
+#: What "no prep" looks like. Deliberately a sentinel and not a template: the old
+#: skeleton pushed three empty bullets under "(local model offline)" half an hour
+#: before a meeting, which cost Arun a read and told him nothing he could use. A
+#: form he has to fill in himself is not prep — it is the assistant handing the
+#: work back with extra steps.
+NO_PREP = ""
 
 
 async def meeting_prep(title: str = "") -> str:
@@ -1153,7 +1300,6 @@ async def meeting_prep(title: str = "") -> str:
     points, questions to ask, and watch-outs. `title` matches a meeting by name; empty =
     the next meeting you have to speak in. Best-effort, local-model-first (cheap). This
     only DRAFTS — stage it with prepare_to_send if you want it sent to anyone."""
-    import asyncio as _aio
     from . import briefing
     try:
         meetings = await briefing._cached_meetings()
@@ -1170,8 +1316,12 @@ async def meeting_prep(title: str = "") -> str:
         open_items = await jira_my_issues()
     except Exception:
         pass
-    body = await _aio.to_thread(memory.local_llm_complete, _prep_prompt(ev, open_items), 400)
-    body = (body or "").strip() or _prep_skeleton(ev)
+    # paid_ok: he walks into this meeting in half an hour. A short turn on a brain
+    # he already pays for is worth it; an empty checklist is worth nothing.
+    body = (await memory.cheap_complete(_prep_prompt(ev, open_items), 400,
+                                        paid_ok=True) or "").strip()
+    if not body:
+        return NO_PREP
     org = f" (with {ev['organizer']})" if ev.get("organizer") else ""
     return f"📝 Prep — {ev.get('title', 'meeting')} at {ev.get('start', '')}{org}:\n\n{body}"
 
@@ -1186,7 +1336,6 @@ async def meeting_recap(transcript: str, title: str = "") -> str:
     action items (flagging any that need HIM), and open questions. Pass the transcript
     text — e.g. from Teams' own recording/recap. Use after a call he missed or wants
     summarized. Local-model-first (cheap). If an item needs Arun, he's pinged."""
-    import asyncio as _aio
     from . import notify
     t = (transcript or "").strip()
     if len(t) < 40:
@@ -1196,9 +1345,11 @@ async def meeting_recap(transcript: str, title: str = "") -> str:
               "sections: **TL;DR** (≤2 lines), **Decisions**, **Action items** (prefix any "
               "that are Arun's with 'ARUN:'), **Open questions**. Be concise, no preamble.\n\n"
               "TRANSCRIPT:\n" + t[:12000])
-    body = (await _aio.to_thread(memory.local_llm_complete, prompt, 700) or "").strip()
+    # He asked for this and is waiting on it, so it may cost a paid turn — the
+    # alternative was telling him to go and start LM Studio, which is not an answer.
+    body = (await memory.cheap_complete(prompt, 700, paid_ok=True) or "").strip()
     if not body:
-        return "Local model offline — start LM Studio (or set a hosted key) and retry the recap."
+        return "No brain is available to summarize it — start LM Studio, or add a key in .env."
     head = f" — {title}" if title else ""
     recap = f"📋 Recap{head}:\n\n{body}"
     if _recap_needs_arun(body):
@@ -1213,7 +1364,6 @@ async def draft_teams_reply(chat: str, question: str = "") -> str:
     for HIM to review. Reads the recent thread with `chat` for context. DRAFT ONLY — stage
     it with prepare_to_send (channel 'teams') so nothing goes out in his name without his yes.
     Use when someone pings Arun on Teams with a question and he wants a head start."""
-    import asyncio as _aio
     from . import teams_bridge
     thread: list[str] = []
     try:
@@ -1231,9 +1381,9 @@ async def draft_teams_reply(chat: str, question: str = "") -> str:
               + (f"Relevant context Arun has:\n{ground}\n\n" if ground else "")
               + "Draft Arun's reply in his voice — direct, brief, helpful. If you genuinely "
                 "lack the information, say what you'd need instead of guessing. No greeting fluff.")
-    draft = (await _aio.to_thread(memory.local_llm_complete, prompt, 400) or "").strip()
+    draft = (await memory.cheap_complete(prompt, 400, paid_ok=True) or "").strip()
     if not draft:
-        return "Couldn't draft (local model offline). Start LM Studio, or answer manually."
+        return f"No brain is available to draft it — answer {chat} manually for now."
     return f"✍️ Draft reply to {chat} (review, then say 'send' to post it):\n\n{draft}"
 
 

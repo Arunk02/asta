@@ -203,8 +203,51 @@ _sticky: dict[str, set[str]] = {}
 _STICKY_MAX = 64
 
 
+# --- intent tier -------------------------------------------------------------
+# The biggest token lever isn't narrowing the toolset — it's not sending tools at
+# all on turns that don't need them. A large share of chat is pure reasoning ABOUT
+# the conversation ("explain that", "why", "elaborate", "summarise the above"):
+# it needs the model but no capability, yet it ranks no tool and so used to fall
+# into the "expose everything" default and pay the full schema. These get the
+# ALWAYS floor only.
+#
+# The gate is deliberately TIGHT and doubled — the opener must be unmistakably
+# conversational AND the ranker must have found nothing — because a false positive
+# strands a real request (the floor has no teams/jira/file tools), which is a far
+# worse failure than a few wasted tokens.
+_CONVERSATIONAL = re.compile(
+    r"^\s*(?:"
+    r"explain|elaborate|clarify|rephrase|reword|summari[sz]e|recap|expand|"
+    r"describe|define|compare|contrast|"
+    r"why\b|why'?s\b|how\s+come|what\s+do\s+you\s+mean|what\s+did\s+you\s+mean|"
+    r"what\s+does\s+(?:that|this|it)\s+mean|what'?s\s+the\s+difference|"
+    r"tell\s+me\s+more|tell\s+me\s+about|go\s+on|"
+    r"walk\s+me\s+through|break\s+(?:that|this|it)\s+down|"
+    r"help\s+me\s+understand|i\s+don'?t\s+(?:get|understand)|"
+    r"(?:can|could)\s+you\s+explain|give\s+me\s+more\s+detail|more\s+detail|"
+    r"in\s+short|tl;?dr|what\s+do\s+you\s+think|your\s+(?:opinion|take|thoughts)"
+    r")\b", re.I)
+
+
+def is_conversational(text: str) -> bool:
+    """A pure reasoning/explanation turn about the conversation itself — needs the
+    model, no external capability. Kept tight on purpose (see the note above)."""
+    return bool(_CONVERSATIONAL.match((text or "").strip()))
+
+
+def _floor() -> list[str]:
+    """Just the ALWAYS core — the Tier-0 toolset."""
+    reg = capabilities.registry()
+    return sorted(n for n in capabilities.ALWAYS if n in reg)
+
+
 def select_sticky(conv_id: str, query: str, k: int = TOP_K) -> list[str] | None:
     picked = select(query, k)
+    # Tier 0: nothing ranked AND clearly conversational -> the floor only, not all
+    # 50 schemas. Transient — it does not grow the conversation's sticky set, so a
+    # later real request re-picks cleanly.
+    if picked is None and is_conversational(query):
+        return _floor()
     if not conv_id:
         return picked
     prev = _sticky.get(conv_id)

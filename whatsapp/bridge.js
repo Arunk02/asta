@@ -33,6 +33,37 @@ if (fs.existsSync(envPath)) {
 
 const TOKEN = process.env.ASTA_TOKEN || "";
 const ASTA_URL = process.env.ASTA_URL || "http://127.0.0.1:8321";
+
+// POST a message to Asta, surviving a transient hiccup instead of losing it.
+// The old code did a single bare fetch: one blip — the server briefly busy on a
+// heavy turn, or a moment of FD pressure — surfaced straight to the user as
+// "(bridge error: fetch failed)" and the message was gone. Asta acks in-band
+// within ~20s, so 45s is comfortable headroom before we abort. A retry is only
+// safe on a CONNECTION-level failure ("fetch failed" / abort): the request never
+// reached the server, so re-sending can't double-process it. Once the server has
+// answered (even an error status), we do NOT retry.
+async function postToAsta(text, attempt = 0) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    const r = await fetch(`${ASTA_URL}/api/wa/incoming`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ text }),
+      signal: ctrl.signal,
+    });
+    return await r.json();
+  } catch (e) {
+    // connection never completed → safe to retry a couple of times with backoff
+    if (attempt < 2) {
+      await new Promise((res) => setTimeout(res, 1500 * (attempt + 1)));
+      return postToAsta(text, attempt + 1);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 const PORT = Number(process.env.WA_BRIDGE_PORT || 8323);
 const BOT_MARK = "🤖 ";
 
@@ -154,12 +185,7 @@ async function connect() {
       }
       console.log("→ asta:", text.slice(0, 80));
       try {
-        const r = await fetch(`${ASTA_URL}/api/wa/incoming`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
-          body: JSON.stringify({ text }),
-        });
-        const data = await r.json();
+        const data = await postToAsta(text);
         if (data.reply) await send(data.reply);
       } catch (e) {
         await send("(bridge error: " + e.message + ")");

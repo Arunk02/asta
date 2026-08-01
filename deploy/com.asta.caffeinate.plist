@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.asta.caffeinate</string>
+
+    <!-- Keeping the Mac awake used to be done by wrapping the server in
+         `caffeinate -si`. That worked, but it made caffeinate the process macOS
+         held responsible for everything Asta did — including reading the Teams
+         notification database, which needs Full Disk Access. Permission can be
+         granted to Python; it cannot be granted to an Apple system binary. So
+         the watcher was blind no matter what was toggled in System Settings.
+
+         Splitting them costs one more agent and buys back a permission model
+         that can actually be reasoned about: the server is the server, and
+         staying awake is its own job.
+
+         -s prevents system sleep on AC power; -i prevents idle sleep. No -d, so
+         the display still sleeps normally. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-si</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

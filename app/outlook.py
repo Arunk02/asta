@@ -32,7 +32,10 @@ MAIL_URL = "https://outlook.office.com/mail/"
 CALENDAR_URL = "https://outlook.office.com/calendar/view/day"
 MAIL_LIST = '[role="listbox"][aria-label*="Message"]'
 
-POLL_SECONDS_DEFAULT = 900
+# How stale a notification is allowed to be. The hold window can promise "you hear
+# within 5 minutes" only if the inbox is actually read that often — a 15-minute
+# poll made every other timing decision in this file decorative.
+POLL_SECONDS_DEFAULT = 300
 SEEN_KEY = "outlook_seen_mail"
 
 # Senders that are machine traffic: alerts, digests, no-reply blasts. They are
@@ -154,8 +157,42 @@ def _preview(aria: str, when_match) -> str:
 # Platform alerts that heal themselves are the worst kind of notification: by the
 # time Arun looks, there is nothing to do. Holding them briefly and dropping the
 # pair when a recovery lands means only the ones that STAYED broken reach him.
-HOLD_MINUTES = int(os.environ.get("ASTA_ALERT_HOLD_MINUTES", "20"))
+#
+# But that reasoning does NOT survive contact with a real outage, and holding
+# everything for twenty minutes was the wrong conclusion drawn from it. If pods
+# are down, twenty minutes of silence is the whole incident — and a late alert on
+# a real outage costs far more than an extra ping he can ignore. So:
+#
+#   something is DOWN          → tell him now, no window at all
+#   a warning that may settle  → a short window (5 min), then tell him
+#   it recovered               → tell him that too, if he was told it broke
+#
+# The last line is the part that makes immediacy affordable. Holding existed to
+# spare him the "never mind" — reporting the recovery instead means a flap costs
+# two messages and he is never late on the one that matters.
+HOLD_MINUTES = int(os.environ.get("ASTA_ALERT_HOLD_MINUTES", "5"))
 _HOLD_KEY = "alert_hold"
+
+# Breakage that is already real: no window, whatever the rest of the wording says.
+# Deliberately narrow — everything here means "a thing that was serving traffic
+# has stopped", not "a number moved".
+_CRITICAL = re.compile(
+    r"\b(down|outage|unavailable|unreachable|not responding|no longer responding|"
+    r"crash ?loop|crashloopbackoff|oom ?killed|out of memory|"
+    r"pods? (are )?(down|restarting|failing|not ready|unavailable)|"
+    r"service (is )?(down|unavailable|degraded)|"
+    r"cannot connect|connection refused|refusing connections|"
+    r"p1|sev ?1|severity ?1|critical|data loss|all requests failing)\b", re.I)
+
+
+def is_critical(m: dict) -> bool:
+    """Is this already breakage, rather than something that might settle?
+
+    Checked against the body as well as the subject, because a monitoring subject
+    names the channel and the words that matter — "pods down", "connection
+    refused" — are in the mail itself.
+    """
+    return bool(_CRITICAL.search(f"{m.get('subject', '')} {m.get('preview', '')}"))
 
 _ALERTY = re.compile(
     r"\b(alert|alarm|incident|error|failed|failure|down|unhealthy|degraded|"
@@ -272,9 +309,23 @@ def triage_alerts(mails: list[dict], now: float | None = None) -> tuple[list[dic
         subj = m.get("subject", "")
         key = alert_key(m)
         if _RECOVERY.search(subj):
-            if key in holds and not holds[key].get("done"):
+            info = holds.get(key)
+            if info and info.get("released"):
+                # He was told this broke. Telling him it is fixed is the other
+                # half of that promise — and it is what makes reporting breakage
+                # immediately affordable, because "never mind" arrives by itself
+                # instead of him having to go and check.
+                release.append({
+                    "kind": "recovered", "key": key,
+                    "subject": info.get("subject", key),
+                    "sender": info.get("sender", ""),
+                    "detail": alert_detail(m.get("preview", "")),
+                    "minutes": int((now - info.get("first", now)) // 60),
+                })
+                holds[key] = {"first": now, "done": True}
+            elif info and not info.get("done"):
                 holds.pop(key, None)
-                cancelled.append(key)
+                cancelled.append(key)          # healed inside the window: never told
             else:
                 # Recovery for something never held — nothing to tell him about.
                 holds[key] = {"first": now, "done": True}
@@ -287,6 +338,7 @@ def triage_alerts(mails: list[dict], now: float | None = None) -> tuple[list[dic
                 "sender": (m.get("sender") or "")[:60],
                 "detail": alert_detail(m.get("preview", "")),
                 "seen": [_mail_instance(m)],
+                "critical": is_critical(m),
             }
             m["_alert"] = "held"
             continue
@@ -304,6 +356,11 @@ def triage_alerts(mails: list[dict], now: float | None = None) -> tuple[list[dic
             # the first ("now at 40%"), so take it when the first had none.
             if not info.get("detail"):
                 info["detail"] = alert_detail(m.get("preview", ""))
+            # It started as a warning and has since become an outage. Escalate the
+            # remaining wait away rather than making him serve out a window that
+            # was set when the situation looked milder.
+            if not info.get("critical") and is_critical(m):
+                info["critical"] = True
         m["_alert"] = "held"
 
     for key, info in list(holds.items()):
@@ -311,13 +368,16 @@ def triage_alerts(mails: list[dict], now: float | None = None) -> tuple[list[dic
             if now - info.get("first", now) > 6 * 3600:
                 holds.pop(key, None)               # stop the ledger growing
             continue
-        if now - info.get("first", now) >= HOLD_MINUTES * 60:
+        wait = 0 if info.get("critical") else HOLD_MINUTES * 60
+        if now - info.get("first", now) >= wait:
             if not info.get("released"):
                 info["released"] = True
                 release.append({
+                    "kind": "broken",
                     "subject": info.get("subject", key), "key": key,
                     "sender": info.get("sender", ""),
                     "detail": info.get("detail", ""),
+                    "critical": bool(info.get("critical")),
                     "count": len(info.get("seen") or []) or 1,
                     "minutes": int((now - info.get("first", now)) // 60),
                 })
@@ -338,6 +398,15 @@ def fmt_alert(r: dict) -> str:
     """
     lines = [f"• {r['subject']}"]
     detail = (r.get("detail") or "").strip()
+    if r.get("kind") == "recovered":
+        # No "open Outlook" prompt on a recovery: there is nothing for him to do,
+        # and asking him to go and look would undo the point of telling him.
+        if detail:
+            lines.append(f"  {detail}")
+        mins = r.get("minutes", 0)
+        lines.append(f"  {r['sender']} · was broken {mins} min" if r.get("sender")
+                     else f"  was broken {mins} min")
+        return "\n".join(lines)
     lines.append(f"  {detail}" if detail
                  else "  (the mail carries no detail beyond the subject — open Outlook)")
     facts = []
@@ -345,14 +414,49 @@ def fmt_alert(r: dict) -> str:
         facts.append(r["sender"])
     n = int(r.get("count") or 1)
     facts.append(f"{n} mails" if n > 1 else "1 mail")
-    facts.append(f"first seen {r.get('minutes', HOLD_MINUTES)} min ago")
+    age = r.get("minutes", 0)
+    facts.append("just now" if age < 1 else f"first seen {age} min ago")
     lines.append("  " + " · ".join(facts))
     return "\n".join(lines)
 
 
+def alert_message(release: list[dict]) -> tuple[str, str]:
+    """Render a batch of released alerts as (text, urgency).
+
+    Breakage and recovery are separated because they ask different things of him,
+    and an outage headline sitting above a "back to normal" line reads as though
+    both are still open. Urgency follows the worst thing in the batch: a recovery
+    on its own is ambient — it is good news, and good news does not need to
+    interrupt.
+    """
+    broken = [r for r in release if r.get("kind") != "recovered"]
+    healed = [r for r in release if r.get("kind") == "recovered"]
+    parts = []
+    if broken:
+        critical = [r for r in broken if r.get("critical")]
+        head = ("🚨 Broken now" if critical
+                else f"⚠️ Still broken after {HOLD_MINUTES} min")
+        if len(broken) > 1:
+            head += f" ({len(broken)})"
+        parts.append(head + ":\n\n" + "\n\n".join(fmt_alert(r) for r in broken[:6]))
+    if healed:
+        head = "🟢 Recovered" + (f" ({len(healed)})" if len(healed) > 1 else "")
+        parts.append(head + ":\n\n" + "\n\n".join(fmt_alert(r) for r in healed[:6]))
+    return "\n\n".join(parts), ("direct" if broken else "ambient")
+
+
 def is_alerty(m: dict) -> bool:
+    """Is this alert-class mail at all?
+
+    Anything CRITICAL counts by definition, and that clause is not redundant: the
+    word list below wants "failed" and "failure" but not "failing", so a subject
+    reading "P1: all requests failing" matched nothing and never entered the
+    pipeline — the single most urgent shape of mail was the one shape that fell
+    straight through. Deriving it from the critical set means the two can't
+    disagree again.
+    """
     subj = m.get("subject", "")
-    return bool(_ALERTY.search(subj) or _RECOVERY.search(subj))
+    return bool(_ALERTY.search(subj) or _RECOVERY.search(subj) or is_critical(m))
 
 
 def goes_to_hold(m: dict) -> bool:
@@ -567,11 +671,8 @@ async def watch_loop() -> None:
         except Exception:
             release = []
         if release:
-            head = (f"🚨 Still broken after {HOLD_MINUTES} min"
-                    + (f" ({len(release)})" if len(release) > 1 else "") + ":")
-            await notify.notify(
-                head + "\n\n" + "\n\n".join(fmt_alert(r) for r in release[:6]),
-                "outlook", urgency="direct")
+            text, urgency = alert_message(release)
+            await notify.notify(text, "outlook", urgency=urgency)
 
 
 if __name__ == "__main__":

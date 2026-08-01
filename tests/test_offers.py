@@ -128,9 +128,10 @@ def test_the_pr_step_asks_where_rather_than_assuming():
 def test_yes_maps_to_a_prompt_that_investigates_without_changing_code():
     o = offers.for_ci_failure("Arunk02/asta", "build.yml", "main", "https://gh/run/1")
     p = main._offer_prompt(o)
-    assert "Do not change any code yet" in p
+    assert "Do NOT change production code yet" in p
     assert "build.yml on main" in p                      # the context travels with it
     assert "whether to fix it and raise the PR" in p     # and it offers the next step
+    assert "root cause" in p.lower()                     # senior analysis, not a log skim
 
 
 def test_the_pr_prompt_uses_his_personal_account_and_chains_on():
@@ -176,7 +177,7 @@ def test_a_bare_yes_from_the_phone_starts_the_analysis(monkeypatch):
     out = asyncio.run(main._dispatch({"id": "c1", "model": "claude"}, "yes",
                                      _Sink(), "whatsapp"))
     assert out == "task"                               # a turn really started
-    assert "Investigate it now" in started["prompt"]
+    assert "root cause" in started["prompt"].lower()
     assert started["channel"] == "whatsapp"
     assert offers.pending() is None                    # and the offer is consumed
 

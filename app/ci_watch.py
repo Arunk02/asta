@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import time
@@ -24,7 +25,11 @@ from pathlib import Path
 
 from . import store, workspace_tools
 
-POLL_SECONDS = 600
+# A red build is worth knowing about while he is still in the change that caused
+# it. Ten minutes was long enough to have moved on to something else. GitHub API
+# calls are free-tier cheap and cost zero LLM tokens, so the shorter poll costs
+# nothing but the request.
+POLL_SECONDS = int(os.environ.get("ASTA_CI_POLL", "300"))
 RETRY_UNAUTH_SECONDS = 1800
 BAD = ("failure", "cancelled", "timed_out", "startup_failure")
 _auth_cache: dict = {"ok": None, "at": 0.0}
@@ -229,6 +234,19 @@ async def _poll_repo(repo: str) -> list[str]:
     return notes
 
 
+def _analyse_payload(note: str) -> dict | None:
+    """Which workspace this failing repo lives in, so a "yes" runs the analysis
+    with that project's context and code rather than in Asta's own repo. None
+    when it can't be told — the brain falls back to figuring it out, as before.
+    """
+    try:
+        from . import workspace as ws_mod
+        wsname = ws_mod.infer(text=note)
+        return {"workspace": wsname} if wsname else None
+    except Exception:
+        return None
+
+
 async def check_all() -> list[str]:
     notes: list[str] = []
     for repo in repos():
@@ -265,17 +283,22 @@ async def loop() -> None:
                 await asyncio.sleep(RETRY_UNAUTH_SECONDS)
                 continue
             for note in await check_all():
-                # His own pipelines, but still not something addressed TO him:
-                # held while he's at the laptop, delivered when he steps away.
                 if note.startswith("🔴"):
-                    # A red pipeline is worth an offer, not just a report: he can
-                    # reply "yes" from his phone and the investigation starts
-                    # without him opening a laptop. Nothing runs unasked.
+                    # A red pipeline goes out IMMEDIATELY, not held until he steps
+                    # away. It is his own branch and the useful moment to hear
+                    # about it is while he is still in the change that caused it —
+                    # which is precisely when the ambient hold was suppressing it.
+                    #
+                    # And it is an offer, not just a report: he can reply "yes"
+                    # from his phone and the investigation starts without him
+                    # opening a laptop. Nothing runs unasked.
                     o = offers.offer("analyse", note.split("\n")[0],
                                      "\n".join(note.split("\n")[1:]),
-                                     "Want me to analyse the failure?")
-                    await notify.notify(o.render(), "ci", urgency="ambient")
+                                     "Want me to analyse the failure?",
+                                     payload=_analyse_payload(note))
+                    await notify.notify(o.render(), "ci", urgency="direct")
                 else:
+                    # Recovery is good news and good news does not interrupt.
                     await notify.notify(note, "ci", urgency="ambient")
         except Exception:
             pass

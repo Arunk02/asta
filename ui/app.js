@@ -1126,6 +1126,15 @@ async function loadTasks() {
         };
         el.appendChild(act);
       }
+      if (t.status === "paused" || t.status === "failed") {
+        const act = document.createElement("div");
+        act.className = "m-actions";
+        act.innerHTML = `<button class="t-resume">▶ Resume</button>`;
+        act.querySelector(".t-resume").onclick = async () => {
+          await api(`/api/tasks/${t.id}/resume`, { method: "POST" }); loadTasks();
+        };
+        el.appendChild(act);
+      }
       list.appendChild(el);
     });
   } catch (e) {}

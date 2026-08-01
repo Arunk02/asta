@@ -238,8 +238,44 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
             if not box:
                 raise RuntimeError("message box not found — Teams UI changed")
             await box.click()
-            await box.type(text, delay=15)
-            await page.keyboard.press("Enter")
+            await box.focus()
+            # Teams' ckeditor sends the message on a bare Enter — it does NOT
+            # insert a newline. box.type() presses a real Enter for every "\n"
+            # in the string, so a multi-line message used to go out as one
+            # fragmented, garbled send per line. Shift+Enter inserts a soft
+            # line break instead.
+            #
+            # insert_text (not type) puts each line in as ONE atomic input event.
+            # type() streams per-character keystrokes, and the first few were
+            # landing before the editor had finished focusing — the "iff got
+            # truncated" instead of "1) Diff got truncated" that reached Vinish.
+            # As a bonus, insert_text doesn't fire the keypress that turns a
+            # leading "- " into an auto-list, so bullet lines stay literal.
+            lines = text.split("\n")
+            for i, line in enumerate(lines):
+                if line:
+                    await page.keyboard.insert_text(line)
+                if i < len(lines) - 1:
+                    await page.keyboard.press("Shift+Enter")
+            # A line starting with "- " or "* " auto-converts to a bullet list
+            # in ckeditor; once that happens, a bare Enter just adds another
+            # list item instead of submitting, so the message never sends.
+            # The Send button always submits regardless of list state — prefer
+            # it, and only fall back to Enter if the UI doesn't expose one.
+            sent_via_button = False
+            for sel in ('button[data-tid="sendMessageCommand"]',
+                        'button[aria-label="Send"]',
+                        'button[aria-label*="Send message"]'):
+                try:
+                    send_btn = await page.wait_for_selector(sel, timeout=2000)
+                    if send_btn:
+                        await send_btn.click()
+                        sent_via_button = True
+                        break
+                except Exception:
+                    continue
+            if not sent_via_button:
+                await page.keyboard.press("Enter")
             await asyncio.sleep(2.5)  # let the send complete before verifying
             # Verify rather than assume: read the thread back and confirm the
             # text is really the last thing in it. "Sent ✅" must mean sent.
@@ -455,7 +491,10 @@ async def read_activity(limit: int = 25) -> list[str]:
 # Background poll is the SAFETY NET (so a mention can reach you on WhatsApp when
 # you're not asking). On-demand reads — "any messages for me?" — go through
 # read_activity() directly and are always live. 0 disables the poll entirely.
-ACTIVITY_POLL_SECONDS = int(os.environ.get("TEAMS_ACTIVITY_POLL", "1800"))
+# Someone pinging Arun on Teams is the most time-sensitive thing Asta watches, and
+# it was the slowest: half an hour meant a colleague could ask, wait, and give up
+# before he was told. Five minutes is the promise; the poll has to match it.
+ACTIVITY_POLL_SECONDS = int(os.environ.get("TEAMS_ACTIVITY_POLL", "300"))
 ACTIVITY_SEEN_KEY = "teams_activity_seen"
 # feed entries worth pinging about; reactions are deliberately excluded as noise
 _ACTIVITY_INTERESTING = ("mentioned you", "missed call", "invited you", "replied to")

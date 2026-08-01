@@ -11,6 +11,7 @@ local LM Studio model when reachable, so they cost zero API tokens.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 import re
@@ -77,6 +78,58 @@ def local_llm_complete(prompt: str, max_tokens: int = 400) -> str | None:
         return r.json()["choices"][0]["message"]["content"].strip()
     except Exception:
         return None
+
+
+async def cheap_complete(prompt: str, max_tokens: int = 400,
+                         paid_ok: bool = False) -> str | None:
+    """One short completion, free if possible, from whichever brain is actually up.
+
+    Nine background features called `local_llm_complete` directly and treated None
+    as "produce nothing" — so with LM Studio closed, meeting prep shipped an empty
+    checklist, recaps and Teams drafts came back blank, and the learning loop
+    quietly stopped learning. "Free-first" was the right instinct; "free-only" was
+    an accident of it, and it made the whole background half of Asta depend on one
+    optional local process nobody is told to keep running.
+
+    Order is cheapest-first and stops at the first brain that answers: LM Studio
+    (free), then an API key if there is one, then a CLI subscription. The last two
+    are gated on `paid_ok`, because the caller knows whether this is worth money —
+    prep for a meeting Arun walks into in half an hour is; re-digesting yesterday's
+    chat at 2am is not, and that one should just skip a night.
+
+    Returns None when nothing could answer, and callers must treat that as "say
+    nothing" rather than "emit a template".
+    """
+    out = await asyncio.to_thread(local_llm_complete, prompt, max_tokens)
+    if (out or "").strip():
+        return out.strip()
+    if not paid_ok:
+        return None
+    from . import agent as agent_mod
+    try:
+        name = agent_mod.best_model_name()
+    except RuntimeError:
+        name = ""
+    if name:
+        try:
+            from pydantic_ai import Agent as _Agent
+            result = await _Agent(model=agent_mod.get_model(name)).run(prompt)
+            if (result.output or "").strip():
+                return result.output.strip()
+        except Exception:
+            pass
+    # Last resort: a CLI subscription Arun already pays for. Bounded to one short
+    # turn — this is a paragraph of prep, not a task.
+    for cli_name in agent_mod.EXECUTORS:
+        if not agent_mod.available(cli_name):
+            continue
+        try:
+            text = await agent_mod.runner(cli_name).one_shot(prompt, timeout=120)
+            if (text or "").strip():
+                return text.strip()
+        except Exception:
+            continue
+    return None
 
 
 # --- learning from corrections -----------------------------------------------
@@ -246,28 +299,43 @@ def _age_days(date_str: str) -> float:
 # Half-life in days: a lesson from March should not outrank yesterday's on a tie.
 RECENCY_HALFLIFE = float(os.environ.get("ASTA_RECALL_HALFLIFE", "45"))
 
+# A memory must be at least this semantically close to the query to be surfaced.
+# Below it, "recall" was injecting whatever FTS happened to return and labelling
+# it relevant — which is how a question about a Teams send failure got answered
+# with a ten-day-old document-storage note. An unrelated memory is worse than no
+# memory: it doesn't just fail to help, it actively misdirects the answer.
+RECALL_FLOOR = float(os.environ.get("ASTA_RECALL_FLOOR", "0.35"))
+
 
 def recall(query: str, k: int = 4) -> list[dict]:
-    """Top-k relevant memories, ranked by meaning where possible.
+    """Top-k memories that are actually about the query — or nothing.
 
     FTS5 alone is keyword-only: "what breaks the grafana proxy" misses a fact
     worded "VPN required for monitoring". So FTS casts a WIDE net (cheap) and
-    embeddings re-rank it (local, free) — with a recency weight so old lessons
-    lose to newer ones on a tie. When LM Studio is down this degrades to exactly
-    the previous keyword behaviour rather than failing.
+    embeddings re-rank it (local, free), with a recency weight to separate ties
+    and a relevance FLOOR so coincidental matches are dropped rather than shown.
+
+    When LM Studio is down there is no embedder to judge meaning, so we cannot
+    tell a real match from a keyword collision. That is the riskiest moment, not
+    a free pass: the stopword filter has already removed generic terms, so a
+    surviving FTS hit is at least on a real topic — take only the few best, and
+    lean on the caller framing recall as "ignore if not relevant".
     """
     hits = store.memory_search(query, max(k * 4, 12))
     if not hits:
         return []
     vecs = local_embed([query] + [f"{h['title']} {h.get('snippet', '')}" for h in hits])
     if not vecs:
-        return hits[:k]
+        return hits[:min(k, 3)]
     qv, hvs = vecs[0], vecs[1:]
     scored = []
     for h, hv in zip(hits, hvs):
         sim = _cosine(qv, hv)
+        if sim < RECALL_FLOOR:
+            continue                     # unrelated — don't surface it at all
         recency = 0.5 ** (_age_days(h.get("date", "")) / RECENCY_HALFLIFE)
-        # Meaning dominates; recency only separates near-ties.
+        # Meaning dominates; recency only separates near-ties, and can never lift
+        # a below-floor memory over the bar (the floor is checked on sim alone).
         scored.append((sim + 0.15 * recency, h))
     scored.sort(key=lambda s: s[0], reverse=True)
     return [h for _, h in scored[:k]]
@@ -278,7 +346,12 @@ def recall_block(query: str) -> str:
     if not hits:
         return ""
     lines = [f"- **{h['title']}** ({h['mtype']}): {h['snippet']}" for h in hits]
-    return "Relevant memories (recalled automatically):\n" + "\n".join(lines)
+    # NOT "relevant memories" — that framing is what made the model trust a
+    # marginal hit and answer from it. These are candidates; the model must judge
+    # each against the actual question and drop the ones that don't bear on it.
+    return ("Notes pulled from memory that MIGHT relate — use one only if it clearly "
+            "answers the question at hand, otherwise ignore it (do not force a "
+            "connection):\n" + "\n".join(lines))
 
 
 def read_memory_file(rel_path: str) -> str | None:

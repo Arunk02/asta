@@ -30,7 +30,7 @@ from app import outlook, store
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     store.kv_set(outlook._HOLD_KEY, "")
-    monkeypatch.setattr(outlook, "HOLD_MINUTES", 20)
+    monkeypatch.setattr(outlook, "HOLD_MINUTES", 5)
     yield
 
 
@@ -131,8 +131,8 @@ def test_a_later_mail_supplies_detail_the_first_one_lacked():
     now = time.time()
     outlook.triage_alerts([_mail(THE_ALERT, preview="")], now=now)
     outlook.triage_alerts([_mail(THE_ALERT, preview="Now at 40% error rate.",
-                                 when="09:20")], now=now + 300)
-    release, _ = outlook.triage_alerts([], now=now + 21 * 60)
+                                 when="09:20")], now=now + 120)
+    release, _ = outlook.triage_alerts([], now=now + 6 * 60)
     assert "40% error rate" in release[0]["detail"]
 
 
@@ -144,7 +144,7 @@ def test_a_self_healing_alert_never_reaches_him():
     now = time.time()
     outlook.triage_alerts([_mail(THE_ALERT, preview=THE_BODY)], now=now)
     _, cancelled = outlook.triage_alerts(
-        [_mail(f"RESOLVED: {THE_ALERT}", preview="Back to normal.")], now=now + 300)
+        [_mail(f"RESOLVED: {THE_ALERT}", preview="Back to normal.")], now=now + 120)
     assert cancelled
     release, _ = outlook.triage_alerts([], now=now + 21 * 60)
     assert release == []
@@ -153,7 +153,7 @@ def test_a_self_healing_alert_never_reaches_him():
 def test_nothing_is_released_before_the_window_passes():
     now = time.time()
     outlook.triage_alerts([_mail(THE_ALERT, preview=THE_BODY)], now=now)
-    release, _ = outlook.triage_alerts([], now=now + 19 * 60)
+    release, _ = outlook.triage_alerts([], now=now + 4 * 60)
     assert release == []
 
 
@@ -172,15 +172,21 @@ def test_a_recovery_for_something_never_held_stays_silent():
     assert cancelled == []
 
 
-def test_a_recovery_after_release_does_not_resurrect_it():
-    """It was released, he saw it, then it healed. The recovery must not be
-    reported as cancelling a firing he was never spared."""
+def test_he_is_told_when_something_he_was_warned_about_recovers():
+    """The other half of reporting breakage immediately. He was interrupted for
+    this; leaving him to find out on his own whether it is still broken is what
+    made holding look attractive in the first place."""
     now = time.time()
     outlook.triage_alerts([_mail(THE_ALERT, preview=THE_BODY)], now=now)
-    outlook.triage_alerts([], now=now + 21 * 60)
-    _, cancelled = outlook.triage_alerts(
-        [_mail(f"RESOLVED: {THE_ALERT}", preview="ok")], now=now + 30 * 60)
-    assert cancelled == [outlook.alert_key(_mail(THE_ALERT))]
+    outlook.triage_alerts([], now=now + 21 * 60)          # released to him
+    release, cancelled = outlook.triage_alerts(
+        [_mail(f"RESOLVED: {THE_ALERT}", preview="Back to normal.")], now=now + 30 * 60)
+    assert cancelled == []                                # not a silent cancel
+    assert [r["kind"] for r in release] == ["recovered"]
+    text, urgency = outlook.alert_message(release)
+    assert "🟢 Recovered" in text and THE_ALERT in text
+    assert "was broken 30 min" in text
+    assert urgency == "ambient"                           # good news never interrupts
 
 
 def test_the_ledger_does_not_grow_without_bound():
@@ -264,3 +270,105 @@ def test_a_servicenow_incident_is_not_swallowed_by_the_bulk_sender_filter():
               sender="ServiceNow", preview="Booking API returning 500s.")
     assert outlook._BULK_SENDER.search("ServiceNow")      # the rule really does match
     assert m in outlook.needs_attention([m])              # and the exception still wins
+
+
+# --- immediacy ---------------------------------------------------------------
+#
+# Arun: "if some error in service pods down it has to throw error immediately na?
+# if i recovered tell after that it recovered". Holding a real outage for twenty
+# minutes IS the incident. The window was the wrong conclusion drawn from a right
+# observation about flapping — reporting the recovery is what makes immediacy
+# affordable instead.
+
+@pytest.mark.parametrize("subject,preview", [
+    ("Error Reporting :: Booking", "booking-api pods are down in prod"),
+    ("Alert", "Service is unavailable, connection refused to booking-db"),
+    ("P1: Booking", "all requests failing"),
+    ("Booking alarm", "CrashLoopBackOff on 3 replicas"),
+    ("Critical: booking side work", "OOMKilled"),
+])
+def test_real_breakage_is_reported_with_no_window_at_all(subject, preview):
+    now = time.time()
+    release, _ = outlook.triage_alerts([_mail(subject, preview=preview)], now=now)
+    assert len(release) == 1, f"{subject} / {preview} waited"
+    assert release[0]["critical"] is True
+    text, urgency = outlook.alert_message(release)
+    assert "🚨 Broken now" in text
+    assert urgency == "direct"                # never held, even at the laptop
+
+
+def test_a_soft_warning_still_gets_its_short_window():
+    """The anti-flap value is kept — just at five minutes, not twenty."""
+    now = time.time()
+    release, _ = outlook.triage_alerts(
+        [_mail(THE_ALERT, preview="Error rate nudged to 3%.")], now=now)
+    assert release == []
+    later, _ = outlook.triage_alerts([], now=now + 6 * 60)
+    assert len(later) == 1
+    assert later[0]["critical"] is False
+    assert "Still broken after" in outlook.alert_message(later)[0]
+
+
+def test_the_default_window_is_five_minutes_not_twenty(monkeypatch):
+    monkeypatch.delenv("ASTA_ALERT_HOLD_MINUTES", raising=False)
+    import importlib
+    assert importlib.reload(outlook).HOLD_MINUTES == 5
+
+
+def test_a_warning_that_becomes_an_outage_stops_waiting():
+    """It was 3% and is now pods-down. Making him serve out a window set when the
+    situation looked milder is the same late-alert failure, one step removed."""
+    now = time.time()
+    outlook.triage_alerts([_mail(THE_ALERT, preview="Error rate nudged to 3%.")], now=now)
+    release, _ = outlook.triage_alerts(
+        [_mail(THE_ALERT, preview="booking-api pods are down", when="09:16")],
+        now=now + 60)
+    assert len(release) == 1 and release[0]["critical"] is True
+
+
+def test_a_self_healing_blip_still_never_reaches_him():
+    """Immediacy must not cost the one thing the window was actually good at."""
+    now = time.time()
+    outlook.triage_alerts([_mail(THE_ALERT, preview="Error rate nudged to 3%.")], now=now)
+    _, cancelled = outlook.triage_alerts(
+        [_mail(f"RESOLVED: {THE_ALERT}", preview="ok")], now=now + 120)
+    assert cancelled
+    release, _ = outlook.triage_alerts([], now=now + 30 * 60)
+    assert release == []
+
+
+def test_breakage_and_recovery_are_never_run_together_under_one_headline():
+    """"Broken now" sitting above a "back to normal" line reads as though both
+    are still open."""
+    text, urgency = outlook.alert_message([
+        {"kind": "broken", "subject": "A down", "detail": "pods down",
+         "sender": "Grafana", "critical": True, "count": 1, "minutes": 0},
+        {"kind": "recovered", "subject": "B", "detail": "", "sender": "Grafana",
+         "minutes": 12},
+    ])
+    assert text.index("🚨") < text.index("🟢")
+    assert urgency == "direct"                 # the worst thing in the batch wins
+
+
+def test_a_recovery_does_not_tell_him_to_go_and_look():
+    text = outlook.fmt_alert({"kind": "recovered", "subject": "A", "detail": "",
+                              "sender": "Grafana", "minutes": 12})
+    assert "open Outlook" not in text
+
+
+def test_an_immediate_alert_does_not_claim_to_be_minutes_old():
+    now = time.time()
+    release, _ = outlook.triage_alerts(
+        [_mail("Booking down", preview="pods are down")], now=now)
+    assert "just now" in outlook.fmt_alert(release[0])
+
+
+# --- the promise is only as good as the poll ---------------------------------
+
+def test_every_watcher_polls_at_least_every_five_minutes():
+    """A five-minute hold behind a thirty-minute poll is a thirty-minute hold. The
+    numbers have to agree or the window is decorative."""
+    from app import ci_watch, teams_bridge
+    assert outlook.POLL_SECONDS_DEFAULT <= 300
+    assert teams_bridge.ACTIVITY_POLL_SECONDS <= 300
+    assert ci_watch.POLL_SECONDS <= 300

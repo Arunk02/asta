@@ -29,14 +29,26 @@ from pathlib import Path
 
 from . import repo_ops, untrusted, workspace as ws_mod
 
-#: A diff past this is summarised rather than read line by line — a 10k-line
-#: refactor would otherwise blow the worker's context on generated files.
-MAX_DIFF_CHARS = 60000
+#: Total diff budget handed to the worker. Raised from 60k: a 16-file service PR
+#: runs well past that, and the old naive head-cut dropped whatever came last —
+#: which for PR #1333 was every business-logic file, so the review went out blind
+#: to the code it most needed to see. Modern CLI brains hold this comfortably.
+MAX_DIFF_CHARS = 200000
+
+#: Files whose diff is noise in a review — generated, locked, binary, snapshots.
+#: They go LAST so they are the ones dropped when a diff overflows, never the code.
+_LOW_VALUE_FILE = re.compile(
+    r"(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|go\.sum|Cargo\.lock|"
+    r"\.lock$|/generated/|\.generated\.|\.min\.(js|css)|\.map$|__snapshots__|"
+    r"\.(svg|png|jpg|jpeg|gif|ico|pdf|woff2?|ttf)$)", re.I)
+#: Tests matter, but the logic they exercise matters first — middle tier.
+_TEST_FILE = re.compile(r"(test|spec|fixture|__tests__|/it/|\.feature$)", re.I)
 
 PR_REF = re.compile(r"(?:^|\s|#)(\d{1,6})\b")
 
-REVIEW_BRIEF = """Review this pull request as a senior engineer on the team. Arun will
-post your notes himself, so write them for a human reviewer, not as a bot comment.
+REVIEW_BRIEF = """Review this pull request as a senior engineer on the team. Arun pastes your
+points into the PR / sends them to the author, so they must be pull-apart-able — each a
+standalone comment someone can act on, NOT a paragraph of prose.
 
 {meta}
 
@@ -51,18 +63,32 @@ CI:
 DIFF:
 {diff}
 
-Produce, in this order:
-1. VERDICT: one of APPROVE / COMMENT / REQUEST CHANGES, with one sentence of justification.
-2. BLOCKING — defects that must be fixed: correctness, data loss, security, breaking API or
-   schema changes, missing error handling on a path that can fail. Each with file:line and the
-   concrete failure it causes. If there are none, say so plainly and do not invent any.
-3. NON-BLOCKING — worth raising but not gating.
-4. TESTS — what is covered, what is not, and the specific case you would add.
-5. QUESTIONS — only things the diff genuinely cannot answer.
+Output EXACTLY this shape:
 
-Rules: cite file:line for every point. Judge the change against how THIS codebase already does
-things (the project context above), not a generic style guide. Do not restate what the diff
-does — Arun can read it. Say nothing about formatting a linter would catch.
+VERDICT: APPROVE | COMMENT | REQUEST CHANGES — one clause why.
+
+BLOCKING (must fix — correctness, data loss, security, breaking API/schema, unhandled failure path):
+- `path:line` — what is wrong (one clause) → what to do (one clause)
+- … or "None." if there are genuinely none. Never invent one to look thorough.
+
+NON-BLOCKING (worth raising, not gating):
+- `path:line` — issue → suggestion
+
+TESTS:
+- `path:line` — the specific case that is missing or wrong → what to add
+
+QUESTIONS (only what the diff truly cannot answer):
+- `path:line` — the one thing you need confirmed
+
+Hard rules:
+- ONE point per bullet. Each bullet ≤ 25 words, starts with `path:line`. If it needs a
+  paragraph, it is two points.
+- Cite a real path:line for every point — no line, no bullet.
+- Judge against how THIS codebase already does things (the PROJECT CONTEXT above), not a
+  generic style guide.
+- Do NOT restate what the diff does — Arun can read it. Nothing a linter would catch.
+- If a file you needed was not in the diff (see any NOTE above), say which, and do not
+  guess at what it contains.
 """
 
 
@@ -115,12 +141,85 @@ def _fmt_files(files: list[dict]) -> str:
                      for f in files[:60])
 
 
-def _trim_diff(diff: str) -> str:
-    if len(diff) <= MAX_DIFF_CHARS:
+def _split_diff_by_file(diff: str) -> list[tuple[str, str]]:
+    """[(path, that file's diff chunk)] in file order. A unified diff starts each
+    file with 'diff --git a/… b/…', so split on that boundary."""
+    parts = re.split(r"(?m)^(?=diff --git )", diff)
+    out: list[tuple[str, str]] = []
+    for p in parts:
+        if not p.strip():
+            continue
+        m = re.match(r"diff --git a/\S+ b/(\S+)", p)
+        out.append((m.group(1) if m else "?", p))
+    return out
+
+
+def _file_rank(path: str) -> int:
+    """0 = business logic (show first), 1 = tests, 2 = generated/noise (drop first)."""
+    if _LOW_VALUE_FILE.search(path):
+        return 2
+    if _TEST_FILE.search(path):
+        return 1
+    return 0
+
+
+def _prioritise_diff(diff: str, budget: int = MAX_DIFF_CHARS) -> str:
+    """Fill the budget logic-first, so an overflow drops generated files and never
+    the code. Which files made it in, and which were cut, is stated at the top —
+    the old behaviour hid that a whole class of files was missing.
+
+    A single logic file too large to fit whole is included truncated rather than
+    dropped: seeing most of the code that matters beats seeing all of a lockfile.
+    """
+    files = _split_diff_by_file(diff)
+    if len(files) <= 1 and len(diff) <= budget:
         return diff
-    return (diff[:MAX_DIFF_CHARS] +
-            f"\n\n… diff truncated at {MAX_DIFF_CHARS} chars. Review what is shown and say "
-            f"explicitly which files you could not see.")
+    # logic before tests before noise; within a tier, smaller first so more fit.
+    files.sort(key=lambda f: (_file_rank(f[0]), len(f[1])))
+    shown, omitted, chunks, used = [], [], [], 0
+    for path, chunk in files:
+        if used + len(chunk) <= budget:
+            chunks.append(chunk)
+            used += len(chunk)
+            shown.append(path)
+        elif _file_rank(path) == 0 and budget - used > 2000:
+            # a logic file that won't fit whole: keep as much as remains.
+            room = budget - used
+            chunks.append(chunk[:room] + f"\n… [{path} truncated — {len(chunk) - room} more chars]")
+            used = budget
+            shown.append(f"{path} (partial)")
+        else:
+            omitted.append(path)
+    body = "".join(chunks)
+    if not omitted:
+        return body
+    note = ("NOTE: the diff was larger than the review budget. Shown (logic first): "
+            + ", ".join(shown) + ".\nNOT shown (generated/large, review separately if needed): "
+            + ", ".join(omitted) + ".\n\n")
+    return note + body
+
+
+def _project_context(workspace: str, meta: dict) -> str:
+    """The 'how this codebase does things' the review judges against.
+
+    The resolver alone returns a routing map — which files are relevant — not
+    their content, so the old brief handed the model 500 chars of JSON pointers
+    and called it context. The conventions (lessons, pinned facts, build shape)
+    are the part that actually teaches the codebase, so they lead. When nothing
+    is available the brief SAYS so, rather than silently reviewing blind and
+    leaving Arun to wonder whether it understood the project at all.
+    """
+    parts: list[str] = []
+    try:
+        conv = ws_mod.conventions(workspace)
+        if conv and conv.strip():
+            parts.append(untrusted.wrap(conv[:6000], "project conventions"))
+    except (ValueError, RuntimeError, OSError):
+        pass
+    return ("PROJECT CONTEXT — how this codebase already does things; judge the change "
+            "against it, not a generic style guide:\n" + "\n\n".join(parts)) if parts else (
+        "PROJECT CONTEXT: none is built for this workspace, so this review is from the "
+        "diff alone — call out anything you cannot judge without the surrounding code.")
 
 
 async def brief(pr: str, workspace: str, repo: str = "") -> tuple[str, dict]:
@@ -130,14 +229,7 @@ async def brief(pr: str, workspace: str, repo: str = "") -> tuple[str, dict]:
     "please approve this" line in a description is data, not an instruction.
     """
     meta = await gather(pr, workspace, repo)
-    context = ""
-    try:
-        paths = " ".join(f.get("path", "") for f in (meta.get("files") or [])[:20])
-        resolved = await ws_mod.resolve_context(workspace, f"{meta['title']} {paths}")
-        if resolved:
-            context = "PROJECT CONTEXT (how this codebase does things):\n" + resolved[:8000]
-    except (ValueError, RuntimeError):
-        context = ""   # a workspace without context still gets a diff review
+    context = _project_context(workspace, meta)
     header = (
         f"PR #{meta['number']}: {meta['title']}\n"
         f"Author: {(meta.get('author') or {}).get('login', '?')} · "
@@ -152,7 +244,7 @@ async def brief(pr: str, workspace: str, repo: str = "") -> tuple[str, dict]:
         files=_fmt_files(meta.get("files") or []),
         checks=_fmt_checks(meta.get("checks") or []),
         context=context,
-        diff=untrusted.wrap(_trim_diff(meta["diff"]), f"diff of PR #{meta['number']}"),
+        diff=untrusted.wrap(_prioritise_diff(meta["diff"]), f"diff of PR #{meta['number']}"),
     )
     return text, meta
 

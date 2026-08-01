@@ -260,8 +260,15 @@ async def premeeting_loop() -> None:
                         else:
                             from . import agent as agent_mod
                             draft = await agent_mod.meeting_prep(ev["title"])
-                        await notify.notify(f"{head}\n\n📝 Draft for it:\n\n{draft}",
-                                            "premeeting", urgency="direct")
+                        # No draft means no draft. Announcing "📝 Draft for it:"
+                        # above nothing is the worst of both: it promises content,
+                        # delivers none, and still costs him the read.
+                        body = (draft or "").strip()
+                        await notify.notify(
+                            f"{head}\n\n📝 Draft for it:\n\n{body}" if body
+                            else f"{head}\n\nNo prep drafted — say the word and I'll "
+                                 f"pull it together now.",
+                            "premeeting", urgency="direct")
                     else:
                         await notify.notify(
                             f"{head}\n\nWant me to prep anything for it? "

@@ -81,10 +81,34 @@ def test_a_missing_pr_surfaces_ghs_own_error(_gh, monkeypatch):
         asyncio.run(review.gather("999", "ws"))
 
 
-def test_a_huge_diff_is_trimmed_and_says_so():
-    out = review._trim_diff("x" * (review.MAX_DIFF_CHARS + 5000))
-    assert len(out) < review.MAX_DIFF_CHARS + 400
-    assert "could not see" in out
+def _difffile(path: str, lines: int) -> str:
+    body = "\n".join(f"+    line {i} of {path}" for i in range(lines))
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -0,0 +1,{lines} @@\n{body}\n"
+
+
+def test_an_overflowing_diff_keeps_logic_and_drops_generated():
+    """THE bug behind PR #1333: a naive head-cut dropped whatever came last, which
+    was every business-logic file. Priority order must keep the code and shed the
+    lockfile instead."""
+    lock = _difffile("package-lock.json", 4000)         # big and worthless to review
+    logic = _difffile("src/main/java/RentalChassisMismatchEvaluator.java", 40)
+    diff = lock + logic                                 # lockfile FIRST, as gh often emits
+    out = review._prioritise_diff(diff, budget=len(logic) + 500)
+    assert "RentalChassisMismatchEvaluator.java" in out   # the code survived
+    assert "package-lock.json" in out.split("NOT shown")[1]  # named as omitted, not silently gone
+    assert "line 39 of src/main" in out                  # the actual logic lines are present
+
+
+def test_a_diff_within_budget_is_returned_whole():
+    d = _difffile("src/A.java", 5) + _difffile("src/B.java", 5)
+    assert review._prioritise_diff(d, budget=100000) == d
+
+
+def test_a_lone_logic_file_too_big_is_truncated_not_dropped():
+    big = _difffile("src/main/java/Huge.java", 10000)
+    out = review._prioritise_diff(big, budget=5000)
+    assert "Huge.java" in out
+    assert "truncated" in out.lower()
 
 
 def test_review_never_writes_to_the_pr():
@@ -99,11 +123,25 @@ def test_review_never_writes_to_the_pr():
 
 
 def test_a_workspace_without_context_still_reviews(_gh, monkeypatch):
-    async def boom(ws, q):
+    """No conventions built → the review still runs from the diff, and SAYS the
+    context is missing rather than pretending it understood the project."""
+    def no_conv(ws):
         raise RuntimeError("no provider")
-    monkeypatch.setattr("app.workspace.resolve_context", boom)
+    monkeypatch.setattr("app.workspace.conventions", no_conv)
     text, _ = asyncio.run(review.brief("123", "ws"))
     assert "VERDICT" in text
+    assert "none is built" in text or "diff alone" in text
+
+
+def test_project_conventions_are_fed_into_the_review(_gh, monkeypatch):
+    """The whole complaint: it wasn't taking project context. Conventions are the
+    'how this codebase does things' the rules judge against — they must reach the
+    brief, not just a routing JSON of file pointers."""
+    monkeypatch.setattr("app.workspace.conventions",
+                        lambda ws: "### lessons\nVessel ETA is a two-store sync, keep both in step.")
+    text, _ = asyncio.run(review.brief("123", "ws"))
+    assert "two-store sync" in text
+    assert "PROJECT CONTEXT" in text
 
 
 # --- posting it (outward, and therefore staged) -------------------------------

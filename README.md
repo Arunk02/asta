@@ -160,6 +160,35 @@ or `use <brain>` from any channel picks it up — switching after a quota stop j
 carries on, since making you then type "resume" would be theatre. Checkpoints
 expire (`ASTA_RESUME_TTL`, 24h): a day later the branch has moved and so have you.
 
+### Every turn ends in a message — including the ones that fail
+
+A WhatsApp message once went unanswered for three hours. Four things had to line
+up, and each on its own would have been survivable:
+
+- Copilot's monthly quota was gone, so every turn failed.
+- The "one fresh retry" for a dead session was not bounded to *one* — the guard
+  was the session key, which the next call writes back — so a turn that could
+  never succeed retried roughly every 20 seconds, forever, and never returned to
+  report it. It left 7,851 session directories on disk.
+- Nothing bounded a turn by wall clock, so "forever" really was forever. The
+  CLI's own 300s ceiling covered only the part where output is pumped; the
+  Teams/Outlook pre-fetch *before* the process spawns and the wait for it to exit
+  *after* both sat outside it.
+- And the phone sink only flushed on `{"type": "done"}` — which a **failing**
+  turn never sends. So even once the failure was reported, it was reported into
+  a buffer nobody read.
+
+The rule now is that delivery does not depend on success: whatever the sink holds
+is flushed when the turn ends, however it ended (`close()`, called from a
+`finally`). Above the brains' own limits sits `ASTA_TURN_CEILING` (420s) as a
+backstop, so a hang nobody anticipated becomes a message that names the brain and
+tells you how to switch — the brain's own clearer error still wins normally.
+
+Meta-commands are answered before any of this, so `use claude cli` is never queued
+behind the dead brain it is meant to rescue you from. The phrasing is generous
+("change the LLM model to claude cli") but a loose match must name a brain that
+actually exists, or "change the ticket status to done" becomes a model switch.
+
 ## Workspaces and project context
 
 Workspaces are configured in the UI (⚙ Settings → Workspaces), not in code. Point
@@ -455,7 +484,10 @@ Bridge listens on 127.0.0.1:8323.
 ### Teams and Outlook (no Azure AD)
 
 `app/teams_bridge.py` drives Teams web through a Playwright profile holding your
-session. One-time login, where you complete SSO yourself:
+session. This is the **primary path for everything** — reading the activity feed,
+reading a thread, sending a message, setting presence, joining a call — because a
+real authenticated browser can *act*, not just observe, and it needs no special OS
+permission. One-time login, where you complete SSO yourself:
 
 ```bash
 .venv/bin/python -m app.teams_bridge login
@@ -526,13 +558,33 @@ Sessions expire on your org's token policy; Asta notifies you to re-login.
 `data/teams_profile/` holds corporate session cookies — same exposure class as your
 browser profile, so keep FileVault on.
 
-### macOS notification watcher
+### How Asta learns you were pinged — two triggers, Playwright by default
 
-`app/msnotify.py` watches the Notification Center database for Teams/Outlook
-banners mentioning you. Pure-Python filtering, so notification text never reaches a
-model. Off by default: grant **Full Disk Access** to the terminal running Asta, set
-`TEAMS_WATCHER=1`, restart. It only sees what macOS shows as a banner, so muted
-chats are invisible — the Teams bridge above covers those.
+**Default: the Playwright activity poll** (`teams_bridge.activity_watch_loop`,
+`TEAMS_ACTIVITY_POLL=300`). It reads the Teams Activity feed in the same browser
+session that does the reading and sending, so it sees muted/DND chats, needs **no
+Full Disk Access**, and can act on what it finds. Latency is the poll interval.
+This is on whenever the Teams bridge is up, and it is what serves the "tell me
+within five minutes" promise.
+
+**Optional add-on: the macOS notification watcher** (`app/msnotify.py`,
+`TEAMS_WATCHER`, **default 0**). Reads Notification Center banners straight from
+SQLite — near-instant and free — but read-only, blind to muted/DND chats, and it
+needs **Full Disk Access**. It buys *latency* over the poll and nothing else, so it
+is off unless you deliberately want sub-poll alerts.
+
+That Full Disk Access is worth a caution, because it is easy to grant to the wrong
+thing: macOS attributes file access to the process that *launched* the server. Run
+from a terminal (`nohup …`), the responsible process is **Terminal.app**, and a
+grant on Python does nothing. Run under launchd (`sh deploy/install.sh`), the
+responsible process is **Python itself** — which is why the install script launches
+Python directly and keeps `caffeinate` in its own separate agent rather than
+wrapping the server in it (a wrapper would make *caffeinate*, an ungrantable Apple
+binary, the responsible process). Grant Full Disk Access to:
+
+```
+/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13/Resources/Python.app
+```
 
 ### Voice
 

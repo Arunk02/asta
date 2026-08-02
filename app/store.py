@@ -93,6 +93,36 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- One row per THING THAT WANTS ARUN, whatever channel carried it.
+--
+-- The `key` is deliberately UNIQUE across every source rather than per-source:
+-- a ServiceNow incident that arrives as mail, as a Teams mention and as a CI
+-- alert is ONE thing wanting him, and the previous design had no way to know
+-- that. `goes_to_hold` in outlook.py exists purely because that collision was
+-- found by hand, once; this is the general answer to it.
+--
+-- `state` is what the old `notifications` table never had: after a push, nothing
+-- recorded whether the thing was ever dealt with, so an ask missed while he was
+-- away was gone for good. notifications stays exactly as it is — that is the UI
+-- bell, a log of what was SAID. This is the log of what is OWED.
+CREATE TABLE IF NOT EXISTS attention (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    source TEXT NOT NULL,
+    sources TEXT NOT NULL DEFAULT '',
+    who TEXT NOT NULL DEFAULT '',
+    what TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 2,
+    why TEXT NOT NULL DEFAULT '',
+    due_at REAL,
+    state TEXT NOT NULL DEFAULT 'new',
+    seen_count INTEGER NOT NULL DEFAULT 1,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    notified_at REAL,
+    acted_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_attention_state ON attention(state, priority);
 CREATE TABLE IF NOT EXISTS questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     text TEXT NOT NULL,
@@ -464,6 +494,80 @@ def list_notifications(limit: int = 30, unseen_only: bool = False) -> list[dict]
 def mark_notifications_seen() -> None:
     with _connect() as conn:
         conn.execute("UPDATE notifications SET seen=1 WHERE seen=0")
+
+
+# --- attention ledger ---------------------------------------------------------
+
+def attention_upsert(key: str, source: str, who: str = "", what: str = "",
+                     priority: int = 2, why: str = "", due_at: float | None = None,
+                     now: float | None = None) -> dict:
+    """Record that something wants Arun, or note that it wants him AGAIN.
+
+    Re-seeing a thing must never reset it. That is the whole reason the ledger
+    exists: `seen_count` climbing while `state` stays `notified` is precisely the
+    signal that someone is chasing him, and overwriting the row on every poll
+    would erase it every five minutes. So a second sighting bumps the counter and
+    the timestamps, keeps the FIRST source, and leaves the lifecycle alone.
+
+    A better priority is allowed to win, though — an alert that started as a
+    warning and has since become an outage should not stay ranked at what it
+    looked like the first time.
+    """
+    now = time.time() if now is None else now
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM attention WHERE key=?", (key,)).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO attention (key, source, sources, who, what, priority, why,"
+                " due_at, state, seen_count, first_seen, last_seen)"
+                " VALUES (?,?,?,?,?,?,?,?,'new',1,?,?)",
+                (key, source, source, who, what, priority, why, due_at, now, now))
+        else:
+            sources = [s for s in (row["sources"] or "").split(",") if s]
+            if source not in sources:
+                sources.append(source)
+            conn.execute(
+                "UPDATE attention SET seen_count=seen_count+1, last_seen=?, sources=?,"
+                " priority=MIN(priority,?), due_at=COALESCE(?,due_at),"
+                " what=CASE WHEN ?<>'' THEN ? ELSE what END WHERE key=?",
+                (now, ",".join(sources), priority, due_at, what, what, key))
+        return dict(conn.execute("SELECT * FROM attention WHERE key=?", (key,)).fetchone())
+
+
+def attention_get(key: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM attention WHERE key=?", (key,)).fetchone()
+    return dict(row) if row else None
+
+
+def attention_set(key: str, **fields) -> None:
+    if not fields:
+        return
+    keys = ", ".join(f"{k}=?" for k in fields)
+    with _connect() as conn:
+        conn.execute(f"UPDATE attention SET {keys} WHERE key=?", (*fields.values(), key))
+
+
+def attention_open(limit: int = 50, max_priority: int = 3) -> list[dict]:
+    """What is still owed, most urgent first — the answer to "what's on my plate".
+
+    Ordered by priority then age, so the oldest unanswered P1 outranks a P1 that
+    arrived a minute ago. `acted` and `dropped` are settled and never returned.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM attention WHERE state IN ('new','notified') AND priority<=?"
+            " ORDER BY priority ASC, first_seen ASC LIMIT ?", (max_priority, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def attention_purge(before: float) -> int:
+    """Drop settled rows older than `before`, so the ledger cannot grow forever."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM attention WHERE state IN ('acted','dropped') AND last_seen < ?",
+            (before,))
+        return cur.rowcount
 
 
 # --- key/value (watermarks for watchers) -------------------------------------

@@ -16,7 +16,7 @@ import json
 import shutil
 import time
 
-from . import copilot_cli, memory, msnotify, store, teams_bridge, telegram
+from . import attention, copilot_cli, memory, msnotify, store, teams_bridge, telegram
 
 CHECK_SECONDS = 6 * 3600
 MIN_FREE_GB = 5
@@ -45,6 +45,13 @@ async def checks() -> dict[str, str]:
     ms = await asyncio.to_thread(msnotify.status)
     if ms.get("enabled") and not ms.get("ok"):
         problems["teams_watcher"] = ms.get("reason", "notification DB unreadable")
+    # A watcher that has stopped reading is the one failure that LOOKS like good
+    # news. Both loops swallow exceptions and continue, so a permanently broken
+    # selector is silent — and silence is also what a calm morning looks like.
+    for source, minutes in attention.stale_sources().items():
+        problems[f"{source}_watcher"] = (
+            f"no successful read for {minutes} min — the scrape may be broken, "
+            f"so treat quiet as unknown rather than as nothing happening")
     if not copilot_cli.available():
         problems["copilot"] = "Copilot CLI missing/unauthenticated (run: copilot login)"
     if not memory.local_llm_model():

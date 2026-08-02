@@ -623,13 +623,23 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
     is judged: only real asks are marked as needing him, and the rest are simply
     stated once so he has the context without being asked for anything.
     """
-    from . import triage
+    from . import attention, triage
     verdicts = []
     for m in fresh[:12]:
         v = triage.classify(m.get("sender", ""), m.get("subject", ""),
                             m.get("preview", ""))
-        verdicts.append(await triage.refine(v, m.get("sender", ""),
-                                            m.get("subject", ""), m.get("preview", "")))
+        v = await triage.refine(v, m.get("sender", ""),
+                                m.get("subject", ""), m.get("preview", ""))
+        # The ledger gets the last word on whether this is worth saying. When it
+        # is off, `consider` waves everything through and this is the old path
+        # exactly; when it is on, something another source already announced is
+        # dropped here rather than announced twice in two different words.
+        led_key = attention.key_for(m.get("sender", ""), m.get("subject", ""))
+        if not attention.consider("outlook", led_key, who=m.get("sender", ""),
+                                  what=v.one_line, why=v.why,
+                                  priority=attention.P_TODAY if v.action else attention.P_FYI):
+            continue
+        verdicts.append(v)
     text, needs = triage.summarize(verdicts, "📧 Outlook")
     if not text:
         return
@@ -654,6 +664,12 @@ async def watch_loop() -> None:
             mails = await read_mail(20)
         except Exception:
             continue
+        # Stamped only on a SUCCESSFUL read, so the heartbeat measures what it
+        # claims to: that the inbox is actually being seen. The `continue` above
+        # is why this matters — a permanently broken selector loops quietly for
+        # ever, and nothing downstream can tell that apart from an empty inbox.
+        from . import attention
+        attention.note_scrape("outlook")
         wanted = needs_attention(mails)
         keys = [mail_key(m) for m in wanted]
         raw = store.kv_get(SEEN_KEY)

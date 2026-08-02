@@ -534,13 +534,18 @@ async def _push_activity(notify, wanted: list[str]) -> None:
     now on whether anyone actually wants a move from him — not merely on whether
     his name appeared.
     """
-    from . import triage
+    from . import attention, triage
     verdicts = []
     for it in wanted[:12]:
         who, _, rest = it.partition(" — ")
         addressed = any(m in it.lower() for m in _DIRECT_MARKERS)
         v = triage.classify(who, rest or it, addressed=addressed)
-        verdicts.append(await triage.refine(v, who, rest or it))
+        v = await triage.refine(v, who, rest or it)
+        if not attention.consider("teams", attention.key_for(it), who=who,
+                                  what=v.one_line, why=v.why,
+                                  priority=attention.P_TODAY if v.action else attention.P_FYI):
+            continue
+        verdicts.append(v)
     text, needs = triage.summarize(verdicts, "💬 Teams")
     if text:
         await notify.notify(text, "teams", urgency="direct" if needs else "ambient")
@@ -562,6 +567,8 @@ async def activity_watch_loop() -> None:
             rows = await read_activity_rows()
         except Exception:
             continue  # transient (session probe will flag real expiry)
+        from . import attention
+        attention.note_scrape("teams")   # only on success — see attention.stale_sources
         if not rows:
             continue
         items = [r["text"] for r in rows]

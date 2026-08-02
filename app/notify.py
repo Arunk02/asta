@@ -110,7 +110,31 @@ def _stale(items: list[dict], now: float | None = None) -> bool:
     return any(now - it["at"] >= limit * 60 for it in items)
 
 
-async def notify(text: str, level: str = "info", urgency: str = "direct") -> dict:
+def _hold(text: str) -> None:
+    held = _held_items()
+    held.append({"at": time.time(), "text": text})
+    store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))
+
+
+async def deliver(text: str) -> dict:
+    """Actually put it on his phone, and remember that something just went out.
+
+    Split out of `notify` so the coalescing flush can send a merged batch through
+    exactly the same path — and so `note_sent` is stamped in ONE place. Stamping
+    it per call site is how a batching window starts disagreeing with itself.
+    """
+    from . import delivery
+    wa = await wa_send(text)
+    tg = await telegram.send(text)
+    delivery.note_sent()
+    if not (wa or tg):
+        store.kv_set("last_push_failure",
+                     json.dumps({"at": time.time(), "text": text[:120]}))
+    return {"bell": True, "held": False, "whatsapp": wa, "telegram": tg}
+
+
+async def notify(text: str, level: str = "info", urgency: str = "direct",
+                 priority: int | None = None) -> dict:
     """Record for the UI bell and fan out to WhatsApp + Telegram.
 
     urgency="direct"  — someone is actually addressing Arun (1:1 message, @mention,
@@ -126,6 +150,13 @@ async def notify(text: str, level: str = "info", urgency: str = "direct") -> dic
     no one was looking at.
     """
     store.add_notification(text, level)  # the bell always gets everything
+    from . import delivery
+    # Night first, because it outranks every other reason to speak. Held items
+    # wait for morning rather than for him to walk away — at 2am he has already
+    # walked away, and a departure-released hold would fire instantly.
+    if delivery.hold_for_quiet(urgency, priority):
+        _hold(text)
+        return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
     if urgency == "ambient":
         from . import presence
         if await presence.at_laptop():
@@ -141,14 +172,13 @@ async def notify(text: str, level: str = "info", urgency: str = "direct") -> dic
                 return {"bell": True, "held": False, "whatsapp": True, "telegram": True}
             store.kv_set(HELD_KEY, json.dumps(held))
             return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
-    wa = await wa_send(text)
-    tg = await telegram.send(text)
-    if not (wa or tg):
-        # Delivered to the bell and nowhere else. Record it so health can surface
-        # a mute assistant instead of it being silently swallowed.
-        store.kv_set("last_push_failure",
-                     json.dumps({"at": time.time(), "text": text[:120]}))
-    return {"bell": True, "held": False, "whatsapp": wa, "telegram": tg}
+    # Something went out moments ago and this is not breakage: let it ride along
+    # with the next flush. One buzz carrying four items beats four buzzes.
+    if delivery.should_batch(priority):
+        delivery.buffer(text)
+        return {"bell": True, "held": True, "batched": True,
+                "whatsapp": False, "telegram": False}
+    return await deliver(text)
 
 
 async def live_push_channels() -> list[str]:
@@ -169,8 +199,12 @@ async def live_push_channels() -> list[str]:
 
 async def flush_held(reason: str = "while you were at the laptop") -> None:
     """Deliver notifications that were held. Says WHY they are arriving now."""
+    from . import delivery
     held = _held_items()
-    if not held:
+    # Never in the small hours. This is the other half of the quiet-hours hold:
+    # releasing on departure would fire the moment he goes to bed, which is the
+    # exact opposite of what holding it was for.
+    if not held or delivery.in_quiet_hours():
         return
     store.kv_set(HELD_KEY, "[]")
     texts = [it["text"] for it in held]

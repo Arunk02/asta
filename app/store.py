@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS attention (
     first_seen REAL NOT NULL,
     last_seen REAL NOT NULL,
     notified_at REAL,
-    acted_at REAL
+    acted_at REAL,
+    chased_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_attention_state ON attention(state, priority);
 -- What Asta has learned about a person, as counters rather than opinions.
@@ -198,6 +199,10 @@ _ADDED_COLUMNS = {
                ("cost_usd", "REAL NOT NULL DEFAULT 0"),
                ("measured", "INTEGER NOT NULL DEFAULT 0")),
     "usage": (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),),
+    # Added after the ledger shipped. Any machine that already ran the server
+    # once has the table without it, and CREATE TABLE IF NOT EXISTS would leave
+    # that machine behind — which is the only one with real history on it.
+    "attention": (("chased_at", "REAL"),),
 }
 
 

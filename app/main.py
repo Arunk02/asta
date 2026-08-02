@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, delivery, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -123,6 +123,8 @@ async def startup() -> None:
     asyncio.create_task(tasks.resume_paused_loop())
     asyncio.create_task(notify.held_watch_loop())
     asyncio.create_task(attention.sweep_loop())
+    asyncio.create_task(delivery.chase_loop())
+    asyncio.create_task(delivery.flush_loop())
     asyncio.create_task(_learning_loop())
     # The WhatsApp bridge is a child of Asta's lifecycle now, not a manual step:
     # it starts with the server and is restarted on crash, so "no bridge" stops

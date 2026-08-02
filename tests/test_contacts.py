@@ -170,7 +170,7 @@ class _Notify:
     def __init__(self):
         self.sent = []
 
-    async def notify(self, text, level="info", urgency="direct"):
+    async def notify(self, text, level="info", urgency="direct", priority=None):
         self.sent.append((text, urgency))
         return {"bell": True}
 

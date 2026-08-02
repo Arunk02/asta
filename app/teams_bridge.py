@@ -551,7 +551,9 @@ async def _push_activity(notify, wanted: list[str]) -> None:
         verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)
     text, needs = triage.summarize(verdicts, "💬 Teams")
     if text:
-        await notify.notify(text, "teams", urgency="direct" if needs else "ambient")
+        ranks = [v.priority for v in verdicts if v.priority is not None]
+        await notify.notify(text, "teams", urgency="direct" if needs else "ambient",
+                            priority=min(ranks) if ranks else None)
 
 
 async def activity_watch_loop() -> None:

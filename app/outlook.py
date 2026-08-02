@@ -648,8 +648,12 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
     if not text:
         return
     # Only a genuine ask earns an immediate interrupt. Pure FYI rides the ambient
-    # path, so it waits for a natural moment instead of buzzing his pocket.
-    await notify.notify(text, "outlook", urgency="direct" if needs else "ambient")
+    # path, so it waits for a natural moment instead of buzzing his pocket. The
+    # rank of the most urgent thing in the batch travels with it, so delivery can
+    # tell "prod is down" from "someone asked a question" at three in the morning.
+    ranks = [v.priority for v in verdicts if v.priority is not None]
+    await notify.notify(text, "outlook", urgency="direct" if needs else "ambient",
+                        priority=min(ranks) if ranks else None)
 
 
 async def watch_loop() -> None:

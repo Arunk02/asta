@@ -12,6 +12,7 @@ Arun already makes:
   ask      answered, or timed out                        → were the questions worth asking
   skill    written                                       → is the learning loop producing
   verify   passed its own check, or parked unresolved    → did the work clear the bar
+  relevance held a passive question from spawning work    → how often intent drifted
 
 Deliberately not an LLM judge: these are facts Asta already observes, so they
 cost nothing to record and cannot be flattered. The verify signal is the newest
@@ -38,7 +39,7 @@ GOOD = {
 LABEL = {
     "plan": "Planning", "task": "Tasks", "draft": "Drafts",
     "ask": "Questions", "ship": "Shipping", "skill": "Learning",
-    "verify": "Verification",
+    "verify": "Verification", "relevance": "Relevance guard",
 }
 
 
@@ -93,7 +94,7 @@ def report(days: int = 7) -> str:
         return (f"No outcomes recorded in the last {days} days — nothing has finished, "
                 f"or this is running before the first measured task.")
     lines = [f"Quality, last {days} days:"]
-    for kind in ("plan", "task", "draft", "ask", "ship", "skill", "verify"):
+    for kind in ("plan", "task", "draft", "ask", "ship", "skill", "verify", "relevance"):
         entry = kinds.get(kind)
         if not entry:
             continue

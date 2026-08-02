@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, resume, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
+from . import activity, asking, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -1382,6 +1382,9 @@ async def _run_turn(out, conv: dict, user_text: str, channel: str = "web") -> No
     # Link any task the agent spawns this turn back to this conversation, so a
     # later follow-up here can augment or redirect it.
     tasks.bind_conversation(conv["id"])
+    # Remember what he actually said, so the relevance gate can catch a passive
+    # question that tries to spawn work (a question is not a request to go do it).
+    relevance.bind_trigger(user_text)
     # Capture BEFORE this message is stored — the learner needs the assistant's
     # previous reply, which is currently the last row.
     if memory.looks_like_correction(user_text):
@@ -1523,6 +1526,10 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
                     cache_write_tokens=trace_usage["cache_write"],
                     measured=bool(trace_usage["input"] or trace_usage["output"]))
     store.add_ui_message(conv["id"], "assistant", assistant_text, {"tools": tools_used, "channel": channel})
+    # Measure-only: did the answer address the question? Fire-and-forget so it never
+    # delays delivery, and a no-op unless ASTA_RELEVANCE is on.
+    if relevance.enabled():
+        asyncio.create_task(relevance.judge_answer(user_text, assistant_text))
     await out.send({"type": "done", "tools": tools_used})
 
 
@@ -1554,6 +1561,8 @@ async def ws_chat(ws: WebSocket) -> None:
             if msg.get("workspace") != conv.get("workspace"):
                 store.update_conversation(conv["id"], workspace=msg.get("workspace") or None)
                 conv["workspace"] = msg.get("workspace") or None
+                # He picked it — an explicit anchor, so clear any inherited stamp.
+                relevance.clear_inherited_workspace(conv["id"])
             # Fire and keep reading. Awaiting the turn here meant one socket
             # could only ever run one turn: a status question sat in a client-side
             # queue behind a five-minute analysis, and a disconnect mid-turn threw
@@ -2091,6 +2100,9 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                 conv["workspace"] = ws_name
                 with contextlib.suppress(Exception):
                     store.update_conversation(cid, workspace=ws_name)
+                # Adopted silently, not named by Arun — mark it so a later spawn
+                # into this repo that the ask never mentioned reads as drift.
+                relevance.mark_inherited_workspace(cid, ws_name)
             return _start_turn(conv, _offer_prompt(open_offer), sink, channel)
         if _DECLINE.match(user_text):
             offers.decline()

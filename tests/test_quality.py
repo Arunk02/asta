@@ -62,6 +62,16 @@ def test_verify_convergence_empty_when_nothing_passed():
     assert quality.verify_convergence() == {}
 
 
+def test_relevance_holds_are_counted_so_intent_drift_is_a_number():
+    """The gate's catches surface in the brief — off-topic drift you can watch fall,
+    not an anecdote you happen to notice."""
+    store.record_outcome("relevance", "held", detail="analysis: No recent one..?")
+    store.record_outcome("relevance", "held", detail="code: did that get fixed?")
+    text = quality.report()
+    assert "Relevance guard" in text
+    assert "held 2" in text
+
+
 def test_old_outcomes_fall_outside_the_window():
     store.record_outcome("task", "done")
     with store._connect() as conn:

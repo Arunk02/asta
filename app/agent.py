@@ -1129,7 +1129,13 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     chat context). kind: analysis (read-only, parallel) | code (edits code — set
     the workspace) | teams_draft (drafts a Teams reply — set teams_chat; the
     draft waits for Arun's approval, it is never sent automatically)."""
-    from . import tasks
+    from . import relevance, tasks
+    # A question is not a request to go do work. If this turn was opened by a
+    # passive question and the model is now trying to spawn work off it, hold and
+    # ask first rather than silently running (and touching a repo) unasked.
+    held = relevance.guard_spawn(kind, title, workspace)
+    if held:
+        return held
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
     return (f"Task #{t['id']} ({kind}) spawned — running in the background. "
             f"Arun will be notified when it finishes.")

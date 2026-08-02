@@ -76,6 +76,16 @@ Episode pruning already existed (`memory.py`, newest 30 kept).
   for chat — `relevance.judge_answer` records off-topic answers without ever looping
   or blocking. The still-deferred piece is only the *acting* on that verdict.
 
+- **Browser executor — agent-browser vs Playwright (DECISION PENDING).** The
+  Playwright layer Asta uses today (teams_bridge read/send, `meetings.join`) is
+  *deterministic scripted* automation — fixed selectors, no LLM in the loop, so zero
+  model tokens for the automation itself. agent-browser's advantage is token
+  efficiency *for an LLM driving the browser*, a different job — so it does not help
+  read/send/join and would regress their reliability for no token saving.
+  agent-browser is the right primary for a NEW agentic-browser capability (an
+  API-less task where a brain must work the UI out on the fly); build it when such a
+  use case is named, keeping Playwright as the deterministic path.
+
 ## Closed on 2026-08-02
 
 ### Relevance gate — intent drift caught before it acts (off behind `ASTA_RELEVANCE`)
@@ -98,6 +108,26 @@ fuzzy layer is trusted to block:
   `ontopic`/`offtopic`, so the scoreboard stays signal-dense.
 Off by default; additive; no-op when the flag is unset. Next increment: promote anchor
 drift / off-topic from measure to block once the numbers show the precision is there.
+
+### Coding-brain tooling — Serena + Context7 for code tasks, and the approved plan as a durable spec (both off by default)
+Two token-lean upgrades for the brains Asta spawns on code work, each behind its own
+flag and a pure no-op until flipped:
+- **Serena + Context7 reach the code brains** (`app/dev_mcp.py`, off behind
+  `ASTA_DEV_MCP`). Serena gives symbol-level nav/edit scoped to the repo
+  (`--project <cwd>`); Context7 injects version-correct docs — it was already wired
+  for the chat agent via mcp.json but never reached the code brains, and that gap is
+  closed. One shared policy builds the inline mcpServers JSON that both the claude
+  (`--mcp-config`) and copilot (`--additional-mcp-config`) task legs pass through; a
+  missing binary is skipped rather than fatal (mcp_loader's contract). Attaches to
+  code + analysis legs only — never teams_draft, never chat.
+- **The approved plan is kept as the definition of done** (`app/task_spec.py`, off
+  behind `ASTA_TASK_SPEC`) — GSD's one good idea. Captured at the moment Arun approves
+  the plan (the one unambiguous point, no mid-output marker parsing), first-approval
+  wins, and re-injected into a resumed/compacted implementation leg so a worker that
+  lost its context rebuilds against the same bar. Same off-by-default/additive
+  contract as the verify and relevance gates.
+Tests: `test_dev_mcp.py` (12, incl. e2e wiring through both brains),
+`test_task_spec.py` (9). Full suite 800 passed.
 
 - **Voice clone** — flow is built and waiting on Arun: record the five takes
   (`python -m app.voice script`), then

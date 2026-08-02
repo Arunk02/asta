@@ -541,11 +541,13 @@ async def _push_activity(notify, wanted: list[str]) -> None:
         addressed = any(m in it.lower() for m in _DIRECT_MARKERS)
         v = triage.classify(who, rest or it, addressed=addressed)
         v = await triage.refine(v, who, rest or it)
-        if not attention.consider("teams", attention.key_for(it), who=who,
-                                  what=v.one_line, why=v.why,
-                                  priority=attention.P_TODAY if v.action else attention.P_FYI):
+        led_key = attention.key_for(it)
+        pri, why, due = attention.score(v.action, it, addressed=addressed, key=led_key)
+        pri, chased = attention.escalate_for_chase(pri, led_key)
+        if not attention.consider("teams", led_key, who=who, what=v.one_line,
+                                  why=chased or why, priority=pri, due_at=due):
             continue
-        verdicts.append(v)
+        verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)
     text, needs = triage.summarize(verdicts, "💬 Teams")
     if text:
         await notify.notify(text, "teams", urgency="direct" if needs else "ambient")

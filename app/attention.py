@@ -26,6 +26,7 @@ here that can hurt him today.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import re
 import time
@@ -75,6 +76,133 @@ def key_for(*parts: str) -> str:
         return ids[0].upper()
     from . import triage
     return triage.stable_key(blob)
+
+
+# --- when is it wanted by? ---------------------------------------------------
+#
+# The words were already being matched — triage's `_ASK` has `eod|asap|urgent`
+# in it — and then thrown away, because the only thing they could affect was a
+# bool that was already true. Parsing them into an actual time is what lets
+# "approve by EOD, we ship tonight" outrank "any update?", which is the whole
+# complaint. Free: regex and arithmetic, no model.
+
+def eod_hour() -> int:
+    try:
+        return min(23, max(0, int(os.environ.get("ASTA_EOD_HOUR", "18"))))
+    except ValueError:
+        return 18
+
+
+def urgent_within_hours() -> float:
+    """A deadline closer than this makes something interrupt-now rather than today."""
+    try:
+        return max(0.0, float(os.environ.get("ASTA_URGENT_HOURS", "4")))
+    except ValueError:
+        return 4.0
+
+
+_ASAP = re.compile(r"\b(asap|as soon as possible|urgent(ly)?|immediately|right away)\b", re.I)
+_EOD = re.compile(r"\b(eod|end of (the )?day|cob|close of business)\b", re.I)
+_BY_TIME = re.compile(r"\bby\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", re.I)
+_TODAY = re.compile(r"\b(today|this afternoon|this evening|tonight)\b", re.I)
+_TOMORROW = re.compile(r"\b(tomorrow|first thing tomorrow)\b", re.I)
+_BY_WEEKDAY = re.compile(r"\bby\s+(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b", re.I)
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def deadline(text: str, now: float | None = None) -> float | None:
+    """The time this is wanted by, or None. The EARLIEST candidate wins.
+
+    A deadline already in the past is returned as-is rather than rolled forward
+    to tomorrow: "by 3pm" read at 4pm means he is late, and late is the most
+    urgent state there is — quietly reinterpreting it as tomorrow would hide
+    exactly the thing worth telling him.
+    """
+    if not text:
+        return None
+    now = time.time() if now is None else now
+    base = dt.datetime.fromtimestamp(now)
+    end = eod_hour()
+    found: list[float] = []
+
+    def at(day_offset: int, hour: int, minute: int = 0) -> float:
+        stamp = (base + dt.timedelta(days=day_offset)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0)
+        return stamp.timestamp()
+
+    if _ASAP.search(text):
+        found.append(now)
+    if _EOD.search(text) or _TODAY.search(text):
+        found.append(at(0, end))
+    if _TOMORROW.search(text):
+        found.append(at(1, end))
+    m = _BY_TIME.search(text)
+    if m:
+        hour = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+        found.append(at(0, hour, int(m.group(2) or 0)))
+    w = _BY_WEEKDAY.search(text)
+    if w:
+        want = _WEEKDAYS.index(w.group(1).lower())
+        found.append(at((want - base.weekday()) % 7, end))
+    return min(found) if found else None
+
+
+# --- how much does it want him? ----------------------------------------------
+
+#: How many sightings of an unanswered thing before it counts as being chased.
+def chase_at() -> int:
+    try:
+        return max(2, int(os.environ.get("ASTA_CHASE_AT", "3")))
+    except ValueError:
+        return 3
+
+
+def score(action: bool, text: str, *, addressed: bool = False, critical: bool = False,
+          key: str = "", now: float | None = None) -> tuple[int, str, float | None]:
+    """Rank one arrival: (priority, why, due_at).
+
+    The rules are ordered by how OBJECTIVE the signal is, the same discipline the
+    relevance gate uses — something that is provably broken outranks something
+    that merely reads as urgent, which outranks a judgement about wording.
+
+    `key` is optional and only used to look up how many times this has already
+    been seen unanswered. That lookup is why ranking needed the ledger: a third
+    chase is a fact about history, and no amount of reading one message reveals
+    it.
+    """
+    now = time.time() if now is None else now
+    due = deadline(text, now)
+
+    if critical:
+        return P_NOW, "something is broken", due
+    if action and due is not None and due <= now + urgent_within_hours() * 3600:
+        return P_NOW, "asked for, and due within hours", due
+    if action:
+        return (P_TODAY, "asks you directly" if addressed else "asks for something", due)
+    if addressed:
+        return P_FYI, "addressed to you, no ask", due
+    return P_FYI, "no ask detected", due
+
+
+def escalate_for_chase(priority: int, key: str, now: float | None = None) -> tuple[int, str]:
+    """Bump something being chased. Returns (priority, why-suffix).
+
+    Someone asking a third time is a stronger signal than anything in the wording
+    of the first message, and it is invisible without the ledger. Only unanswered
+    things escalate — a thing he dealt with is not a chase, it is a thank-you.
+    """
+    if not key or priority <= P_NOW:
+        return priority, ""
+    row = store.attention_get(key)
+    if not row or row.get("state") in SETTLED:
+        return priority, ""
+    seen = int(row.get("seen_count") or 0)
+    if seen + 1 < chase_at():
+        return priority, ""
+    return priority - 1, f"chased {seen + 1}×"
+
+
+LABELS = {P_NOW: "now", P_TODAY: "today", P_FYI: "FYI", P_MUTE: "muted"}
 
 
 # --- the one decision --------------------------------------------------------

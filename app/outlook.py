@@ -635,11 +635,14 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
         # exactly; when it is on, something another source already announced is
         # dropped here rather than announced twice in two different words.
         led_key = attention.key_for(m.get("sender", ""), m.get("subject", ""))
+        blob = f"{m.get('subject', '')} {m.get('preview', '')}"
+        pri, why, due = attention.score(v.action, blob, critical=is_critical(m), key=led_key)
+        pri, chased = attention.escalate_for_chase(pri, led_key)
         if not attention.consider("outlook", led_key, who=m.get("sender", ""),
-                                  what=v.one_line, why=v.why,
-                                  priority=attention.P_TODAY if v.action else attention.P_FYI):
+                                  what=v.one_line, why=chased or why,
+                                  priority=pri, due_at=due):
             continue
-        verdicts.append(v)
+        verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)
     text, needs = triage.summarize(verdicts, "📧 Outlook")
     if not text:
         return

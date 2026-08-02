@@ -36,10 +36,21 @@ class Verdict:
     action: bool          # True → he has to do something; False → pure FYI
     why: str              # the short reason, so a wrong call is debuggable
     one_line: str         # the precise single line he reads on his phone
+    #: How urgently, once something has ranked it (attention.P_*). None means
+    #: unranked, which is what every caller predating the ranking passes — and
+    #: unranked must render exactly as it always did, or turning the ledger off
+    #: would still change what he reads.
+    priority: int | None = None
+    due_at: float | None = None
+
+    def ranked(self, priority: int, why: str = "", due_at: float | None = None) -> "Verdict":
+        """A copy carrying its rank. Frozen, so ranking returns rather than mutates."""
+        return Verdict(self.action, why or self.why, self.one_line, priority, due_at)
 
     def render(self) -> str:
         """One line, with a marker that makes the ask/no-ask split scannable."""
-        return f"{'🔴' if self.action else '·'} {self.one_line}"
+        mark = "🚨" if self.priority == 0 else ("🔴" if self.action else "·")
+        return f"{mark} {self.one_line}"
 
 
 # --- stable identity --------------------------------------------------------
@@ -231,13 +242,27 @@ def summarize(verdicts: list[Verdict], source: str) -> tuple[str, bool]:
     phone. The FYI tail is one line each under a header that states plainly that
     nothing is wanted — so a glance is enough and he can put the phone down.
     """
-    acts = [v for v in verdicts if v.action]
-    fyis = [v for v in verdicts if not v.action]
+    # The urgent tier is taken from PRIORITY, not from `action`, and the
+    # difference is not cosmetic: nobody asks anything when prod falls over, so a
+    # critical alert has action=False and bucketing on `action` first filed
+    # "connection refused, pods are down" under "FYI, nothing needed from you".
+    # Once something is ranked, the rank is the answer.
+    #
+    # Unranked verdicts have priority None and so can never enter this tier,
+    # which is what keeps an unflagged batch rendering byte-for-byte as before.
+    now = [v for v in verdicts if v.priority == 0]
+    acts = [v for v in verdicts if v.priority != 0 and v.action]
+    fyis = [v for v in verdicts if v.priority != 0 and not v.action]
     parts: list[str] = []
+    if now:
+        parts.append(f"🚨 {source} — needs you NOW ({len(now)}):\n"
+                     + "\n".join("• " + v.one_line for v in now[:6]))
     if acts:
         parts.append(f"🔴 {source} — needs you ({len(acts)}):\n"
                      + "\n".join("• " + v.one_line for v in acts[:6]))
     if fyis:
         parts.append(f"· {source} — FYI, nothing needed from you ({len(fyis)}):\n"
                      + "\n".join("• " + v.one_line for v in fyis[:6]))
-    return "\n\n".join(parts), bool(acts)
+    # `acts` was split above, so it no longer answers "does this need him" on its
+    # own — a batch of nothing but P0 would report False and ride the quiet path.
+    return "\n\n".join(parts), bool(now or acts)

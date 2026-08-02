@@ -225,6 +225,11 @@ async def _cached_meetings() -> list[dict]:
     events = await outlook.todays_meetings(structured=True)
     store.kv_set("meet_cache", _json.dumps({"date": today, "events": events}))
     store.kv_set("meet_cache_at", str(time.time()))
+    # Free, objective, and already in hand: the people he actually sits in
+    # meetings with. It is the one thing known about a person before any learning
+    # has happened, and it is what stops a colleague ever being auto-muted.
+    from . import contacts
+    contacts.seed_from_meetings(events)
     return events
 
 

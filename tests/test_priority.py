@@ -216,6 +216,17 @@ def test_something_broken_reaches_the_urgent_tier_though_nobody_asked_anything()
     assert needs is True
 
 
+def test_a_promoted_item_leaves_the_fyi_pile_it_was_promoted_out_of():
+    """The mirror of the bug above, one tier down: the ask/FYI split was still
+    made on `action`, so something ranked up by the sender prior stayed filed
+    under FYI — the exact pile the promotion existed to lift it out of."""
+    v = triage.Verdict(False, "no ask detected", "boss: thoughts on the roadmap")
+    text, needs = triage.summarize([v.ranked(attention.P_TODAY, "you usually act")], "📧 Outlook")
+    assert "🔴 📧 Outlook — needs you (1):" in text
+    assert "nothing needed from you" not in text
+    assert needs is True
+
+
 def test_render_marks_an_urgent_line_distinctly():
     assert triage.Verdict(True, "w", "x").ranked(attention.P_NOW).render().startswith("🚨")
     assert triage.Verdict(True, "w", "x").render().startswith("🔴")

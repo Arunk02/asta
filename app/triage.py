@@ -235,6 +235,24 @@ async def _complete(memory, prompt: str) -> str:
 
 # --- rendering a batch ------------------------------------------------------
 
+def _tier(v: Verdict) -> int:
+    """Which block of the message this line belongs in: 0 urgent, 1 ask, 2 FYI.
+
+    Once something is RANKED, the rank is the answer and `action` is not — and
+    the difference is not cosmetic in either direction. Nobody asks anything when
+    prod falls over, so a critical alert has action=False and would have been
+    filed under "FYI, nothing needed from you"; and a message promoted because
+    it came from someone he always answers would have stayed in the FYI pile
+    that the promotion existed to lift it out of.
+
+    Unranked verdicts carry priority None and fall back to `action`, which is
+    what keeps an unflagged batch rendering byte-for-byte as it always did.
+    """
+    if v.priority is None:
+        return 1 if v.action else 2
+    return min(v.priority, 2)
+
+
 def summarize(verdicts: list[Verdict], source: str) -> tuple[str, bool]:
     """Render a poll's findings as ONE message, and say whether it needs him.
 
@@ -242,17 +260,9 @@ def summarize(verdicts: list[Verdict], source: str) -> tuple[str, bool]:
     phone. The FYI tail is one line each under a header that states plainly that
     nothing is wanted — so a glance is enough and he can put the phone down.
     """
-    # The urgent tier is taken from PRIORITY, not from `action`, and the
-    # difference is not cosmetic: nobody asks anything when prod falls over, so a
-    # critical alert has action=False and bucketing on `action` first filed
-    # "connection refused, pods are down" under "FYI, nothing needed from you".
-    # Once something is ranked, the rank is the answer.
-    #
-    # Unranked verdicts have priority None and so can never enter this tier,
-    # which is what keeps an unflagged batch rendering byte-for-byte as before.
-    now = [v for v in verdicts if v.priority == 0]
-    acts = [v for v in verdicts if v.priority != 0 and v.action]
-    fyis = [v for v in verdicts if v.priority != 0 and not v.action]
+    now = [v for v in verdicts if _tier(v) == 0]
+    acts = [v for v in verdicts if _tier(v) == 1]
+    fyis = [v for v in verdicts if _tier(v) == 2]
     parts: list[str] = []
     if now:
         parts.append(f"🚨 {source} — needs you NOW ({len(now)}):\n"
@@ -263,6 +273,6 @@ def summarize(verdicts: list[Verdict], source: str) -> tuple[str, bool]:
     if fyis:
         parts.append(f"· {source} — FYI, nothing needed from you ({len(fyis)}):\n"
                      + "\n".join("• " + v.one_line for v in fyis[:6]))
-    # `acts` was split above, so it no longer answers "does this need him" on its
-    # own — a batch of nothing but P0 would report False and ride the quiet path.
+    # Both action tiers count. `acts` alone would report False for a batch of
+    # nothing but P0 and send an outage down the quiet ambient path.
     return "\n\n".join(parts), bool(now or acts)

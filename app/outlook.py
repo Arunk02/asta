@@ -636,7 +636,8 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
         # dropped here rather than announced twice in two different words.
         led_key = attention.key_for(m.get("sender", ""), m.get("subject", ""))
         blob = f"{m.get('subject', '')} {m.get('preview', '')}"
-        pri, why, due = attention.score(v.action, blob, critical=is_critical(m), key=led_key)
+        pri, why, due = attention.score(v.action, blob, critical=is_critical(m),
+                                        key=led_key, who=m.get("sender", ""))
         pri, chased = attention.escalate_for_chase(pri, led_key)
         if not attention.consider("outlook", led_key, who=m.get("sender", ""),
                                   what=v.one_line, why=chased or why,

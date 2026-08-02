@@ -123,6 +123,26 @@ CREATE TABLE IF NOT EXISTS attention (
     acted_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_attention_state ON attention(state, priority);
+-- What Asta has learned about a person, as counters rather than opinions.
+--
+-- `_BULK_SENDER` in outlook.py is a hand-written regex: every new noisy sender
+-- is a code change, and every important human is anonymous to it — the manager
+-- who needs an answer and a stranger's cold email score identically. A regex
+-- list does not scale; counters do, and they cost arithmetic.
+--
+-- `met` is seeded from calendar co-attendance, which is already scraped and
+-- is the one OBJECTIVE fact available before any learning has happened: a
+-- person he sits in meetings with is not bulk mail, whatever the wording of
+-- their subject line.
+CREATE TABLE IF NOT EXISTS contacts (
+    who TEXT PRIMARY KEY,
+    engaged INTEGER NOT NULL DEFAULT 0,
+    ignored INTEGER NOT NULL DEFAULT 0,
+    muted INTEGER NOT NULL DEFAULT 0,
+    met INTEGER NOT NULL DEFAULT 0,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     text TEXT NOT NULL,
@@ -568,6 +588,37 @@ def attention_purge(before: float) -> int:
             "DELETE FROM attention WHERE state IN ('acted','dropped') AND last_seen < ?",
             (before,))
         return cur.rowcount
+
+
+# --- contacts (what Asta has learned about a person) --------------------------
+
+_CONTACT_FIELDS = ("engaged", "ignored", "muted", "met")
+
+
+def contact_bump(who: str, field: str, n: int = 1, now: float | None = None) -> None:
+    if not who or field not in _CONTACT_FIELDS:
+        return
+    now = time.time() if now is None else now
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO contacts (who, first_seen, last_seen) VALUES (?,?,?)"
+            " ON CONFLICT(who) DO NOTHING", (who, now, now))
+        conn.execute(
+            f"UPDATE contacts SET {field}={field}+?, last_seen=? WHERE who=?", (n, now, who))
+
+
+def contact_get(who: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM contacts WHERE who=?", (who,)).fetchone()
+    return dict(row) if row else None
+
+
+def contacts_list(limit: int = 200) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM contacts ORDER BY (engaged+ignored+muted) DESC LIMIT ?",
+            (limit,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 # --- key/value (watermarks for watchers) -------------------------------------

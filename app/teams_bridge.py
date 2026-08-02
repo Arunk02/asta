@@ -542,7 +542,8 @@ async def _push_activity(notify, wanted: list[str]) -> None:
         v = triage.classify(who, rest or it, addressed=addressed)
         v = await triage.refine(v, who, rest or it)
         led_key = attention.key_for(it)
-        pri, why, due = attention.score(v.action, it, addressed=addressed, key=led_key)
+        pri, why, due = attention.score(v.action, it, addressed=addressed,
+                                        key=led_key, who=who)
         pri, chased = attention.escalate_for_chase(pri, led_key)
         if not attention.consider("teams", led_key, who=who, what=v.one_line,
                                   why=chased or why, priority=pri, due_at=due):

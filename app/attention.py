@@ -158,7 +158,8 @@ def chase_at() -> int:
 
 
 def score(action: bool, text: str, *, addressed: bool = False, critical: bool = False,
-          key: str = "", now: float | None = None) -> tuple[int, str, float | None]:
+          key: str = "", who: str = "", now: float | None = None
+          ) -> tuple[int, str, float | None]:
     """Rank one arrival: (priority, why, due_at).
 
     The rules are ordered by how OBJECTIVE the signal is, the same discipline the
@@ -176,12 +177,20 @@ def score(action: bool, text: str, *, addressed: bool = False, critical: bool = 
     if critical:
         return P_NOW, "something is broken", due
     if action and due is not None and due <= now + urgent_within_hours() * 3600:
-        return P_NOW, "asked for, and due within hours", due
-    if action:
-        return (P_TODAY, "asks you directly" if addressed else "asks for something", due)
-    if addressed:
-        return P_FYI, "addressed to you, no ask", due
-    return P_FYI, "no ask detected", due
+        base, why = P_NOW, "asked for, and due within hours"
+    elif action:
+        base, why = P_TODAY, "asks you directly" if addressed else "asks for something"
+    elif addressed:
+        base, why = P_FYI, "addressed to you, no ask"
+    else:
+        base, why = P_FYI, "no ask detected"
+
+    # Who sent it is the LAST word, never the first: it can nudge a rank the
+    # message already earned, and it is capped at one tier so a statistic can
+    # never quietly overrule the message itself.
+    from . import contacts
+    adjusted, note = contacts.adjust(base, who)
+    return adjusted, (f"{why} · {note}" if note else why), due
 
 
 def escalate_for_chase(priority: int, key: str, now: float | None = None) -> tuple[int, str]:
@@ -264,6 +273,11 @@ def _label(row: dict, outcome: str) -> None:
         "attention", outcome, subject=str(row.get("key") or "")[:80],
         detail=f"p{row.get('priority')} source={row.get('sources') or row.get('source')} "
                f"seen={row.get('seen_count')}")
+    # The same label is what a person's reputation is made of. Recorded even when
+    # the contacts prior is switched off, so flipping it on later starts with real
+    # history instead of an empty table that has to earn its evidence from zero.
+    from . import contacts
+    contacts.record(str(row.get("who") or ""), outcome)
 
 
 def mark_acted(key: str, now: float | None = None, why: str = "acted") -> None:

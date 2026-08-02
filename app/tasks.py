@@ -542,13 +542,18 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         store.kv_set(sid_key, sid)
     watcher = _progress_watcher(task_id, (store.get_task(task_id) or {}).get("title", ""))
     pipeline = _pipeline_name("code", _pipeline_for(task_id))
-    from . import agent as agent_mod
+    from . import agent as agent_mod, dev_mcp
+    # Serena + Context7, when ASTA_DEV_MCP is on: symbol-level nav/edit and live
+    # docs for this repo. Empty string when disabled or nothing's installed, so
+    # the default command is unchanged.
+    dev_cfg = dev_mcp.config_json(cwd)
     if ex == "claude":
         try:
             return await claude_cli.one_shot(
                 prompt, cwd=cwd, timeout=TASK_TIMEOUT["code"],
                 agent_file=_agent_file("code", _pipeline_for(task_id)),
-                effort=effort, session_id=sid, resume=resume, on_progress=watcher)
+                effort=effort, session_id=sid, resume=resume, on_progress=watcher,
+                mcp_config=dev_cfg)
         except RuntimeError as exc:
             # Claude's session (the pinned --resume thread) can't move to another
             # brain, so a limit here is always a pause — the wait is cheap because
@@ -563,7 +568,8 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         # prompt instead and nothing is installed into the user's repo.
         return await copilot_cli.one_shot(
             _with_pipeline(pipeline, prompt), cwd=cwd, timeout=TASK_TIMEOUT["code"],
-            effort=effort, session_id=sid, resume=resume, on_progress=watcher)
+            effort=effort, session_id=sid, resume=resume, on_progress=watcher,
+            mcp_config=dev_cfg)
     except RuntimeError as exc:
         if not agent_mod.transient_limit(str(exc)):
             raise
@@ -590,12 +596,18 @@ async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
     eff = _effort_for(t["kind"], ex)
     pipeline = _pipeline_name(t["kind"]) if agent else ""
     agent_file = _agent_file(t["kind"]) if agent else ""
+    # Analysis walks the code read-only, so Serena's symbol nav pays off here too;
+    # teams_draft and other non-code kinds get nothing. "" when disabled.
+    from . import dev_mcp
+    dev_cfg = dev_mcp.config_json(cwd) if t["kind"] in ("analysis", "code") else ""
     if ex == "claude":
         return await claude_cli.one_shot(prompt, cwd=cwd, timeout=tout,
-                                         agent_file=agent_file, effort=eff)
+                                         agent_file=agent_file, effort=eff,
+                                         mcp_config=dev_cfg)
     try:
         return await copilot_cli.one_shot(_with_pipeline(pipeline, prompt),
-                                          cwd=cwd, timeout=tout, effort=eff)
+                                          cwd=cwd, timeout=tout, effort=eff,
+                                          mcp_config=dev_cfg)
     except RuntimeError as exc:
         from . import agent as agent_mod
         if not agent_mod.transient_limit(str(exc)) or not claude_cli.available():
@@ -603,7 +615,8 @@ async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
         agent_mod.mark_quota_down("copilot")
         store.kv_set(f"task_executor:{task_id}", "claude")
         return await claude_cli.one_shot(prompt, cwd=cwd, timeout=tout,
-                                         agent_file=agent_file, effort=eff)
+                                         agent_file=agent_file, effort=eff,
+                                         mcp_config=dev_cfg)
 
 
 def _rounds(task_id: int) -> int:
@@ -946,6 +959,11 @@ def reply(task_id: int, text: str) -> str:
     # Did the plan hold? The cheapest honest measure of planning quality: a plan
     # Arun approves as-is versus one he sends back.
     store.record_outcome("plan", "approved" if approved else "replanned", subject=str(task_id))
+    # The plan he just approved is the definition of done — keep it (no-op unless
+    # ASTA_TASK_SPEC is on) so a later compacted leg can re-anchor to it.
+    if approved:
+        from . import task_spec
+        task_spec.capture(task_id, t.get("result") or "")
     # Anything buffered by augment() while the task ran rides in now, on the user's
     # gate action — so mid-flight additions land without a session restart.
     full_text = text + _drain_addenda(task_id)
@@ -967,9 +985,14 @@ async def _resume_worker(task_id: int, text: str, approved: bool = False) -> Non
     # planning leg's medium to high only now, so grilling/planning stays cheap.
     _ex = _resolve_executor(task_id)
     effort = _impl_effort(_ex) if approved else _effort_for("code", _ex)
+    # Re-anchor an approved implementation leg to the definition of done, so a
+    # compacted or fresh session rebuilds against the plan Arun signed off rather
+    # than re-deriving one. "" unless ASTA_TASK_SPEC is on and a spec was captured.
+    from . import task_spec
+    spec_preamble = task_spec.preamble(task_id) if approved else ""
     try:
         async with _ws_lock(t["workspace"]):
-            result = await _run_code_leg(task_id, text + CODE_OVERRIDES,
+            result = await _run_code_leg(task_id, spec_preamble + text + CODE_OVERRIDES,
                                          _cwd(t["workspace"]), resume=True,
                                          effort=effort, workspace=t["workspace"])
         if (store.get_task(task_id) or {}).get("status") in FINAL:

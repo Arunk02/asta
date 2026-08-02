@@ -60,12 +60,15 @@ def _subprocess_env() -> dict:
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent_file: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
-                   on_progress=None) -> str:
+                   on_progress=None, mcp_config: str = "") -> str:
     """Headless claude run with the same contract as copilot_cli.one_shot.
 
     agent_file — a .github/agents/*.agent.md whose CONTENT becomes the appended
     system prompt (re-attached on resume too; prompt caching makes that cheap).
     effort     — same ladder as Copilot (low|medium|high|xhigh|max).
+    mcp_config — inline mcpServers JSON to attach for this run (e.g. the dev MCP
+                 servers for a code task). Empty leaves the command untouched, so
+                 the default path is byte-for-byte what it was.
     """
     if not available():
         raise RuntimeError("claude CLI is not installed")
@@ -73,6 +76,11 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
            # Parity with the copilot path's --allow-all-tools: the pipeline
            # must run builds/tests unattended. Workspace repos only.
            "--permission-mode", "bypassPermissions"]
+    if mcp_config:
+        # No --strict-mcp-config: these servers ADD to whatever the workspace
+        # already configures, they don't replace it. `claude --mcp-config` takes
+        # a JSON string as readily as a file, so nothing touches disk.
+        cmd += ["--mcp-config", mcp_config]
     if session_id:
         cmd += (["--resume", session_id] if resume else ["--session-id", session_id])
     if agent_file:

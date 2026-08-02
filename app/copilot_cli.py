@@ -468,7 +468,7 @@ def last_turn_usage(conv: dict, reply_chars: int = 0):
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
-                   on_progress=None) -> str:
+                   on_progress=None, mcp_config: str = "") -> str:
     """Headless one-off prompt.
 
     agent      — a workspace .github/agents/*.agent.md pipeline (e.g.
@@ -477,6 +477,8 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     session_id — pin the Copilot session so a run that pauses at a human gate
                  (solo agent Stage 1) can be resumed later with resume=True.
     effort     — per-call reasoning effort; falls back to COPILOT_EFFORT_TASK.
+    mcp_config — inline mcpServers JSON to attach for this run (the dev MCP
+                 servers for a code task). Empty leaves the command unchanged.
     """
     if not available():
         raise RuntimeError("Copilot CLI is not installed/authenticated")
@@ -485,6 +487,10 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
         cmd += ["--resume" if resume else "--session-id", session_id]
     cmd += ["-p", prompt, "-s", "--no-color", "--no-ask-user",
             "--allow-all-tools", "--allow-all-paths", "--log-level", "none"]
+    if mcp_config:
+        # --additional-mcp-config ADDS to Copilot's own config (parity with the
+        # chat path's flag); --allow-all-tools already clears the new tools.
+        cmd += ["--additional-mcp-config", mcp_config]
     if agent:
         cmd += ["--agent", agent]
     # Headless workers are where the money goes — one ran 22 minutes

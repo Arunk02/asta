@@ -838,6 +838,25 @@ async def request_leave(start_date: str, end_date: str = "", reason: str = "",
     return f"Staged the leave request — waiting for Arun's yes.\n{meetings.describe(invite)}"
 
 
+async def join_meeting_by_name(which: str) -> str:
+    """Join a meeting Arun names rather than links — "join my 3pm", "join the standup".
+
+    Use this whenever he refers to a meeting by time or by name; only fall back to
+    join_meeting when he actually pastes a link. If the phrase does not pick out
+    exactly one meeting this refuses and lists the day — pass that back to him and
+    ask which he meant. Never guess: joining the wrong call puts him in a room in
+    front of people who watch him arrive."""
+    import asyncio as _asyncio
+
+    from . import meetings
+    try:
+        result = await meetings.join_by_phrase(which)
+    except RuntimeError as exc:
+        return f"Didn't join — {exc}"
+    _asyncio.create_task(meetings.watch_and_report(which))
+    return result
+
+
 async def join_meeting(join_url: str, title: str = "") -> str:
     """Join a Teams meeting from its join link, muted with the camera off.
 

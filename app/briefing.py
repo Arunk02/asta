@@ -142,6 +142,17 @@ async def morning_brief() -> str:
     meetings, mails = await _outlook_bits()
     if meetings:
         parts.append("📅 Today's meetings:\n" + "\n".join("• " + m for m in meetings))
+        # A double-booking is invisible until the day: both invites were accepted
+        # at different moments, and the collision usually surfaces about four
+        # minutes beforehand. The brief is the last useful place to say it.
+        from . import agenda
+        if agenda.enabled():
+            try:
+                warnings = agenda.day_warnings(await _cached_meetings())
+            except Exception:
+                warnings = []
+            if warnings:
+                parts.append("\n".join(warnings))
     if mails:
         parts.append("📧 Mail that looks like it needs you:\n" + "\n".join("• " + m for m in mails))
 
@@ -246,17 +257,30 @@ async def premeeting_loop() -> None:
             now = dt.datetime.now()
             if now.weekday() < 5:
                 nowmin = now.hour * 60 + now.minute
+                from . import agenda
                 for ev in await _cached_meetings():
                     lead = ev["minutes"] - nowmin
+                    # A 1:1 needs a moment to gather a thought, not half an hour of
+                    # runway; a broadcast needs a nudge and no prep at all. One
+                    # fixed lead treated them identically.
+                    want = agenda.lead_minutes(ev, PREMEET_MINUTES) if agenda.enabled() \
+                        else PREMEET_MINUTES
                     # One tick's worth of window, so a ping can't be missed or doubled.
-                    if not (PREMEET_MINUTES - 2 <= lead <= PREMEET_MINUTES + 2):
+                    if not (want - 2 <= lead <= want + 2):
                         continue
+                    # Advisory only: a meeting Asta guessed was optional is the one
+                    # mistake here he finds out about by missing it, so this moves
+                    # the ping from interrupting to ambient and never suppresses it.
+                    needed, why = agenda.attendance(ev) if agenda.enabled() else (True, "")
+                    urgency = "direct" if needed else "ambient"
                     key = f"premeet:{now.date().isoformat()}:{ev['start']}:{ev['title'][:30]}"
                     if store.kv_get(key):
                         continue
                     store.kv_set(key, "1")
                     who = f" (by {ev['organizer']})" if ev["organizer"] else ""
                     head = f"📅 In {lead} min — {ev['title']}{who}, {ev['start']}"
+                    if why:
+                        head += f"\n   ↳ you may not need this one — {why}"
                     if _SPEAKING_MEETING.search(ev["title"]):
                         # Standups get the standup draft; a 1:1/sync/review gets prep
                         # specific to THAT meeting (talking points, watch-outs).
@@ -273,12 +297,12 @@ async def premeeting_loop() -> None:
                             f"{head}\n\n📝 Draft for it:\n\n{body}" if body
                             else f"{head}\n\nNo prep drafted — say the word and I'll "
                                  f"pull it together now.",
-                            "premeeting", urgency="direct")
+                            "premeeting", urgency=urgency)
                     else:
                         await notify.notify(
                             f"{head}\n\nWant me to prep anything for it? "
                             "Reply with what you need and I'll pull it together.",
-                            "premeeting", urgency="direct")
+                            "premeeting", urgency=urgency)
         except Exception:
             pass
         await asyncio.sleep(60)

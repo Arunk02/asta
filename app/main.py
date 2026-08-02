@@ -731,8 +731,12 @@ async def api_request_leave(request: Request):
 @app.post("/api/meetings/join", dependencies=[Depends(require_auth)])
 async def api_join_meeting(request: Request):
     b = await request.json()
+    # Either a link he pasted or a meeting he named. The named form is the one
+    # that was missing: `join()` always needed a URL and nothing produced one.
+    if b.get("which"):
+        return {"message": await agent_mod.join_meeting_by_name(b["which"])}
     if not b.get("join_url"):
-        raise HTTPException(400, "join_url is required")
+        raise HTTPException(400, "join_url or which is required")
     return {"message": await agent_mod.join_meeting(b["join_url"], b.get("title", ""))}
 
 

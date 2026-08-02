@@ -275,6 +275,37 @@ async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
             await pw.stop()
 
 
+async def join_by_phrase(phrase: str, now_minutes: int | None = None) -> str:
+    """Join the meeting he named — "join my 3pm", "join the standup".
+
+    `join()` has always needed a URL and nothing ever produced one, so this
+    capability was reachable only by pasting a link. Now the calendar answers it.
+
+    Refuses on ambiguity rather than guessing. Joining the wrong call puts him in
+    a room he did not mean to be in, in front of people who watch him arrive, and
+    that is not an error anyone can quietly undo.
+    """
+    import datetime as _dt
+
+    from . import agenda, outlook
+    events = await outlook.todays_meetings(structured=True)
+    if not events:
+        raise RuntimeError("nothing on the calendar today")
+    if now_minutes is None:
+        now = _dt.datetime.now()
+        now_minutes = now.hour * 60 + now.minute
+    ev = agenda.pick(events, phrase, now_minutes)
+    if not ev:
+        listing = ", ".join(f"{e['start']} {e['title']}" for e in events[:6])
+        raise RuntimeError(
+            f"'{phrase}' doesn't pick out one meeting — today has: {listing}")
+    if not ev.get("join_url"):
+        raise RuntimeError(
+            f"found '{ev['title']}' at {ev['start']} but the calendar row carries no "
+            f"join link — open it in Outlook and send me the link")
+    return f"{await join(ev['join_url'])} — {ev['title']} ({ev['start']})"
+
+
 async def _click_first(page, selectors, timeout: float = 3000) -> bool:
     for sel in selectors:
         try:

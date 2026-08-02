@@ -153,6 +153,13 @@ _TABLE: tuple[Capability, ...] = (
                note="Joins MUTED with the camera off, always. Joining is listening only; "
                     "say so, and never imply anything was said on his behalf. It hangs up "
                     "by itself when the call ends — reply to Arun immediately, don't wait."),
+    Capability("join_meeting_by_name", "teams",
+               http='POST /api/meetings/join {"which":"my 3pm"}',
+               write=True,
+               note="The one to reach for when he NAMES a meeting rather than pasting a "
+                    "link — 'join my 3pm', 'join the standup'. Refuses and lists the day "
+                    "when the phrase fits more than one; hand that back and ask which. "
+                    "Joining the wrong call cannot be quietly undone."),
     Capability("leave_meeting", "teams", http="POST /api/meetings/leave", write=True,
                note="Hangs up. Safe to call when not in a call — it says so."),
     Capability("say_in_call", "teams", http='POST /api/meetings/say {"text":"…"}',

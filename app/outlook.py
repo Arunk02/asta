@@ -583,9 +583,34 @@ async def _todays_events() -> list[dict]:
                 "title": title.strip(),
                 "organizer": organizer.group(1).strip() if organizer else "",
                 "minutes": _clock_minutes(start),
+                "ends": _clock_minutes(end),
+                # Parsed all along and then thrown away apart from one "[tentative]"
+                # tag. It is the calendar's own statement of how much he is
+                # expected at a thing, which is most of "do I need to be there".
+                "status": status.group(1) if status else "",
+                "join_url": join_url_in(raw),
             })
 
     return sorted(events, key=lambda e: e["minutes"])
+
+
+# The link that actually joins a Teams meeting. `meetings.join()` has always
+# required one and nothing ever produced one, so "join my 3pm" could not be
+# executed end to end — the capability existed with no way to reach it.
+_JOIN_URL = re.compile(
+    r"https://teams\.microsoft\.com/l/meetup-join/[^\s\"'<>]+", re.I)
+
+
+def join_url_in(text: str) -> str:
+    """The Teams join link inside a blob of calendar text, or "".
+
+    Best effort by design: some Outlook builds put the link in the row's
+    aria-label and some do not. When it is absent the caller falls back to
+    driving the calendar UI, which is why this returns "" rather than raising —
+    a missing link is a normal day, not a failure.
+    """
+    m = _JOIN_URL.search(text or "")
+    return m.group(0).rstrip(".,);") if m else ""
 
 
 def _clock_minutes(s: str) -> int:

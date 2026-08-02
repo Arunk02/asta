@@ -204,7 +204,7 @@ async def flush_held(reason: str = "while you were at the laptop") -> None:
     # Never in the small hours. This is the other half of the quiet-hours hold:
     # releasing on departure would fire the moment he goes to bed, which is the
     # exact opposite of what holding it was for.
-    if not held or delivery.in_quiet_hours():
+    if not held or delivery.quiet_now():
         return
     store.kv_set(HELD_KEY, "[]")
     texts = [it["text"] for it in held]

@@ -76,6 +76,17 @@ Episode pruning already existed (`memory.py`, newest 30 kept).
   for chat — `relevance.judge_answer` records off-topic answers without ever looping
   or blocking. The still-deferred piece is only the *acting* on that verdict.
 
+- **Act on the interruption numbers (MEASURE-ONLY TODAY, by design).** The
+  attention ledger records whether each interruption earned its place — engaged,
+  ignored or muted — and reports precision per tier. Nothing yet SUPPRESSES on that
+  history beyond the deliberately conservative contacts prior (which can quiet an
+  FYI but never silence a question, never re-rank breakage, and never mute someone
+  whose meetings he attends). **When to revisit:** once `quality.report()` shows a
+  week or two of real numbers. If P0 engagement is high and FYI engagement is near
+  zero, the FYI tier can start collapsing into the brief instead of pushing. If P0
+  engagement is LOW, the ranking is miscalibrated and the fix is in `attention.score`
+  — not in more suppression. Same order as the relevance gate: measure, then act.
+
 - **Browser executor — agent-browser vs Playwright (DECISION PENDING).** The
   Playwright layer Asta uses today (teams_bridge read/send, `meetings.join`) is
   *deterministic scripted* automation — fixed selectors, no LLM in the loop, so zero
@@ -128,6 +139,38 @@ flag and a pure no-op until flipped:
   contract as the verify and relevance gates.
 Tests: `test_dev_mcp.py` (12, incl. e2e wiring through both brains),
 `test_task_spec.py` (9). Full suite 800 passed.
+
+### Notifications — ranked, remembered, and measured (six flags, all off by default)
+The old pipeline compressed every judgement about the inbound world into two
+booleans (`Verdict.action`, `notify.urgency`) spread across 34 independent push
+sites. Four states, no memory, no ranking. Six additive stages:
+- **`app/attention.py` (`ASTA_ATTENTION`)** — one ledger, one policy. Cross-source
+  dedup joins on the incident/ticket id both channels carry verbatim, so one
+  incident arriving as mail AND a Teams mention is one interruption; the general
+  answer to the collision `goes_to_hold` patched by hand. Plus the freshness
+  heartbeat, NOT behind the flag — both watchers swallow exceptions and continue,
+  so a broken selector reads as a quiet week.
+- **Ranking (same flag)** — P0..P3 from objective signals first: provable breakage,
+  then a parsed clock deadline (a past one stays past — he is late), then wording,
+  then the chase count only the ledger can see.
+- **`app/contacts.py` (`ASTA_CONTACTS`)** — a learned sender prior replacing a
+  hand-written regex, seeded from calendar co-attendance. Three refusals make it
+  safe: it can quiet noise but never silence a question, never re-ranks breakage,
+  and is capped at one tier.
+- **Feedback (same flag)** — `quality.report()` now scores the thing that actually
+  interrupts him, per tier, from labels he already produces. Recorded even while
+  the prior is off, so switching it on starts with real history.
+- **`app/delivery.py` (`ASTA_DELIVERY`)** — quiet hours (only breakage earns the
+  night; unranked pushes always go out), coalescing, and chasing an unanswered ask
+  once. Never twice: an assistant that nags gets muted.
+- **`app/agenda.py` (`ASTA_MEET2`)** — closes a real functional hole: `meetings.join()`
+  needed a URL nothing produced, so "join my 3pm" was unreachable. Now resolved from
+  the calendar, refusing on ambiguity. Plus clash/back-to-back warnings, per-type
+  lead, and attendance-need (advisory only — it quiets a ping, never suppresses one).
+Tests: `test_attention` 29 · `test_priority` 37 · `test_attention_feedback` 16 ·
+`test_contacts` 20 · `test_delivery_policy` 30 · `test_agenda` 40 ·
+`test_attention_integration` 14 (all six flags on together, plus schema migration).
+Full suite 985 passed.
 
 - **Voice clone** — flow is built and waiting on Arun: record the five takes
   (`python -m app.voice script`), then

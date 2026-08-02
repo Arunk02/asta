@@ -69,6 +69,18 @@ def in_quiet_hours(now: float | None = None) -> bool:
     return start <= minute or minute < end if start > end else start <= minute < end
 
 
+def quiet_now(now: float | None = None) -> bool:
+    """Is the night guard actually in force right now?
+
+    `in_quiet_hours` answers only "is it late", which is not the same question —
+    ASTA_QUIET_HOURS can be set while ASTA_DELIVERY is off, and a guard that
+    consulted the clock alone would then suppress a flush that `notify` had
+    already decided to deliver, and report it as delivered. Every caller that
+    withholds something must ask THIS one.
+    """
+    return enabled() and in_quiet_hours(now)
+
+
 def hold_for_quiet(urgency: str, priority: int | None, now: float | None = None) -> bool:
     """Should this wait for morning?
 
@@ -193,7 +205,13 @@ async def chase_loop() -> None:
             if not rows:
                 continue
             mark_chased(rows)
-            await notify.notify(render_chase(rows), "attention", urgency="direct")
+            # The rank travels with it, so the night guard applies. Without it a
+            # chase is an unranked direct push — and this loop runs hourly past
+            # end of day, so "still waiting on you" would arrive at 2am about
+            # something that had already waited eight hours.
+            from . import attention
+            await notify.notify(render_chase(rows), "attention",
+                                urgency="direct", priority=attention.P_TODAY)
         except Exception:
             pass
 
@@ -205,7 +223,11 @@ async def flush_loop() -> None:
     while True:
         await asyncio.sleep(max(30, coalesce_seconds()))
         try:
-            if not enabled():
+            # `deliver` is the raw send, deliberately below the policy — so this
+            # loop has to apply the night guard itself. Buffered items are never
+            # P0 (should_batch refuses those), so nothing here has earned the
+            # night, and leaving them queued means they go out in the morning.
+            if not enabled() or quiet_now():
                 continue
             texts = take_buffered()
             if texts:

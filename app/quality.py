@@ -40,6 +40,7 @@ LABEL = {
     "plan": "Planning", "task": "Tasks", "draft": "Drafts",
     "ask": "Questions", "ship": "Shipping", "skill": "Learning",
     "verify": "Verification", "relevance": "Relevance guard",
+    "attention": "Interruptions",
 }
 
 
@@ -94,7 +95,8 @@ def report(days: int = 7) -> str:
         return (f"No outcomes recorded in the last {days} days — nothing has finished, "
                 f"or this is running before the first measured task.")
     lines = [f"Quality, last {days} days:"]
-    for kind in ("plan", "task", "draft", "ask", "ship", "skill", "verify", "relevance"):
+    for kind in ("plan", "task", "draft", "ask", "ship", "skill", "verify",
+                 "relevance", "attention"):
         entry = kinds.get(kind)
         if not entry:
             continue
@@ -111,6 +113,13 @@ def report(days: int = 7) -> str:
             if conv:
                 lines.append(f"    → avg {conv['avg_fix_rounds']} fix-round(s) to green, "
                              f"{conv['first_try']}/{conv['passed']} first-try")
+        if kind == "attention":
+            # Per tier, because one number cannot separate "P0 is miscalibrated"
+            # from "there is a lot of FYI" — and those want opposite fixes.
+            from . import attention
+            for tier, c in sorted(attention.precision(days).items()):
+                lines.append(f"    → {tier}: {int(c['rate'] * 100)}% engaged "
+                             f"({c['engaged']}/{c['total']})")
     unknown = set(kinds) - set(LABEL) - {"verify_round"}   # internal fix-round telemetry
     for kind in sorted(unknown):
         lines.append(f"  {kind}: " + ", ".join(f"{k} {v}" for k, v in kinds[kind]["counts"].items()))

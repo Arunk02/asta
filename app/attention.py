@@ -245,17 +245,136 @@ def should_push(row: dict) -> bool:
     return row.get("state") != "notified"
 
 
-def mark_acted(key: str, now: float | None = None) -> None:
+# --- did the interruption earn its place? ------------------------------------
+#
+# `quality.py` scores plans, tasks, drafts, verification and relevance — and not
+# this, the thing that actually interrupts him. So the accuracy of every filter
+# above was a feeling rather than a number, and "it pushes too much" could only
+# ever be argued about.
+#
+# The labels cost nothing because Arun already produces them: he deals with a
+# thing, or he does not. Both are recorded, and NEITHER changes what Asta does
+# yet — measure first, act on the data later, the same order the relevance gate
+# was built in. What this buys immediately is per-tier precision: of the things
+# ranked P0, how many did he actually touch, is the number that says whether P0
+# means anything.
+
+def _label(row: dict, outcome: str) -> None:
+    store.record_outcome(
+        "attention", outcome, subject=str(row.get("key") or "")[:80],
+        detail=f"p{row.get('priority')} source={row.get('sources') or row.get('source')} "
+               f"seen={row.get('seen_count')}")
+
+
+def mark_acted(key: str, now: float | None = None, why: str = "acted") -> None:
     """He dealt with it — by replying, by asking Asta to, or elsewhere entirely."""
     if not key:
         return
+    row = store.attention_get(key)
+    if not row or row.get("state") in SETTLED:
+        return
     store.attention_set(key, state="acted", acted_at=time.time() if now is None else now)
+    if row.get("state") == "notified":
+        # Only a thing he was actually TOLD about can score the telling. Something
+        # settled before it was ever announced says nothing about the filter.
+        _label(row, why)
 
 
-def mark_dropped(key: str) -> None:
-    """It stopped mattering without him doing anything (an alert that recovered)."""
-    if key:
-        store.attention_set(key, state="dropped")
+def mark_dropped(key: str, why: str = "") -> None:
+    """It stopped mattering without him doing anything (an alert that recovered).
+
+    Not a label either way: he neither engaged nor ignored it, the world moved on.
+    Scoring it as noise would punish the filter for a recovery it reported
+    correctly.
+    """
+    if not key:
+        return
+    row = store.attention_get(key)
+    if not row or row.get("state") in SETTLED:
+        return
+    store.attention_set(key, state="dropped")
+    if why:
+        _label(row, why)
+
+
+def note_read(key: str) -> None:
+    """He opened it somewhere else — on his phone, in Outlook, in Teams.
+
+    The cheapest honest engagement signal there is, and it was already being
+    scraped and thrown away: the activity feed reports `unread`, and a mail row
+    says whether it is still bold. If he read it, the interruption did its job.
+    """
+    mark_acted(key, why="read_elsewhere")
+
+
+def mute(key: str, row: dict | None = None) -> None:
+    """He said stop telling him about this. Recorded, so 'why didn't you say'
+    has an answer — a silent drop cannot explain itself later."""
+    if not key:
+        return
+    row = row or store.attention_get(key) or {"key": key}
+    store.attention_set(key, state="dropped", priority=P_MUTE)
+    _label(row, "muted")
+
+
+def settle_stale(days: int = 7, now: float | None = None) -> int:
+    """Anything announced and never dealt with is, in the end, noise.
+
+    Deliberately generous. A week is long enough that "he was busy" or "he was on
+    leave" has been ruled out, so what is left is the honest reading: Asta chose
+    to interrupt him and he never cared. That is the label the filter needs, and
+    the one it has never had.
+    """
+    now = time.time() if now is None else now
+    cutoff = now - days * 86400
+    settled = 0
+    for row in store.attention_open(limit=500, max_priority=P_FYI):
+        if row.get("state") != "notified":
+            continue
+        if float(row.get("notified_at") or 0) > cutoff:
+            continue
+        store.attention_set(row["key"], state="dropped")
+        _label(row, "ignored")
+        settled += 1
+    return settled
+
+
+#: Outcomes that mean the interruption was worth making. `read_elsewhere` counts:
+#: he dealt with it on his phone rather than through Asta, which says the thing
+#: mattered — only whether ASTA was the one to handle it is different.
+ENGAGED = ("acted", "read_elsewhere")
+
+_TIER_IN_DETAIL = re.compile(r"\bp(\d)\b")
+
+
+def precision(days: int = 7) -> dict:
+    """Of what Asta interrupted him with, how much did he engage? Per tier.
+
+    The per-tier split is the point. One overall number cannot tell "P0 is
+    miscalibrated" from "there is simply a lot of FYI", and those want opposite
+    fixes — one is a ranking bug, the other is working as intended.
+    """
+    since = time.time() - days * 86400
+    tiers: dict[str, dict[str, int]] = {}
+    for row in store.recent_outcomes(1000):
+        if row.get("kind") != "attention" or float(row.get("created_at") or 0) < since:
+            continue
+        m = _TIER_IN_DETAIL.search(row.get("detail") or "")
+        tier = LABELS.get(int(m.group(1)), "?") if m else "?"
+        counts = tiers.setdefault(tier, {"engaged": 0, "ignored": 0, "muted": 0})
+        outcome = row.get("outcome") or ""
+        if outcome in ENGAGED:
+            counts["engaged"] += 1
+        elif outcome == "muted":
+            counts["muted"] += 1
+        else:
+            counts["ignored"] += 1
+    out = {}
+    for tier, counts in tiers.items():
+        total = sum(counts.values())
+        out[tier] = {**counts, "total": total,
+                     "rate": round(counts["engaged"] / total, 2) if total else 0.0}
+    return out
 
 
 def open_items(limit: int = 50, max_priority: int = P_FYI) -> list[dict]:
@@ -271,6 +390,24 @@ def open_items(limit: int = 50, max_priority: int = P_FYI) -> list[dict]:
 def purge(days: int = 14, now: float | None = None) -> int:
     now = time.time() if now is None else now
     return store.attention_purge(now - days * 86400)
+
+
+async def sweep_loop() -> None:
+    """Hourly: label what he never dealt with, then drop old settled rows.
+
+    Runs whatever the flag says. With the ledger off there is nothing in the
+    table, so this is a no-op query — and leaving it unconditional means turning
+    the flag on for a week and off again does not strand a pile of rows that
+    never get their label or their cleanup.
+    """
+    import asyncio
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            settle_stale()
+            purge()
+        except Exception:
+            pass
 
 
 # --- freshness heartbeat (NOT behind the flag, on purpose) -------------------

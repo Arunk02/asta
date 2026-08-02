@@ -585,6 +585,12 @@ async def activity_watch_loop() -> None:
         # settled, and pushing it again is exactly the noise he complained about.
         opened = {_activity_key(r["text"]) for r in rows if r.get("unread") is False}
         fresh = [it for it in fresh if _activity_key(it) not in opened]
+        # He opened it on his phone. That was already known here and thrown away
+        # after suppressing the re-push — but it is also the cheapest honest
+        # answer to "was that interruption worth making", so the ledger gets told.
+        for r in rows:
+            if r.get("unread") is False:
+                attention.note_read(attention.key_for(r["text"]))
         wanted = [it for it in fresh if _activity_wanted(it)]
         if not wanted:
             continue

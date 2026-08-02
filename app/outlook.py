@@ -673,6 +673,12 @@ async def watch_loop() -> None:
         # ever, and nothing downstream can tell that apart from an empty inbox.
         from . import attention
         attention.note_scrape("outlook")
+        # A mail that is no longer bold is one he has dealt with, wherever he did
+        # it. Free, already in hand, and the only engagement signal that does not
+        # require him to tell Asta anything.
+        for m in mails:
+            if not m.get("unread"):
+                attention.note_read(attention.key_for(m.get("sender", ""), m.get("subject", "")))
         wanted = needs_attention(mails)
         keys = [mail_key(m) for m in wanted]
         raw = store.kv_get(SEEN_KEY)

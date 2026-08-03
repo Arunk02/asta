@@ -684,10 +684,11 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
 async def watch_loop() -> None:
     """Poll the inbox and push NEW mail that looks like it needs Arun."""
     import os
-    from . import notify
+    from . import attention, notify
     poll = int(os.environ.get("OUTLOOK_POLL", str(POLL_SECONDS_DEFAULT)))
     if poll <= 0:
         return
+    attention.note_watching("outlook")   # running, and expected to succeed
     while True:
         await asyncio.sleep(poll)
         if not (teams_bridge.enabled() and teams_bridge.logged_in_once()
@@ -695,13 +696,13 @@ async def watch_loop() -> None:
             continue
         try:
             mails = await read_mail(20)
-        except Exception:
+        except Exception as exc:
+            attention.note_scrape_error("outlook", exc)
             continue
         # Stamped only on a SUCCESSFUL read, so the heartbeat measures what it
         # claims to: that the inbox is actually being seen. The `continue` above
         # is why this matters — a permanently broken selector loops quietly for
         # ever, and nothing downstream can tell that apart from an empty inbox.
-        from . import attention
         attention.note_scrape("outlook")
         # A mail that is no longer bold is one he has dealt with, wherever he did
         # it. Free, already in hand, and the only engagement signal that does not

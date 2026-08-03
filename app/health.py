@@ -49,9 +49,17 @@ async def checks() -> dict[str, str]:
     # news. Both loops swallow exceptions and continue, so a permanently broken
     # selector is silent — and silence is also what a calm morning looks like.
     for source, minutes in attention.stale_sources().items():
+        if attention.never_succeeded(source):
+            # The worse case: running since startup and has NEVER read anything.
+            # Not "it went quiet" — it has never worked, and every quiet poll
+            # since looked exactly like good news.
+            head = f"running for {minutes} min and has never once read successfully"
+        else:
+            head = f"no successful read for {minutes} min"
+        why = attention.last_error(source)
         problems[f"{source}_watcher"] = (
-            f"no successful read for {minutes} min — the scrape may be broken, "
-            f"so treat quiet as unknown rather than as nothing happening")
+            f"{head} — treat quiet as unknown, not as nothing happening"
+            + (f" (last error: {why})" if why else ""))
     if not copilot_cli.available():
         problems["copilot"] = "Copilot CLI missing/unauthenticated (run: copilot login)"
     if not memory.local_llm_model():

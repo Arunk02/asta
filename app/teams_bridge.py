@@ -429,6 +429,40 @@ async def set_presence(wanted: str) -> str:
             await pw.stop()
 
 
+#: How many times to re-try opening the Activity tab before giving up on a poll.
+_ACTIVITY_ATTEMPTS = 3
+
+
+async def _open_activity(page) -> None:
+    """Click through to the Activity feed, surviving Teams re-rendering under us.
+
+    This was `wait_for_selector(...)` followed by `handle.click()`, and it was
+    silently dead in production for an unknown length of time: Teams re-renders
+    its rail moments after load, so the handle resolved and was then DETACHED
+    before the click landed — "ElementHandle.click: Element is not attached to
+    the DOM", every poll, caught and discarded by the watcher's bare `except`.
+    Nobody could see it because a dead mention watcher and a quiet afternoon look
+    identical.
+
+    `page.click(selector)` re-resolves the selector and auto-retries instead of
+    holding a handle across a re-render, which is the whole reason Playwright
+    offers it. The retry loop on top covers the slower case where the rail itself
+    is still being replaced when the click is attempted.
+    """
+    last: Exception | None = None
+    for attempt in range(_ACTIVITY_ATTEMPTS):
+        try:
+            await page.click('[aria-label*="Activity"]', timeout=10000)
+            await page.wait_for_selector('[data-tid="activity-list-container"]',
+                                         timeout=20000)
+            return
+        except Exception as exc:          # detached, still rendering, or not there yet
+            last = exc
+            await asyncio.sleep(2 * (attempt + 1))
+    raise RuntimeError(
+        f"could not open the Teams Activity feed after {_ACTIVITY_ATTEMPTS} tries: {last}")
+
+
 async def read_activity_rows(limit: int = 25) -> list[dict]:
     """Activity feed rows as {text, unread}, newest first. Zero LLM tokens.
 
@@ -440,9 +474,7 @@ async def read_activity_rows(limit: int = 25) -> list[dict]:
         pw, ctx = await _launch()
         try:
             page = await _open_teams(ctx)
-            btn = await page.wait_for_selector('[aria-label*="Activity"]', timeout=10000)
-            await btn.click()
-            await page.wait_for_selector('[data-tid="activity-list-container"]', timeout=20000)
+            await _open_activity(page)
             await asyncio.sleep(3)  # virtualized feed renders after the header
             rows = await page.evaluate(
                 """() => {
@@ -563,16 +595,20 @@ async def activity_watch_loop() -> None:
     DND, and with notifications disabled — it reads Teams itself.
     """
     import json as _json
-    from . import notify
+    from . import attention, notify
+    attention.note_watching("teams")     # running, and expected to succeed
     while True:
         await asyncio.sleep(ACTIVITY_POLL_SECONDS)
         if not (enabled() and logged_in_once() and store.kv_get("teams_session_ok") != "0"):
             continue
         try:
             rows = await read_activity_rows()
-        except Exception:
-            continue  # transient (session probe will flag real expiry)
-        from . import attention
+        except Exception as exc:
+            # Still swallowed — a transient DOM hiccup must not kill the loop.
+            # But the REASON is kept now. This handler ran silently every five
+            # minutes while the watcher was dead, and nothing anywhere said so.
+            attention.note_scrape_error("teams", exc)
+            continue
         attention.note_scrape("teams")   # only on success — see attention.stale_sources
         if not rows:
             continue

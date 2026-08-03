@@ -444,10 +444,37 @@ def stale_after_minutes() -> int:
         return 90
 
 
+_WATCH_KEY = "attention_watch_started:"
+
+
 def note_scrape(source: str, now: float | None = None) -> None:
     """Record that `source` successfully read its surface just now."""
     if source:
         store.kv_set(_SCRAPE_KEY + source, str(time.time() if now is None else now))
+
+
+def note_watching(source: str, now: float | None = None) -> None:
+    """Record that a watcher for `source` is RUNNING and expects to succeed.
+
+    Without this the heartbeat has a hole exactly where it is needed most. "A
+    source that never reported is switched off" is right for a bridge Arun never
+    enabled — and wrong for a scrape that broke on its FIRST poll after a deploy,
+    which then never reports, and so is never called broken. That is the shape
+    the Teams activity watcher was found in: enabled, session healthy, silently
+    failing every poll while Outlook beside it ran fine.
+
+    Stamped once when the loop starts, and never overwritten while the process
+    lives, so "started an hour ago and has still never read anything" is a
+    question the ledger can answer.
+    """
+    if source and not store.kv_get(_WATCH_KEY + source):
+        store.kv_set(_WATCH_KEY + source, str(time.time() if now is None else now))
+
+
+def clear_watching(source: str) -> None:
+    """Forget the start marker — used when a watcher stops on purpose."""
+    if source:
+        store.kv_del(_WATCH_KEY + source)
 
 
 def last_scrape(source: str) -> float:
@@ -457,13 +484,24 @@ def last_scrape(source: str) -> float:
         return 0.0
 
 
+def watching_since(source: str) -> float:
+    try:
+        return float(store.kv_get(_WATCH_KEY + source) or 0)
+    except ValueError:
+        return 0.0
+
+
 def stale_sources(sources: tuple[str, ...] = ("outlook", "teams"),
                   now: float | None = None) -> dict[str, int]:
-    """Sources that used to work and have now gone quiet — {source: minutes}.
+    """Sources that should be reading and are not — {source: minutes}.
 
-    A source that has NEVER reported is not stale, it is switched off; alarming
-    about a Teams bridge Arun never enabled would be the boy who cried wolf on
-    day one. Only something that was working and stopped is worth a word.
+    Two ways to qualify, and the second is the one that matters:
+      - it worked before and has now gone quiet;
+      - it has been RUNNING for longer than the window and has never once
+        succeeded, which is a watcher that was broken from its first poll.
+
+    A source that is neither running nor has ever reported is switched off, and
+    alarming about a bridge Arun never enabled would be crying wolf on day one.
     """
     now = time.time() if now is None else now
     limit = stale_after_minutes()
@@ -472,9 +510,42 @@ def stale_sources(sources: tuple[str, ...] = ("outlook", "teams"),
     out: dict[str, int] = {}
     for source in sources:
         last = last_scrape(source)
-        if last <= 0:
+        if last > 0:
+            minutes = int((now - last) // 60)
+            if minutes >= limit:
+                out[source] = minutes
             continue
-        minutes = int((now - last) // 60)
-        if minutes >= limit:
-            out[source] = minutes
+        started = watching_since(source)
+        if started > 0:
+            minutes = int((now - started) // 60)
+            if minutes >= limit:
+                out[source] = minutes
     return out
+
+
+def never_succeeded(source: str) -> bool:
+    """True when the watcher is running but has not once managed to read."""
+    return last_scrape(source) <= 0 and watching_since(source) > 0
+
+
+_ERROR_KEY = "attention_scrape_error:"
+
+
+def note_scrape_error(source: str, exc: BaseException) -> None:
+    """Keep WHY a scrape failed, so a dead watcher can be fixed and not just found.
+
+    Both loops catch every exception and continue, which is right — a transient
+    DOM hiccup must not kill a watcher. But the reason was discarded, so the
+    handler ran silently every five minutes and the only evidence a watcher had
+    died was an absence. Knowing it is broken says to look; knowing it raised a
+    selector timeout on the activity list says where.
+    """
+    if not source:
+        return
+    store.kv_set(_ERROR_KEY + source,
+                 f"{type(exc).__name__}: {str(exc).splitlines()[0][:200]}"
+                 if str(exc) else type(exc).__name__)
+
+
+def last_error(source: str) -> str:
+    return store.kv_get(_ERROR_KEY + source) or ""

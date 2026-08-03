@@ -161,6 +161,52 @@ def test_a_source_that_never_ran_is_off_not_broken(monkeypatch):
     assert attention.stale_sources(now=10**9) == {}
 
 
+def test_a_watcher_that_never_once_succeeded_is_reported(monkeypatch):
+    """The hole this closes, found live. 'Never reported = switched off' is right
+    for a bridge he never enabled and WRONG for a scrape that broke on its first
+    poll — which then never reports, and so is never called broken. That is the
+    state the Teams activity watcher was actually in: enabled, session healthy,
+    failing silently every five minutes while Outlook beside it ran fine."""
+    monkeypatch.delenv("ASTA_ATTENTION", raising=False)
+    attention.note_watching("teams", now=1000)
+    assert attention.stale_sources(("teams",), now=1000 + 30 * 60) == {}   # grace
+    assert attention.stale_sources(("teams",), now=1000 + 91 * 60) == {"teams": 91}
+    assert attention.never_succeeded("teams") is True
+
+
+def test_one_success_turns_a_never_worked_watcher_into_a_healthy_one():
+    attention.note_watching("teams", now=1000)
+    attention.note_scrape("teams", now=1000 + 60)
+    assert attention.stale_sources(("teams",), now=1000 + 91 * 60) == {"teams": 90}
+    assert attention.never_succeeded("teams") is False
+
+
+def test_the_start_marker_is_not_reset_by_a_later_restart_of_the_loop():
+    """Otherwise a loop that restarts often would keep resetting its own clock and
+    never age past the window — the alarm could never fire."""
+    attention.note_watching("teams", now=1000)
+    attention.note_watching("teams", now=5000)
+    assert attention.watching_since("teams") == 1000
+
+
+def test_the_reason_a_scrape_failed_is_kept(monkeypatch):
+    """Knowing it is broken says to look. Knowing it raised a selector timeout on
+    the activity list says where."""
+    attention.note_scrape_error("teams", TimeoutError("waiting for activity-list-container"))
+    assert "TimeoutError" in attention.last_error("teams")
+    assert "activity-list-container" in attention.last_error("teams")
+
+
+def test_health_says_a_watcher_never_worked_and_why(monkeypatch):
+    from app import health
+    attention.note_watching("teams", now=1000)
+    attention.note_scrape_error("teams", TimeoutError("activity-list-container"))
+    monkeypatch.setattr(attention, "stale_sources", lambda *a, **k: {"teams": 120})
+    problems = asyncio.run(health.checks())
+    assert "never once read successfully" in problems["teams_watcher"]
+    assert "activity-list-container" in problems["teams_watcher"]
+
+
 def test_a_source_that_just_read_is_healthy():
     attention.note_scrape("outlook", now=1000)
     assert attention.stale_sources(("outlook",), now=1000 + 60) == {}
@@ -284,3 +330,56 @@ def test_pure_fyi_still_rides_the_quiet_path(on):
     n = _Notify()
     asyncio.run(outlook._push_mail(n, [_mail("Sam", "FYI — notes from the sync")]))
     assert n.sent and n.sent[0][1] == "ambient"
+
+
+# --- the Teams activity click, which was silently dead in production ------------
+
+class _Page:
+    """A page that detaches its Activity button the way Teams actually does."""
+
+    def __init__(self, fail_times: int = 0, always_fail: bool = False):
+        self.fail_times = fail_times
+        self.always_fail = always_fail
+        self.clicks = 0
+        self.waited = []
+
+    async def click(self, selector, timeout=None):
+        self.clicks += 1
+        if self.always_fail or self.clicks <= self.fail_times:
+            raise RuntimeError("ElementHandle.click: Element is not attached to the DOM")
+
+    async def wait_for_selector(self, selector, timeout=None):
+        self.waited.append(selector)
+        return object()
+
+
+def test_opening_activity_survives_teams_re_rendering_under_it(monkeypatch):
+    """The live failure: the rail re-renders between resolve and click, so a held
+    handle is detached. Every poll raised, the watcher swallowed it, and a dead
+    mention watcher looked exactly like a quiet afternoon."""
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    page = _Page(fail_times=2)
+    asyncio.run(teams_bridge._open_activity(page))
+    assert page.clicks == 3
+    assert "[data-tid=\"activity-list-container\"]" in page.waited
+
+
+def test_opening_activity_succeeds_first_time_when_the_page_is_settled(monkeypatch):
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    page = _Page()
+    asyncio.run(teams_bridge._open_activity(page))
+    assert page.clicks == 1
+
+
+def test_a_genuinely_broken_activity_tab_raises_rather_than_returning_empty(monkeypatch):
+    """It must RAISE, so the watcher records the error and the heartbeat goes
+    stale. Returning [] would read as 'no mentions' — the silent failure again."""
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    page = _Page(always_fail=True)
+    with pytest.raises(RuntimeError, match="could not open the Teams Activity feed"):
+        asyncio.run(teams_bridge._open_activity(page))
+    assert page.clicks == teams_bridge._ACTIVITY_ATTEMPTS
+
+
+async def _instant(seconds):
+    return None

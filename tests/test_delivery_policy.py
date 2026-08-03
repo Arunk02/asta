@@ -235,6 +235,55 @@ def test_the_chase_says_what_is_owed_and_to_whom(on):
     assert "Still waiting on you" in text and "Sam" in text
 
 
+def test_a_flush_that_reached_nobody_keeps_the_batch_and_says_so(on, monkeypatch):
+    """Held items are the ones Asta deliberately kept back, so they are the only
+    copy. The queue was cleared BEFORE the send and both results discarded, so a
+    flush with WhatsApp unpaired and Telegram unbound deleted the batch and
+    reported success to a caller that then told him it was delivered."""
+    async def _down(text):
+        return False
+
+    monkeypatch.setattr(delivery, "in_quiet_hours", lambda now=None: False)
+    monkeypatch.setattr(notify, "wa_send", _down)
+    monkeypatch.setattr(notify.telegram, "send", _down)
+
+    notify._hold("something worth keeping")
+    out = asyncio.run(notify.flush_held())
+
+    assert out == {"held": True, "whatsapp": False, "telegram": False}
+    assert [i["text"] for i in notify._held_items()] == ["something worth keeping"]
+    assert store.kv_get("last_push_failure")
+
+
+def test_a_flush_that_landed_reports_the_channels_that_took_it(on, monkeypatch,
+                                                               _no_channels):
+    monkeypatch.setattr(delivery, "in_quiet_hours", lambda now=None: False)
+    notify._hold("news")
+    out = asyncio.run(notify.flush_held())
+    assert out["held"] is False and out["whatsapp"] is True
+    assert notify._held_items() == []
+
+
+def test_the_stale_release_no_longer_claims_a_delivery_it_never_checked(on, monkeypatch):
+    async def _down(text):
+        return False
+
+    monkeypatch.setattr(delivery, "in_quiet_hours", lambda now=None: False)
+    monkeypatch.setattr(delivery, "hold_for_quiet", lambda *a, **k: False)
+    monkeypatch.setattr(notify, "wa_send", _down)
+    monkeypatch.setattr(notify.telegram, "send", _down)
+    monkeypatch.setattr(notify, "_stale", lambda items, now=None: True)
+
+    async def _away():
+        return True
+
+    from app import presence
+    monkeypatch.setattr(presence, "at_laptop", _away)
+
+    out = asyncio.run(notify.notify("ambient thing", "outlook", urgency="ambient"))
+    assert out["whatsapp"] is False and out["telegram"] is False
+
+
 def test_disabled_nothing_changes_at_all(monkeypatch, _no_channels):
     monkeypatch.delenv("ASTA_DELIVERY", raising=False)
     monkeypatch.setenv("ASTA_QUIET_HOURS", "22:00-07:00")

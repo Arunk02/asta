@@ -168,8 +168,10 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
             # a departure that may not come today.
             if _stale(held):
                 store.kv_set(HELD_KEY, json.dumps(held))
-                await flush_held(reason="waited long enough")
-                return {"bell": True, "held": False, "whatsapp": True, "telegram": True}
+                # Report what the flush actually achieved. This used to claim
+                # both channels had taken it without asking either — the one
+                # shape of lie this module was written to end.
+                return {"bell": True, **await flush_held(reason="waited long enough")}
             store.kv_set(HELD_KEY, json.dumps(held))
             return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
     # Something went out moments ago and this is not breakage: let it ride along
@@ -197,23 +199,40 @@ async def live_push_channels() -> list[str]:
     return out
 
 
-async def flush_held(reason: str = "while you were at the laptop") -> None:
-    """Deliver notifications that were held. Says WHY they are arriving now."""
+async def flush_held(reason: str = "while you were at the laptop") -> dict:
+    """Deliver notifications that were held. Says WHY they are arriving now.
+
+    Returns what actually happened, and puts the batch BACK when nothing reached
+    him. The queue used to be cleared before the send and both results thrown
+    away, so a flush with WhatsApp unpaired and Telegram unbound deleted the
+    whole batch and reported success to a caller that then told him it was
+    delivered. Held items are the ones deliberately kept back — losing those is
+    losing the only copy of something Asta chose not to say at the time.
+
+    The batch is capped, so putting it back cannot grow without bound.
+    """
     from . import delivery
     held = _held_items()
     # Never in the small hours. This is the other half of the quiet-hours hold:
     # releasing on departure would fire the moment he goes to bed, which is the
     # exact opposite of what holding it was for.
     if not held or delivery.quiet_now():
-        return
+        return {"held": bool(held), "whatsapp": False, "telegram": False}
     store.kv_set(HELD_KEY, "[]")
     texts = [it["text"] for it in held]
     head = f"🔕 Held ({len(texts)}) — {reason}:\n\n"
     body = "\n\n".join(texts[-10:])
     if len(texts) > 10:
         body += f"\n\n(+{len(texts) - 10} more in the app)"
-    await wa_send(head + body)
-    await telegram.send(head + body)
+    wa = await wa_send(head + body)
+    tg = await telegram.send(head + body)
+    if not (wa or tg):
+        store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))   # nothing landed — keep it
+        store.kv_set("last_push_failure",
+                     json.dumps({"at": time.time(), "text": head[:120]}))
+        return {"held": True, "whatsapp": False, "telegram": False}
+    delivery.note_sent()
+    return {"held": False, "whatsapp": wa, "telegram": tg}
 
 
 async def held_watch_loop() -> None:

@@ -22,6 +22,36 @@ CHECK_SECONDS = 6 * 3600
 MIN_FREE_GB = 5
 
 
+#: Days of neglect before stale context is worth naming in a health check. Below
+#: this a workspace is simply being worked in — code moves faster than the notes
+#: about it, and saying so daily would be the noise this exists to replace.
+CONTEXT_STALE_DAYS = 14
+
+
+def stale_contexts(now: float | None = None) -> dict[str, float]:
+    """workspace -> days since its context was last enriched (-1 = never)."""
+    from . import refresh, workspace as ws_mod
+    out: dict[str, float] = {}
+    try:
+        names = ws_mod.available_workspaces()
+    except Exception:
+        return out
+    for name in names:
+        days = refresh.stale_days(name, now)
+        # "Never" is reported only once a workspace HAS context to be stale —
+        # an unbootstrapped one is not broken, it is simply not set up yet.
+        if days < 0:
+            try:
+                if not ws_mod.get(name) or not ws_mod.get(name).exists():
+                    continue
+            except Exception:
+                continue
+            out[name] = -1.0
+        elif days >= CONTEXT_STALE_DAYS:
+            out[name] = days
+    return out
+
+
 async def checks() -> dict[str, str]:
     """key -> problem description; empty dict = all healthy."""
     from . import notify
@@ -60,6 +90,15 @@ async def checks() -> dict[str, str]:
         problems[f"{source}_watcher"] = (
             f"{head} — treat quiet as unknown, not as nothing happening"
             + (f" (last error: {why})" if why else ""))
+    # Context that is quietly out of date is the same shape of failure as a dead
+    # watcher: everything answers, nothing complains, and the answers are wrong.
+    # A number here is what turns "it's probably fine" into a decision.
+    for name, days in stale_contexts().items():
+        problems[f"context_{name}"] = (
+            "never enriched — every answer about this workspace is guesswork"
+            if days < 0 else
+            f"context last enriched {int(days)} days ago — say yes to the refresh offer")
+
     if not copilot_cli.available():
         problems["copilot"] = "Copilot CLI missing/unauthenticated (run: copilot login)"
     if not memory.local_llm_model():

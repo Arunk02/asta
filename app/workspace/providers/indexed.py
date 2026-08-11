@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -427,5 +428,54 @@ class IndexedProvider(ContextProvider):
         return "\n".join(lines)
 
     async def enrich(self) -> str:
-        """Re-run the deterministic generators so the index matches current code."""
-        return await self.provision()
+        """Bring the context back in line with the code — the deterministic half.
+
+        This used to be `return await self.provision()`, which copies the runtime
+        scripts and re-runs the index generators. Neither of those reads a line of
+        source, so a workspace 286 commits out of date came back "enriched" with
+        every mini-skill exactly as stale as before. The name promised something
+        the body never did.
+
+        What is honest to do here is everything that needs no judgement:
+        re-derive the cross-repo links from source (a new producer/consumer really
+        does become an edge automatically), rebuild the indexes over whatever the
+        mini-skills now say, and then REPORT the mini-skills that still need a
+        writer. Rewriting prose about code is the token-costly half and stays
+        Arun's call — so this returns the worklist rather than pretending to have
+        done it.
+        """
+        res = resources_dir()
+        if not res:
+            return ("Context generators not found. Set ASTA_CONTEXT_RESOURCES to the "
+                    "directory holding generate-indexes.js / generate-links.js.")
+        lines = [f"Enriching {self.root.name}"]
+
+        # Cross-repo edges are derived from source, so this half genuinely
+        # self-heals: a new REST client or listener becomes an edge with no writer.
+        for label, script, args in (
+                ("links", "generate-links.js", ["--write"]),
+                ("indexes", "generate-indexes.js", ["--write"]),
+                ("symbols", "generate-symbols.js", ["--write"]),
+                ("router", "reconcile-router.js", ["--write"])):
+            path = res / script
+            if not path.is_file():
+                continue
+            rc, out = await _run(["node", str(path), str(self.root), *args],
+                                 self.root, 600, self.ctx.name)
+            lines.append(f"  {'✓' if rc == 0 else '⚠'} {label}"
+                         + (f": {out.strip()[-160:]}" if out.strip() else ""))
+
+        stale, detail = await self.drift()
+        if not stale:
+            lines.append("  ✓ every mini-skill matches its repo's HEAD")
+            return "\n".join(lines)
+
+        # Name the work rather than claim it. A writer — Arun's yes, or the task
+        # the offer spawns — patches these against the Step 5b quality bar.
+        skills = sorted(set(re.findall(r"([a-z-]+/[a-z0-9-]+\.md)", detail)))
+        lines.append(f"  ⏸ {len(skills)} mini-skill(s) still need a writer "
+                     f"(prose about code — not derivable):")
+        lines.append("     " + ", ".join(skills[:12]) + (" …" if len(skills) > 12 else ""))
+        lines.append("     These are NOT stamped verified_against — staleness stays "
+                     "visible until someone actually reads the code.")
+        return "\n".join(lines)

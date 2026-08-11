@@ -228,6 +228,22 @@ Four rules, and the last one is the one that gets broken:
 Stamp `verified_against = HEAD` even when nothing was written: the code WAS reviewed against the
 context and found consistent, and leaving the sha behind means re-reviewing the same commits forever.
 
+**A patch is not finished when the prose is written.** Three front-matter fields decide whether the
+new fact can ever be found again, and `generate-indexes.js` does NOT back-fill them — it writes
+`_global_index.json` from the per-repo `_index.json`, which is the WRITER's to maintain. Miss this
+and the fact is real, correct, sourced, and unreachable:
+
+| Field | What it buys | Miss it and… |
+|---|---|---|
+| `sources:` | the file is watched | the next change to it never marks this skill stale — it rots silently |
+| `entities:` | the symbol lane | `resolve-task.js` answers `route: "ask"` for the exact class you documented |
+| `scenarios:` | the natural-language lane | it is only findable by someone who already knows the symbol |
+
+So: patch the `.md`, add the new source/entity/scenario to its front-matter, mirror those three
+fields into `repos/<repo>/_index.json`, THEN run `generate-indexes.js` → `generate-symbols.js` →
+`reconcile-router.js`. Verify with `resolve-task.js "<the new symbol>"` — a fact that does not route
+was not captured, it was only typed.
+
 ### Step 6 — `workspace.yml` + mode-aware pointer
 
 Write `workspace.yml` (schema below). Then inject the managed pointer block

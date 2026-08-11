@@ -76,13 +76,17 @@ def set_continue(cid: str, next_step: str) -> None:
         _next[cid] = {"kind": "continue", "next_step": (next_step or "").strip()}
 
 
-def set_pending_send(cid: str, what: str, to: str = "", channel: str = "chat") -> None:
+def set_pending_send(cid: str, what: str, to: str = "", channel: str = "chat",
+                     to_group: bool = False) -> None:
     if cid:
         _next[cid] = {
             "kind": "send",
             "what": (what or "").strip(),
             "to": (to or "").strip(),
             "channel": (channel or "chat").strip() or "chat",
+            # Carried explicitly and never inferred from the name: a thread with
+            # fourteen people in it is not somewhere to end up by resemblance.
+            "to_group": bool(to_group),
         }
 
 

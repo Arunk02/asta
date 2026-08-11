@@ -13,12 +13,21 @@ Configure in .env:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
 import httpx
 
 from . import store
+
+#: How much of a comment thread to carry by default. Ten is enough to hold the
+#: conversation that settled the requirement without turning a routine lookup
+#: into a wall of "+1" and automation noise.
+COMMENT_LIMIT = 10
+#: Per-comment cap. Long ones are usually a pasted stack trace or a spec dump;
+#: the first part carries the point.
+COMMENT_CHARS = 1500
 
 
 def configured() -> bool:
@@ -114,14 +123,59 @@ def _adf_to_text(node) -> str:
     return "".join(out)
 
 
-async def get_issue(key: str) -> dict:
+def _fmt_comment(cm: dict) -> dict:
+    # A comment whose body is only an image, an attachment or an embedded card
+    # has no text nodes at all, and flattens to "". Rendered raw that becomes a
+    # bare author name with nothing after it, which reads as a comment someone
+    # left blank rather than as content that did not survive the flattening.
+    text = _adf_to_text(cm.get("body")).strip()[:COMMENT_CHARS]
+    return {
+        "author": (cm.get("author") or {}).get("displayName", "someone"),
+        "text": text or "(no text — image, attachment or embedded card)",
+        "created": cm.get("created", ""),
+    }
+
+
+async def _fetch_comments(c: httpx.AsyncClient, key: str, limit: int) -> dict:
+    """The newest `limit` comments, oldest-first, plus how many exist in all.
+
+    Deliberately NOT the `comment` field of the issue payload, which is where
+    this used to come from. That field pages from the START: ask a ticket with
+    forty comments for its comments and Jira hands back the first twenty — the
+    original triage chatter — and silently omits the decision someone made
+    yesterday. Sorting by `-created` asks for the end of the thread instead.
+
+    Returned oldest-first even though they arrive newest-first, because a
+    conversation read backwards is a conversation misread.
+    """
+    r = await c.get(f"/rest/api/3/issue/{key}/comment",
+                    params={"orderBy": "-created", "maxResults": max(1, limit)})
+    r.raise_for_status()
+    data = r.json()
+    items = [_fmt_comment(cm) for cm in data.get("comments", [])]
+    items.reverse()
+    return {"items": items, "total": int(data.get("total", len(items)))}
+
+
+async def comments(key: str, limit: int = COMMENT_LIMIT) -> dict:
+    """Public comment read: {"items": [{author, text, created}], "total": int}."""
+    _require_configured()
+    async with _client() as c:
+        return await _fetch_comments(c, key, limit)
+
+
+async def get_issue(key: str, comment_limit: int = COMMENT_LIMIT) -> dict:
     if not configured():
         raise RuntimeError("Jira is not configured — set JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN in .env")
     async with _client() as c:
-        r = await c.get(f"/rest/api/3/issue/{key}", params={
+        # Concurrent: the comment thread is a second round trip now that it no
+        # longer rides along with the issue, and there is no reason to pay for
+        # it serially.
+        issue_req = c.get(f"/rest/api/3/issue/{key}", params={
             "fields": "summary,status,assignee,priority,updated,issuetype,"
-                      "description,labels,components,comment",
+                      "description,labels,components",
         })
+        r, thread = await asyncio.gather(issue_req, _fetch_comments(c, key, comment_limit))
         r.raise_for_status()
         data = r.json()
     issue = _fmt_issue(data)
@@ -129,15 +183,12 @@ async def get_issue(key: str) -> dict:
     issue["description"] = _adf_to_text(f.get("description"))[:6000]
     issue["labels"] = f.get("labels", [])
     issue["components"] = [c.get("name") for c in f.get("components", [])]
-    # Comments carry the real requirements on many tickets (the AC lives in the
-    # Q&A between reporter and dev, not the one-line description). Fetching them
-    # here means every caller — chat, the solo agent's ticket digest — sees them.
-    issue["comments"] = [
-        {"author": (cm.get("author") or {}).get("displayName", "someone"),
-         "text": _adf_to_text(cm.get("body")).strip(),
-         "created": cm.get("created", "")}
-        for cm in ((f.get("comment") or {}).get("comments") or [])
-    ]
+    # Comments carry the real requirements on many tickets — the acceptance
+    # criteria live in the Q&A between reporter and dev, not in the one-line
+    # description. `comment_total` travels with them so a caller can tell a
+    # complete thread from a truncated one instead of assuming it saw everything.
+    issue["comments"] = thread["items"]
+    issue["comment_total"] = thread["total"]
     return issue
 
 
@@ -146,18 +197,8 @@ async def latest_comment(key: str) -> dict | None:
     if not configured():
         return None
     async with _client() as c:
-        r = await c.get(f"/rest/api/3/issue/{key}/comment",
-                        params={"orderBy": "-created", "maxResults": 1})
-        r.raise_for_status()
-        items = r.json().get("comments", [])
-    if not items:
-        return None
-    cm = items[0]
-    return {
-        "author": (cm.get("author") or {}).get("displayName", "someone"),
-        "text": _adf_to_text(cm.get("body")).strip(),
-        "created": cm.get("created", ""),
-    }
+        thread = await _fetch_comments(c, key, 1)
+    return thread["items"][-1] if thread["items"] else None
 
 
 def _require_configured() -> None:

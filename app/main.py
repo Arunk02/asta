@@ -524,7 +524,7 @@ async def api_loop_prepare_send(request: Request):
     if not cid:
         raise HTTPException(400, "no conversation")
     loop.set_pending_send(cid, b.get("what") or "", b.get("to") or "",
-                          b.get("channel") or "chat")
+                          b.get("channel") or "chat", to_group=bool(b.get("to_group")))
     return {"ok": True}
 
 
@@ -603,9 +603,9 @@ async def api_jira_search(jql: str, limit: int = 15):
 
 
 @app.get("/api/jira/issue/{key}", dependencies=[Depends(require_auth)])
-async def api_jira_issue(key: str):
+async def api_jira_issue(key: str, comments: int = jira.COMMENT_LIMIT):
     try:
-        return await jira.get_issue(key)
+        return await jira.get_issue(key, comment_limit=max(1, comments))
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except httpx.HTTPStatusError as e:
@@ -743,6 +743,13 @@ async def api_join_meeting(request: Request):
 @app.post("/api/meetings/leave", dependencies=[Depends(require_auth)])
 async def api_leave_meeting():
     return {"message": await agent_mod.leave_meeting()}
+
+
+@app.get("/api/meetings/notes", dependencies=[Depends(require_auth)])
+async def api_meeting_notes():
+    """Captions captured from the call Asta sat in on — same function the chat tool
+    calls, so a CLI brain gets the identical transcript and the identical caveats."""
+    return {"notes": await agent_mod.meeting_notes()}
 
 
 @app.post("/api/meetings/say", dependencies=[Depends(require_auth)])
@@ -1720,7 +1727,11 @@ async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> No
     """Show Arun a drafted outward message and ask before it is sent. The draft is
     persisted as an assistant turn so it survives in history, and the loop waits:
     his next message is routed as the yes/no (see _dispatch)."""
-    to = f" to *{intent['to']}*" if intent.get("to") else ""
+    # A group is named as a group. The difference between a 1:1 and a fourteen-person
+    # thread is the whole risk of the question being asked, and "to *Vinish*" and
+    # "to *prod issue - triaging*" look identical when skimmed on a phone.
+    where = "👥 GROUP " if intent.get("to_group") else ""
+    to = f" to {where}*{intent['to']}*" if intent.get("to") else ""
     body = (f"📤 Ready to send{to} on **{intent.get('channel', 'chat')}** — can I send this?\n\n"
             f"———\n{intent.get('what', '')}\n———\n\n"
             "Reply “send” to confirm, or tell me what to change.")
@@ -1789,6 +1800,34 @@ def _offer_prompt(o, where: str = "") -> str:
 # A bare yes to "can I send this?" — anything else is treated as change-requests.
 _AFFIRM = re.compile(r"^\s*(send( it)?|yes|yep|yeah|y|ok(ay)?( send| do it)?|go( ahead)?|"
                      r"confirm|do it|👍|✅)\s*[.!]*\s*$", re.I)
+
+
+def _mechanical_send(staged: dict) -> dict | None:
+    """The recorded call for an approved draft, or None if it needs a brain.
+
+    Only Teams today. Email and PR bodies still go back through the model because
+    nothing here composes them; chat has nowhere to send to. Returning None keeps
+    those on exactly the path they were already on.
+    """
+    if (staged.get("channel") or "").strip().lower() != "teams":
+        return None
+    to, what = (staged.get("to") or "").strip(), (staged.get("what") or "").strip()
+    if not to or not what:
+        return None            # nothing to address it to — let the model sort it out
+    return {"name": "teams_send", "args": {"to": to, "text": what,
+                                           "to_group": bool(staged.get("to_group"))}}
+
+
+async def _run_op(op: dict, cid: str, sink, channel: str) -> None:
+    """Run one recorded outward call and report the outcome, success or failure."""
+    try:
+        line = await ops.run(op)
+    except Exception as exc:
+        line = f"⚠️ Couldn't do it — {type(exc).__name__}: {exc}"
+    store.add_ui_message(cid, "assistant", line, {"via": "staged-send", "channel": channel})
+    await sink.send({"type": "note", "text": line})
+    if channel == "web":
+        await sink.send({"type": "done", "tools": []})
 
 
 async def _run_staged_op(o, cid: str, sink, channel: str) -> None:
@@ -2074,6 +2113,16 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     if staged and (user_text or "").strip():
         loop.clear_awaiting(cid)
         if _AFFIRM.match(user_text):
+            # A Teams send runs as a recorded call, not as a prompt asking a brain
+            # to perform the send it just described. Handing it back to the model
+            # is what made "send it" unreliable: it could reword the message,
+            # resolve a different person of that name, treat the tool call as
+            # optional, or simply answer ABOUT sending — and every one of those
+            # ends with Arun believing a message went out that never did.
+            op = _mechanical_send(staged)
+            if op:
+                await _run_op(op, cid, sink, channel)
+                return None
             prompt = (f"Arun approved sending this. Send it now using the right tool for "
                       f"channel '{staged.get('channel', 'chat')}'"
                       + (f" to {staged['to']}" if staged.get("to") else "")

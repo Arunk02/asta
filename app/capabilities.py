@@ -107,7 +107,11 @@ _TABLE: tuple[Capability, ...] = (
     Capability("jira_my_issues", "jira",
                http="GET /api/jira/search?jql=assignee = currentUser() AND "
                     "statusCategory != Done ORDER BY updated DESC"),
-    Capability("jira_issue", "jira", http="GET /api/jira/issue/{key}"),
+    Capability("jira_issue", "jira", http="GET /api/jira/issue/{key}[?comments=N]",
+               note="Returns the description AND the comment thread. Read the comments "
+                    "before answering: on many tickets the description is one line and "
+                    "the real requirement was settled in the Q&A under it. If the ticket "
+                    "still doesn't explain itself, ask Arun — do not infer it from the title."),
     Capability("jira_sprint", "jira", http="GET /api/jira/sprint",
                note="The CURRENT sprint, not everything assigned — use this for 'what's on "
                     "me this sprint', standup, and before offering to pick work up."),
@@ -129,6 +133,15 @@ _TABLE: tuple[Capability, ...] = (
                     "miss', 'any mentions' — it reads Teams itself, so muted chats count."),
     Capability("teams_read_chat", "teams",
                shell='python -m app.teams_bridge read "<chat name>" [limit]'),
+    Capability("teams_resolve", "teams",
+               shell='python -m app.teams_bridge resolve "<name>" [--group]',
+               note="Checks WHO a message would reach without sending. Use it before "
+                    "sending to a short or common name, and for any group. An ambiguous "
+                    "name is refused here rather than delivered to the wrong person."),
+    Capability("teams_call", "teams", write=True,
+               shell='python -m app.teams_bridge call "<person>" [--video]',
+               note="STAGES, does not dial. A call interrupts someone the instant it "
+                    "connects — offer reading or messaging first unless Arun asked to call."),
     Capability("teams_send_message", "teams",
                shell='python -m app.teams_bridge send "<chat name>" "<text>"',
                write=True,
@@ -162,6 +175,10 @@ _TABLE: tuple[Capability, ...] = (
                     "Joining the wrong call cannot be quietly undone."),
     Capability("leave_meeting", "teams", http="POST /api/meetings/leave", write=True,
                note="Hangs up. Safe to call when not in a call — it says so."),
+    Capability("meeting_notes", "teams", http="GET /api/meetings/notes",
+               note="Live captions Asta captured while in a call — the answer to 'what "
+                    "did I miss'. Speech recognition, and only the part Asta attended: "
+                    "summarise what is there, never fill in what is not."),
     Capability("say_in_call", "teams", http='POST /api/meetings/say {"text":"…"}',
                write=True,
                note="ONLY the words Arun gave you, never improvised and never an answer on "

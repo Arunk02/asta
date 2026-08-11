@@ -25,6 +25,7 @@ several fallbacks and fail with a clear error instead of guessing.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -95,6 +96,21 @@ async def _open_teams(ctx, timeout: float = 75.0):
     raise RuntimeError(f"Teams app did not load within {int(timeout)}s (url: {page.url[:100]})")
 
 
+#: How long to wait for the thread header to catch up with the click (10 × 0.4s).
+_TITLE_ATTEMPTS = 10
+_TITLE_POLL = 0.4
+
+
+def _title_matches(title: str, wanted: str) -> bool:
+    """Whether the open conversation is the one that was asked for.
+
+    Any token, not all: he asks for "Vinish" and the header reads "Vinish Kumar",
+    he asks for "Daily deployment slot" and the header carries the full name with
+    the environments appended.
+    """
+    return any(tok in (title or "").lower() for tok in wanted.split())
+
+
 async def _chat_title(page) -> str:
     """Name of the conversation currently open (empty string if undetermined)."""
     return await page.evaluate(
@@ -107,6 +123,152 @@ async def _chat_title(page) -> str:
             }
             return '';
         }""")
+
+
+def _display_name(o: dict) -> str:
+    """The name Teams shows, without the role/participant tail it appends."""
+    return (o.get("text") or "").split("\n")[0].strip()
+
+
+def _matches(o: dict, wanted: str) -> bool:
+    """Whole-word match, not substring.
+
+    Substring was matching "Vinisha Vijay Shetty" for "Vinish" — a different
+    person entirely, who then counted as a rival candidate and made an
+    unambiguous name look ambiguous. Names are words; "Vinish" is not a partial
+    spelling of anybody, it is somebody.
+    """
+    hay = f"{o.get('aria', '')} {o.get('text', '')}".lower()
+    words = set(re.findall(r"[a-z0-9]+", hay))
+    return all(tok in words for tok in re.findall(r"[a-z0-9]+", wanted.lower()))
+
+
+#: The rail on the left, in the order Teams shows it — most recent first. Leaf
+#: rows only: the section containers ("Chats", "Favorites") are treeitems too and
+#: their text is every child concatenated.
+_CHAT_ROWS = """
+    () => Array.from(document.querySelectorAll('[role="treeitem"]'))
+        .filter(n => !n.querySelector('[role="treeitem"]'))
+        .map(n => (n.innerText || '').split('\\n')[0].trim())
+        .filter(t => t && t.length < 80)
+"""
+#: Rail entries that are furniture rather than conversations.
+_NOT_A_CHAT = {"copilot", "mentions", "discover", "drafts", "saved", "chats",
+               "favorites", "quick views", "new chat", "unread"}
+
+
+#: Names ever seen on his rail, newest first. Persisted because the rail is
+#: VIRTUALISED — only the rendered rows are readable, so two identical runs can
+#: see different halves of it. Live-only, "Suraj" resolved on one poll and
+#: refused on the next with nothing changed but scroll position, and an assistant
+#: that answers differently to the same question twice cannot be trusted with
+#: either answer. Remembering makes it monotonic: the set only grows, and it
+#: grows toward exactly the people he deals with.
+_RAIL_KEY = "teams_rail_names"
+_RAIL_MAX = 400
+
+
+async def recent_chats(page) -> set[str]:
+    """Lowercased names of the conversations he actually has, most recent first.
+
+    This is the difference between who Arun talks to and who exists at Maersk. The
+    directory has three Vinish Kumars and five Harikas; his rail has one of each,
+    because it is a record of real conversations rather than a name index. When he
+    means somebody new he types the full name — so the common case is someone
+    already here, and that is the case worth being right about.
+    """
+    try:
+        rows = await page.evaluate(_CHAT_ROWS)
+    except Exception:
+        rows = []               # no rail is a reason to fall back, not to fail
+    live = [r.strip().lower() for r in rows
+            if r.strip().lower() and r.strip().lower() not in _NOT_A_CHAT]
+    try:
+        remembered = json.loads(store.kv_get(_RAIL_KEY) or "[]")
+    except Exception:
+        remembered = []
+    # Live first so the most recent conversations stay at the head when capped.
+    merged = list(dict.fromkeys([*live, *remembered]))[:_RAIL_MAX]
+    if merged != remembered:
+        store.kv_set(_RAIL_KEY, json.dumps(merged))
+    return set(merged)
+
+
+def _known(o: dict, chats: set[str]) -> bool:
+    """Whether this candidate is someone he already has a conversation with."""
+    name = _display_name(o).lower()
+    if not name:
+        return False
+    # "Vinish Kumar" on the rail should match the search row for Vinish Kumar even
+    # when one of them carries a trailing "(You)" or an alias in brackets.
+    return any(name == c or name.startswith(c) or c.startswith(name) for c in chats)
+
+
+def _is_top_hit(o: dict) -> bool:
+    """Whether Teams itself ranked this as a top hit rather than a directory row.
+
+    Teams splits its own suggestions: TOPHITS is who you actually deal with,
+    PEOPLE is everyone else in a 100,000-person company who shares the name. Arun
+    has one Vinish; the directory has three plus a Vinisha. Using Teams' own
+    ranking beats inventing a heuristic, because it is derived from his real
+    interaction history rather than from my guess about names.
+    """
+    return "TOPHITS" in (o.get("tid") or "").upper()
+
+
+def _dedupe(options) -> list[dict]:
+    """One entry per person/group. Teams lists the same person more than once
+    (chat result, contact card, directory hit) and three rows for one human must
+    not read as three candidates."""
+    seen: dict[str, dict] = {}
+    for o in options:
+        seen.setdefault(_display_name(o).lower(), o)
+    return list(seen.values())
+
+
+def _one_of(matches: list[dict], asked: str, noun: str,
+            chats: set[str] | None = None) -> dict:
+    """Narrow to one, or refuse and name the candidates.
+
+    Taking the first of several was the old behaviour, and it is the failure with
+    the worst ending: "Kumar" quietly opened Vinish Kumar's chat while four other
+    Kumars sat behind it in the same list. Nobody finds out from Asta — they find
+    out from the person who received it.
+
+    Four rounds, ordered from fact to inference:
+
+      1. One match. Nothing to decide.
+      2. The exact name, so "Vinish Kumar" is not made ambiguous by a "Vinish
+         Kumar Balaji" also existing in a company of a hundred thousand people.
+      3. Someone he is ALREADY talking to. This is the one that carries the
+         common case, and it is Arun's own reasoning: a half-name is nearly
+         always somebody in his rail, because when he means a stranger he types
+         the full name. An open conversation is a fact about him; directory
+         ranking is a guess about the org.
+      4. Teams' own top hit — the fallback when the rail is unreadable or the
+         person is new.
+
+    Anything still ambiguous is genuinely ambiguous: two people he really does
+    both talk to. The names go back to him rather than to a coin toss.
+    """
+    if len(matches) == 1:
+        return matches[0]
+    wanted = asked.strip().lower()
+    exact = [m for m in matches if _display_name(m).lower() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    known = [m for m in matches if _known(m, chats or set())]
+    if len(known) == 1:
+        return known[0]
+    top = [m for m in (known or matches) if _is_top_hit(m)]
+    if len(top) == 1:
+        return top[0]
+    pool = known or top or matches
+    names = ", ".join(sorted(_display_name(m) or "?" for m in pool))
+    talks = " (you have open chats with both)" if len(known) > 1 else ""
+    raise RuntimeError(
+        f"'{asked}' matches {len(pool)} {noun} in Teams{talks} — {names}. "
+        f"Refusing to guess: ask Arun which one he means and use the full name.")
 
 
 async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
@@ -122,6 +284,9 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
     Person (1:1 DM) always wins. Groups/channels are only considered when the
     caller explicitly asked for one.
     """
+    # Read the rail BEFORE opening search — once search takes over, the list of
+    # his real conversations is no longer on screen to read.
+    chats = await recent_chats(page)
     await page.keyboard.press("Control+E" if sys.platform != "darwin" else "Meta+E")
     box = None
     for sel in ('input[data-tid="searchInput"]', 'input[type="search"]',
@@ -140,6 +305,7 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
     options = await page.evaluate(
         """() => Array.from(document.querySelectorAll('[role="option"]')).map((o, i) => ({
                i, aria: o.getAttribute('aria-label') || '', text: (o.innerText || '').trim(),
+               tid: o.getAttribute('data-tid') || '',
            }))""")
     wanted = chat.strip().lower()
 
@@ -150,17 +316,14 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
                 return k
         return "other"
 
-    def _matches(o: dict) -> bool:
-        hay = f"{o['aria']} {o['text']}".lower()
-        return all(tok in hay for tok in wanted.split())
-
-    people = [o for o in options if _kind(o) == "person" and _matches(o)]
-    groups = [o for o in options if _kind(o) in ("group chat", "channel") and _matches(o)]
+    people = _dedupe(o for o in options if _kind(o) == "person" and _matches(o, wanted))
+    groups = _dedupe(o for o in options
+                     if _kind(o) in ("group chat", "channel") and _matches(o, wanted))
 
     if people:
-        pick = people[0]
+        pick = _one_of(people, chat, "people", chats)
     elif allow_group and groups:
-        pick = groups[0]
+        pick = _one_of(groups, chat, "groups", chats)
     elif groups:
         raise RuntimeError(
             f"'{chat}' only matches a group/channel ({groups[0]['text'][:60]!r}) — refusing: "
@@ -169,17 +332,48 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
         found = ", ".join(f"{_kind(o)}:{o['text'][:30]}" for o in options[:6]) or "nothing"
         raise RuntimeError(f"no person match for '{chat}' in Teams search (saw: {found})")
 
-    handles = await page.query_selector_all('[role="option"]')
-    await handles[pick["i"]].click()
+    # Mark and click, rather than index into a fresh query_selector_all(). The
+    # options were read by an earlier evaluate(), and Teams streams its results
+    # in — files, meetings and Loop cards arrive after the people do. Anything
+    # that re-resolves the list by POSITION is reading an index from one render
+    # against the DOM of a later one, which is how a message ends up in the wrong
+    # thread. Choosing and marking happen in the same evaluate, so no re-render
+    # can land between them, and page.click then re-resolves the marker itself
+    # with Playwright's own auto-retry.
+    marked = await page.evaluate(
+        """(i) => {
+            const opts = document.querySelectorAll('[role="option"]');
+            document.querySelectorAll('[data-asta-pick]').forEach(
+                e => e.removeAttribute('data-asta-pick'));
+            if (!opts[i]) return false;
+            opts[i].setAttribute('data-asta-pick', '1');
+            return true;
+        }""", pick["i"])
+    if not marked:
+        raise RuntimeError(
+            f"the Teams search results changed while picking '{chat}' — nothing opened")
+    before = await _chat_title(page)
+    await page.click('[data-asta-pick="1"]', timeout=10000)
     await page.wait_for_selector(
         '[data-tid="messageBodyContent"], [data-tid="chat-pane-message"], [role="main"]',
         timeout=20000)
-    await asyncio.sleep(2)  # header re-renders after the thread loads
 
-    title = await _chat_title(page)
+    # Wait for the header to actually BECOME the thread asked for, rather than
+    # sleeping two seconds and hoping. That selector above is already satisfied by
+    # whichever conversation was open before the click, so on a page that already
+    # had one, the old wait proved nothing and the title read straight back the
+    # PREVIOUS chat — which the check below then reported as opening the wrong
+    # thread. The guard was right; the wait underneath it was the bug.
+    title = before
+    for _ in range(_TITLE_ATTEMPTS):
+        title = await _chat_title(page)
+        if title and title != before and _title_matches(title, wanted):
+            return title
+        await asyncio.sleep(_TITLE_POLL)
+
     # Last line of defence: if the open conversation is not the one asked for,
     # fail loudly rather than let the caller type into the wrong thread.
-    if title and not any(tok in title.lower() for tok in wanted.split()):
+    if title and not _title_matches(title, wanted):
         raise RuntimeError(f"opened '{title}' instead of '{chat}' — aborted without typing")
     return title or chat
 
@@ -293,6 +487,27 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
                     f"message does not appear in '{title}' after sending — treat as NOT sent")
             store.kv_set("teams_session_ok", "1")
             return title
+        finally:
+            await ctx.close()
+            await pw.stop()
+
+
+async def resolve_target(chat: str, allow_group: bool = False) -> dict:
+    """Open what a send WOULD target, and report it — without typing anything.
+
+    The send path already refuses to type into a thread it cannot verify, but
+    that check happens with the message in hand. This runs the identical
+    resolution with nothing to send, which is the only way to answer "who would
+    this actually reach" before committing to it — and the only way to exercise
+    group targeting without putting a test message in front of fourteen people.
+    """
+    async with _lock:
+        pw, ctx = await _launch()
+        try:
+            page = await _open_teams(ctx)
+            title = await _find_chat(page, chat, allow_group=allow_group)
+            store.kv_set("teams_session_ok", "1")
+            return {"asked": chat, "opened": title, "allow_group": allow_group}
         finally:
             await ctx.close()
             await pw.stop()
@@ -712,6 +927,22 @@ if __name__ == "__main__":
         except RuntimeError as exc:
             print(f"ERROR: {'session expired — rerun login' if 'SESSION_EXPIRED' in str(exc) else exc}")
             sys.exit(1)
+    elif cmd == "resolve" and len(sys.argv) > 2:
+        # Read-only counterpart to `send`: says who it WOULD reach and stops.
+        try:
+            r = asyncio.run(resolve_target(sys.argv[2], allow_group="--group" in sys.argv[3:]))
+            print(f"would open: {r['opened']}  (nothing sent)")
+        except RuntimeError as exc:
+            print(f"ERROR: {'session expired — rerun login' if 'SESSION_EXPIRED' in str(exc) else exc}")
+            sys.exit(1)
+    elif cmd == "call" and len(sys.argv) > 2:
+        from . import meetings
+        try:
+            who = asyncio.run(meetings.call_person(sys.argv[2], video="--video" in sys.argv[3:]))
+            print(f"calling: {who}")
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
     elif cmd == "send" and len(sys.argv) > 3:
         try:
             # --group must be spelled out; a bare `send <name>` is always 1:1
@@ -724,5 +955,6 @@ if __name__ == "__main__":
     else:
         print(__doc__)
         print("Usage: python -m app.teams_bridge login|check|activity [limit]|read <chat> [limit]"
-              "|send <person> <text> [--group]")
+              "|send <person> <text> [--group]|resolve <name> [--group]|call <person> [--video]")
         print("NOTE: `send` targets a PERSON's 1:1 chat. Group/channel sends require --group.")
+        print("      `resolve` says who a send WOULD reach and sends nothing.")

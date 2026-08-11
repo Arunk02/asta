@@ -682,15 +682,58 @@ async def jira_my_issues() -> str:
     return await jira_search("assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC")
 
 
-async def jira_issue(key: str) -> str:
-    """Full detail of one Jira issue (summary, status, description)."""
+#: A description shorter than this explains nothing on its own — "see comments",
+#: a bare link, a copied error string. Not a bug to fix in Jira, just how tickets
+#: get written when the reporter is in a hurry.
+_THIN_DESCRIPTION = 80
+
+
+def _reads_thin(text: str) -> bool:
+    return len("".join((text or "").split())) < _THIN_DESCRIPTION
+
+
+async def jira_issue(key: str, comments: int = 10) -> str:
+    """Full detail of one Jira issue: status, description, AND the comment thread.
+
+    The comments are not background colour. On plenty of tickets the description is
+    one line and the real requirement was settled in the Q&A underneath it, so
+    answering from the title and description alone produces confident nonsense.
+    Raise `comments` when the recent thread refers back to something older.
+    """
     from . import jira
-    i = await jira.get_issue(key)
+    i = await jira.get_issue(key, comment_limit=max(1, comments))
+    thread, total = i.get("comments") or [], i.get("comment_total", 0)
     head = (f"{i['key']} [{i['type']} / {i['status']} / {i['priority']}] {i['summary']}\n"
             f"Labels: {', '.join(i['labels']) or '-'} Components: {', '.join(i['components']) or '-'}")
-    # Anyone with tracker access can write the summary, description and comments.
-    return head + "\n\n" + untrusted.wrap(
-        i["description"] or "(no description)", f"Jira {i['key']}")
+
+    # Say when the ticket does not explain itself. Without this the model reads a
+    # one-line description, finds nothing contradicting its first guess, and
+    # answers with confidence it has not earned. Naming the gap is what turns
+    # that into a question for Arun.
+    if _reads_thin(i["description"]):
+        head += ("\nNOTE: this ticket's description does not stand on its own — "
+                 + ("read the comments below for what is actually being asked."
+                    if thread else
+                    "and there are no comments either. Do not infer the requirement "
+                    "from the title; ask Arun what it means."))
+
+    body = [f"--- description ---\n{i['description'].strip() or '(empty)'}"]
+    if thread:
+        shown = (f"showing the {len(thread)} most recent of {total}"
+                 if total > len(thread) else f"all {len(thread)}")
+        lines = [f"[{c['created'][:10]}] {c['author']}: {c['text']}".rstrip()
+                 for c in thread]
+        body.append(f"--- comments ({shown}, oldest first) ---\n" + "\n\n".join(lines))
+        if total > len(thread):
+            body.append(f"({total - len(thread)} older comment(s) not shown — call "
+                        f"jira_issue('{i['key']}', comments={total}) if the thread "
+                        f"refers back to something missing.)")
+    else:
+        body.append("--- comments ---\n(none)")
+
+    # Anyone with tracker access can write the summary, description and comments,
+    # so the whole lot is untrusted — one fence around all of it.
+    return head + "\n\n" + untrusted.wrap("\n\n".join(body), f"Jira {i['key']}")
 
 
 async def jira_sprint() -> str:
@@ -885,6 +928,24 @@ async def leave_meeting() -> str:
     """Hang up on the call Asta is sitting in. Use when Arun says to drop off."""
     from . import meetings
     return await meetings.leave()
+
+
+async def meeting_notes() -> str:
+    """The transcript Asta captured from the last call it sat in on.
+
+    Use for "what did I miss", "notes from that call", "what was said". This is live
+    captions read out of Teams while the call ran — real speech recognition of a real
+    meeting, so it is imperfect and it only covers the part Asta was present for.
+    Summarise from it; do not fill in gaps it does not contain."""
+    from . import meetings
+    text = meetings.captured_transcript() or meetings.last_transcript()
+    if not text:
+        return ("No captions were captured — either Asta wasn't in the call, or live "
+                "captions could not be turned on. Nothing to summarise; if the meeting "
+                "was recorded, Teams' own transcript is the place to look.")
+    live = " (call still running — this is what has been said so far)" \
+        if meetings.captured_transcript() else ""
+    return f"Captured transcript{live}:\n\n" + untrusted.wrap(text, "Teams live captions")
 
 
 async def say_in_call(text: str) -> str:
@@ -1123,7 +1184,8 @@ def continue_working(next_step: str) -> str:
     return f"Continuing automatically: {next_step or 'next step'}"
 
 
-def prepare_to_send(what: str, to: str = "", channel: str = "chat") -> str:
+def prepare_to_send(what: str, to: str = "", channel: str = "chat",
+                    to_group: bool = False) -> str:
     """Stage an outward-facing message for Arun to approve BEFORE it is sent.
 
     Use this whenever you've drafted something to send outside this chat — a Teams
@@ -1131,13 +1193,17 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat") -> str:
     the full draft, `to` the recipient/target, `channel` one of teams|email|jira|pr|chat.
     Asta shows Arun the draft and asks "can I send this?" — it is NEVER sent until he
     confirms. This is the ONLY approved way to send on his behalf; never send outward
-    through any other tool without staging it here first."""
+    through any other tool without staging it here first.
+
+    `to` on Teams means a PERSON's 1:1 chat. Set to_group=True ONLY when Arun named a
+    group or channel himself ("post it in the prod issue group") — never because a
+    group happens to share a word with the name he used."""
     from . import tasks, loop
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
-    loop.set_pending_send(cid, what, to, channel)
-    tgt = f" to {to}" if to else ""
+    loop.set_pending_send(cid, what, to, channel, to_group=to_group)
+    tgt = f" to {'group ' if to_group else ''}{to}" if to else ""
     return f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
 
 
@@ -1431,6 +1497,43 @@ async def teams_send_message(chat: str, text: str, to_group: bool = False) -> st
         if "SESSION_EXPIRED" in str(exc):
             return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
         return f"Teams send failed: {exc}"
+
+
+async def teams_resolve(chat: str, to_group: bool = False) -> str:
+    """Check WHO a Teams message would actually reach, without sending anything.
+
+    Use before sending when the name is short, common, or a surname ("Kumar", "Priya"),
+    and whenever Arun names a group. It opens the same chat the send would open and
+    reports its real title, so an ambiguous name is caught before a message lands on
+    the wrong person rather than after."""
+    from . import teams_bridge
+    if not teams_bridge.enabled():
+        return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
+    try:
+        r = await teams_bridge.resolve_target(chat, allow_group=to_group)
+        kind = "group/channel" if to_group else "1:1 chat"
+        return f"'{chat}' resolves to the {kind}: {r['opened']!r} — nothing was sent."
+    except RuntimeError as exc:
+        if "SESSION_EXPIRED" in str(exc):
+            return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
+        return f"Would NOT send: {exc}"
+
+
+async def teams_call(who: str, video: bool = False) -> str:
+    """Propose ringing someone on Teams. Only when Arun asked for a call.
+
+    This does NOT dial. A call interrupts a person immediately and cannot be taken
+    back, so it stages like any other outward act and waits for his yes. Reading a
+    chat or sending a message is almost always the lighter thing to offer first."""
+    from . import offers, teams_bridge
+    if not teams_bridge.enabled():
+        return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
+    kind = "video call" if video else "call"
+    offers.staged_write(
+        "teams_call", {"who": who, "video": video},
+        f"📞 {kind.title()} {who}", f"Teams {kind} to {who}.",
+        f"Ring {who} on Teams?", kind="teams_write")
+    return f"Staged the {kind} to {who} — waiting for Arun's yes. Nothing is ringing yet."
 
 
 def build_agent(selected: list[str] | tuple[str, ...] | None = None) -> Agent:

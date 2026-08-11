@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// Context directory name is supplied by the caller — Asta passes the name it
-// detected for this workspace. Defaults to Asta's own layout.
-const CTX_DIR = process.env.ASTA_CONTEXT_DIR || '.asta-context';
 
 /**
  * resolve-task.js — runs the Boot 0 §5–§7 repo/file routing algorithm ON DISK
@@ -40,7 +37,20 @@ if (!ROOT || TASK == null) {
   console.error('usage: node resolve-task.js <workspace-root> "<task text>"');
   process.exit(2);
 }
-const CTX = path.join(ROOT, CTX_DIR);
+// Which directory holds the context — explicit name, else self-location (this
+// file is copied INTO the context dir), else probe the known layouts. A
+// hardcoded default would make `node .contmark/resolve-task.js .` fail on a
+// workspace that is bootstrapped perfectly well.
+function contextDirName(root) {
+  const env = (process.env.ASTA_CONTEXT_DIR || '').trim();
+  if (env) return env;
+  if (fs.existsSync(path.join(__dirname, 'workspace.yml'))) return path.basename(__dirname);
+  for (const cand of ['.contmark', '.asta-context']) {
+    if (fs.existsSync(path.join(root, cand, 'workspace.yml'))) return cand;
+  }
+  return '.asta-context';
+}
+const CTX = path.join(ROOT, contextDirName(ROOT));
 
 function readJSON(p) {
   if (!fs.existsSync(p)) { console.error(JSON.stringify({ error: 'missing_file', path: p })); process.exit(2); }
@@ -182,6 +192,19 @@ function twoTier(phrase) {
   return cw.length >= 2 && cw.every((w) => taskTerms.has(w));
 }
 
+// The org prefix every repo shares ("telikos-", "iom-", ""), DERIVED from the repo
+// keys rather than hardcoded. A literal org name only works for one company and a
+// placeholder like "example-" works for nobody: with it in place
+// "telikos-booking-service" normalises to "telikosbookingservice", so a marker
+// phrase of "booking" scores against the noise instead of the name. Derived, it is
+// right for every workspace and needs no configuration.
+const ORG_PREFIX = (() => {
+  const keys = repoKeys.map((k) => k.toLowerCase());
+  if (keys.length < 2) return '';
+  const head = keys[0].split('-')[0];
+  return head && keys.every((k) => k.startsWith(head + '-')) ? head + '-' : '';
+})();
+
 // prefix (e.g. "AP" / "booking" from *_marker_phrases) → repo key
 function resolveRepoFromPrefix(prefix, candidates) {
   const pre = prefix.toLowerCase();
@@ -189,7 +212,9 @@ function resolveRepoFromPrefix(prefix, candidates) {
   let best = null; let bestScore = 0;
   for (const key of pool) {
     let score = 0;
-    const keyNorm = key.toLowerCase().replace(/^example-/, '').replace(/[-_]/g, '');
+    const keyNorm = key.toLowerCase()
+      .replace(ORG_PREFIX ? new RegExp('^' + ORG_PREFIX) : /^$/, '')
+      .replace(/[-_]/g, '');
     if (keyNorm.includes(pre)) score = Math.max(score, 3);
     for (const d of domainsByRepo[key] || []) {
       const acr = d.split('-').map((w) => w[0]).join('');

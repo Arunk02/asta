@@ -191,6 +191,42 @@ and each mini-skill `.md` carries its `sources:`. Nothing to install.
   cross-repo call becomes an edge automatically — links never go stale without a full re-setup.
 - **No git hook, no `_drift.json`.** OPTIONAL: emit a ledger ONLY for a CI gate that fails a PR on drift
   without running an agent — `node check-drift.js <$root> --json > _drift.json`.
+- **Materiality gate.** `unmatched_changed` reports only files that could change what the context SAYS;
+  the count of the rest arrives as `unmatched_immaterial`. Test sources, `.agents/`, `.claude/`,
+  `.github/`, docs and lockfiles are dropped — build manifests, `.avsc`/`.proto`/`.sql` and
+  `openapi.*` are kept wherever they live. On a real three-repo workspace this took the reported gap
+  from 333 files to 87. A claimed file still counts as staleness regardless; the gate only decides
+  what a writer is sent off to READ.
+
+### Step 5b — What counts as a valid capture (the enrichment quality bar)
+
+The point of a mini-skill is to save an agent from rediscovering something. A line that does not do
+that is not neutral — it is a permanent tax, loaded on every future task, pushing the genuinely useful
+line further down the context window. **Adding nothing is better than adding noise.**
+
+A fact earns its place only if an agent, arriving cold, would otherwise get the work WRONG without it.
+
+| Capture | Skip |
+|---|---|
+| A contract: topic, endpoint, schema, queue name, event shape | "added a null check", "added logging", "renamed a variable" |
+| An invariant or rule: *ATA wins over ETA*, *EXPORT skips customs* | A changelog line, or what a PR did |
+| A decision with a reason: *retries capped at 3 because TMS 429s* | Restating what the code plainly says |
+| Where a flow ENTERS and what it touches | Line-by-line narration of a method |
+| A cross-repo edge: who produces, who consumes | A test that was added |
+| A gotcha that has actually bitten: *this listener is not idempotent* | Anything already in a sibling mini-skill |
+
+Four rules, and the last one is the one that gets broken:
+
+1. **Every fact carries `(source: path:line)`.** No line, no fact — an unsourced claim cannot be
+   verified later and is exactly what rots.
+2. **Patch ≤10 lines.** A drifted mini-skill is corrected, not rewritten. Growth is the failure mode.
+3. **Hard cap 150 lines per mini-skill.** At the cap, the fix is to SPLIT by concern or to delete
+   something stale — never to keep appending.
+4. **A patch that only restates the diff is a no-op — make it, and say nothing changed.** The commit
+   that motivated the drift does not have to produce a context change. Most do not.
+
+Stamp `verified_against = HEAD` even when nothing was written: the code WAS reviewed against the
+context and found consistent, and leaving the sha behind means re-reviewing the same commits forever.
 
 ### Step 6 — `workspace.yml` + mode-aware pointer
 

@@ -36,6 +36,30 @@ def op(name: str, describe):
     return register
 
 
+@op("teams_send", lambda a: (f"Message {a.get('to', '?')} on Teams"
+                             + (" (GROUP)" if a.get("to_group") else "")))
+async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> str:
+    """Send the approved words, unchanged.
+
+    This is the op that was missing. A Teams send used to be approved and then
+    handed BACK to a brain as a prompt saying "send this now" — which is the one
+    thing the module docstring above says never to do. Everything that made a
+    staged Jira comment trustworthy was absent here: the brain could reword it,
+    address it to a different Vinish, decide the tool call was optional, or answer
+    about the send instead of performing it. All four look identical to Arun,
+    because all four end with the message not arriving.
+    """
+    from . import teams_bridge
+    where = await teams_bridge.send_message(to, text, allow_group=to_group)
+    return f"✅ Sent to {where}."
+
+
+@op("teams_call", lambda a: f"Call {a.get('who', '?')} on Teams")
+async def _teams_call(who: str = "", video: bool = False) -> str:
+    result = await meetings.call_person(who, video=video)
+    return f"📞 Calling {result} — the call window is open."
+
+
 @op("jira_comment", lambda a: f"Comment on {a.get('key', '?')}")
 async def _jira_comment(key: str = "", text: str = "") -> str:
     await jira.add_comment(key, text)

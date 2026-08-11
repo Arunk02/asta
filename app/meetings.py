@@ -45,6 +45,10 @@ AUDIO_DEVICE = os.environ.get("ASTA_CALL_AUDIO_DEVICE", "").strip()
 #: A joined call is left after this long no matter what, so a meeting that
 #: overruns — or a bug — cannot leave Asta sitting in someone's call all day.
 MAX_CALL_MINUTES = int(os.environ.get("ASTA_MAX_CALL_MINUTES", "90"))
+#: Captions scroll out of their window within seconds, so they are read far more
+#: often than the call-ended check. A caption missed is gone; a call noticed as
+#: ended a few seconds late costs nothing.
+CAPTION_POLL_SECONDS = float(os.environ.get("ASTA_CAPTION_POLL", "4"))
 
 
 # --- building an invite ------------------------------------------------------
@@ -266,11 +270,76 @@ async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
             raise RuntimeError("couldn't find the Join button — did not join")
         joined = True
         _CALL.update(pw=pw, ctx=ctx, page=page, url=join_url,
-                     joined_at=asyncio.get_event_loop().time())
+                     joined_at=asyncio.get_event_loop().time(), captions=[])
         store.kv_set("teams_in_call", join_url)
-        return "joined (muted, camera off)" if muted else "joined"
+        # Captions are what make a recap possible at all. Failing to turn them on
+        # is not a reason to abandon a call that has already been joined, so it
+        # is recorded and reported later rather than raised now.
+        _CALL["captions_on"] = await start_captions(page)
+        note = "" if _CALL["captions_on"] else " (no live captions — recap will be thin)"
+        return ("joined (muted, camera off)" if muted else "joined") + note
     finally:
         if not joined:
+            await ctx.close()
+            await pw.stop()
+
+
+#: The call controls in an open chat header.
+_CALL_BUTTONS = {
+    "audio": ['button[aria-label="Audio call"]', 'button[aria-label*="Audio call" i]',
+              '[data-tid="calling-audio-button"]'],
+    "video": ['button[aria-label="Video call"]', 'button[aria-label*="Video call" i]',
+              '[data-tid="calling-video-button"]'],
+}
+#: Proof a call is actually up, rather than a button having been clicked.
+_IN_CALL = ('[data-tid="calling-hangup-button"], [aria-label*="Hang up" i], '
+            '[data-tid="call-duration"], [data-tid="calling-screen"]')
+
+
+async def call_person(who: str, video: bool = False) -> str:
+    """Ring a PERSON on Teams. Returns who it actually rang.
+
+    Lives here rather than in the bridge because a call is not a message: the
+    browser context has to STAY OPEN for the call to continue, and closing it is
+    what hanging up means. So it follows `join` exactly — same profile, real
+    window, registered in `_CALL` so `leave()` ends it.
+
+    Groups are refused outright. Not as policy — "call the group" dials every
+    member at once, and there is no reading of that which is what he meant unless
+    he said so in those words.
+
+    Verified like a send, because a clicked button is not a ringing phone. If no
+    call UI appears this reports NOT placed: believing he rang someone he did not
+    leaves a colleague waiting for a call that was never coming.
+    """
+    from . import teams_bridge
+    if not teams_bridge.enabled():
+        raise RuntimeError("Teams bridge is off (set TEAMS_BRIDGE=1 in .env)")
+    if _CALL:
+        raise RuntimeError("already in a call — leave that one first")
+    kind = "video" if video else "audio"
+    pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
+    placed = False
+    try:
+        page = await teams_bridge._open_teams(ctx)
+        title = await teams_bridge._find_chat(page, who, allow_group=False)
+        if not await _click_first(page, _CALL_BUTTONS[kind], timeout=5000):
+            raise RuntimeError(
+                f"no {kind} call button in the chat with '{title}' — either the Teams "
+                f"UI changed or calling is not available for this account")
+        try:
+            await page.wait_for_selector(_IN_CALL, timeout=25000)
+        except Exception as exc:
+            raise RuntimeError(f"clicked {kind} call for '{title}' but no call ever "
+                               f"started — treat as NOT called") from exc
+        placed = True
+        _CALL.update(pw=pw, ctx=ctx, page=page, url=f"teams-call:{title}",
+                     joined_at=asyncio.get_event_loop().time(), captions=[])
+        store.kv_set("teams_in_call", f"call:{title}")
+        _CALL["captions_on"] = await start_captions(page)
+        return title
+    finally:
+        if not placed:
             await ctx.close()
             await pw.stop()
 
@@ -307,9 +376,17 @@ async def join_by_phrase(phrase: str, now_minutes: int | None = None) -> str:
 
 
 async def _click_first(page, selectors, timeout: float = 3000) -> bool:
+    """Click the first selector that works.
+
+    page.click() rather than wait_for_selector().click(): the handle form resolves
+    an element and then clicks whatever that handle still points at, which is
+    nothing at all once the surrounding UI has re-rendered. That exact pattern is
+    what left the Teams activity watcher silently dead. Meeting join controls
+    re-render constantly as the pre-join screen settles, so it is the same race.
+    """
     for sel in selectors:
         try:
-            await (await page.wait_for_selector(sel, timeout=timeout)).click()
+            await page.click(sel, timeout=timeout)
             return True
         except Exception:
             continue
@@ -335,10 +412,23 @@ async def say_in_call(text: str) -> str:
     return f"said it in the call ({len(text)} chars)"
 
 
+#: The transcript of the call that just finished. Kept OUTSIDE `_CALL` because
+#: leaving clears that dict, and the recap is wanted precisely after the hang-up
+#: — losing the transcript at the moment it becomes useful would be perfect.
+_LAST_TRANSCRIPT: list[str] = []
+
+
+def last_transcript() -> str:
+    """What was said in the most recent call Asta sat in on."""
+    return _LAST_TRANSCRIPT[0] if _LAST_TRANSCRIPT else ""
+
+
 async def leave() -> str:
     """Hang up. Closing the browser context IS leaving the call."""
     store.kv_set("teams_in_call", "")
     call = dict(_CALL)
+    text = transcript_text(call.get("captions") or [])
+    _LAST_TRANSCRIPT[:] = [text] if text else []
     _CALL.clear()
     if not call:
         return "not in a call"
@@ -372,6 +462,100 @@ def overran(now: float | None = None) -> bool:
     return elapsed >= MAX_CALL_MINUTES
 
 
+# --- live captions -----------------------------------------------------------
+#
+# Teams will not hand out a transcript unless someone recorded the meeting, which
+# is why a recap used to be an offer to go and look for one rather than an answer.
+# But the web client renders live captions into the DOM, and reading the DOM is
+# something this codebase already does deterministically and for free. So the
+# transcript is built by watching captions go past, same as the activity feed.
+#
+# It is a genuine transcript with genuine limits: captions only exist while Asta
+# is in the call, they are speech recognition rather than truth, and they start
+# when captions are turned on rather than when the meeting did. Every one of those
+# is stated to Arun instead of being smoothed over.
+
+_CAPTION_TOGGLES = [
+    'button[aria-label*="Turn on live captions" i]',
+    '[data-tid="closed-caption-button"]',
+    'div[role="menuitem"][aria-label*="captions" i]',
+]
+_MORE_MENU = ['button[aria-label="More"]', 'button[aria-label*="More actions" i]',
+              '[data-tid="callingButtons-showMoreBtn"]']
+_LANGUAGE_MENU = ['div[role="menuitem"][aria-label*="Language and speech" i]',
+                  'div[role="menuitem"][aria-label*="language" i]']
+#: One rendered caption line: who spoke, and what the recogniser heard.
+_CAPTION_ROWS = ('[data-tid="closed-caption-v2-window"] [data-tid="closed-caption-text"], '
+                 '[data-tid="closed-caption-text"], '
+                 '[class*="closedCaption"] [class*="captionText"]')
+
+
+async def start_captions(page) -> bool:
+    """Turn live captions on. False when they could not be enabled.
+
+    Tries the direct button first — it exists once the call toolbar is settled —
+    and only then goes hunting through More → Language and speech, because menu
+    walking is the part most likely to break when Teams reorganises its toolbar.
+    """
+    if await _click_first(page, _CAPTION_TOGGLES, timeout=3000):
+        return True
+    if not await _click_first(page, _MORE_MENU, timeout=4000):
+        return False
+    await asyncio.sleep(1.0)
+    await _click_first(page, _LANGUAGE_MENU, timeout=3000)
+    await asyncio.sleep(1.0)
+    return await _click_first(page, _CAPTION_TOGGLES, timeout=3000)
+
+
+def _merge_caption(lines: list[dict], speaker: str, text: str) -> None:
+    """Fold a caption row into the transcript.
+
+    Captions are not appended, they are REVISED — a line grows word by word as the
+    recogniser catches up, so the same utterance is rendered a dozen times, each a
+    little longer. Appending every poll produces a transcript of stutters. When the
+    newest line from a speaker is a prefix of what just arrived, it is the same
+    sentence still being written, so it is replaced rather than added.
+    """
+    text = " ".join((text or "").split())
+    if not text:
+        return
+    for prev in reversed(lines):
+        if prev["speaker"] != speaker:
+            break                      # somebody else spoke; this is a new utterance
+        if text.startswith(prev["text"]) or prev["text"].startswith(text):
+            prev["text"] = max(text, prev["text"], key=len)
+            return
+        break
+    lines.append({"speaker": speaker, "text": text})
+
+
+async def poll_captions(page, lines: list[dict]) -> None:
+    """Read whatever captions are on screen into `lines`."""
+    try:
+        rows = await page.evaluate(
+            """(sel) => Array.from(document.querySelectorAll(sel)).map(n => {
+                   const item = n.closest('[data-tid="closed-caption-message"]')
+                             || n.closest('li') || n.parentElement || n;
+                   const who = item.querySelector(
+                       '[data-tid="author"], [class*="authorName"], [class*="displayName"]');
+                   return {speaker: ((who && who.innerText) || '').trim(),
+                           text: (n.innerText || '').trim()};
+               })""", _CAPTION_ROWS)
+    except Exception:
+        return                          # a caption read must never end the call watch
+    for r in rows:
+        _merge_caption(lines, r.get("speaker") or "someone", r.get("text") or "")
+
+
+def transcript_text(lines: list[dict]) -> str:
+    return "\n".join(f"{l['speaker']}: {l['text']}" for l in lines if l.get("text"))
+
+
+def captured_transcript() -> str:
+    """The transcript built during the call Asta is in (empty if none)."""
+    return transcript_text(_CALL.get("captions") or [])
+
+
 async def watch(poll_seconds: float = 30) -> str:
     """Sit in the call until it ends, then leave and say why.
 
@@ -380,10 +564,16 @@ async def watch(poll_seconds: float = 30) -> str:
     overran, or because a selector changed and the end was never noticed — hits
     the ceiling. Without that, a single missed marker leaves Asta parked in
     someone's call for the rest of the day with his camera light on.
+
+    Captions are polled far more often than the end-of-call check, because a
+    caption that scrolls out of the window between polls is gone for good, while
+    a call that ended thirty seconds ago is merely thirty seconds stale.
     """
     if not _CALL:
         return "not in a call"
     page = _CALL.get("page")
+    lines = _CALL.setdefault("captions", [])
+    ticks = max(1, int(poll_seconds // CAPTION_POLL_SECONDS) or 1)
     while _CALL:
         if overran():
             await leave()
@@ -391,7 +581,12 @@ async def watch(poll_seconds: float = 30) -> str:
         if page is not None and await call_ended(page):
             await leave()
             return "the call ended"
-        await asyncio.sleep(poll_seconds)
+        for _ in range(ticks):
+            if not _CALL:
+                break
+            if page is not None:
+                await poll_captions(page, lines)
+            await asyncio.sleep(CAPTION_POLL_SECONDS)
     return "left the call"
 
 
@@ -412,16 +607,29 @@ async def watch_and_report(title: str = "") -> None:
         why = "lost track of the call"
         await leave()
     label = f" — {title}" if title else ""
-    offers.propose(
-        subject=f"📞 Call ended{label}",
-        context=why,
-        question="Want me to go through what was said and pull out anything for you?",
-        action=(f"Arun was not in this call{label}; Asta sat in on it. Read whatever record "
-                f"exists — the meeting chat, the Teams recap or transcript if one was "
-                f"recorded — and report ONLY the parts that concern him: decisions that "
-                f"affect his work, anything assigned to him, and questions left open for "
-                f"him. If there is no record to read, say so plainly rather than "
-                f"reconstructing it. Do not summarise the rest of the meeting."))
+    text = last_transcript()
+    if text:
+        # There IS a record now, captured while sitting in the call, so the offer
+        # is to summarise something real rather than to go looking for something
+        # that probably does not exist.
+        action = (f"Arun was not in this call{label}; Asta sat in on it and captured the "
+                  f"live captions below. Report ONLY the parts that concern him: decisions "
+                  f"affecting his work, anything assigned to him, questions left open for "
+                  f"him. Captions are speech recognition — quote them as heard, and if a "
+                  f"line is too garbled to be sure of, say so rather than tidying it into "
+                  f"something confident.\n\nTranscript:\n{text[:12000]}")
+        question = "Want the parts that concern you?"
+        context = f"{why} · captured {len(text.split())} words of captions"
+    else:
+        action = (f"Arun was not in this call{label}; Asta sat in on it but captured no "
+                  f"captions. Read whatever record exists — the meeting chat, the Teams "
+                  f"recap or transcript if one was recorded — and report ONLY the parts "
+                  f"that concern him. If there is no record to read, say so plainly rather "
+                  f"than reconstructing it. Do not summarise the rest of the meeting.")
+        question = "Want me to go through what was said and pull out anything for you?"
+        context = f"{why} · no captions captured"
+    offers.propose(subject=f"📞 Call ended{label}", context=context,
+                   question=question, action=action)
     await notify.notify(offers.pending().render(), "calls", urgency="ambient")
 
 

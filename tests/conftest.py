@@ -26,6 +26,28 @@ def _isolated_db(tmp_path, monkeypatch):
     yield
 
 
+#: Settings whose value depends on WHEN the suite runs, or on how this particular
+#: machine is configured. Same argument as the database above: a rule everybody has
+#: to remember is a rule that gets forgotten, and forgetting is silent.
+#:
+#: This one was found the hard way. `ASTA_QUIET_HOURS=22:00-07:00` is set in the
+#: real .env, tests load it, and `flush_held` correctly refuses to push during quiet
+#: hours — so three hold-window tests passed all day and failed at 23:42 with an
+#: IndexError that says nothing about the clock. A suite that is green at noon and
+#: red at midnight teaches people to re-run it rather than read it.
+#:
+#: Cleared for every test. A test that is ABOUT quiet hours sets the window itself
+#: with monkeypatch.setenv, which still works and now states its intent out loud.
+_TIME_DEPENDENT_ENV = ("ASTA_QUIET_HOURS",)
+
+
+@pytest.fixture(autouse=True)
+def _no_wall_clock_dependence(monkeypatch):
+    for name in _TIME_DEPENDENT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _no_live_brains(monkeypatch):
     """No test may spend money or spawn a subprocess to reach a model.

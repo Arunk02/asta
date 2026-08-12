@@ -94,6 +94,14 @@ def build_instructions(conversation_summary: str, recall_block: str, workspace: 
     notes = capabilities.notes_block(selected)
     if notes:
         parts.append(notes)
+    # How he actually writes, measured from his own sent messages. Carried on
+    # every turn because prepare_to_send is in the ALWAYS set — a draft can
+    # happen at any point, and a message that reads like a bot has already been
+    # written by the time anything could decide to load this.
+    from . import writing
+    voice = writing.guidance()
+    if voice:
+        parts.append(voice)
     if channel in CHANNEL_NOTES:
         parts.append(CHANNEL_NOTES[channel])
     idx = memory.index_text()
@@ -1198,10 +1206,16 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     `to` on Teams means a PERSON's 1:1 chat. Set to_group=True ONLY when Arun named a
     group or channel himself ("post it in the prod issue group") — never because a
     group happens to share a word with the name he used."""
-    from . import tasks, loop
+    from . import tasks, loop, writing
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
+    # Links are repaired here rather than asked for in a prompt. A full stop
+    # welded to the end of a URL is what turned a PR link Vinish was meant to
+    # click into either a 404 or plain text, and "remember not to do that" is
+    # not a fix — every future draft would be one slip away from it again.
+    # Applied BEFORE staging, so what Arun approves is exactly what goes out.
+    what = writing.tidy_links(what)
     loop.set_pending_send(cid, what, to, channel, to_group=to_group)
     tgt = f" to {'group ' if to_group else ''}{to}" if to else ""
     return f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."

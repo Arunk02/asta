@@ -1221,9 +1221,58 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     held = relevance.guard_spawn(kind, title, workspace)
     if held:
         return held
+    # Feedback on work that just finished is not a new task, however much it
+    # reads like one. Spawning here is what made Arun's corrections start from
+    # nothing: a fresh session, none of the context of the change being
+    # criticised, and a second implementation of the same thing.
+    same = tasks.refinable_match(title, prompt, workspace)
+    if same:
+        return (f"This looks like feedback on task #{same['id']} "
+                f"(“{same['title'][:60]}”, {same['status']}), not a new piece of "
+                f"work. Call refine_task({same['id']}, \"<what should change>\") "
+                f"so it continues in that task's own session with everything it "
+                f"already knows. If it really IS unrelated new work, say so and "
+                f"spawn it with a title that does not restate the old one.")
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
     return (f"Task #{t['id']} ({kind}) spawned — running in the background. "
             f"Arun will be notified when it finishes.")
+
+
+async def refine_task(task_id: int, feedback: str) -> str:
+    """Continue a FINISHED code task with Arun's feedback, in its own session.
+
+    Use this — never delegate_task — whenever he comments on work a task already
+    delivered: a correction, an addition, "also handle X", a review comment, or
+    a CI failure on its PR. The task keeps everything it learned; a new task
+    would start from nothing and re-implement what is already there.
+    Works on tasks that are done, shipped, failed, or blocked on their PR."""
+    from . import tasks
+    try:
+        return await tasks.refine(task_id, feedback)
+    except ValueError as exc:
+        return str(exc)
+
+
+def task_pr_status(task_id: int = 0) -> str:
+    """Where the PRs for shipped tasks stand — CI, review, merged or not.
+    Call with 0 for every task whose PR is still open."""
+    from . import store, tasks
+    ids = [task_id] if task_id else tasks.open_prs()
+    if not ids:
+        return "No task has an open PR right now."
+    lines = []
+    for tid in ids:
+        t = store.get_task(tid)
+        if not t:
+            continue
+        checked = t.get("pr_checked_at")
+        when = (f", checked {int((time.time() - checked) / 60)}m ago"
+                if checked else ", not checked yet")
+        lines.append(f"#{tid} {t['title'][:50]} — {t['status']} "
+                     f"[{t.get('pr_state') or 'unknown'}{when}]")
+        for url in (t.get("pr_urls") or "").splitlines():
+            lines.append(f"    {url}")
+    return "\n".join(lines)
 
 
 def list_background_tasks() -> str:

@@ -219,8 +219,93 @@ def audit_session(path: str | Path) -> dict:
 
 
 def _grade(ratio: float) -> str:
+    """Absolute bands. Kept for the API, but see `verdict()` for what to SHOW.
+
+    These were written before there was any data to calibrate them against. Every
+    one of the first 13 recorded runs landed between 0.0% and 6.8% — entirely
+    inside A and B. C (>12%) and D (>25%) have never once fired, so on real runs
+    this function is close to a constant, and "grade B (ok)" was being printed on
+    a run that was in fact among the worst measured.
+    """
     return ("A (lean)" if ratio < 0.05 else "B (ok)" if ratio < 0.12
             else "C (trim)" if ratio < 0.25 else "D (wasteful)")
+
+
+#: Fewest same-executor runs before a comparison is worth making at all. Below
+#: this, "better than usual" is noise wearing a percentage sign.
+MIN_BASELINE_RUNS = 5
+
+
+def baseline(executor: str, history: list | None = None) -> tuple[float, int]:
+    """(median waste ratio, n) for this executor's own past runs.
+
+    Per-executor because the ratios are not comparable across brains: Claude
+    reports real cache-write tokens, so `new_tokens` is the true denominator,
+    while Copilot has none and the code falls back to `out_tokens * 6` — a
+    proxy. Pooling them and calling the difference progress is how a change of
+    brain gets read as an improvement in behaviour.
+    """
+    rows = _history() if history is None else history
+    ratios = sorted(r["waste_ratio"] for r in rows
+                    if isinstance(r, dict) and r.get("executor") == executor
+                    and isinstance(r.get("waste_ratio"), (int, float)))
+    if not ratios:
+        return (0.0, 0)
+    mid = len(ratios) // 2
+    median = (ratios[mid] if len(ratios) % 2
+              else (ratios[mid - 1] + ratios[mid]) / 2)
+    return (round(median, 4), len(ratios))
+
+
+def verdict(ratio: float, executor: str, history: list | None = None) -> str:
+    """What to actually tell him about one run's waste.
+
+    A bare percentage answers nothing — he asked whether it is getting better,
+    and that is a question about a SERIES. So this compares the run against the
+    same brain's own history and says plainly when there isn't enough of one to
+    make a claim.
+    """
+    med, n = baseline(executor, history)
+    if n < MIN_BASELINE_RUNS:
+        return (f"{ratio:.0%} avoidable — no baseline yet "
+                f"({n} previous {executor} run{'s' if n != 1 else ''}; "
+                f"{MIN_BASELINE_RUNS} needed before 'better' means anything)")
+    if med <= 0:
+        return f"{ratio:.0%} avoidable (no usable {executor} baseline)"
+    delta = ratio - med
+    if abs(delta) < 0.005:
+        return f"{ratio:.0%} avoidable — typical for {executor} ({med:.0%})"
+    direction = "better than" if delta < 0 else "WORSE than"
+    return (f"{ratio:.0%} avoidable — {direction} the usual {med:.0%} "
+            f"for {executor} (n={n})")
+
+
+def trend_verdict(history: list | None = None) -> str:
+    """Is waste actually falling? Answered per executor, or not at all.
+
+    The honest reading of the first 13 snapshots: overall median fell from 4.8%
+    to 3.4%, which looks like progress and is not. The two halves share no
+    executor at all — the earlier runs were Claude and unlabelled, the later
+    ones all Copilot. The only real signal was inside Copilot alone.
+    """
+    rows = [r for r in (_history() if history is None else history)
+            if isinstance(r, dict) and isinstance(r.get("waste_ratio"), (int, float))]
+    if len(rows) < 2 * MIN_BASELINE_RUNS:
+        return f"not enough runs to call a trend ({len(rows)} recorded)"
+    out = []
+    for ex in sorted({r.get("executor") for r in rows if r.get("executor")}):
+        mine = [r for r in rows if r.get("executor") == ex]
+        if len(mine) < 2 * MIN_BASELINE_RUNS:
+            out.append(f"{ex}: {len(mine)} runs — too few to say")
+            continue
+        half = len(mine) // 2
+        early, _ = baseline(ex, mine[:half])
+        late, _ = baseline(ex, mine[half:])
+        move = late - early
+        word = ("flat" if abs(move) < 0.005 else
+                "improving" if move < 0 else "getting worse")
+        out.append(f"{ex}: {word} ({early:.0%} → {late:.0%}, n={len(mine)})")
+    return "; ".join(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -254,6 +339,11 @@ def audit_task(task_id: int) -> dict | None:
     rep = audit_session(f)
     rep["task_id"] = task_id
     hist = _history()
+    # Graded against history BEFORE this run joins it. Appending first would let
+    # the run help set the bar it is then measured against — which flatters every
+    # result and flatters the worst ones most.
+    rep["verdict"] = verdict(rep["waste_ratio"], rep["executor"], hist)
+    rep["baseline"], rep["baseline_runs"] = baseline(rep["executor"], hist)
     hist.append({"at": time.time(), "task_id": task_id, "waste_ratio": rep["waste_ratio"],
                  "calls": rep["calls"], "avoidable": rep["avoidable_tokens"],
                  "top_fix": rep["top_fix"], "executor": rep["executor"]})
@@ -329,6 +419,9 @@ def audit_recent(hours: float = 24, min_calls: int = 8) -> dict:
         "aggregate_avoidable_tokens": agg_avoidable,
         "top_fix_categories": top[:5],
         "trend_vs_previous": _trend(prev, ratio),
+        # The honest answer to "is it getting better" — per executor, and
+        # explicitly refusing to claim one when the sample can't support it.
+        "trend_by_executor": trend_verdict(),
         "worst_sessions": sorted(sessions, key=lambda s: -s["avoidable_tokens"])[:5],
     }
 

@@ -71,7 +71,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     error TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
     started_at REAL,
-    finished_at REAL
+    finished_at REAL,
+    -- Where the work ended up, and what has happened to it since.
+    --
+    -- A task used to end at "done" — diff written, nothing pushed — and that was
+    -- the last Asta ever thought about it. The PR it later became was tracked
+    -- nowhere, so CI going red on it, a review comment, or the merge itself all
+    -- landed outside anything that knew which task they belonged to.
+    pr_urls TEXT NOT NULL DEFAULT '',
+    pr_state TEXT NOT NULL DEFAULT '',
+    pr_checked_at REAL
 );
 CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -227,6 +236,12 @@ _ADDED_COLUMNS = {
     # once has the table without it, and CREATE TABLE IF NOT EXISTS would leave
     # that machine behind — which is the only one with real history on it.
     "attention": (("chased_at", "REAL"),),
+    # Added when tasks stopped ending at the diff. The machine that matters is
+    # the one with real task history on it, and CREATE TABLE IF NOT EXISTS would
+    # be exactly the one to skip it.
+    "tasks": (("pr_urls", "TEXT NOT NULL DEFAULT ''"),
+              ("pr_state", "TEXT NOT NULL DEFAULT ''"),
+              ("pr_checked_at", "REAL")),
 }
 
 

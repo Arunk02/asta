@@ -132,6 +132,10 @@ async def startup() -> None:
     daemon.start("health", health.loop)
     daemon.start("ci_watch", ci_watch.loop)
     daemon.start("resume_paused", tasks.resume_paused_loop)
+    # Follows shipped work until the PR merges or closes. Without it a task
+    # ended at "PR raised" and everything after — CI, review, the merge — landed
+    # with nothing that knew which task it belonged to.
+    daemon.start("pr_watch", tasks.pr_watch_loop)
     daemon.start("held_notify", notify.held_watch_loop)
     daemon.start("attention_sweep", attention.sweep_loop)
     daemon.start("delivery_chase", delivery.chase_loop)
@@ -830,6 +834,15 @@ async def api_create_task(request: Request):
         raise HTTPException(400, str(e))
 
 
+# Declared BEFORE /api/tasks/{task_id} — FastAPI matches in declaration order,
+# and the parameterised route would otherwise claim "prs" and fail to parse it
+# as an int.
+@app.get("/api/tasks/prs", dependencies=[Depends(require_auth)])
+def api_task_prs():
+    """Shipped tasks and where their PRs stand."""
+    return {"open": [dict(store.get_task(i) or {}) for i in tasks.open_prs()]}
+
+
 @app.get("/api/tasks/{task_id}", dependencies=[Depends(require_auth)])
 def api_task(task_id: int):
     t = store.get_task(task_id)
@@ -853,6 +866,18 @@ async def api_reply_task(task_id: int, request: Request):
         raise HTTPException(400, "text is required")
     try:
         return {"ok": True, "detail": tasks.reply(task_id, b["text"])}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/tasks/{task_id}/refine", dependencies=[Depends(require_auth)])
+async def api_refine_task(task_id: int, request: Request):
+    """Continue a finished task with feedback, in the session it already has."""
+    b = await request.json()
+    if not b.get("text"):
+        raise HTTPException(400, "text is required")
+    try:
+        return {"ok": True, "detail": await tasks.refine(task_id, b["text"])}
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -2229,6 +2254,33 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         if await _route_to_task(live[0], user_text, sink, channel, conv.get("model", "")):
             return None
         # Not about the task — fall through and answer it as an ordinary message.
+
+    # Nothing live, but something finished here recently. Feedback on it belongs
+    # to THAT task — continuing its session keeps everything it already worked
+    # out, where spawning a new one starts from nothing and reimplements the
+    # same change.
+    if not live:
+        recent = tasks.refinable_for(cid)
+        named = _named_task(user_text, recent)
+        target = named
+        if target is None and len(recent) == 1:
+            # Unnamed: only treat it as feedback if it actually reads like a
+            # follow-up. A genuinely new request must not be swallowed into the
+            # last thing that happened to finish.
+            intent = await activity.resolve_interjection(user_text, conv.get("model", ""))
+            if intent == "augment":
+                target = recent[-1]
+        if target is not None:
+            # Drop the "#64" only when he actually wrote one, so the pipeline
+            # reads a natural instruction either way.
+            text = _strip_task_ref(user_text) if target == named else user_text
+            try:
+                note = await tasks.refine(target, text)
+            except ValueError:
+                pass          # not continuable after all — answer it normally
+            else:
+                await sink.send({"type": "note", "text": note})
+                return None
 
     prev = _inflight.get(cid)
     if prev is None or prev.done():

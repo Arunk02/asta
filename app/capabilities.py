@@ -240,7 +240,18 @@ _TABLE: tuple[Capability, ...] = (
                     'POST /api/tasks/{id}/reply {"text":"…"} and the pipeline re-plans.'),
     Capability("ship_task", "tasks", http="POST /api/tasks/{id}/ship", write=True,
                note="Pushes the branch and opens the PR. The pipeline NEVER does this "
-                    "itself — only when Arun has seen the diff and said ship."),
+                    "itself — only when Arun has seen the diff and said ship. The task "
+                    "stays OPEN afterwards, tracked until the PR merges or closes."),
+    Capability("refine_task", "tasks", http='POST /api/tasks/{id}/refine {"text":"…"}',
+               write=True,
+               note="THE tool for any comment on work a task already delivered — a "
+                    "correction, 'also handle X', a review comment, a red PR build. "
+                    "NEVER spawn a new task for feedback: refine continues the original "
+                    "task in its own session, so it keeps everything it already worked "
+                    "out. A new task would re-derive it all and reimplement the change."),
+    Capability("task_pr_status", "tasks", http="GET /api/tasks/prs",
+               note="Where shipped work stands — CI, review, merged or not. Use it for "
+                    "'what's pending', 'did that merge', 'any PR blocked'."),
     Capability("reject_task", "tasks", http="POST /api/tasks/{id}/reject", write=True,
                note="Throws the work away — the branch and its diff go with it. Only when "
                     "Arun says to drop it; if he is merely unhappy with the result, reply "

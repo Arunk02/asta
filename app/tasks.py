@@ -158,6 +158,24 @@ FINAL = ("rejected", "cancelled")
 # a gate — that's the window in which a follow-up should augment or redirect it.
 LIVE_STATUSES = ("running", "awaiting_approval")
 
+# Statuses a task can still be WORKED ON from, as opposed to still running.
+#
+# The bug this exists for: a code task went to "done" the moment the diff was
+# written, and "done" was the end of it. Feedback arriving afterwards found no
+# live task, so it was handled as a brand new request — a fresh worker, a fresh
+# session, none of the context of the thing it was feedback ABOUT, and the work
+# re-derived from nothing. Every one of these can instead resume the task's own
+# session, which is where all of that context still is.
+REFINABLE = ("done", "shipped", "failed", "pr_changes_requested", "pr_ci_failed")
+
+# The PR is open and its fate is not yet decided. A task sitting here is not
+# finished — CI can still go red, review can still ask for changes, and both of
+# those belong to the task that produced the branch.
+SHIPPED_STATUSES = ("shipped", "pr_ci_failed", "pr_changes_requested")
+
+# Actually over. Merged is the only success; the rest are ways of stopping.
+CLOSED_STATUSES = ("merged", "pr_closed", "rejected", "cancelled")
+
 # Set by the chat layer at the start of a turn (contextvar → propagated to the
 # agent's tools by anyio), so a code task spawned during the turn links back to
 # the conversation it came from and follow-ups can steer it.
@@ -207,13 +225,40 @@ def _linked_ids(conv_id: str) -> list[int]:
 
 
 def live_tasks_for(conv_id: str) -> list[int]:
-    """Every task from this conversation that is still live, newest last."""
+    """Every task from this conversation that is still live, newest last.
+
+    The link is NOT dropped when a task finishes. It used to be — this function
+    rewrote `conv_tasks` to the live subset on every call — and that quietly
+    removed the only trail from a conversation back to the work it had just
+    produced. Feedback a minute later found nothing to attach to and became a
+    new task, which is the reprocessing Arun kept hitting. Only genuinely
+    closed tasks are forgotten now; finished-but-refinable ones stay reachable.
+    """
     ids = _linked_ids(conv_id)
-    alive = [i for i in ids
-             if (store.get_task(i) or {}).get("status") in LIVE_STATUSES]
-    if alive != ids:                                  # self-heal finished links
-        store.kv_set(f"conv_tasks:{conv_id}", _json.dumps(alive))
-    return alive
+    keep = [i for i in ids
+            if (store.get_task(i) or {}).get("status") not in CLOSED_STATUSES]
+    if keep != ids:
+        store.kv_set(f"conv_tasks:{conv_id}", _json.dumps(keep))
+    return [i for i in keep
+            if (store.get_task(i) or {}).get("status") in LIVE_STATUSES]
+
+
+def refinable_for(conv_id: str, now: float | None = None) -> list[int]:
+    """Recently-finished tasks from this conversation that feedback can continue.
+
+    Newest last, and windowed: a correction arriving four days later is much
+    more likely to be new work than a comment on the old change.
+    """
+    now = time.time() if now is None else now
+    out = []
+    for i in _linked_ids(conv_id):
+        t = store.get_task(i) or {}
+        if t.get("kind") != "code" or t.get("status") not in REFINABLE:
+            continue
+        ended = t.get("finished_at") or t.get("created_at") or 0
+        if ended and now - ended <= REFINE_WINDOW_SECONDS:
+            out.append(i)
+    return out
 
 
 def live_task_for(conv_id: str) -> int | None:
@@ -385,12 +430,19 @@ def _audit_note(task_id: int) -> str:
         rep = token_audit.audit_task(task_id)
         if not rep:
             return ""
-        if rep["waste_ratio"] >= 0.12:
-            note = (f"\n\n⚠️ token audit: {rep['waste_ratio']:.0%} avoidable "
-                    f"(~{rep['avoidable_tokens']:,} tok), biggest = {rep['top_fix']}. "
-                    f"Grade {rep['grade']}.")
-        else:
-            note = f"\n\n📉 token audit: {rep['waste_ratio']:.0%} waste, grade {rep['grade']}."
+        # Reported against this brain's OWN history rather than as a bare
+        # percentage with a fixed letter beside it. The old line said "7% waste,
+        # grade B (ok)" on a run that was among the worst ever measured — the
+        # bands were set before any data existed and no real run has ever left
+        # A or B, so the letter carried no information and the word "ok" was
+        # actively misleading.
+        verdict = rep.get("verdict") or f"{rep['waste_ratio']:.0%} avoidable"
+        worse = "WORSE" in verdict
+        icon = "⚠️" if worse or rep["waste_ratio"] >= 0.12 else "📉"
+        note = f"\n\n{icon} token audit: {verdict}"
+        if worse or rep["waste_ratio"] >= 0.12:
+            note += (f" · ~{rep['avoidable_tokens']:,} tok, "
+                     f"biggest = {rep['top_fix']}")
         # Close the loop: a waste category that RECURS across runs becomes a durable
         # fix-skill, so the next worker avoids it instead of the meter just noting it.
         try:
@@ -868,7 +920,9 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     waste = _audit_note(task_id)
     await notify.notify(
         f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}\n\n"
-        f"Diff is local only — nothing pushed. Say 'ship' when you're happy."
+        f"Diff is local only — nothing pushed. Say 'ship' when you're happy, "
+        f"or just reply with changes and I'll continue THIS task rather than "
+        f"starting a new one."
         f"{waste}", "task")
 
 
@@ -1228,9 +1282,250 @@ async def ship(task_id: int) -> str:
     if not urls:
         raise RuntimeError("no unpushed feature branch found — nothing to ship")
     store.record_outcome("ship", "pr_opened", subject=str(task_id), detail="; ".join(urls))
-    msg = f"🔀 Task #{task_id} shipped:\n" + "\n".join("• " + u for u in urls)
+    # The task does NOT end here. Raising the PR is the middle of the job, not
+    # the end of it: CI has not run, nobody has reviewed it, and it has not
+    # merged. Keeping the task open through all three is what makes those
+    # events belong to something instead of arriving as orphaned noise.
+    store.update_task(task_id, status="shipped", pr_urls="\n".join(urls),
+                      pr_state="OPEN", pr_checked_at=0.0)
+    msg = (f"🔀 Task #{task_id} shipped:\n" + "\n".join("• " + u for u in urls)
+           + "\n\nStaying on it — I'll tell you if CI goes red, if review asks "
+             "for changes, or when it merges.")
     await notify.notify(msg, "action", urgency="direct")
     return msg
+
+
+# --- after the PR is open -----------------------------------------------------
+
+#: How often to ask GitHub what happened to the open PRs. A PR is a slow object:
+#: CI takes minutes and review takes hours, so polling harder buys nothing and
+#: spends rate limit.
+PR_POLL_SECONDS = int(os.environ.get("ASTA_PR_POLL", "300"))
+
+_PR_FIELDS = "state,mergedAt,statusCheckRollup,reviewDecision,url,title"
+
+
+def _pr_links(t: dict) -> list[str]:
+    """The PR urls recorded on a task, without the 'repo: ' label ship() adds."""
+    out = []
+    for line in (t.get("pr_urls") or "").splitlines():
+        _, _, url = line.rpartition(" ")
+        url = url.strip()
+        if url.startswith("http"):
+            out.append(url)
+    return out
+
+
+async def _pr_state(url: str) -> dict:
+    """Ask GitHub about one PR. {} when it cannot be read — never a guess."""
+    import json as _json
+    rc, out = await repo_ops.git(ROOT, "gh", "pr", "view", url,
+                                 "--json", _PR_FIELDS, timeout=60)
+    if rc != 0:
+        return {}
+    try:
+        return _json.loads(out)
+    except (ValueError, TypeError):
+        return {}
+
+
+def _checks_verdict(pr: dict) -> str:
+    """'red' | 'green' | 'pending' from the check rollup.
+
+    Anything not explicitly a failure or explicitly finished is pending — a run
+    still in flight must not be reported as a pass.
+    """
+    rollup = pr.get("statusCheckRollup") or []
+    if not rollup:
+        return "pending"
+    states = []
+    for c in rollup:
+        s = (c.get("conclusion") or c.get("state") or "").upper()
+        states.append(s)
+    if any(s in ("FAILURE", "TIMED_OUT", "CANCELLED", "ERROR", "ACTION_REQUIRED")
+           for s in states):
+        return "red"
+    if all(s in ("SUCCESS", "NEUTRAL", "SKIPPED") for s in states):
+        return "green"
+    return "pending"
+
+
+async def check_pr(task_id: int) -> str | None:
+    """One poll of one shipped task. Returns a line to tell him, or None.
+
+    Transitions only. A PR that was red an hour ago and is still red is not
+    news, and saying so every five minutes is how a useful watcher gets muted.
+    """
+    t = store.get_task(task_id)
+    if not t or t["status"] not in SHIPPED_STATUSES:
+        return None
+    links = _pr_links(t)
+    if not links:
+        return None
+
+    was = t.get("pr_state") or "OPEN"
+    title = t["title"][:60]
+    for url in links:
+        pr = await _pr_state(url)
+        if not pr:
+            continue
+        store.update_task(task_id, pr_checked_at=time.time())
+
+        if pr.get("state") == "MERGED" or pr.get("mergedAt"):
+            store.update_task(task_id, status="merged", pr_state="MERGED",
+                              finished_at=time.time())
+            store.record_outcome("ship", "merged", subject=str(task_id), detail=url)
+            return f"🎉 Merged — #{task_id} {title}\n{url}"
+        if pr.get("state") == "CLOSED":
+            store.update_task(task_id, status="pr_closed", pr_state="CLOSED",
+                              finished_at=time.time())
+            store.record_outcome("ship", "closed_unmerged", subject=str(task_id), detail=url)
+            return (f"🚫 PR closed without merging — #{task_id} {title}\n{url}\n"
+                    f"Reply with what should change and I'll pick the task back up.")
+
+        decision = (pr.get("reviewDecision") or "").upper()
+        checks = _checks_verdict(pr)
+        # One state string carries both signals, so a change in EITHER is a
+        # transition worth reporting and a repeat of both is silence.
+        now_state = f"{checks}/{decision or 'NONE'}"
+        if now_state == was:
+            continue
+        store.update_task(task_id, pr_state=now_state)
+
+        if checks == "red":
+            store.update_task(task_id, status="pr_ci_failed")
+            return (f"🔴 CI red on the PR for #{task_id} {title}\n{url}\n"
+                    f"Reply 'fix #{task_id}' and I'll pick the task back up with "
+                    f"everything it already knows.")
+        if decision == "CHANGES_REQUESTED":
+            store.update_task(task_id, status="pr_changes_requested")
+            return (f"📝 Changes requested on #{task_id} {title}\n{url}\n"
+                    f"Tell me what to do and I'll continue the same task.")
+        if decision == "APPROVED" and checks == "green":
+            store.update_task(task_id, status="shipped")
+            return f"✅ Approved and green — #{task_id} {title}\n{url}\nReady to merge."
+    return None
+
+
+def open_prs() -> list[int]:
+    """Task ids whose PR is open and still being watched."""
+    return [t["id"] for t in store.list_tasks(limit=200)
+            if t["status"] in SHIPPED_STATUSES]
+
+
+async def pr_watch_loop() -> None:
+    """Follow every shipped task until its PR merges or closes.
+
+    Supervised by daemon.start, so this cannot quietly stop being true.
+    """
+    from . import notify, wake
+    while True:
+        await wake.sleep(PR_POLL_SECONDS)
+        for task_id in open_prs():
+            try:
+                note = await check_pr(task_id)
+            except Exception:
+                continue      # a transient gh failure is not worth a report
+            if not note:
+                continue
+            # Red CI and a change request are both "you are blocked" — those
+            # interrupt. A merge is good news, and good news can wait.
+            good = note.startswith(("🎉", "✅"))
+            await notify.notify(note, "task",
+                                urgency="ambient" if good else "direct")
+
+
+#: How long after a task finishes its work is still "the thing we were just
+#: doing". Beyond this a similar-sounding request is much more likely to be a
+#: genuinely new piece of work on the same area of code.
+REFINE_WINDOW_SECONDS = int(os.environ.get("ASTA_REFINE_WINDOW", str(6 * 3600)))
+
+#: Words that carry no signal about WHAT a task was about. Without stripping
+#: these, "fix the booking service" and "fix the email service" look similar
+#: because they share "fix" and "service".
+_STOPWORDS = frozenset("""
+a an and are as at be by for from has have in into is it its of on or that the
+to with add fix update change make use also should would could need needs
+please can task issue bug ticket pr code test tests service
+""".split())
+
+
+def _terms(*parts: str) -> set[str]:
+    """The words that actually identify a piece of work."""
+    words = re.findall(r"[a-z0-9]+", " ".join(p or "" for p in parts).lower())
+    return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
+
+
+def refinable_match(title: str, prompt: str, workspace: str = "",
+                    now: float | None = None) -> dict | None:
+    """A recently-finished task this request is really feedback on, or None.
+
+    Deliberately conservative. A false positive blocks real new work and makes
+    Arun argue with his own assistant, so the bar is a strong overlap with a
+    task that finished recently in the same workspace — not a vague family
+    resemblance.
+    """
+    now = time.time() if now is None else now
+    wanted = _terms(title, prompt)
+    if len(wanted) < 2:
+        return None
+    best, best_score = None, 0.0
+    for t in store.list_tasks(limit=40):
+        if t["kind"] != "code" or t["status"] not in REFINABLE:
+            continue
+        if workspace and t.get("workspace") and t["workspace"] != workspace:
+            continue
+        ended = t.get("finished_at") or t.get("created_at") or 0
+        if not ended or now - ended > REFINE_WINDOW_SECONDS:
+            continue
+        have = _terms(t["title"])
+        if not have:
+            continue
+        # Against the OLD task's terms: a long new prompt should not be able to
+        # dilute its way under the threshold by mentioning many other things.
+        score = len(wanted & have) / len(have)
+        if score > best_score:
+            best, best_score = t, score
+    return best if best_score >= 0.6 else None
+
+
+async def refine(task_id: int, feedback: str) -> str:
+    """Continue a finished task with feedback, in the session it already has.
+
+    This is the whole point of REFINABLE. The alternative — and what used to
+    happen — is a new task with a new session, which starts by re-deriving
+    everything the original one already worked out, and answers feedback about
+    a change by writing a different change.
+    """
+    t = store.get_task(task_id)
+    if not t:
+        raise ValueError(f"no task #{task_id}")
+    if t["kind"] != "code":
+        raise ValueError(f"task #{task_id} is not a code task (kind={t['kind']})")
+    if t["status"] in LIVE_STATUSES:
+        # Still running: augment() is the right door, and it needs no restart.
+        return augment(task_id, feedback)
+    if t["status"] not in REFINABLE:
+        raise ValueError(f"task #{task_id} cannot be continued (status={t['status']})")
+
+    store.record_outcome("task", "refined", subject=str(task_id))
+    was_shipped = t["status"] in SHIPPED_STATUSES
+    store.update_task(task_id, status="running")
+    prompt = (
+        f"FOLLOW-UP ON YOUR OWN COMPLETED WORK — this is not a new task.\n"
+        f"You already implemented this; the diff is in the working tree"
+        + (" and a PR is open for it.\n" if was_shipped else ".\n")
+        + f"Arun's feedback:\n{feedback}\n\n"
+        f"Apply it to the EXISTING change. Do not start over, do not re-plan "
+        f"from scratch, and do not revert what is already correct."
+        + ("\nThe branch is already pushed — commit on top of it so the open PR "
+           "picks the change up.\n" if was_shipped else "")
+    )
+    job = asyncio.create_task(_resume_worker(task_id, prompt, approved=True))
+    _running[task_id] = job
+    job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
+    where = "the open PR" if was_shipped else "the existing diff"
+    return f"Task #{task_id}: continuing {where} with your feedback (same session, full context)."
 
 
 async def reject(task_id: int) -> str:

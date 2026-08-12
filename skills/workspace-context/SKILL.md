@@ -104,6 +104,53 @@ Replace `verified_against: HEAD` with `git rev-parse HEAD` (from the repo). Then
 node <plugin>/resources/validate-bootstrap.js <$root> --repo <key>   # exit 1 → re-run prompt 02 with failures
 ```
 
+### Step 2b — Capture the DEVELOPER WORKFLOW, not only the system (REQUIRED, per repo)
+
+The eight forensic categories describe what the code *does*. They have no home for what a person
+needs in order to *change* it, and a bootstrap that stops at Step 2 produces a context that can
+explain a Kafka topology and cannot tell you how to run a test. Measured on a real three-repo
+workspace: repo identification 3/3, business questions 2/5, **coding standards 0/2, testing 0/3**.
+
+So every repo also gets:
+
+- **`stack/build-and-test.md`** — the exact commands for install, unit test, component test, lint,
+  build and local run, plus the module layout that makes the obvious command fail. These differ per
+  repo and the difference is the whole point: in one workspace the three repos wanted
+  `mvn test -pl service`, plain `mvn test`, and `cd service && mvn test`. A repo with no root
+  `pom.xml` must say so — otherwise every agent burns a cycle discovering it.
+- **Invariants in `architecture/cross-cutting.md`** — the rules a change is *rejected* for breaking,
+  not preferences: layering direction, `.block()` bans, "all external HTTP goes through X", "ids come
+  from Y, never hand-built". Phrase each with its consequence; a rule whose cost is invisible gets
+  argued with.
+
+**Look for `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` at the repo root and in subdirectories
+FIRST.** On a real repo all of this was already written there, curated by the team, and simply never
+made it into the context — quoting it beats re-deriving it from `pom.xml`, and it stays true because
+its authors maintain it.
+
+### Step 2c — Acceptance: the context must ANSWER, not merely exist
+
+Bootstrapping is not done when the files are written. Ask these of the finished context with
+`resolve-task.js` and confirm the routed mini-skills actually contain the answer:
+
+| Dimension | Ask it |
+|---|---|
+| Identify repo | "where is the X consumer", "which service sends Y" |
+| Identify flow | "trace a request from A to B" — `repo_order` must span the real chain |
+| Impact | "if I change schema Z, what else moves" |
+| Business | 3–5 real domain questions a newcomer would ask |
+| Standards | "what are the coding conventions", "can I use `.block()`" |
+| Testing | "how do I run the unit tests / component tests / this locally" |
+
+A miss is nearly always one of two things, and they need opposite fixes: the fact is **absent**
+(write it), or the fact is **present but phrased in system vocabulary while the question is phrased
+in human vocabulary** (add the question's wording to `scenarios:`). Check which before writing —
+the second case is far more common, and answering it by writing a second mini-skill creates a
+duplicate that will disagree with the first one later.
+
+An honest `route: "ask"` is a PASS when the question genuinely names no repo and several could
+answer it. Grading that as a miss teaches the context to answer confidently for the wrong service.
+
 ### Step 3 — Diagram layer (OPTIONAL; ask the user, then generate from the mini-skills)
 
 **Ask:** _"Generate the Mermaid diagram layer (for human review + agent orientation)? (y/N)"_ Default

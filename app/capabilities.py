@@ -133,6 +133,12 @@ _TABLE: tuple[Capability, ...] = (
                     "miss', 'any mentions' — it reads Teams itself, so muted chats count."),
     Capability("teams_read_chat", "teams",
                shell='python -m app.teams_bridge read "<chat name>" [limit]'),
+    Capability("draft_voice", "teams", http="GET /api/voice?person={person}",
+               note="Call BEFORE drafting any Teams/WhatsApp message to a person. "
+                    "Returns how Arun writes to THAT person. Terms of address belong "
+                    "to a relationship, not to him — 'bro' is attested with one "
+                    "colleague only, and it is stripped automatically for anyone "
+                    "else, so never assume one fits."),
     Capability("teams_history", "teams",
                shell='python -m app.teams_bridge history "<chat name>" "<when>"',
                note="USE THIS, not teams_read_chat, whenever the question has a WHEN in "

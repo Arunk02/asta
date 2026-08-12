@@ -1216,6 +1216,12 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # not a fix — every future draft would be one slip away from it again.
     # Applied BEFORE staging, so what Arun approves is exactly what goes out.
     what = writing.tidy_links(what)
+    # And the same argument for how the recipient is addressed. "bro" is all
+    # over his history and every instance is in ONE chat; carried to anyone
+    # else it calls a colleague something he never has. Only chat channels —
+    # a Jira comment or PR body has no term of address to get wrong.
+    if channel in ("teams", "chat", "whatsapp"):
+        what = writing.fit_address(what, to)
     loop.set_pending_send(cid, what, to, channel, to_group=to_group)
     tgt = f" to {'group ' if to_group else ''}{to}" if to else ""
     return f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
@@ -1250,6 +1256,20 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
     return (f"Task #{t['id']} ({kind}) spawned — running in the background. "
             f"Arun will be notified when it finishes.")
+
+
+def draft_voice(person: str) -> str:
+    """How Arun writes TO THIS PERSON specifically — call before drafting a Teams
+    or WhatsApp message to someone, so the draft uses the words he actually uses
+    with them. Terms of address belong to a relationship, not to him: he says
+    "bro" to one colleague and nothing at all to others, and using the wrong one
+    is a message he would have to apologise for."""
+    from . import writing
+    g = writing.guidance(person)
+    if not g:
+        return (f"Not enough of Arun's own messages stored to describe his voice yet. "
+                f"Write plainly and use NO term of address for {person}.")
+    return g
 
 
 async def refine_task(task_id: int, feedback: str) -> str:

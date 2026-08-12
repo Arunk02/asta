@@ -118,9 +118,22 @@ def test_the_profile_measures_how_short_he_is():
     assert p["median_chars"] < 40, "the whole point is that he writes very short"
 
 
-def test_his_tics_are_picked_up():
+def test_his_prose_tics_are_picked_up():
     _seed(HIS)
-    assert "bro" in writing.profile()["tics"]
+    tics = writing.profile()["tics"]
+    assert any(t in tics for t in ("na", "u", "ur", "once"))
+
+
+def test_a_term_of_address_is_never_a_global_tic():
+    """It travels with the RELATIONSHIP, not with him.
+
+    Pooling made "bro" look like part of his voice, so it would have been
+    offered for every recipient — which is the thing he caught. Terms of address
+    are per-person and live in profile(chat=…)["address"]; see
+    test_writing_address.py.
+    """
+    _seed(HIS)
+    assert "bro" not in writing.profile()["tics"]
 
 
 def test_lowercase_starts_are_noticed():

@@ -837,6 +837,20 @@ async def api_create_task(request: Request):
 # Declared BEFORE /api/tasks/{task_id} — FastAPI matches in declaration order,
 # and the parameterised route would otherwise claim "prs" and fail to parse it
 # as an int.
+@app.get("/api/voice", dependencies=[Depends(require_auth)])
+def api_voice(person: str = ""):
+    """How Arun writes to this person — for any brain about to draft a message.
+
+    Terms of address are per-relationship, so this is answered per person and
+    says plainly when there is no evidence rather than offering the word he uses
+    with somebody else.
+    """
+    from . import writing
+    return {"person": person,
+            "address_terms": writing.address_terms(person),
+            "guidance": writing.guidance(person)}
+
+
 @app.get("/api/tasks/prs", dependencies=[Depends(require_auth)])
 def api_task_prs():
     """Shipped tasks and where their PRs stand."""

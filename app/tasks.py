@@ -89,13 +89,17 @@ CODE_OVERRIDES = """
 - Headless run: you cannot ask questions interactively. At any human gate
   (grill questions, "PLAN APPROVED", "Which repo applies?") print the plan and
   the questions, then END the response. You will be resumed with the answers.
-- Gate policy by size (Arun's rule): if after Stage 0.5 the change is clearly
-  SMALL — at most 2 files, roughly ≤30 changed lines, no schema/avro/migration/
-  config/cross-repo/API-contract impact, and ZERO open grill questions — do NOT
-  stop at the plan gate: print `AUTO-PROCEED (small change): <one-line plan>`
-  and continue straight through implement + tests in this same run. Anything
-  medium or larger, any ambiguity, or any grill question → present the plan and
-  STOP as usual; Arun's approval is mandatory there.
+- THE PLAN GATE IS UNCONDITIONAL. Every code task stops for Arun's approval
+  before a single line is implemented — a one-line constant change included.
+  There is no size below which you may proceed on your own, and no "obviously
+  trivial" exemption. Print the plan and END the response.
+  This replaces an earlier rule that let small changes auto-proceed. He removed
+  it deliberately: the cost of stopping is a few minutes, and the cost of not
+  stopping is discovering at the end that the whole thing was built on a
+  misread of what he wanted. He would rather correct the plan than the diff.
+  The plan he approves is the definition of done — implement THAT, not a better
+  idea you have afterwards. If implementing reveals the plan was wrong, stop
+  and say so; do not quietly build something else.
 - Skip Stage 1.5 and never run Stage 6: no push, no PR, and no Jira writes of
   any kind (no subtasks, no comments, no transitions). Stage 5 Evolution SHOULD
   still run — lessons and skill patches are wanted. After the Stage 4 (and 4b)
@@ -123,7 +127,34 @@ CODE_OVERRIDES = """
   thousands of tokens that re-cache on every later turn. Read each path ONCE;
   if you already opened it this session, reuse what you have — never re-open.
 - Commits: plain `git commit -m "<msg>"` — never a Co-Authored-By trailer, an
-  AI/assistant name, or a "Generated with …" line."""
+  AI/assistant name, or a "Generated with …" line.
+- Branch: Asta has already put every repo on the task's feature branch, cut
+  fresh from develop. Do NOT create another branch, do not switch branches, and
+  do not rebase onto anything. If `git status` shows an unexpected branch, stop
+  and say so rather than fixing it yourself.
+
+[How Arun expects the code to read — he reviews every diff]
+- Small, named, single-purpose functions. A function that needs a comment to
+  explain WHAT it does should be two functions with better names. He has to
+  debug this at 11pm; a forty-line branch-heavy method is where that goes wrong.
+- Prefer a functional shape: take arguments, return a value, no hidden state.
+  Pure helpers where the logic is real (mapping, filtering, deciding), effects
+  pushed to the edges. Avoid mutating a parameter to communicate a result.
+- Name things after the domain, not the mechanism: `cancelledBookingsSkipTms`,
+  not `processFlag2`. Method names say what is true after they run.
+- Comments explain WHY — the constraint, the bug that forced it, the thing the
+  next reader would otherwise undo. Never restate the code in English.
+- SIMPLIFY. The smallest change that fully solves it wins. No layer, interface,
+  factory, config switch or generalisation that this task does not need — do not
+  build for a second caller that does not exist. If you find yourself adding
+  indirection "for later", stop: he would rather change simple code twice.
+- Delete what you replace. A dead branch left behind is a future bug.
+- Guard clauses over nesting; early return over an else-tree three deep.
+- If the same logic already exists in the repo, call it. Do not write a second
+  copy with a different name — that is how the two drift apart.
+- Tests are part of the change, not a follow-up: cover the new behaviour AND the
+  case that used to work and must still work. A test that cannot fail is worse
+  than no test."""
 
 # Analysis rides the same pipeline in inquiry mode: full Boot 0 (resolver,
 # lessons, pins) but read-only and gate-free.
@@ -926,6 +957,63 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         f"{waste}", "task")
 
 
+def task_branch(t: dict, task_id: int) -> str:
+    """The branch this task's work belongs on.
+
+    Named after the ticket when there is one — `feature/BEPTELIKOS-10159` reads
+    the same in the branch list, the PR title and Jira, so the three can be
+    lined up without asking anyone. The key is taken from the title or the
+    prompt, since he raises tasks by pasting a ticket id into either.
+    """
+    key = _JIRA_KEY.search(f"{t.get('title', '')} {t.get('prompt', '')}")
+    return repo_ops.branch_name(key.group(0) if key else "",
+                                t.get("title", ""), task_id)
+
+
+async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
+    """Put every repo in the workspace on a fresh feature branch off develop.
+
+    Arun's rule: coding always starts from develop, never from wherever the
+    working tree happened to be left. Without this a task inherits the previous
+    task's feature branch, and its PR then carries the previous task's commits.
+
+    Reported, never raised: one repo that cannot be prepared must not kill a
+    multi-repo run, and he is told which one and why.
+    """
+    from . import notify
+    root = Path(_cwd(t.get("workspace")))
+    if not root.exists():
+        return []
+    repos = [root] if (root / ".git").is_dir() else \
+        sorted(p for p in root.iterdir() if (p / ".git").is_dir())
+    branch = task_branch(t, task_id)
+
+    results = []
+    for repo in repos:
+        try:
+            results.append(await repo_ops.start_branch(repo, branch))
+        except Exception as exc:                      # noqa: BLE001
+            results.append({"repo": repo.name, "branch": branch, "ok": False,
+                            "note": f"{type(exc).__name__}: {exc}", "dirty": False})
+
+    store.kv_set(f"task_branch:{task_id}", branch)
+    # Only speak when there is something he would want to know: a repo that
+    # could not be prepared, a base that was not develop, or uncommitted work
+    # that is now riding along on the new branch.
+    notable = [r for r in results if not r["ok"] or r.get("note") or r.get("dirty")]
+    if notable:
+        lines = []
+        for r in notable:
+            bits = [r["note"]] if r.get("note") else []
+            if r.get("dirty"):
+                bits.append("uncommitted changes were already in the tree")
+            lines.append(f"• {r['repo']}: {'; '.join(bits) or 'could not prepare'}")
+        await notify.notify(
+            f"🌿 Task #{task_id} — branch `{branch}`:\n" + "\n".join(lines),
+            "task", urgency="ambient")
+    return results
+
+
 async def _worker(task_id: int) -> None:
     from . import notify
     t = store.get_task(task_id)
@@ -953,6 +1041,10 @@ async def _worker(task_id: int) -> None:
             async with _ws_lock(t["workspace"]):
                 # started_at marks actual execution, not time spent queued on the lock
                 store.update_task(task_id, started_at=time.time())
+                # Cut the branch before the executor touches anything. Held
+                # inside the workspace lock so two tasks cannot race over the
+                # same working tree.
+                await _prepare_branches(task_id, t)
                 if agent:
                     result = await _run_code_leg(
                         task_id, prompt, _cwd(t["workspace"]),
@@ -1302,7 +1394,56 @@ async def ship(task_id: int) -> str:
 #: spends rate limit.
 PR_POLL_SECONDS = int(os.environ.get("ASTA_PR_POLL", "300"))
 
-_PR_FIELDS = "state,mergedAt,statusCheckRollup,reviewDecision,url,title"
+_PR_FIELDS = "state,mergedAt,statusCheckRollup,reviewDecision,url,title,reviews,comments"
+
+#: Review noise that is not a request for a change. Approvals with no body and
+#: bot chatter would otherwise arrive as "someone wants something from you".
+_BOT_AUTHORS = ("github-actions", "sonarqubecloud", "sonarcloud", "codecov",
+                "dependabot", "copilot-pull-request-reviewer")
+
+
+def _review_notes(pr: dict, me: str = "") -> list[str]:
+    """What humans actually asked for on this PR, newest last.
+
+    `reviewDecision` alone says CHANGES_REQUESTED without saying what to change,
+    which is not enough to act on — the whole point of following a PR to merge
+    is answering the comments, and that needs their text.
+    """
+    out = []
+    for item in list(pr.get("reviews") or []) + list(pr.get("comments") or []):
+        author = ((item.get("author") or {}).get("login") or "").lower()
+        body = (item.get("body") or "").strip()
+        if not body or author in _BOT_AUTHORS or author.endswith("[bot]"):
+            continue
+        if me and author == me.lower():
+            continue                    # his own replies are not asks of him
+        state = (item.get("state") or "").upper()
+        if state == "APPROVED" and len(body) < 20:
+            continue                    # "lgtm" is not a change request
+        out.append(f"{author}: {body[:400]}")
+    return out
+
+
+def _new_review_notes(task_id: int, notes: list[str]) -> list[str]:
+    """Only the comments not already reported for this task.
+
+    Re-reporting every comment on every poll is how a useful watcher becomes one
+    he mutes, and a muted watcher tells him nothing when it matters.
+    """
+    import hashlib
+    seen_raw = store.kv_get(f"task_pr_seen:{task_id}") or "[]"
+    try:
+        seen = set(_json.loads(seen_raw))
+    except (ValueError, TypeError):
+        seen = set()
+    fresh, keys = [], []
+    for n in notes:
+        key = hashlib.sha1(n.encode("utf-8", "replace")).hexdigest()[:16]
+        keys.append(key)
+        if key not in seen:
+            fresh.append(n)
+    store.kv_set(f"task_pr_seen:{task_id}", _json.dumps((keys + sorted(seen))[:200]))
+    return fresh
 
 
 def _pr_links(t: dict) -> list[str]:
@@ -1389,6 +1530,14 @@ async def check_pr(task_id: int) -> str | None:
         # transition worth reporting and a repeat of both is silence.
         now_state = f"{checks}/{decision or 'NONE'}"
         if now_state == was:
+            # Nothing moved — but someone may still have left a plain comment,
+            # which changes no field on the PR and is exactly the kind of ask
+            # that gets missed until somebody follows up in Teams.
+            asks = _new_review_notes(task_id, _review_notes(pr))
+            if asks:
+                return (f"💬 New comment on the PR for #{task_id} {title}\n{url}\n\n"
+                        + "\n".join(f"• {a}" for a in asks[:4])
+                        + f"\n\nSay 'fix #{task_id}' to address it in the same task.")
             continue
         store.update_task(task_id, pr_state=now_state)
 
@@ -1399,8 +1548,12 @@ async def check_pr(task_id: int) -> str | None:
                     f"everything it already knows.")
         if decision == "CHANGES_REQUESTED":
             store.update_task(task_id, status="pr_changes_requested")
-            return (f"📝 Changes requested on #{task_id} {title}\n{url}\n"
-                    f"Tell me what to do and I'll continue the same task.")
+            # Carry what they actually said. "Changes requested" on its own is
+            # not something he can act on from his phone.
+            asks = _new_review_notes(task_id, _review_notes(pr))
+            detail = ("\n\n" + "\n".join(f"• {a}" for a in asks[:4])) if asks else ""
+            return (f"📝 Changes requested on #{task_id} {title}\n{url}{detail}\n\n"
+                    f"Say 'fix #{task_id}' and I'll address these in the same task.")
         if decision == "APPROVED" and checks == "green":
             store.update_task(task_id, status="shipped")
             return f"✅ Approved and green — #{task_id} {title}\n{url}\nReady to merge."

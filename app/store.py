@@ -93,6 +93,30 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- Teams messages Asta has actually seen, kept so that "what did Vinish say last
+-- night" is answerable at all.
+--
+-- Reading a chat used to mean one querySelectorAll over whatever Teams happened
+-- to have rendered, returning "Sender: text" with no time attached. That cannot
+-- answer a question with a WHEN in it: there was nothing to filter on, nothing
+-- older than the live DOM could be reached, and nothing survived the read. Teams
+-- virtualises the thread, so the messages simply stopped existing once they
+-- scrolled out.
+--
+-- `sent_at` is nullable on purpose. Teams renders some rows without a machine
+-- readable time, and storing a guessed timestamp would be worse than storing
+-- none — a wrong time silently reassigns a message to the wrong night.
+CREATE TABLE IF NOT EXISTS teams_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    chat TEXT NOT NULL,
+    sender TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    sent_at REAL,
+    stamp TEXT NOT NULL DEFAULT '',
+    seen_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_teams_messages_chat ON teams_messages(chat, sent_at);
 -- One row per THING THAT WANTS ARUN, whatever channel carried it.
 --
 -- The `key` is deliberately UNIQUE across every source rather than per-source:
@@ -715,6 +739,69 @@ def kv_set(key: str, value: str) -> None:
 def kv_del(key: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM kv WHERE key=?", (key,))
+
+
+# --- Teams message history ---------------------------------------------------
+
+def save_teams_messages(rows: list[dict]) -> int:
+    """Remember messages read out of a Teams thread. Returns how many were new.
+
+    Idempotent by `key`, because every read of a chat re-sees the same recent
+    messages — without that, asking twice would double the thread.
+    """
+    if not rows:
+        return 0
+    now = time.time()
+    with _connect() as conn:
+        before = conn.total_changes
+        conn.executemany(
+            "INSERT INTO teams_messages (key, chat, sender, text, sent_at, stamp, seen_at) "
+            "VALUES (:key, :chat, :sender, :text, :sent_at, :stamp, :seen_at) "
+            "ON CONFLICT(key) DO NOTHING",
+            [{"key": r["key"], "chat": r.get("chat", ""), "sender": r.get("sender", ""),
+              "text": r.get("text", ""), "sent_at": r.get("sent_at"),
+              "stamp": r.get("stamp", ""), "seen_at": now} for r in rows],
+        )
+        return conn.total_changes - before
+
+
+def teams_messages(chat: str = "", since: float | None = None,
+                   until: float | None = None, limit: int = 200) -> list[dict]:
+    """Stored messages, oldest first, optionally windowed by time.
+
+    `chat` matches loosely: he asks for "Vinish" and the thread was stored under
+    the full header Teams renders, "Vinish Kumar".
+
+    Rows with no `sent_at` are excluded once a window is asked for — an untimed
+    message cannot be honestly claimed to fall inside "last night".
+    """
+    sql = ["SELECT * FROM teams_messages WHERE 1=1"]
+    args: list = []
+    if chat:
+        sql.append("AND lower(chat) LIKE ?")
+        args.append(f"%{chat.strip().lower()}%")
+    if since is not None:
+        sql.append("AND sent_at IS NOT NULL AND sent_at >= ?")
+        args.append(since)
+    if until is not None:
+        sql.append("AND sent_at IS NOT NULL AND sent_at <= ?")
+        args.append(until)
+    # NULL sent_at sorts last rather than first, so an untimed row never
+    # masquerades as the oldest thing in the thread.
+    sql.append("ORDER BY sent_at IS NULL, sent_at ASC, id ASC LIMIT ?")
+    args.append(max(1, limit))
+    with _connect() as conn:
+        rows = conn.execute(" ".join(sql), args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def teams_chats_known() -> list[str]:
+    """Thread names history has been stored under."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT chat, COUNT(*) n, MAX(sent_at) last FROM teams_messages "
+            "GROUP BY chat ORDER BY n DESC").fetchall()
+    return [r["chat"] for r in rows]
 
 
 # --- memory FTS index --------------------------------------------------------

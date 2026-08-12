@@ -26,7 +26,7 @@ import re
 import sys
 import time
 
-from . import store, teams_bridge
+from . import store, teams_bridge, wake
 
 MAIL_URL = "https://outlook.office.com/mail/"
 CALENDAR_URL = "https://outlook.office.com/calendar/view/day"
@@ -690,7 +690,9 @@ async def watch_loop() -> None:
         return
     attention.note_watching("outlook")   # running, and expected to succeed
     while True:
-        await asyncio.sleep(poll)
+        # Interruptible by a wake, so mail that arrived overnight is read when
+        # the machine comes back rather than up to `poll` seconds afterwards.
+        await wake.sleep(poll)
         if not (teams_bridge.enabled() and teams_bridge.logged_in_once()
                 and store.kv_get("teams_session_ok") != "0"):
             continue

@@ -1300,6 +1300,47 @@ async def teams_read_chat(chat: str, limit: int = 15) -> str:
         return f"Teams read failed: {exc}"
 
 
+async def teams_history(chat: str, when: str = "last night", limit: int = 60) -> str:
+    """Read a Teams chat for a TIME WINDOW — 'what did Vinish say last night',
+    'anything from Suraj yesterday', 'messages from the triage group this morning'.
+    `when` is plain English: last night, yesterday, this morning, today, last week,
+    'last 3 hours', or 'while I was away'. Use this instead of teams_read_chat
+    whenever the question has a WHEN in it; teams_read_chat only sees what is
+    currently on screen and cannot reach last night's messages."""
+    from . import teams_bridge, when as when_mod
+    if not teams_bridge.enabled():
+        return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
+    if not teams_bridge.logged_in_once():
+        return "Not logged in — Arun must run: .venv/bin/python -m app.teams_bridge login"
+
+    since, until, label = when_mod.parse(when)
+    window = when_mod.describe(since, until)
+
+    # Stored history first. Anything already read is answerable without opening
+    # a browser, which turns a 20-second scrape into an instant answer for the
+    # common case of asking twice about the same evening.
+    rows = store.teams_messages(chat, since=since, until=until, limit=limit)
+    source = "stored history"
+    if not rows:
+        try:
+            fetched = await teams_bridge.read_history(chat, since=since, limit=limit)
+        except RuntimeError as exc:
+            if "SESSION_EXPIRED" in str(exc):
+                return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
+            return f"Teams read failed: {exc}"
+        rows = [r for r in fetched if r.get("sent_at") and r["sent_at"] <= until]
+        source = "Teams (scrolled back)"
+
+    if not rows:
+        return (f"Nothing found in '{chat}' for {label} ({window}). Asta scrolled the "
+                f"thread back and read no message in that window — either none was sent, "
+                f"or it is older than Teams will load.")
+
+    lines = [teams_bridge.fmt_message(r) for r in rows]
+    body = untrusted.wrap_lines(lines, f"Teams chat: {chat} — {label}")
+    return f"{body}\n\n(window: {window}, from {source}; {len(rows)} message(s))"
+
+
 async def teams_activity(limit: int = 25) -> str:
     """Read Arun's Teams Activity feed — who mentioned him, replies, missed calls, invites.
     Use whenever he asks anything like 'any messages for me', 'anything from Vinish',

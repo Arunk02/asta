@@ -16,7 +16,7 @@ import json
 import shutil
 import time
 
-from . import attention, copilot_cli, memory, msnotify, store, teams_bridge, telegram
+from . import attention, copilot_cli, daemon, memory, msnotify, store, teams_bridge, telegram
 
 CHECK_SECONDS = 6 * 3600
 MIN_FREE_GB = 5
@@ -98,6 +98,14 @@ async def checks() -> dict[str, str]:
             "never enriched — every answer about this workspace is guesswork"
             if days < 0 else
             f"context last enriched {int(days)} days ago — say yes to the refresh offer")
+
+    # A supervised loop cannot vanish any more, but it can still be failing on
+    # every single pass — restarting, dying, restarting. That reads as "running"
+    # to anything that only asks whether the task exists, which is exactly how
+    # the Teams watcher managed to be dead without anything saying so.
+    for line in daemon.problems():
+        name, _, detail = line.partition(" ")
+        problems[f"daemon_{name}"] = f"background loop {detail or 'is not running'}"
 
     if not copilot_cli.available():
         problems["copilot"] = "Copilot CLI missing/unauthenticated (run: copilot login)"

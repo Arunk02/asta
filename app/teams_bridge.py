@@ -31,7 +31,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import store
+from . import store, wake
 
 PROFILE_DIR = Path(__file__).resolve().parent.parent / "data" / "teams_profile"
 TEAMS_URL = "https://teams.microsoft.com/v2/"
@@ -378,35 +378,209 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
     return title or chat
 
 
+#: Pull every message out of the open thread WITH the time Teams attached to it.
+#:
+#: The old version of this read `innerText` and nothing else, which is why a
+#: question with a "when" in it could never be answered. Teams exposes the time
+#: in more than one shape depending on client version, so every known shape is
+#: tried and the first machine-readable one wins:
+#:
+#:   1. <time datetime="..."> — an ISO string, authoritative when present;
+#:   2. a title/aria-label on the timestamp element, which carries the full date
+#:      even when the visible text is just "9:14 PM";
+#:   3. the message id, which in Teams web is the send time in epoch millis.
+#:
+#: If none of them yields a time, the message is still returned with sent_at
+#: null. Guessing would be worse: a message assigned to the wrong evening is a
+#: confident wrong answer, and the whole point of this change is not giving one.
+_MESSAGE_JS = """
+(limit) => {
+  const ITEM = '[data-tid="chat-pane-item"]';
+  const nodes = document.querySelectorAll(
+    '[data-tid="chat-pane-message"], [data-tid="messageBodyContent"]');
+  const seen = new Set();
+  const out = [];
+  for (const n of Array.from(nodes)) {
+    const item = n.closest(ITEM) || n;
+    if (seen.has(item)) continue;
+    seen.add(item);
+
+    const author = item.querySelector(
+      '[data-tid="message-author-name"], [data-tid="threadBodyDisplayName"]');
+    const body = item.querySelector('[data-tid="messageBodyContent"]') || n;
+    const text = (body.innerText || '').trim();
+    if (!text) continue;
+
+    let iso = '', stamp = '';
+    const t = item.querySelector('time[datetime], [data-tid="message-timestamp"]');
+    if (t) {
+      stamp = (t.getAttribute('title') || t.innerText || '').trim();
+      iso = t.getAttribute('datetime') || '';
+      if (!iso) {
+        // "11 August 2026 9:14 PM" in a title attribute parses fine; the bare
+        // "9:14 PM" in innerText does not, and must not be treated as a date.
+        const label = t.getAttribute('title') || t.getAttribute('aria-label') || '';
+        if (label && !isNaN(Date.parse(label))) iso = new Date(label).toISOString();
+      }
+    }
+    if (!iso) {
+      // What this Teams build actually ships. There is no <time> element
+      // anywhere in a message; the send time is the id of the content div,
+      // as `content-1786525691522` — epoch milliseconds. Verified against the
+      // live DOM rather than assumed, because the assumed version returned
+      // every message with no time at all and looked like it worked.
+      const holder = item.querySelector('[id^="content-"], [id^="timestamp-"]')
+                     || item;
+      const id = holder.id || item.getAttribute('data-mid') || item.id || '';
+      const ms = (id.match(/(\\d{13})/) || [])[1];
+      if (ms) {
+        const d = new Date(Number(ms));
+        // A 13-digit number that is not a plausible send time is some other
+        // id that happens to be the right length.
+        if (!isNaN(d) && d.getFullYear() > 2015) iso = d.toISOString();
+      }
+    }
+    out.push({
+      sender: (author?.innerText || 'me').trim(),
+      text: text,
+      iso: iso,
+      stamp: stamp,
+    });
+  }
+  return limit > 0 ? out.slice(-limit) : out;
+}
+"""
+
+#: Teams virtualises the thread: what is not on screen is not in the DOM. To
+#: reach last night's message we have to make Teams render it, which means
+#: scrolling the pane up and letting it fetch. Capped so a thread with five
+#: years of history cannot turn one question into an unbounded crawl.
+_SCROLL_JS = """
+() => {
+  const sel = ['[data-tid="message-pane-list-viewport"]',
+               '[data-tid="messages-pane"]',
+               '[role="log"]', '[role="list"]'];
+  for (const s of sel) {
+    for (const el of document.querySelectorAll(s)) {
+      if (el.scrollHeight > el.clientHeight + 50) { el.scrollTop = 0; return true; }
+    }
+  }
+  return false;
+}
+"""
+
+MAX_SCROLLBACKS = int(os.environ.get("TEAMS_MAX_SCROLLBACK", "12"))
+SCROLL_SETTLE_SECONDS = 1.2
+
+
+def _msg_key(chat: str, m: dict) -> str:
+    """Stable identity for one message, so re-reading a thread never duplicates it."""
+    import hashlib
+    basis = f"{chat}|{m.get('sender','')}|{m.get('iso','')}|{m.get('text','')}"
+    return hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:20]
+
+
+def _to_epoch(iso: str) -> float | None:
+    if not iso:
+        return None
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _capture(chat: str, raw: list[dict]) -> list[dict]:
+    """Turn scraped rows into storable ones and persist them."""
+    rows = []
+    for m in raw:
+        rows.append({
+            "key": _msg_key(chat, m),
+            "chat": chat,
+            "sender": m.get("sender", ""),
+            "text": m.get("text", ""),
+            "sent_at": _to_epoch(m.get("iso", "")),
+            "stamp": m.get("stamp", ""),
+        })
+    if rows:
+        try:
+            store.save_teams_messages(rows)
+        except Exception:
+            # History is a bonus on top of the read, never a reason to fail it.
+            pass
+    return rows
+
+
+def fmt_message(r: dict) -> str:
+    """'[Mon 21:14] Vinish Kumar: …' — time first, because that is what was missing."""
+    import datetime as _dt
+    when = r.get("sent_at")
+    if when:
+        prefix = _dt.datetime.fromtimestamp(when).strftime("[%a %d %b %H:%M] ")
+    elif r.get("stamp"):
+        prefix = f"[{r['stamp']}] "
+    else:
+        prefix = ""
+    return f"{prefix}{r.get('sender') or 'me'}: {r.get('text', '')}"
+
+
 async def read_chat(chat: str, limit: int = 15) -> list[str]:
-    """Return the last `limit` visible messages of a chat as 'Sender: text' lines."""
+    """Return the last `limit` messages of a chat as timestamped lines.
+
+    Still returns strings, so every existing caller keeps working — but each one
+    now carries when it was sent, and every message read is written to history
+    on the way past.
+    """
+    rows = await read_history(chat, limit=limit)
+    return [fmt_message(r) for r in rows]
+
+
+async def read_history(chat: str, since: float | None = None, limit: int = 200,
+                       max_scrolls: int = MAX_SCROLLBACKS) -> list[dict]:
+    """Read a thread, scrolling back far enough to cover `since`.
+
+    Returns message dicts oldest-first. Everything read is persisted, so the
+    next question about the same thread can often be answered without opening a
+    browser at all.
+    """
     async with _lock:
         pw, ctx = await _launch()
         try:
             page = await _open_teams(ctx)
             await _find_chat(page, chat, allow_group=True)  # reading a group is harmless
-            msgs = await page.evaluate(
-                """(limit) => {
-                    const nodes = document.querySelectorAll(
-                      '[data-tid="chat-pane-message"], [data-tid="messageBodyContent"]');
-                    const out = [];
-                    for (const n of Array.from(nodes).slice(-limit)) {
-                      const item = n.closest('[data-tid="chat-pane-item"]') || n;
-                      const author = item.querySelector(
-                        '[data-tid="message-author-name"], [data-tid="threadBodyDisplayName"]');
-                      const body = item.querySelector('[data-tid="messageBodyContent"]') || n;
-                      const text = (body.innerText || '').trim();
-                      if (text) out.push(((author?.innerText || 'me').trim()) + ': ' + text);
-                    }
-                    return out;
-                }""",
-                limit,
-            )
+            title = await _chat_title(page) or chat
+
+            raw = await page.evaluate(_MESSAGE_JS, 0)
+            # Only a time-windowed question justifies scrolling. "The last 15
+            # messages" is already on screen, and paying seconds to fetch older
+            # ones nobody asked for is how a read turns into half a minute.
+            for _ in range(max(0, max_scrolls) if since is not None else 0):
+                # Stop as soon as the thread reaches back past what was asked
+                # for — scrolling further would cost seconds and buy nothing.
+                if raw:
+                    oldest = _to_epoch(raw[0].get("iso", ""))
+                    if oldest is not None and oldest <= since:
+                        break
+                if not await page.evaluate(_SCROLL_JS):
+                    break
+                await asyncio.sleep(SCROLL_SETTLE_SECONDS)
+                grown = await page.evaluate(_MESSAGE_JS, 0)
+                # No new messages loaded means we are at the top of the thread;
+                # continuing would spin against an unmoving pane.
+                if len(grown) <= len(raw):
+                    raw = grown
+                    break
+                raw = grown
+
             store.kv_set("teams_session_ok", "1")
-            return msgs
         finally:
             await ctx.close()
             await pw.stop()
+
+    rows = _capture(title, raw)
+    if since is not None:
+        rows = [r for r in rows if r["sent_at"] is not None and r["sent_at"] >= since]
+    return rows[-limit:] if limit > 0 else rows
 
 
 async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
@@ -813,7 +987,10 @@ async def activity_watch_loop() -> None:
     from . import attention, notify
     attention.note_watching("teams")     # running, and expected to succeed
     while True:
-        await asyncio.sleep(ACTIVITY_POLL_SECONDS)
+        # wake.sleep, not asyncio.sleep: when the lid opens after eight hours
+        # this returns immediately instead of idling out the remainder of a
+        # five-minute timer that was set before the machine went under.
+        await wake.sleep(ACTIVITY_POLL_SECONDS)
         if not (enabled() and logged_in_once() and store.kv_get("teams_session_ok") != "0"):
             continue
         try:
@@ -873,7 +1050,9 @@ async def session_watch_loop() -> None:
     """Every 30 min verify the session; notify ONCE when it expires."""
     from . import notify
     while True:
-        await asyncio.sleep(SESSION_CHECK_SECONDS)
+        # A suspended laptop is the most likely moment for the Teams session to
+        # have gone stale, so waking is exactly when it is worth re-checking.
+        await wake.sleep(SESSION_CHECK_SECONDS)
         if not logged_in_once():
             continue
         try:
@@ -924,6 +1103,19 @@ if __name__ == "__main__":
         try:
             for line in asyncio.run(read_chat(sys.argv[2], limit)):
                 print(line)
+        except RuntimeError as exc:
+            print(f"ERROR: {'session expired — rerun login' if 'SESSION_EXPIRED' in str(exc) else exc}")
+            sys.exit(1)
+    elif cmd == "history" and len(sys.argv) > 2:
+        from . import when as when_mod
+        phrase = sys.argv[3] if len(sys.argv) > 3 else "last night"
+        since, until, label = when_mod.parse(phrase)
+        print(f"# {sys.argv[2]} — {label} ({when_mod.describe(since, until)})")
+        try:
+            rows = asyncio.run(read_history(sys.argv[2], since=since))
+            for r in rows:
+                if r["sent_at"] and r["sent_at"] <= until:
+                    print(fmt_message(r))
         except RuntimeError as exc:
             print(f"ERROR: {'session expired — rerun login' if 'SESSION_EXPIRED' in str(exc) else exc}")
             sys.exit(1)

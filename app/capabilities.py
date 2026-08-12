@@ -133,6 +133,13 @@ _TABLE: tuple[Capability, ...] = (
                     "miss', 'any mentions' — it reads Teams itself, so muted chats count."),
     Capability("teams_read_chat", "teams",
                shell='python -m app.teams_bridge read "<chat name>" [limit]'),
+    Capability("teams_history", "teams",
+               shell='python -m app.teams_bridge history "<chat name>" "<when>"',
+               note="USE THIS, not teams_read_chat, whenever the question has a WHEN in "
+                    "it — 'last night', 'yesterday', 'this morning', 'while I was away'. "
+                    "teams_read_chat only sees what is on screen now; Teams drops older "
+                    "messages out of the DOM, so it CANNOT answer about last night and "
+                    "will quietly return today's messages instead."),
     Capability("teams_resolve", "teams",
                shell='python -m app.teams_bridge resolve "<name>" [--group]',
                note="Checks WHO a message would reach without sending. Use it before "

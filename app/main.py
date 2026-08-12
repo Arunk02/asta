@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, delivery, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -102,30 +102,41 @@ async def startup() -> None:
                 StaticFiles(directory=provider.ctx / "graph"),
                 name=f"graph-{name}",
             )
-    asyncio.create_task(_digest_loop())
-    asyncio.create_task(refresh.scheduler_loop())
-    asyncio.create_task(_jira_watch_loop())
+    # Every long-running loop goes through daemon.start, not create_task.
+    #
+    # `activity_watch_loop` died once with an OperationalError raised by the very
+    # kv_get that guards the top of its body, and stayed dead for the rest of
+    # that process — no retry, nothing in health, no way to tell from the outside
+    # that Teams had stopped being watched at all. Supervision makes that
+    # impossible for ALL of them rather than for the one that was caught.
+    daemon.start("digest", _digest_loop)
+    daemon.start("refresh", refresh.scheduler_loop)
+    daemon.start("jira_watch", _jira_watch_loop)
+    # Detects that the machine was suspended and pulls the watchers forward, so
+    # the first scan after the lid opens happens then and not up to a poll
+    # interval later. Started unconditionally — sleep is not a Teams feature.
+    daemon.start("wake", wake.watch_loop)
     if msnotify.enabled():
-        asyncio.create_task(_msnotify_loop())
+        daemon.start("msnotify", _msnotify_loop)
     if telegram.enabled():
-        asyncio.create_task(telegram.poll_loop(_telegram_turn))
+        daemon.start("telegram", lambda: telegram.poll_loop(_telegram_turn))
     if teams_bridge.enabled():
-        asyncio.create_task(teams_bridge.session_watch_loop())
+        daemon.start("teams_session", teams_bridge.session_watch_loop)
         if teams_bridge.ACTIVITY_POLL_SECONDS > 0:
-            asyncio.create_task(teams_bridge.activity_watch_loop())
-        asyncio.create_task(outlook.watch_loop())
+            daemon.start("teams_activity", teams_bridge.activity_watch_loop)
+        daemon.start("outlook", outlook.watch_loop)
         # Needs the calendar, so it only runs when the Teams/Outlook bridge is up.
-        asyncio.create_task(briefing.premeeting_loop())
-    asyncio.create_task(reminders.loop())
-    asyncio.create_task(briefing.scheduler_loop())
-    asyncio.create_task(health.loop())
-    asyncio.create_task(ci_watch.loop())
-    asyncio.create_task(tasks.resume_paused_loop())
-    asyncio.create_task(notify.held_watch_loop())
-    asyncio.create_task(attention.sweep_loop())
-    asyncio.create_task(delivery.chase_loop())
-    asyncio.create_task(delivery.flush_loop())
-    asyncio.create_task(_learning_loop())
+        daemon.start("premeeting", briefing.premeeting_loop)
+    daemon.start("reminders", reminders.loop)
+    daemon.start("briefing", briefing.scheduler_loop)
+    daemon.start("health", health.loop)
+    daemon.start("ci_watch", ci_watch.loop)
+    daemon.start("resume_paused", tasks.resume_paused_loop)
+    daemon.start("held_notify", notify.held_watch_loop)
+    daemon.start("attention_sweep", attention.sweep_loop)
+    daemon.start("delivery_chase", delivery.chase_loop)
+    daemon.start("delivery_flush", delivery.flush_loop)
+    daemon.start("learning", _learning_loop)
     # The WhatsApp bridge is a child of Asta's lifecycle now, not a manual step:
     # it starts with the server and is restarted on crash, so "no bridge" stops
     # being the default after every restart.
@@ -264,6 +275,8 @@ def api_status():
         "teams_bridge": teams_bridge.status(),
         "wa_bridge": wa_bridge.status(),
         "ci_watch": ci_watch.status(),
+        "daemons": daemon.status(),
+        "wake": wake.status(),
         "reminders_pending": len(store.list_reminders()),
         "health_problems": json.loads(store.kv_get("health_problems") or "[]"),
     }

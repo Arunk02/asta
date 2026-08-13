@@ -393,6 +393,74 @@ async def _click_first(page, selectors, timeout: float = 3000) -> bool:
     return False
 
 
+# --- borrowing the microphone -----------------------------------------------
+#
+# Teams listens to ONE input at a time. While it is pointed at the virtual mic
+# Asta speaks through, it cannot hear Arun at all — so leaving it there after an
+# utterance would silently mute him for the rest of the call, and he would find
+# out when somebody asked why he had gone quiet.
+#
+# So the mic is BORROWED: switched immediately before speaking and given back in
+# a finally, whatever happened in between. The restore is the part that matters;
+# the switch merely fails to be heard, the missing restore fails to be heard FROM.
+
+#: His real microphone — restored after every utterance.
+HIS_MIC = os.environ.get("ASTA_HIS_MIC", "MacBook Pro Microphone")
+
+_SETTINGS_MENU = ('button[data-tid="settings-button"]', 'button[aria-label*="Settings" i]',
+                  '[data-tid="callingSettingsButton"]', 'button[aria-label*="Device settings" i]')
+_MIC_PICKER = ('[data-tid="microphone-device-selector"]', 'select[aria-label*="Microphone" i]',
+               '[aria-label*="Microphone" i][role="combobox"]', '[data-tid="mic-dropdown"]')
+_SETTINGS_CLOSE = ('button[aria-label="Close settings"]', 'button[aria-label*="Close" i]')
+
+
+async def set_call_mic(page, device: str) -> bool:
+    """Point Teams' microphone at `device`. False when the UI would not cooperate.
+
+    Deliberately returns a bool rather than raising: the caller has to be able to
+    tell "could not switch, so do not bother speaking" apart from "spoke and then
+    could not restore", and those two want very different reactions.
+    """
+    if not page or not device:
+        return False
+    try:
+        if not await _click_first(page, _SETTINGS_MENU, timeout=4000):
+            return False
+        for sel in _MIC_PICKER:
+            try:
+                await page.select_option(sel, label=device, timeout=3000)
+                await _click_first(page, _SETTINGS_CLOSE, timeout=2000)
+                return True
+            except Exception:
+                continue
+        # Not a <select> in every Teams build — fall back to opening the listbox
+        # and clicking the option by its visible name.
+        for sel in _MIC_PICKER:
+            try:
+                await page.click(sel, timeout=2500)
+                await page.click(f'text="{device}"', timeout=2500)
+                await _click_first(page, _SETTINGS_CLOSE, timeout=2000)
+                return True
+            except Exception:
+                continue
+        await _click_first(page, _SETTINGS_CLOSE, timeout=2000)
+        return False
+    except Exception:
+        return False
+
+
+async def _restore_mic(page) -> None:
+    """Give the microphone back. Shouts if it could not — being silently muted
+    for the rest of a call is the worst outcome this module can produce."""
+    from . import notify
+    if await set_call_mic(page, HIS_MIC):
+        return
+    await notify.notify(
+        f"🎙️ Could not switch the Teams mic back to {HIS_MIC} — you may be muted "
+        f"to the call. Set it manually in Teams → Settings → Devices.",
+        "warn", urgency="direct")
+
+
 async def say_in_call(text: str, voice_name: str = "") -> str:
     """Say something out loud in the call Asta is in — only if he asked for it.
 
@@ -417,12 +485,32 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
         raise RuntimeError("nothing left to say once the instruction was removed")
     chosen = voice.pick_voice(text, voice_name or voice.VOICE_ASSISTANT)
 
+    # Generated BEFORE the mic is borrowed: synthesis is the slow part, and
+    # holding his microphone hostage for ten seconds of Chatterbox would mute him
+    # mid-conversation for no reason.
     audio = await voice.speak(words, voice=chosen)
     if not audio:
         raise RuntimeError("speech generation produced nothing — said nothing")
-    # Blocking: it has to have FINISHED before this reports that it spoke, or a
-    # second line starts over the top of the first.
-    played = await asyncio.to_thread(voice.play_to_device, audio, AUDIO_DEVICE)
+
+    page = _CALL.get("page")
+    borrowed = False
+    if page is not None:
+        borrowed = await set_call_mic(page, AUDIO_DEVICE)
+        if not borrowed:
+            raise RuntimeError(
+                f"could not point Teams at {AUDIO_DEVICE} — said nothing. "
+                f"Set it manually in Teams → Settings → Devices.")
+    try:
+        # Blocking: it has to have FINISHED before this reports that it spoke, or
+        # a second line starts over the top of the first.
+        played = await asyncio.to_thread(voice.play_to_device, audio, AUDIO_DEVICE)
+    finally:
+        # Whatever happened above — including an exception — he gets his
+        # microphone back. This is the line that keeps him from going silently
+        # mute for the rest of the call.
+        if borrowed:
+            await _restore_mic(page)
+
     store.kv_set("teams_last_spoken", words[:500])
     return f"said it in the call in {chosen} voice ({played:.1f}s): {words[:120]}"
 
@@ -564,6 +652,114 @@ async def poll_captions(page, lines: list[dict]) -> None:
 
 def transcript_text(lines: list[dict]) -> str:
     return "\n".join(f"{l['speaker']}: {l['text']}" for l in lines if l.get("text"))
+
+
+# --- noticing what the other person asked ------------------------------------
+#
+# Arun wanted this to feel natural: Asta listens while he talks, spots something
+# worth looking up, and asks HIM — "can I analyse this that Vinish asked?" — on
+# his phone, never out loud in the call.
+#
+# The split below is the whole design. Some questions Asta can answer from the
+# workspace context and it is genuinely useful for it to offer. Others are about
+# what ARUN will do — review it, merge it, be free at four — and answering those
+# on his behalf would commit him to things he never agreed to. Those are listened
+# to, logged, and handed back afterwards.
+
+#: Questions Asta may offer to look up: they are about the CODE, not about him.
+_ANSWERABLE = re.compile(
+    r"\b(how (does|do|is|are|did)|where (is|are|do|does)|what (does|do|is|are)\b"
+    r"|which (topic|class|service|table|field|repo|method)"
+    r"|why (does|is|are|did)|who (calls|consumes|publishes)"
+    r"|is there (a|any)\b)", re.I)
+
+#: Questions about HIM. Never auto-answered, in any voice.
+_HIS_TO_ANSWER = re.compile(
+    r"\b(can you (review|check|look|merge|approve|deploy|release|join|come)"
+    r"|will you\b|could you\b|shall we\b|should we\b|are you (ok|fine|free|available|done)"
+    r"|when (can|will) you\b|do you (want|mind|agree)|is that (ok|fine)\b"
+    r"|what do you think\b|your (call|view|opinion)\b)", re.I)
+
+#: Asks already put to him this call, so repeated captions do not re-ask.
+_ASKED: set[str] = set()
+
+
+def _ask_key(line: str) -> str:
+    import hashlib
+    words = re.findall(r"[a-z0-9]+", (line or "").lower())
+    return hashlib.sha1(" ".join(words[:14]).encode()).hexdigest()[:16]
+
+
+def classify_line(line: str) -> str:
+    """'answerable' | 'his' | 'chatter' for one caption line.
+
+    Order matters: a line can look like both ("can you check how the ATA
+    fallback works"), and when it does it is HIS — the sentence is a request of
+    him that happens to mention code, and answering it would be answering for
+    him.
+    """
+    text = (line or "").strip()
+    if len(text) < 12:
+        return "chatter"
+    if _HIS_TO_ANSWER.search(text):
+        return "his"
+    if _ANSWERABLE.search(text):
+        return "answerable"
+    return "chatter"
+
+
+def notice_asks(lines: list[str], speaker_is_him: bool = False) -> list[dict]:
+    """New things worth reacting to, deduped for the life of the call.
+
+    His OWN lines are skipped: Asta offering to look up a question Arun himself
+    just asked out loud is noise, and worse, it would offer to answer the person
+    he is talking to on their behalf.
+    """
+    out = []
+    if speaker_is_him:
+        return out
+    for line in lines:
+        kind = classify_line(line)
+        if kind == "chatter":
+            continue
+        key = _ask_key(line)
+        if key in _ASKED:
+            continue
+        _ASKED.add(key)
+        out.append({"line": line.strip(), "kind": kind, "key": key})
+    return out
+
+
+def clear_noticed() -> None:
+    """Forget this call's asks — a new call starts with a clean slate."""
+    _ASKED.clear()
+
+
+async def offer_to_analyse(item: dict) -> None:
+    """Ask HIM, on his phone, whether to look something up. Never spoken aloud.
+
+    Uses the same offer engine as CI failures, so "yes" from WhatsApp already
+    means the right thing and he has one habit rather than two.
+    """
+    from . import notify, offers
+    if item.get("kind") != "answerable":
+        return
+    line = item["line"][:200]
+    o = offers.offer(
+        "analyse",
+        subject=f"asked in the call: {line[:80]}",
+        context=line,
+        prompt=f"Answer this from the workspace context, for Arun to read out: {line}",
+    )
+    await notify.notify(
+        f"🎧 In the call — “{line}”\n\nWant me to look this up? (yes / no)"
+        f"\n{o.render() if hasattr(o, 'render') else ''}".rstrip(),
+        "call", urgency="direct")
+
+
+def pending_for_him(lines: list[str]) -> list[str]:
+    """Things aimed at HIM, to hand back when the call ends."""
+    return [l.strip() for l in lines if classify_line(l) == "his"]
 
 
 def captured_transcript() -> str:

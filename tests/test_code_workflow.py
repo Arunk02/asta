@@ -441,3 +441,60 @@ def test_the_executor_is_told_not_to_touch_the_branch():
 def test_the_no_attribution_rule_survived_all_of_this():
     assert "Co-Authored-By" in tasks.CODE_OVERRIDES
     assert "Co-Authored-By" in repo_ops.NO_ATTRIBUTION
+
+
+# --- the repo Asta is running from is never branched -------------------------
+#
+# Found the hard way. A code task with no workspace resolved to ROOT — Asta's own
+# checkout — so _prepare_branches ran real git on it: fetch, checkout main,
+# pull --ff-only, checkout -b feature/asta-1-fix-bug. The running process moved
+# the branch it was executing from, with unpushed work on the branch it left, and
+# it did the same thing again on every test run that spawned such a task.
+
+@pytest.mark.asyncio
+async def test_a_task_with_no_workspace_branches_nothing(monkeypatch):
+    """No workspace means no repo of its own — not 'use Asta's'."""
+    called = []
+
+    async def spy(repo, branch):
+        called.append(repo)
+        return {"repo": repo.name, "branch": branch, "ok": True, "note": "", "dirty": False}
+
+    monkeypatch.setattr(repo_ops, "start_branch", spy)
+    out = await tasks._prepare_branches(90, {"title": "fix bug", "prompt": "",
+                                             "workspace": None})
+    assert out == []
+    assert called == [], f"ran git in {called}"
+
+
+@pytest.mark.asyncio
+async def test_astas_own_repo_is_never_branched_even_if_named(monkeypatch):
+    """Belt and braces: a workspace that resolves to ROOT is still refused."""
+    called = []
+
+    async def spy(repo, branch):
+        called.append(repo)
+        return {"repo": repo.name, "branch": branch, "ok": True, "note": "", "dirty": False}
+
+    monkeypatch.setattr(repo_ops, "start_branch", spy)
+    monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tasks.ROOT))
+
+    out = await tasks._prepare_branches(91, {"title": "x", "prompt": "",
+                                             "workspace": "asta"})
+    assert out == []
+    assert called == []
+
+
+def test_the_suite_cannot_move_this_repos_branch():
+    """A test run must leave HEAD exactly where it found it.
+
+    The guard above is what makes this true; without it, spawning a code task
+    anywhere in the suite checked out a new branch in the working copy the tests
+    were being read from.
+    """
+    import subprocess
+    head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                          cwd=tasks.ROOT, capture_output=True, text=True).stdout.strip()
+    assert head != "", "could not read HEAD"
+    assert not head.startswith("feature/asta-"), (
+        f"the suite branched this repo to {head!r} — _prepare_branches escaped its guard")

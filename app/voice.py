@@ -148,34 +148,63 @@ async def transcribe(data: bytes, filename: str = "speech.webm",
 # statements makes a voice that cannot ask a question. Around 60-90s total
 # across these five is the sweet spot; past a couple of minutes there is
 # nothing left to learn and generation just gets slower.
+# WRITTEN IN ARUN'S OWN IDIOM, not in correct English.
+#
+# The first version of these was fluent, full-sentence prose — "Here is where
+# things stand this morning", "I have been working through the vessel ETA
+# ticket". He read it and said: follow how I speak, not how you write. He is
+# right, and the reason is technical rather than cosmetic. Chatterbox clones
+# PROSODY: the rhythm, the stress, where a sentence lifts and where it drops.
+# Somebody reading a sentence they would never say produces read-aloud rhythm,
+# and the clone then sounds like that for ever — a stranger with his timbre.
+#
+# So every line below is built from phrases he actually sent, taken out of his
+# own Teams history: "bro", "na" as a tag question, "u" and "ur", "once",
+# "post that" for afterwards, "couldn't able to". Reading them should feel like
+# talking, because they are already his words. That is the whole point.
 CLONE_SCRIPTS: dict[str, str] = {
     "1-status": (
-        "Here is where things stand this morning. The booking service build "
-        "finished at nine forty, all sixty-two tests passed, and the vessel "
-        "schedule sync is running normally. Nothing needs your attention yet."
+        "bro, build finished around nine forty, all sixty two tests passed. "
+        "vessel schedule sync is running fine, no issues from our side. "
+        "i pushed one change last night, post that CI is green. "
+        "nothing pending for u now."
     ),
     "2-one-to-one": (
-        "Hi, good to catch up. I have been working through the vessel ETA "
-        "ticket for most of the week, and I think we are close. There is one "
-        "part I want your view on before I raise the pull request, because it "
-        "touches the service plan logic that everyone depends on."
+        "hi bro, good to catch up. i was on that vessel ETA ticket most of "
+        "this week, i think we are close now. one part i want ur view once "
+        "before i raise the PR, because it is touching the service plan "
+        "logic, everyone is depending on that one. tell me when u free, "
+        "we can discuss and then merge."
     ),
     "3-quick": (
-        "Yes. No, not that one. Go ahead. On it. Give me a minute. "
-        "That is done. Approved. Hold on, let me check. Perfect, thanks."
+        "yes. no, not that one. go ahead. on it. give me a minute. "
+        "done bro. approved. hold on, let me check. then fine. "
+        "call me bro. all merged."
     ),
     "4-question": (
-        "Did the deployment to preprod actually pass? Who picked up the "
-        "incident overnight? Are we sure this is the right branch? "
-        "Excellent, that is exactly what I wanted to hear! Careful there, "
-        "that change would break the amend flow."
+        "did the preprod deployment actually pass? who picked up the "
+        "incident last night? just ur bug fix is fine na? are we sure this "
+        "is the right branch? prod fix? CT u marked as skipped bro? "
+        "then what is that change?"
     ),
     "5-technical": (
-        "The ticket is PROJ dash nine three nine seven, on the orders "
-        "service repository. It fails in ShipmentDomainService "
-        "with a null pointer when getServiceTypeModes returns null. "
-        "Grafana shows the error rate at zero point four percent in preprod."
+        "the ticket is BEPTELIKOS dash one zero one five nine, on the "
+        "booking service repo. it is failing in TmsServiceImpl, null "
+        "pointer when getServicePlanLegs returns null. i shared the PR link "
+        "in the group, one three seven one. grafana is showing error rate "
+        "around zero point four percent in preprod."
     ),
+}
+
+#: When he would rather just TALK than read — which produces a better clone,
+#: because nobody reads with their own rhythm. One prompt per delivery; he
+#: answers each out loud for fifteen or twenty seconds, in whatever words come.
+CLONE_PROMPTS: dict[str, str] = {
+    "1-status": "Give this morning's update out loud — build, tests, what is pending.",
+    "2-one-to-one": "Tell Vinish where you got to on the ETA ticket and what you want his view on.",
+    "3-quick": "Answer ten things quickly — yes, no, go ahead, on it, done, hold on.",
+    "4-question": "Ask six things you genuinely need answers to today.",
+    "5-technical": "Say the ticket id, the class it fails in, the PR number and the error rate.",
 }
 
 # Kept for callers that just want one paragraph.

@@ -981,11 +981,30 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     multi-repo run, and he is told which one and why.
     """
     from . import notify
+    # A task with no workspace is NOT a task with no repo — `_cwd(None)` falls
+    # back to ROOT, which is Asta's own checkout. Branching there means the
+    # running process rewrites the branch it is executing from, mid-session.
+    #
+    # That is not hypothetical: it happened. A task titled "fix bug" with no
+    # workspace cut `feature/asta-1-fix-bug`, and the reflog shows the whole
+    # sequence — `checkout: moving from feature/agentic-loop to main`,
+    # `pull --ff-only`, `checkout: moving from main to feature/asta-1-fix-bug`
+    # — while five commits of unpushed work sat on the branch it left. Nothing
+    # was lost, because git does not lose commits, but the working tree moved
+    # underneath an editor and a test run at the same time.
+    #
+    # So: no workspace, no branching. And never this repo, even if a workspace
+    # somehow resolves to it.
+    if not t.get("workspace"):
+        return []
     root = Path(_cwd(t.get("workspace")))
-    if not root.exists():
+    if not root.exists() or root.resolve() == ROOT.resolve():
         return []
     repos = [root] if (root / ".git").is_dir() else \
         sorted(p for p in root.iterdir() if (p / ".git").is_dir())
+    repos = [r for r in repos if r.resolve() != ROOT.resolve()]
+    if not repos:
+        return []
     branch = task_branch(t, task_id)
 
     results = []

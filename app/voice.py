@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import httpx
 
@@ -29,6 +30,134 @@ HINDI_PROFILE = os.environ.get("VOICEBOX_PROFILE_HI", "Asta (Hindi)")
 # Kokoro on an M1 Pro is a couple of seconds for a sentence; cloning engines are
 # slower, and the first call of the day also pays for loading the model.
 GENERATE_TIMEOUT = float(os.environ.get("VOICEBOX_TIMEOUT", "120"))
+
+# --- the two voices ----------------------------------------------------------
+#
+# Arun asks for one or the other in words — "talk like me", "talk like
+# assistant" — so the choice has to survive being typed, spoken, or shouted
+# mid-call, and it must never be GUESSED. Defaulting to his clone because the
+# request was ambiguous would put his voice in front of someone on the strength
+# of a parse failure, so anything unrecognised falls back to the assistant.
+#
+# Measured on this machine (M1 Pro), which is why they are not interchangeable:
+#   assistant  kokoro      ~1.3s a line, faster than real time
+#   mine       chatterbox  ~3.4x real time on the GPU, ~6.5x on CPU
+VOICE_MINE = "mine"
+VOICE_ASSISTANT = "assistant"
+
+#: profile + engine per voice. The clone's profile name is whatever `voice clone`
+#: created; the assistant keeps whatever the .env default is.
+CLONE_PROFILE = os.environ.get("VOICEBOX_CLONE_PROFILE", "Arun")
+CLONE_ENGINE = os.environ.get("VOICEBOX_CLONE_ENGINE", "chatterbox")
+
+_SAY_AS_MINE = re.compile(
+    r"\b(?:talk|speak|say\s+it|reply|answer)?\s*(?:like|as|in)\s+"
+    r"(?:me|my\s+voice|myself|arun)\b|\bmy\s+voice\b|\bas\s+me\b", re.I)
+_SAY_AS_ASSISTANT = re.compile(
+    r"\b(?:talk|speak|say\s+it|reply|answer)?\s*(?:like|as|in)\s+"
+    r"(?:the\s+)?(?:assistant|asta|bot|yourself)\b|\bassistant\s+voice\b", re.I)
+
+
+def pick_voice(text: str, current: str = VOICE_ASSISTANT) -> str:
+    """Which voice he just asked for, or `current` if he did not say.
+
+    Assistant wins a tie. Two competing instructions in one sentence is not a
+    coin toss — it is an unclear instruction, and the safe reading of an unclear
+    instruction about whose voice to use is "not his".
+    """
+    said_assistant = bool(_SAY_AS_ASSISTANT.search(text or ""))
+    said_mine = bool(_SAY_AS_MINE.search(text or ""))
+    if said_assistant:
+        return VOICE_ASSISTANT
+    if said_mine:
+        return VOICE_MINE
+    return current if current in (VOICE_MINE, VOICE_ASSISTANT) else VOICE_ASSISTANT
+
+
+def voice_settings(voice: str) -> tuple[str, str]:
+    """(profile, engine) for a voice name."""
+    if voice == VOICE_MINE:
+        return CLONE_PROFILE, CLONE_ENGINE
+    return DEFAULT_PROFILE, DEFAULT_ENGINE
+
+
+def strip_voice_instruction(text: str) -> str:
+    """The words to SAY, with the 'talk like me' instruction removed.
+
+    Without this the instruction is spoken aloud — Vinish hears "talk like me,
+    tell him the build passed", which is both wrong and revealing.
+    """
+    out = _SAY_AS_ASSISTANT.sub(" ", _SAY_AS_MINE.sub(" ", text or ""))
+    return re.sub(r"\s{2,}", " ", out).strip(" ,.:;-—")
+
+
+# --- playing audio into a call ----------------------------------------------
+
+#: The virtual microphone Teams is pointed at. Empty = Asta cannot be heard.
+CALL_DEVICE = os.environ.get("ASTA_CALL_AUDIO_DEVICE", "").strip()
+
+
+def output_devices() -> list[str]:
+    """Output devices this machine can play to. [] if the audio stack is absent."""
+    try:
+        import sounddevice as sd
+        return [d["name"] for d in sd.query_devices() if d["max_output_channels"] > 0]
+    except Exception:
+        return []
+
+
+def find_device(name: str) -> int | None:
+    """Index of an output device by name, or None. Substring, case-insensitive —
+    "BlackHole 2ch" is listed slightly differently across macOS versions."""
+    if not name:
+        return None
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+    except Exception:
+        return None
+    wanted = name.strip().lower()
+    for i, d in enumerate(devices):
+        if d["max_output_channels"] > 0 and wanted in d["name"].strip().lower():
+            return i
+    return None
+
+
+def play_to_device(wav: bytes, device: str = "") -> float:
+    """Play WAV bytes to a named output device. Returns seconds played.
+
+    Raises rather than returning quietly on every failure path. The whole reason
+    this function exists is that `say_in_call` used to generate audio, drop it,
+    and report success — so Arun believed a point had been made in a call when
+    nothing had been said at all. A silent failure here is the same bug wearing
+    a different hat.
+    """
+    import io
+    import wave as _wave
+
+    name = device or CALL_DEVICE
+    if not name:
+        raise RuntimeError("no output device configured (ASTA_CALL_AUDIO_DEVICE)")
+    idx = find_device(name)
+    if idx is None:
+        have = ", ".join(output_devices()) or "none"
+        raise RuntimeError(f"audio device {name!r} not found — available: {have}")
+
+    with _wave.open(io.BytesIO(wav)) as w:
+        rate, channels = w.getframerate(), w.getnchannels()
+        frames = w.readframes(w.getnframes())
+    if not frames:
+        raise RuntimeError("audio had no frames — nothing to play")
+
+    import numpy as np
+    import sounddevice as sd
+    samples = np.frombuffer(frames, dtype=np.int16)
+    if channels > 1:
+        samples = samples.reshape(-1, channels)
+    # blocking on purpose: the caller needs to know it FINISHED speaking before
+    # it reports that it spoke, and before anything else is said over the top.
+    sd.play(samples, samplerate=rate, device=idx, blocking=True)
+    return len(samples) / rate / max(1, channels if samples.ndim == 1 else 1)
 
 
 async def available() -> bool:
@@ -90,12 +219,19 @@ def pick_profile(text: str, requested: str = "") -> str:
     return DEFAULT_PROFILE
 
 
-async def speak(text: str, profile: str = "", engine: str = "") -> bytes:
+async def speak(text: str, profile: str = "", engine: str = "",
+                voice: str = "") -> bytes:
     """Render text to speech; returns audio bytes (wav/mp3 as Voicebox produced).
+
+    `voice` is the high-level choice — "mine" (his clone) or "assistant" — and
+    fills in profile+engine when they were not named explicitly. An explicit
+    profile/engine still wins, so existing callers behave exactly as before.
 
     Raises rather than returning empty audio so callers can fall back to the
     browser's built-in voice instead of playing silence.
     """
+    if voice and not (profile or engine):
+        profile, engine = voice_settings(voice)
     body: dict = {"text": text[:10000], "engine": engine or DEFAULT_ENGINE}
     chosen = pick_profile(text, profile)
     if chosen:

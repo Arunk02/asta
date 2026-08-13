@@ -187,7 +187,7 @@ def test_silent_speech_generation_is_not_reported_as_spoken(monkeypatch):
     monkeypatch.setattr(meetings, "AUDIO_DEVICE", "BlackHole 2ch")
     store.kv_set("teams_in_call", "https://teams/x")
 
-    async def nothing(text, profile="", engine=""):
+    async def nothing(text, profile="", engine="", voice=""):
         return b""
 
     from app import voice

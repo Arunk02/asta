@@ -393,23 +393,38 @@ async def _click_first(page, selectors, timeout: float = 3000) -> bool:
     return False
 
 
-async def say_in_call(text: str) -> str:
+async def say_in_call(text: str, voice_name: str = "") -> str:
     """Say something out loud in the call Asta is in — only if he asked for it.
 
-    Refuses when no virtual microphone is configured. The alternative — generating
-    the audio, playing it to a device nobody in the call is listening to, and
-    reporting success — is the failure mode worth engineering against: he would
-    believe his point was made and find out in the follow-up that it never was.
+    This used to generate the audio and then DROP it: no playback, no device, and
+    a cheerful "said it in the call" either way. Its own docstring warned about a
+    milder version of the same thing. So the contract now is that the function
+    returns only after the audio has finished playing into the virtual mic Teams
+    is listening to, and raises on every other path — he must never be told a
+    point was made in a call when nothing was said.
+
+    `voice_name` is "mine" (his clone) or "assistant". Unrecognised → assistant,
+    never his voice by accident.
     """
     from . import voice
     if not can_speak():
         raise RuntimeError("no virtual microphone configured — " + speaking_hint())
     if not store.kv_get("teams_in_call"):
         raise RuntimeError("not in a call")
-    audio = await voice.speak(text)
+
+    words = voice.strip_voice_instruction(text)
+    if not words:
+        raise RuntimeError("nothing left to say once the instruction was removed")
+    chosen = voice.pick_voice(text, voice_name or voice.VOICE_ASSISTANT)
+
+    audio = await voice.speak(words, voice=chosen)
     if not audio:
         raise RuntimeError("speech generation produced nothing — said nothing")
-    return f"said it in the call ({len(text)} chars)"
+    # Blocking: it has to have FINISHED before this reports that it spoke, or a
+    # second line starts over the top of the first.
+    played = await asyncio.to_thread(voice.play_to_device, audio, AUDIO_DEVICE)
+    store.kv_set("teams_last_spoken", words[:500])
+    return f"said it in the call in {chosen} voice ({played:.1f}s): {words[:120]}"
 
 
 #: The transcript of the call that just finished. Kept OUTSIDE `_CALL` because

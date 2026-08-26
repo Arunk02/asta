@@ -80,6 +80,9 @@ first thing to revisit.
 | 41 | High | A read-only side turn could still spawn a CODE task — the guard that would catch it is behind a flag that is off | `agent.delegate_task` | **closed** |
 | 42 | Medium | Code questions went to a 9B local model before the CLI subscriptions already paid for | `call_brain` | **closed** |
 | 43 | High | The documented cert command truncates its target before fetching, so a failed fetch leaves a 0-byte cert | `health`, `mcp-setup-bundle` | **closed** |
+| 44 | **Critical** | Code work ran in a 300s chat turn instead of the task lane — the original timeout | `main._dispatch`, `work_intent` | **closed** |
+| 45 | High | No CI: 1,800 tests were green only because someone ran them | `.github/workflows/tests.yml` | **closed** |
+| 46 | Medium | The project was not installable — `pip install -e .` fails on package discovery | `pyproject.toml` | **closed** |
 
 ## Closed
 
@@ -796,10 +799,76 @@ maintained.
 
 ---
 
+### 44 — implementation ran in the wrong lane — CLOSED 2026-08-26
+The finding this whole thread started from. "implement X" landed in a chat turn
+capped at `ASTA_TURN_TIMEOUT` (300s) instead of the code-task lane (35-65 min,
+with a plan gate), and died mid-edit.
+
+Asta's own instruction already said **"When Arun assigns work … delegate it as a
+background task right away"** and **"Never plan or implement in chat yourself"**.
+It implemented anyway. An instruction the model may or may not follow is not a
+routing decision, so this makes it one — structurally, in two layers.
+
+**`app/work_intent.py` routes clear work assignments to a code task.** Safe to be
+imperfect in one direction: a code task runs its context gate, plans, and STOPS
+for approval, so a false positive costs a plan he declines. The failure it
+replaces is a half-finished edit ending in a stack trace.
+
+**The first version was far too loose, and probing found it — not review.** A work
+verb alone matched "update me on the PR", "drop the call", "delete that message",
+and **"change my status to busy"** — every one a different flow that would have
+been hijacked into a spawned repo change. It now requires positive evidence the
+message is about *code*: a ticket key, a repo name from the workspace, or a code
+noun. Bare "fix it" deliberately does **not** route — nothing in it says code, so
+routing would be a guess.
+
+**Second layer: the chat brain may no longer edit files** (`--deny-tool edit`).
+Only `edit` — `bash`, `view` and `grep` stay, because reading is most of what chat
+legitimately does. So the bare "fix it" that does not route reaches a brain that
+cannot implement it and has to delegate. Task runs are untouched: implementing is
+their whole job.
+
+Mutation testing caught a first-pass classifier whose question guard was
+redundant, and my own `--deny-tool` test **passed while the code said
+`argv += …` against a list named `cmd`** — an UnboundLocalError on every chat
+turn. The delivery tests caught that; my grep-based test gave false confidence,
+so it now checks the append targets the same list the flags are built in.
+
+### 45 — nothing ran the tests but me — CLOSED 2026-08-26
+1,800 tests were green because they were run on a laptop. Nothing checked a push,
+so a regression would reach the branch and wait to be noticed — for a repo whose
+entire argument is "verify before you claim", the sharpest irony in it.
+
+`.github/workflows/tests.yml`, two jobs in parallel:
+
+- **pytest** — the suite on every push and PR, no `.env`. That is the point:
+  `conftest` already isolates the database, clears wall-clock-dependent settings
+  and blocks live brains, so anything needing a real key or browser must skip.
+- **dom** — the 11 Teams DOM tests, which need a real Chromium and skip without
+  one. **A skip fails the job**, because otherwise it goes green having run
+  nothing the moment the browser install breaks.
+
+Verified before committing by building a clean venv and running the suite the way
+CI would: **1,801 passed, 11 skipped**, and all 11 skips are the browser tests.
+
+### 46 — the project was never installable — CLOSED 2026-08-26
+Found by that verification, and it would have failed CI on its first run.
+`pip install -e .` dies in setuptools package discovery: it sees `app/`, `tests/`,
+`agents/`, `skills/`, `ui/`, `deploy/` at the top level and refuses to guess which
+is the package rather than choosing wrong.
+
+Nobody noticed because everything runs from a venv built by hand against a
+checkout, where the package is never installed at all. `[tool.setuptools.packages.find]`
+declares it. Test dependencies are declared as a `test` extra in the same file
+rather than as a loose list in the workflow, so "what the tests need" has one
+answer and CI cannot drift from a local checkout.
+
+---
+
 ## Where this leaves the review
 
-**43 findings raised, 42 closed**, plus finding 4 recorded as Arun's accepted
-risk. 1,766 tests pass. Every fix was mutation-tested — the source was
+**46 findings raised, 45 closed**, plus finding 4 recorded as Arun's accepted
+risk. 1,812 tests pass, now on every push. Every fix was mutation-tested — the source was
 deliberately broken and the suite had to notice.
 
 Still needing Arun rather than code:

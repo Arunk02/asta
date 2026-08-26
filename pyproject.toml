@@ -9,3 +9,28 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "python-dotenv>=1.0",
 ]
+
+# Declared here rather than as a loose list in the CI workflow, so "what the
+# tests need" has one answer and CI cannot drift from a local checkout.
+#
+# Deliberately excludes playwright, sounddevice, numpy and fastmcp: every one of
+# them is imported lazily inside a function, and the tests that would reach them
+# skip when they are absent (see tests/test_teams_dom.py). Installing a browser
+# on CI to run tests that do not need one is minutes per run for nothing.
+# Without this, `pip install -e .` fails: setuptools sees app/, tests/, agents/,
+# skills/, ui/, deploy/ … at the top level, cannot guess which is the package, and
+# refuses rather than choosing wrong. The project was never actually installable —
+# which nobody noticed, because everything runs from a venv built by hand against
+# a repo checkout. Found by building a clean environment to prove the CI workflow
+# would work before committing it; it would not have.
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "cryptography>=42",
+    "pyyaml>=6.0",
+]

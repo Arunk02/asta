@@ -1,0 +1,86 @@
+# The suite, on every push and pull request.
+#
+# Until this existed, 1,800 tests were green because someone ran them on a
+# laptop. Nothing checked a push, so a regression reached the branch and waited
+# to be noticed — which for a repo whose whole argument is "verify before you
+# claim" was the sharpest irony in it.
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A second push supersedes the first: the older run is answering a question
+# nobody is asking any more.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15        # the suite is ~3 min; this catches a hang, not a slow run
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"     # matches the local .venv; 3.12 is the floor in pyproject
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Run the suite
+        # No .env on CI, and that is the point: every test has to pass on its own
+        # fixtures. conftest already isolates the database, clears wall-clock
+        # dependent settings and blocks live brains — if something needs a real
+        # key or a real browser, it must skip, not fail.
+        env:
+          ASTA_TOKEN: ci-not-a-real-token
+        run: python -m pytest -q --durations=10
+
+  # The 11 Teams DOM tests need a real Chromium, and skip without one. They parse
+  # the markup the selectors run against, which is the part that breaks when
+  # Microsoft ships — so they are worth running, just not worth making everyone
+  # wait for a browser download. Separate job: it runs alongside `pytest`, so the
+  # wall clock barely moves.
+  dom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install (with a browser)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]" playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Teams DOM parsing
+        env:
+          ASTA_TOKEN: ci-not-a-real-token
+        # A skip here must FAIL the job. These tests skip themselves when no
+        # browser is present, so without this check the job goes green having run
+        # nothing the moment the chromium install breaks — "silence reads as
+        # success", which is the failure the whole August review is about.
+        run: |
+          python -m pytest tests/test_teams_dom.py -q -rs --no-header | tee dom.log
+          if grep -q "skipped" dom.log; then
+            echo "::error::Teams DOM tests SKIPPED — chromium is missing, so this job proved nothing"
+            exit 1
+          fi

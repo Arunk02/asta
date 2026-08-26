@@ -29,7 +29,7 @@ Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
 Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-.venv/bin/python -m pytest -q           # 1,766 tests
+.venv/bin/python -m pytest -q           # 1,812 tests
 ```
 
 ## How it is put together
@@ -74,6 +74,15 @@ turns out bigger.
 
 Kinds: **analysis** (read-only, runs in parallel), **code** (edits a repo),
 **teams_draft** (never sent automatically).
+
+**Work is routed to a task, not answered in chat.** "implement the retry logic in
+booking" goes straight to the code lane — because a chat turn is capped at five
+minutes and a real implementation does not fit in one, which is how it used to end
+in `timed out after 300s` mid-edit. Routing is deliberately narrow: it needs a
+work verb *and* evidence the message is about code (a ticket key, a repo name, a
+code noun), so "change my status to busy" and "update me on the PR" keep their own
+flows. Anything ambiguous falls through to chat — which can no longer edit files,
+so the model has to delegate from there anyway.
 
 **Code tasks run in parallel too, on git worktrees.** They used to be serialised
 one-per-workspace, and the reason was sound — two tasks sharing a checkout fight
@@ -855,7 +864,7 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  1,766 tests (conftest isolates the DB — see below)
+tests/                  1,812 tests (conftest isolates the DB — see below)
 ```
 
 `tests/conftest.py` points `store.DB_PATH` at a temp file for *every* test. A stray
@@ -867,7 +876,7 @@ roadmap this is being built against. Still ahead of it: one scheduler replacing 
 background loops, detached runs that survive a closed tab, adaptive context
 compaction, a people/contacts model, and deep research.
 
-`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 43 findings
+`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 46 findings
 raised against the *running* system — every number measured on the live install, not
 inferred from the source — each closed in place with what was done and how it was
 proved. Every fix was mutation-tested: the source was deliberately broken and the

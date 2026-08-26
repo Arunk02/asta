@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, quiet, router, quality, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, quiet, router, quality, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -1740,6 +1740,21 @@ def _clear_inflight(job: asyncio.Task, cid: str) -> None:
         _inflight.pop(cid, None)
 
 
+def _workspace_repos(workspace: str) -> tuple[str, ...]:
+    """Repo names in this workspace, so naming one counts as code evidence.
+
+    "fix the mapper in telikos-booking-service" is unmistakably code work; the
+    generic noun list alone would not always catch it.
+    """
+    try:
+        from pathlib import Path as _P
+        from . import worktrees
+        root = workspace_tools.WORKSPACES.get(workspace)
+        return tuple(p.name for p in worktrees.repos_in(_P(root))) if root else ()
+    except Exception:                                  # noqa: BLE001
+        return ()
+
+
 def _start_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task:
     job = asyncio.create_task(_conducted_turn(conv, user_text, sink, channel))
     _inflight[conv["id"]] = job
@@ -2392,6 +2407,41 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         if await _route_to_task(live[0], user_text, sink, channel, conv.get("model", "")):
             return None
         # Not about the task — fall through and answer it as an ordinary message.
+
+    # Handing over CODE WORK goes to the task lane, not to this chat turn.
+    #
+    # Asta's own instruction already says to delegate work and "never plan or
+    # implement in chat yourself". The model ignored it and implemented inline,
+    # and the chat turn's 300s budget killed it mid-edit with a stack trace. An
+    # instruction the model may or may not follow is not a routing decision, so
+    # this makes it one.
+    #
+    # Safe to be imperfect, in one direction: a code task runs its context gate,
+    # plans, and STOPS for his approval — so a false positive costs him a plan he
+    # can decline. The failure it replaces is a half-finished edit and a
+    # five-minute wait ending in "timed out after 300s".
+    #
+    # Only when a workspace is known: `tasks.code_cwd` refuses to run code work
+    # without one, and routing into a refusal would be worse than not routing.
+    if (not live and (conv.get("workspace") or "").strip()
+            and work_intent.is_work_assignment(user_text, _workspace_repos(conv["workspace"]))):
+        try:
+            t = tasks.spawn(work_intent.title_for(user_text), user_text,
+                            "code", conv["workspace"])
+        except Exception as exc:                       # noqa: BLE001
+            # Never swallow the message: if the lane will not take it, the chat
+            # turn still answers, which is exactly the old behaviour.
+            quiet.note("dispatch.route_code_work", exc)
+        else:
+            tasks.link_task(cid, t["id"])
+            await sink.send({"type": "note", "text":
+                             f"🛠 Task #{t['id']} — {t['title']}\n"
+                             f"Planning it in {conv['workspace']} now; you'll get the "
+                             f"plan to approve before anything is written. "
+                             f"Say “stop {t['id']}” to drop it."})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
 
     # Nothing live, but something finished here recently. Feedback on it belongs
     # to THAT task — continuing its session keeps everything it already worked

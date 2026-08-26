@@ -33,6 +33,17 @@ def mcp_cli_enabled() -> bool:
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _deny_edit_in_chat() -> bool:
+    """Whether the chat brain is barred from editing files (default: yes).
+
+    `ASTA_CHAT_MAY_EDIT=1` puts it back, for anyone who wants chat to be a place
+    code gets written. It is off because a chat turn is capped at
+    ASTA_TURN_TIMEOUT and real edits do not fit in it — that mismatch is the bug,
+    not the editing.
+    """
+    return os.environ.get("ASTA_CHAT_MAY_EDIT", "0").lower() not in ("1", "true", "yes", "on")
+
+
 def turn_timeout() -> int:
     """How long ONE CLI turn may run before it is abandoned.
 
@@ -301,6 +312,23 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
         # enough: it grants file access, not execution.
         "--allow-all-paths",
     ]
+    # Defence in depth behind the routing in `_dispatch`: the CHAT path may not
+    # edit files.
+    #
+    # The instruction has said "never plan or implement in chat yourself" for a
+    # long time and the model implemented anyway, burning the 300s turn budget
+    # mid-edit. Routing catches the clear cases; this catches the rest, by making
+    # the wrong thing impossible rather than discouraged.
+    #
+    # Only `edit` — `bash`, `view` and `grep` stay, because reading is most of
+    # what chat legitimately does and taking bash away would break every Teams,
+    # git and log command. A model determined to write through bash still could;
+    # what this removes is the effortless default, which is what was actually
+    # happening.
+    #
+    # Task runs (`one_shot`) are untouched: implementing is their whole job.
+    if _deny_edit_in_chat():
+        cmd += ["--deny-tool", "edit"]
     # Native asta tools instead of curl, when enabled. Copilot takes the config
     # as inline JSON (its flag differs from Claude's --mcp-config). --allow-all-
     # tools above already clears the MCP tools. Kept in lockstep with the shared

@@ -187,3 +187,47 @@ def _no_live_brains(monkeypatch):
         with contextlib.suppress(ImportError, AttributeError):
             monkeypatch.setattr(f"app.{mod}.one_shot", _no_cli, raising=False)
     yield
+
+
+# --- tests about THIS machine's install --------------------------------------
+#
+# A few tests assert facts about Arun's real setup rather than about code: that
+# booking is the only registered workspace, that each of his repos has a verify
+# command, that the eval cases are grounded in lessons that still say what they
+# cited. They are worth having — they catch his configuration drifting — and they
+# cannot hold anywhere else, because everything they read lives under `data/`,
+# which is gitignored for holding the database, OAuth tokens and session cookies.
+#
+# So they SKIP off this machine instead of failing. That distinction matters: a
+# red CI run that means "this is not Arun's laptop" trains people to ignore red
+# runs, which is worth more than the tests are.
+
+def _needs(path: str, why: str):
+    from pathlib import Path as _P
+    if not _P(path).exists():
+        pytest.skip(f"{why} — {path} is gitignored and absent here")
+
+
+@pytest.fixture
+def live_verify_commands():
+    """His per-repo verify commands. Local-only: they name work repos."""
+    _needs("data/verify-commands.json", "no verify commands on this machine")
+    yield
+
+
+@pytest.fixture
+def live_eval_cases():
+    """The grounded eval cases. Local-only: they quote internal names."""
+    from app import evals
+    if not evals.load():
+        pytest.skip("no eval cases on this machine — data/evals/ is gitignored")
+    yield
+
+
+@pytest.fixture
+def live_workspaces():
+    """His registered workspaces, which live in the gitignored data/ config."""
+    from app.workspace import registry
+    if not list(registry.all_workspaces()):
+        pytest.skip("no workspaces registered on this machine")
+    yield

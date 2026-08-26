@@ -158,6 +158,16 @@ def _dispatch(text, monkeypatch, *, workspace="booking", spawn=None, live=()):
     monkeypatch.setattr(main, "_start_turn", _no_turn)
     monkeypatch.setattr(main, "_workspace_repos", lambda ws: ("telikos-booking-service",))
     monkeypatch.setattr(tasks, "live_tasks_for", lambda cid: list(live))
+
+    # Steering a live task is its own path and reaches a brain to classify the
+    # message. Stubbed to "not about that task" so this stays a test of routing
+    # versus not-routing. Without it the live-task case tripped conftest's
+    # no-live-brains guard on CI — and passed locally, which is the worst kind of
+    # difference to leave in a suite.
+    async def _not_about_the_task(*a, **k):
+        return False
+
+    monkeypatch.setattr(main, "_route_to_task", _not_about_the_task)
     monkeypatch.setattr(tasks, "refinable_for", lambda cid: [])
     monkeypatch.setattr(tasks, "paused_tasks_for", lambda cid: [])
     monkeypatch.setattr(tasks, "link_task", lambda cid, tid: None)

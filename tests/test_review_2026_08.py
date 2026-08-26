@@ -509,7 +509,7 @@ def test_a_missing_or_broken_map_is_not_a_crash(tmp_path, monkeypatch):
     assert verify.resolve_command(str(root)) is None
 
 
-def test_asta_ships_a_map_covering_every_booking_repo():
+def test_asta_ships_a_map_covering_every_booking_repo(live_verify_commands):
     """The three repos must each be present, so a missing check is a visible
     empty string rather than a silently absent key."""
     import json
@@ -614,7 +614,7 @@ async def test_a_check_that_times_out_is_skipped_not_looped(monkeypatch, tmp_pat
         "a skipped check must say so, or it silently protects nothing"
 
 
-def test_the_booking_repos_all_have_a_real_check_configured():
+def test_the_booking_repos_all_have_a_real_check_configured(live_verify_commands):
     """The whole point of finding 2. An empty command here means the gate is on
     and verifying nothing, which looks exactly like a gate that works."""
     import json
@@ -628,7 +628,7 @@ def test_the_booking_repos_all_have_a_real_check_configured():
         assert "test" in cmd, f"{repo}'s check does not run tests: {cmd}"
 
 
-def test_the_multi_module_repo_builds_its_siblings_too():
+def test_the_multi_module_repo_builds_its_siblings_too(live_verify_commands):
     """service/ depends on persistence, event, booking-domain, common and
     workflow. Without -am those resolve from the repository rather than the
     working tree, so a change to a sibling module would not be checked at all."""
@@ -750,7 +750,7 @@ def test_analysis_tasks_keep_the_old_lenient_behaviour(monkeypatch):
     assert tasks._cwd(None) == str(tasks.ROOT)
 
 
-def test_booking_is_the_only_workspace_registered():
+def test_booking_is_the_only_workspace_registered(live_workspaces):
     """Arun removed iom-workspace on 2026-08-19. With exactly one registered,
     a workspace-less code task resolves rather than refuses — so this is load
     bearing for the case above, not decoration."""
@@ -1880,7 +1880,7 @@ def test_the_caption_reader_records_its_failures():
 from app import evals
 
 
-def test_every_case_is_grounded_in_something_verified():
+def test_every_case_is_grounded_in_something_verified(live_eval_cases):
     """A case whose ground truth cannot be pointed at is worse than no case — it
     measures agreement with a guess and calls the result quality."""
     cases = evals.load("booking")
@@ -1943,7 +1943,7 @@ def test_no_answer_is_a_failure_not_a_pass():
 
 
 @pytest.mark.asyncio
-async def test_a_brain_that_throws_is_reported_not_crashed(monkeypatch):
+async def test_a_brain_that_throws_is_reported_not_crashed(monkeypatch, live_eval_cases):
     async def explode(question):
         raise RuntimeError("401 API key is invalid")
 
@@ -1954,7 +1954,7 @@ async def test_a_brain_that_throws_is_reported_not_crashed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_report_says_what_the_answer_should_have_cited(monkeypatch):
+async def test_the_report_says_what_the_answer_should_have_cited(monkeypatch, live_eval_cases):
     async def vague(question):
         return "It is handled somewhere in the service layer."
 
@@ -1965,7 +1965,7 @@ async def test_the_report_says_what_the_answer_should_have_cited(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_score_is_recorded_so_change_is_visible(monkeypatch):
+async def test_a_score_is_recorded_so_change_is_visible(monkeypatch, live_eval_cases):
     async def perfect(question):
         return ("booking.references serviceDates VTS "
                 "VesselTrackingRegistrationActivityImpl clean MapStruct -am")

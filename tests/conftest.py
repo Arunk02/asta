@@ -55,6 +55,13 @@ _TIME_DEPENDENT_ENV = ("ASTA_QUIET_HOURS",)
 #: sets it itself, which states the assumption instead of inheriting it.
 _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 
+#: Settings this machine PINS that the code under test falls back to. Third
+#: member of the same family, and the one that would have bitten next: the model
+#: tier is "his stored choice, else the environment", and Arun's .env pins
+#: ASTA_CLAUDE_CLI_MODEL=claude-sonnet-5. A test asserting what an unset tier
+#: does would therefore pass here and fail on any machine that leaves it blank.
+_MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE")
+
 
 #: What this machine's .env said, captured before it is cleared. A handful of
 #: tests are genuinely ABOUT the live workspace — checking that eval ground truth
@@ -67,7 +74,7 @@ _REAL_CONTEXT_DIRNAMES = {n: os.environ.get(n) for n in
 
 @pytest.fixture(autouse=True)
 def _no_wall_clock_dependence(monkeypatch):
-    for name in _TIME_DEPENDENT_ENV + _FIXTURE_SHAPING_ENV:
+    for name in _TIME_DEPENDENT_ENV + _FIXTURE_SHAPING_ENV + _MACHINE_PINNED_ENV:
         monkeypatch.delenv(name, raising=False)
     yield
 

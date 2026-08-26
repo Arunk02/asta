@@ -756,6 +756,26 @@ async def api_selector_check():
     return {"report": await selector_health.check_and_report()}
 
 
+@app.post("/api/model-tier", dependencies=[Depends(require_auth)])
+async def api_model_tier(request: Request):
+    """Pick which model of a brain answers — the UI half of "use opus".
+
+    Refuses a tier the brain does not declare rather than passing it through: an
+    unknown --model reaches the CLI as an argument error mid-turn, which reads to
+    him as the brain being broken.
+    """
+    b = await request.json() if await request.body() else {}
+    brain = agent_mod.normalize_model(str(b.get("brain") or ""))
+    tier = str(b.get("tier") or "").strip()
+    offered = agent_mod.tier_options(brain)
+    if not offered:
+        raise HTTPException(400, f"{brain or 'that brain'} has no model choice")
+    if tier and tier not in offered:
+        raise HTTPException(400, f"{brain} offers {', '.join(offered)}")
+    agent_mod.set_tier(brain, tier)
+    return {"brain": brain, "tier": agent_mod.tier_of(brain)}
+
+
 @app.post("/api/evals", dependencies=[Depends(require_auth)])
 async def api_evals(request: Request):
     """Score answers about a workspace against grounded cases. Costs brain calls."""
@@ -2058,6 +2078,36 @@ _MODEL_CMD_LOOSE = re.compile(
     r"([\w.\- ]{2,40})\s*[.!]*\s*$", re.I)
 _MODEL_ASK = re.compile(r"^\s*(which model|what model|models|list models|brains?)\s*\??\s*$", re.I)
 
+# "ignore claude-key", "stop telling me about context_booking" — the other half of
+# the health report. It could say a thing was broken and he had no way to say "I
+# know, and I am not fixing it", so a fault he had ruled out came back on every
+# set change and was then chased.
+#
+# Same shape as _MODEL_CMD_LOOSE and for the same reason: loose about how he says
+# it, strict about what it names. A hit counts ONLY when the name resolves to a
+# health key that actually exists, so "ignore that message" stays an ordinary
+# message instead of silencing something at random.
+_MUTE_CMD = re.compile(
+    r"^\s*(?:ignore|mute|silence|stop (?:telling|reporting|flagging|showing)"
+    r"(?:\s+me)?(?:\s+about)?)\s+(?:the\s+|that\s+)?([\w .:\-]{2,60}?)"
+    r"(?:\s+(?:issue|problem|warning|error|flag|for now|please))?\s*[.!]*\s*$", re.I)
+_UNMUTE_CMD = re.compile(
+    r"^\s*(?:unmute|un-?mute|stop ignoring|start reporting)\s+(?:the\s+)?"
+    r"([\w .:\-]{2,60})\s*[.!]*\s*$", re.I)
+_MUTED_ASK = re.compile(
+    r"^\s*(muted|what'?s muted|show mutes?|mute list|what am i ignoring)\s*\??\s*[.!]*\s*$", re.I)
+
+
+def _known_health_keys() -> list[str]:
+    """Health keys a mute command may name: the last known faults, plus the
+    already-muted ones so "unmute X" still resolves after the fault stops being
+    reported."""
+    try:
+        last = json.loads(store.kv_get("health_problems") or "[]")
+    except ValueError:
+        last = []
+    return sorted({*(k for k in last if isinstance(k, str)), *health.muted()})
+
 # Deliberately NOT a bare "continue": that word already belongs to the conductor
 # loop's pause, and stealing it would break the more common of the two.
 _RESUME_CMD = re.compile(
@@ -2124,8 +2174,12 @@ def _model_listing(current: str) -> str:
         mark = "→" if name == current else ("·" if info.get("available") else "×")
         state = "" if info.get("available") else f"  — {info.get('detail') or 'not configured'}"
         lines.append(f" {mark} {name}: {info.get('label') or name}{state}")
+    tiers = sorted({t for info in agent_mod.model_registry().values()
+                    for t in info.get("tiers") or ()})
+    pick = (f"\n\nModels: {', '.join(tiers)} — say “use opus” or “use sonnet” "
+            f"to change which one answers." if tiers else "")
     return ("Brains:\n" + "\n".join(lines) +
-            "\n\nSay “use <name>” to switch. The switch sticks for this chat.")
+            "\n\nSay “use <name>” to switch. The switch sticks for this chat." + pick)
 
 
 def _resolve_brain(wanted: str) -> str:
@@ -2168,6 +2222,25 @@ def _model_request(text: str) -> str:
     return ""
 
 
+def _switch_tier(conv: dict, brain: str, tier: str) -> str:
+    """Point Asta at a different model of the same brain — "use opus".
+
+    Deliberately global rather than per-chat: the tier is a statement about how
+    hard the work is, and a code task delegated from this chat runs in its own
+    lane. A preference that stopped at the chat boundary would be exactly wrong
+    for the case he asks for it in.
+    """
+    agent_mod.set_tier(brain, tier)
+    label = agent_mod.model_registry().get(brain, {}).get("label") or brain
+    moved = ""
+    if agent_mod.normalize_model(conv.get("model", "")) != brain:
+        store.update_conversation(conv["id"], model=brain)
+        conv["model"] = brain
+        moved = f" This chat is now on {brain}, which is the brain that runs it."
+    return (f"✅ Now using {tier}. ({label}){moved}\n\n"
+            f"Applies everywhere — chat and delegated tasks — until you say otherwise.")
+
+
 def _switch_model(conv: dict, wanted: str) -> str:
     """Point this conversation at another brain. Returns what to tell him.
 
@@ -2178,6 +2251,12 @@ def _switch_model(conv: dict, wanted: str) -> str:
     registry = agent_mod.model_registry()
     want = agent_mod.normalize_model(wanted.strip().lower().replace(" ", "_"))
     if want not in registry:
+        # He may be naming the MODEL rather than the brain — "use opus". That is
+        # how he thinks about the choice, and exactly one brain offers each tier,
+        # so it is unambiguous. Ambiguity would resolve to nothing and fall through.
+        tier_brain = agent_mod.brain_for_tier(wanted)
+        if tier_brain:
+            return _switch_tier(conv, tier_brain, wanted.strip().lower())
         hit = [n for n in registry if want in n or n in want]
         if len(hit) != 1:
             return (f"I don't have a brain called “{wanted.strip()}”.\n\n"
@@ -2192,6 +2271,46 @@ def _switch_model(conv: dict, wanted: str) -> str:
         return (f"Switched to {want}, but it isn't configured yet — "
                 f"{info.get('label', want)} needs its key or CLI before it can answer.")
     return f"✅ Now using {info.get('label') or want} for this chat."
+
+
+def _health_mute_reply(text: str) -> str:
+    """Answer a mute/unmute/list command, or "" when this isn't one.
+
+    Returns the whole reply so the caller stays a router. Nothing here runs a
+    health pass: the keys come from the last recorded result, which is what he
+    was just shown, so silencing something is instant and costs nothing.
+    """
+    if _MUTED_ASK.match(text):
+        quiet_keys = health.muted()
+        if not quiet_keys:
+            return ("🔊 Nothing muted — every health issue is being reported.\n\n"
+                    "Say “ignore <name>” to silence one until it actually clears.")
+        return ("🔇 Muted (each returns on its own if the fault clears and comes "
+                "back):\n" + "\n".join(f"• {k}" for k in sorted(quiet_keys))
+                + "\n\nSay “unmute <name>” to hear about one again.")
+    m = _UNMUTE_CMD.match(text)
+    if m:
+        key = health.resolve_key(m.group(1), health.muted())
+        if key and health.unmute(key):
+            return f"🔊 Reporting {key} again."
+        return ""            # names nothing muted — an ordinary message
+    m = _MUTE_CMD.match(text)
+    if m:
+        keys = _known_health_keys()
+        key = health.resolve_key(m.group(1), keys)
+        if not key:
+            return ""        # names no known fault — an ordinary message
+        if key in health.muted():
+            return f"🔇 {key} was already muted."
+        try:
+            last = json.loads(store.kv_get("health_problems_detail") or "{}")
+        except ValueError:
+            last = {}
+        health.mute(key, str(last.get(key, "")))
+        return (f"🔇 Muted {key} — I won't raise it again.\n\n"
+                f"If it ever clears, the mute is forgotten, so the same thing "
+                f"breaking later is news again. “unmute {key}” to reverse this.")
+    return ""
 
 
 async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> asyncio.Task | None:
@@ -2224,6 +2343,12 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # the question and must not be mistaken for changing the subject.
     if _MODEL_ASK.match(user_text or ""):
         await sink.send({"type": "note", "text": _model_listing(conv.get("model", ""))})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+    _muted_note = _health_mute_reply(user_text or "")
+    if _muted_note:
+        await sink.send({"type": "note", "text": _muted_note})
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None

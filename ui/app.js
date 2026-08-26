@@ -270,6 +270,8 @@ async function loadStatus() {
   });
   const firstOn = Object.entries(s.models).find(([, m]) => m.available);
   pick.value = prev && [...pick.options].some((o) => o.value === prev && !o.disabled) ? prev : firstOn ? firstOn[0] : "claude";
+  state.models = s.models;
+  renderTierPicker();
 
   renderWorkspacePicker(s.workspaces || {});
 
@@ -277,6 +279,31 @@ async function loadStatus() {
     `<span class="${m.enabled ? "on" : "off"}" title="${esc(m.reason || "connected")}">${m.name}</span>`
   ).join(" · ");
   $("#side-status").innerHTML = `MCP: ${mcp || "none"}<br>memories: ${s.memories}`;
+}
+
+/* Which MODEL, as opposed to which brain. Only shown for a brain that offers
+   the choice, so the row stays empty for the ones where it means nothing. */
+function renderTierPicker() {
+  const tp = $("#tier-pick");
+  const m = (state.models || {})[$("#model-pick").value] || {};
+  const tiers = m.tiers || [];
+  tp.classList.toggle("hidden", tiers.length === 0);
+  if (!tiers.length) return;
+  tp.innerHTML = "";
+  tiers.forEach((t) => {
+    const o = document.createElement("option");
+    o.value = t; o.textContent = t;
+    tp.appendChild(o);
+  });
+  if (m.tier) tp.value = m.tier;
+}
+
+async function setTier() {
+  await api("/api/model-tier", {
+    method: "POST",
+    body: JSON.stringify({ brain: $("#model-pick").value, tier: $("#tier-pick").value }),
+  });
+  await loadStatus();
 }
 
 /* ---------- tabs ---------- */
@@ -326,6 +353,8 @@ function setGraph(url) {
 }
 $("#graph-pick").onchange = (e) => setGraph(e.target.value);
 $("#workspace-pick").onchange = () => { if ($("#pane-graph").classList.contains("active")) loadGraphs(); };
+$("#model-pick").onchange = renderTierPicker;
+$("#tier-pick").onchange = setTier;
 
 /* ---------- memory tab ---------- */
 

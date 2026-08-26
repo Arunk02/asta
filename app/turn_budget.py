@@ -23,6 +23,11 @@ So a turn now stops for a named reason:
     ceiling  still producing output when the budget ran out — a long job, not a
              stuck one, and the right response is to resume rather than retry
 
+An idle stop then splits once more, because two very different things look
+identical to a clock. A brain that wedged mid-edit has said nothing complete; a
+brain that answered in full and then sat waiting on a twelve-minute CI run has.
+`Stop.answered()` separates them, and only the first is a failure — see there.
+
 Same module for both brains rather than a copy in each. The two drivers had
 byte-identical pump loops and drifted anyway; a rule that lives in one place is
 the only kind that stays consistent.
@@ -33,8 +38,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import time
 from dataclasses import dataclass, field
+
+#: Output that actually ENDS — sentence punctuation at the very end, allowing the
+#: markdown and quoting that usually trails it. Anchored, so a full stop in the
+#: MIDDLE does not count: a turn killed mid-sentence, or one that answered and
+#: then began narrating a tool call, fails this. That is the whole point of it.
+_FINISHED = re.compile(r"[.!?\u2026][\"\'\u2019\u201d)\]`*_]*$")
 
 
 def idle_seconds() -> int:
@@ -67,6 +79,40 @@ class Stop:
     @property
     def partial(self) -> str:
         return "".join(self.chunks).strip()
+
+    def answered(self, min_chars: int = 80) -> bool:
+        """Did it finish saying something before it went quiet?
+
+        A brain that streamed a complete answer and THEN fell silent is not
+        wedged. It has said what it had to say and is waiting on something
+        outside itself — a CI run it promised to watch, a build, a colleague.
+        Reporting that as "stuck, more time would not have helped" turned a
+        perfectly good answer into a warning, and then reprinted the answer
+        underneath the warning, so Arun paid for the same paragraphs twice and
+        still could not tell whether the work had finished.
+
+        Deliberately conservative, because the failure it must not mask is a
+        brain that wedged halfway through an edit. Three things have to hold:
+        the stop was idle (a ceiling stop really was cut short), the body is
+        substantial, and the body ENDS in sentence punctuation. A turn killed
+        mid-sentence, or one that answered and then began narrating a tool call,
+        fails the last of those and is still reported as stopped.
+
+        `min_chars` is calibrated against real traffic rather than picked. The
+        complete answers in the messages that prompted this run 127 and 166
+        characters; the dangerous near-miss — a brain announcing intent and THEN
+        wedging ("I'll look at the failing test now.") — runs 6 to 45. Eighty
+        sits in the gap. A first guess of 160 was measured against his actual
+        screenshot and rejected the very message this exists to rescue.
+        """
+        if self.reason != "idle":
+            return False
+        body = self.partial
+        # An earlier version walked to the last line before matching. The regex
+        # is anchored and `partial` is already stripped, so it was doing that
+        # anyway — mutation testing showed removing the walk changed nothing,
+        # which is the only reason to know it was there for no reason.
+        return len(body) >= min_chars and bool(_FINISHED.search(body))
 
     def why(self) -> str:
         """One line Arun can act on, which is the whole point of the split."""
@@ -127,13 +173,24 @@ class TurnStopped(RuntimeError):
     possible once the process is killed.
     """
 
-    def __init__(self, stop: Stop, tail_chars: int = 1200):
+    def __init__(self, stop: Stop, tail_chars: int = 1200,
+                 already_shown: bool = False):
+        """`already_shown` — the caller streamed this text to Arun as it arrived.
+
+        Repeating it under "It got this far:" is then pure duplication: he reads
+        the same three paragraphs twice on a phone, and pays for them twice on
+        the way out. What he still needs is the SIZE of what he already saw, so
+        he can tell "it stopped having done nothing" from "it stopped after a
+        full answer" without scrolling.
+        """
         self.stop = stop
         self.partial = stop.partial
-        tail = self.partial[-tail_chars:] if self.partial else ""
         message = stop.why()
-        if tail:
-            message += f"\n\nIt got this far:\n{tail}"
+        if self.partial and already_shown:
+            message += (f"\n\n(The {len(self.partial)} characters above are what it "
+                        f"produced — not repeated here.)")
+        elif self.partial:
+            message += f"\n\nIt got this far:\n{self.partial[-tail_chars:]}"
         super().__init__(message)
 
 

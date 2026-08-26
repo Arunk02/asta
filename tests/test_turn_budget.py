@@ -368,3 +368,104 @@ def test_repo_discovery_has_exactly_one_definition():
     src = _P("app/tasks.py").read_text()
     assert 'iterdir() if (p / ".git")' not in src, \
         "tasks.py restated the repo-discovery rule instead of delegating to worktrees"
+
+
+# --- answered, then quiet ------------------------------------------------------
+#
+# A clock cannot tell two very different things apart. A brain that wedged
+# halfway through an edit and a brain that gave a complete answer and then sat
+# waiting on a twelve-minute CI run are both silent — and both were reported as
+# "stuck, more time would not have helped", with the answer reprinted underneath
+# the warning. Arun read the same paragraphs twice and still could not tell
+# whether the work had finished. From his screenshots, verbatim:
+#
+#     ⚠️ TurnStopped: stuck — no output for 120s, 2.4 min into the turn.
+#     It got this far:
+#     Still running (Component test job in progress, ~6-7 min in so far). I'll
+#     keep watching and let you know the moment it finishes.
+#
+# That turn had succeeded. These tests hold the split, and hold it conservative:
+# only a complete, substantial, terminated answer counts.
+
+#: His actual message, from the 26 Aug screenshot — the one reported as "stuck"
+#: 2.4 minutes into a turn it had already completed. Kept verbatim so the length
+#: threshold stays pinned to real traffic instead of to an invented string.
+_ANSWER = ("Still running (Component test job in progress, ~6-7 min in so far). "
+           "I'll keep watching and let you know the moment it finishes.")
+
+
+def test_a_complete_answer_then_silence_is_not_stuck():
+    stop = _drain([(0.01, _ANSWER.encode())], total=30, idle=0.3)
+    assert stop.reason == "idle"
+    assert stop.answered(), "it said its piece; it is waiting on the world"
+
+
+def test_a_turn_cut_mid_sentence_is_still_stuck():
+    """The failure the split must never mask: wedged halfway through an edit."""
+    cut = b"Editing BookingService.java, replacing the ETA comparison with a call to"
+    stop = _drain([(0.01, cut)], total=30, idle=0.3)
+    assert stop.reason == "idle"
+    assert not stop.answered()
+
+
+@pytest.mark.parametrize("said", [
+    "On it.",
+    "Working on it.",
+    "Let me check the CI logs and get back to you.",
+    "I'll look at the failing test now.",
+])
+def test_announcing_intent_and_then_wedging_is_not_an_answer(said):
+    """The dangerous near-miss: it terminates, so only length separates it from
+    a real answer. Handing this back as the reply would tell him the work had
+    finished when it had not started."""
+    stop = _drain([(0.01, said.encode())], total=30, idle=0.3)
+    assert stop.reason == "idle"
+    assert not stop.answered()
+
+
+def test_a_ceiling_stop_is_never_reclassified():
+    """Ceiling means it was still producing output when the budget ran out — cut
+    short, whatever the last character happens to be."""
+    stop = tb.Stop("ceiling", 300.0, 0.5, [_ANSWER])
+    assert not stop.answered()
+
+
+def test_a_finished_turn_is_not_reclassified():
+    stop = tb.Stop("done", 12.0, 0.1, [_ANSWER])
+    assert not stop.answered()
+
+
+@pytest.mark.parametrize("tail", ['done."', "done.)", "done.*", "done!", "done?", "done…"])
+def test_markdown_and_quoting_do_not_hide_the_full_stop(tail):
+    body = ("x" * 200) + " " + tail
+    assert tb.Stop("idle", 200.0, 130.0, [body]).answered()
+
+
+def test_a_trailing_tool_narration_line_is_not_an_answer():
+    """The last LINE decides, not the last full stop anywhere in the body — a
+    brain that answered and then started a tool call was cut mid-work."""
+    body = _ANSWER + "\n\n● Bash(gh run view 1409 --log"
+    assert not tb.Stop("idle", 200.0, 130.0, [body]).answered()
+
+
+# --- saying it twice -----------------------------------------------------------
+
+def test_streamed_output_is_not_repeated_back():
+    """It already reached his phone as it arrived. Repeating it is the doubled
+    text in the screenshots — two copies to read, two copies to pay for."""
+    stop = tb.Stop("idle", 222.0, 120.0, [_ANSWER])
+    message = str(tb.TurnStopped(stop, already_shown=True))
+    assert _ANSWER not in message
+    assert str(len(_ANSWER)) in message, "he still needs to know how much there was"
+
+
+def test_output_he_never_saw_still_travels_with_the_error():
+    """A background task has no delta sink, so nothing was shown; throwing the
+    evidence away is what made "did it do anything?" unanswerable."""
+    stop = tb.Stop("idle", 222.0, 120.0, [_ANSWER])
+    assert _ANSWER in str(tb.TurnStopped(stop, already_shown=False))
+
+
+def test_a_stop_with_nothing_to_show_says_only_why():
+    message = str(tb.TurnStopped(tb.Stop("idle", 130.0, 125.0, [])))
+    assert "It got this far" not in message and "characters above" not in message

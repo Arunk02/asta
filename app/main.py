@@ -1747,6 +1747,46 @@ def _start_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task:
     return job
 
 
+#: How many read-only questions may be answered alongside running work, across
+#: all conversations. A bound rather than none: each one is a real brain turn, and
+#: an unbounded fan-out on a phone channel is how a burst of messages becomes a
+#: burst of billing.
+SIDE_TURNS_MAX = int(os.environ.get("ASTA_SIDE_TURNS_MAX", "2"))
+_side_turns: set[asyncio.Task] = set()
+
+
+def _start_side_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task | None:
+    """Answer a read-only question WITHOUT waiting for the running turn.
+
+    Arun asked for a PR's CI status while an implementation was running and was
+    told "still finishing the previous one". Reading a PR does not conflict with
+    writing code — the serialisation was protecting the conversation, not the repo.
+
+    Two things keep this safe rather than clever:
+
+    * The turn is READ-ONLY, enforced by the toolset and not by the classifier
+      being right. `capabilities.READ_ONLY_TURN` is set before the task is
+      created, and asyncio copies the context at that moment — so it holds for
+      this turn and everything it awaits, and not for the turn already running.
+    * It does not touch `_inflight`, so the primary turn still owns redirect,
+      augment and cancellation. A side turn is an answer, never the work.
+    """
+    live = {t for t in _side_turns if not t.done()}
+    _side_turns.clear()
+    _side_turns.update(live)
+    if len(live) >= SIDE_TURNS_MAX:
+        return None
+    token = capabilities.READ_ONLY_TURN.set(True)
+    try:
+        job = asyncio.create_task(_conducted_turn(conv, user_text, sink, channel))
+    finally:
+        # The task kept the read-only context; this turn's caller must not.
+        capabilities.READ_ONLY_TURN.reset(token)
+    _side_turns.add(job)
+    job.add_done_callback(_side_turns.discard)
+    return job
+
+
 async def _conducted_turn(conv0: dict, first_text: str, sink, channel: str) -> None:
     """Wrapper that guarantees delivery. See _conduct for the actual loop.
 
@@ -2306,9 +2346,11 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             offers.accept()
             return _start_turn(conv, _offer_prompt(open_offer, where=user_text.strip()),
                                sink, channel)
-        # Anything else: he moved on. Drop the offer instead of holding a stale
-        # question that would misread a much later "yes".
-        offers.clear()
+        # Anything else: he moved on. Drop the whole set instead of holding stale
+        # questions that would misread a much later "yes" — and promoting a queued
+        # one here would be worse: it would silently arm a question he has never
+        # read, which is the exact failure the queue was added to prevent.
+        offers.drop_all()
 
     # An open ask_user question owns the next message. Explicit form first
     # ("answer 3 the second one"), then the bare reply — which is how a person
@@ -2395,6 +2437,20 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         _addenda.setdefault(cid, []).append(user_text)
         await sink.send({"type": "note",
                          "text": "✚ adding that to what I'm doing — same task, no restart."})
+        return None
+    if intent == "independent":
+        # A read-only question with no bearing on the running work. Answer it now,
+        # in its own read-only turn, instead of making him wait out a forty-minute
+        # implementation for a one-line answer.
+        side = _start_side_turn(conv, user_text, sink, channel)
+        if side is not None:
+            return side
+        # At the concurrency bound — fall through and queue it, which is the old
+        # behaviour and still correct.
+        _followups.setdefault(cid, []).append(user_text)
+        await sink.send({"type": "note",
+                         "text": "💬 a couple of answers already in flight — "
+                                 "I'll take this one next."})
         return None
     if intent == "ambiguous":
         # Not clearly a refinement of the running work, so DON'T glue it on —

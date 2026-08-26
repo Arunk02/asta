@@ -51,16 +51,52 @@ def exists(workspace_root: Path, task_id: int) -> bool:
     return root.is_dir() and any(root.iterdir())
 
 
-def repos_in(workspace_root: Path) -> list[Path]:
-    """The git repos of a workspace — itself, or the repos inside it."""
-    root = Path(workspace_root)
-    if (root / ".git").exists():
-        return [root]
+def _inner_repos(root: Path) -> list[Path]:
     try:
         return sorted(p for p in root.iterdir()
                       if (p / ".git").exists() and p.name != DIRNAME)
     except OSError:
         return []
+
+
+def repos_in(workspace_root: Path) -> list[Path]:
+    """The repos where a code task actually changes code.
+
+    Inner repos win over the root, and that ordering is the whole point. This used
+    to return `[root]` the moment the workspace root had a `.git` — and Arun's
+    booking workspace IS a git repo: `Arunk540/booking-workspace`, tracking the
+    234 generated files under `.contmark/`, with the three service repos sitting
+    inside it as ordinary directories.
+
+    So it reported one repo, and the one it reported was the context repo.
+    Everything downstream inherited that: worktree isolation cut a worktree of the
+    generated context instead of the services, rollback looked in the wrong tree,
+    and the scope-based budget sized a three-repo job as a one-repo job. None of
+    it failed loudly, because a wrong repo still exists and still answers git.
+
+    A plain single-repo workspace — root is the repo, nothing inside — still
+    returns the root, which is the case the shortcut was written for.
+    """
+    root = Path(workspace_root)
+    inner = _inner_repos(root)
+    if inner:
+        return inner
+    return [root] if (root / ".git").exists() else []
+
+
+def all_repos_in(workspace_root: Path) -> list[Path]:
+    """Every repo a task could have touched, including a workspace-level one.
+
+    Rollback wants the superset: if the root is also a repo, a change written
+    there still needs undoing. Worktrees deliberately want the narrower set —
+    cutting a worktree of the context repo would isolate the wrong thing. Both
+    read from `_inner_repos`, so the two answers cannot drift apart.
+    """
+    root = Path(workspace_root)
+    repos = _inner_repos(root)
+    if (root / ".git").exists() and root not in repos:
+        repos = [root, *repos]
+    return repos
 
 
 async def _base_branch(repo: Path) -> str:

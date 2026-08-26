@@ -72,13 +72,29 @@ def test_ttl_zero_means_never_expires(monkeypatch):
     assert offers.pending() is not None
 
 
-def test_only_one_offer_is_open_at_a_time():
+def test_only_one_offer_is_asked_at_a_time():
     """Two open questions plus a bare 'yes' is ambiguous — guessing would be the
-    confident wrong move."""
-    offers.offer("analyse", "first", "c", "a?")
-    offers.offer("raise_pr", "second", "c", "b?")
+    confident wrong move.
+
+    That intent is unchanged. What changed is how it is kept: this used to assert
+    that the SECOND offer won, i.e. that a new offer overwrote the one Arun was
+    looking at. Four background daemons stage offers, so in practice a daemon
+    could take the slot between a question being asked and him answering it — and
+    his "yes" then reached a question he had never read. He hit exactly that: he
+    said "go ahead" three times to a staged Teams call and nothing rang.
+
+    So the offer he was shown stays the asked one, and later ones queue behind it.
+    Still one answerable question; nothing silently replaced, nothing lost.
+    """
+    first = offers.offer("analyse", "first", "c", "a?")
+    second = offers.offer("raise_pr", "second", "c", "b?")
+
     o = offers.pending()
-    assert o.kind == "raise_pr" and o.subject == "second"
+    assert o.id == first.id, "a later offer replaced the one he was shown"
+    assert [q.id for q in offers.waiting()] == [second.id]
+
+    offers.accept()
+    assert offers.pending().id == second.id, "the queued offer never surfaced"
 
 
 def test_corrupt_state_never_crashes():

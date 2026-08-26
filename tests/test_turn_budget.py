@@ -171,3 +171,117 @@ def test_the_code_ceiling_clears_the_measured_p90():
     from app import tasks
     assert tasks.TASK_TIMEOUT["code"] / 60 > 32, \
         "the code ceiling is at or below the measured p90 of 32 min"
+
+
+# --- what a workspace's repos actually are -----------------------------------
+
+def _make_repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / ".git").mkdir(exist_ok=True)
+
+
+def test_a_workspace_that_is_itself_a_repo_still_finds_the_code_repos(tmp_path):
+    """The booking workspace shape, which was silently mis-read.
+
+    `~/booking-workspace` is a git repo of its own — Arunk540/booking-workspace,
+    tracking 234 generated files under .contmark/ — with the three service repos
+    inside it as ordinary directories. The old rule returned `[root]` the moment
+    the root had a .git, so it reported ONE repo and that repo was the context
+    repo, not the code.
+
+    Nothing failed loudly, because a wrong repo still exists and still answers
+    git commands: worktrees isolated the wrong tree, rollback looked in the wrong
+    tree, and the scope-based budget sized a three-repo job as a one-repo job.
+    """
+    from app import worktrees
+
+    root = tmp_path / "booking-workspace"
+    _make_repo(root)                       # the workspace is itself a repo
+    for name in ("telikos-booking-service", "telikos-email-service",
+                 "telikos-activityplanworkflow-service"):
+        _make_repo(root / name)
+
+    code = [p.name for p in worktrees.repos_in(root)]
+    assert code == sorted(["telikos-booking-service", "telikos-email-service",
+                           "telikos-activityplanworkflow-service"]), \
+        f"code repos should be the services, got {code}"
+    assert "booking-workspace" not in code, \
+        "a worktree of the generated-context repo isolates the wrong thing"
+
+
+def test_rollback_still_covers_the_workspace_repo_itself(tmp_path):
+    """Rollback wants the superset — a change written to the root needs undoing."""
+    from app import worktrees
+
+    root = tmp_path / "booking-workspace"
+    _make_repo(root)
+    _make_repo(root / "telikos-booking-service")
+
+    every = [p.name for p in worktrees.all_repos_in(root)]
+    assert "booking-workspace" in every
+    assert "telikos-booking-service" in every
+
+
+def test_a_plain_single_repo_workspace_is_unchanged(tmp_path):
+    """The case the original shortcut was written for must keep working."""
+    from app import worktrees
+
+    root = tmp_path / "just-one-repo"
+    _make_repo(root)
+    assert [p.name for p in worktrees.repos_in(root)] == ["just-one-repo"]
+    assert [p.name for p in worktrees.all_repos_in(root)] == ["just-one-repo"]
+
+
+def test_rollback_and_worktrees_read_the_same_definition(tmp_path):
+    """Two copies of one rule is how the bug survived in both places."""
+    from app import tasks, worktrees
+
+    root = tmp_path / "ws"
+    _make_repo(root)
+    _make_repo(root / "svc-a")
+    _make_repo(root / "svc-b")
+    assert tasks._repos_under(root) == worktrees.all_repos_in(root)
+
+
+def test_the_code_budget_scales_with_how_many_repos_are_in_reach(monkeypatch, tmp_path):
+    """Arun's point: a small change across three repos is not a one-repo job.
+
+    Verification alone is per-repo — `mvn clean test` on each — so a task that can
+    touch three pays it three times. A flat number is wrong in both directions.
+    """
+    from app import tasks, workspace as workspace_mod
+
+    one = tmp_path / "one"
+    _make_repo(one)
+    three = tmp_path / "three"
+    _make_repo(three)
+    for n in ("a", "b", "c"):
+        _make_repo(three / n)
+
+    monkeypatch.setattr(workspace_mod, "WORKSPACES",
+                        {"one": one, "three": three}, raising=False)
+
+    small = tasks.code_timeout("one")
+    big = tasks.code_timeout("three")
+    assert big > small, "three repos got the same budget as one"
+    assert small / 60 > 32, "even a one-repo budget must clear the measured p90 of 32 min"
+    assert big <= tasks.CODE_MAX_SECONDS, "the budget must stay capped"
+
+
+def test_the_budget_is_capped(monkeypatch, tmp_path):
+    """Past a point a run that long is a task that should have been split."""
+    from app import tasks, workspace as workspace_mod
+
+    many = tmp_path / "many"
+    _make_repo(many)
+    for i in range(40):
+        _make_repo(many / f"repo{i}")
+    monkeypatch.setattr(workspace_mod, "WORKSPACES", {"many": many}, raising=False)
+    assert tasks.code_timeout("many") == tasks.CODE_MAX_SECONDS
+
+
+def test_an_unknown_workspace_gets_a_sane_budget():
+    """A missing workspace must not mean a zero-second or unbounded budget."""
+    from app import tasks
+    assert 32 * 60 < tasks.code_timeout(None) <= tasks.CODE_MAX_SECONDS
+    assert 32 * 60 < tasks.code_timeout("does-not-exist") <= tasks.CODE_MAX_SECONDS

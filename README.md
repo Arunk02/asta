@@ -29,7 +29,7 @@ Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
 Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-.venv/bin/python -m pytest -q           # 1,714 tests
+.venv/bin/python -m pytest -q           # 1,738 tests
 ```
 
 ## How it is put together
@@ -146,7 +146,12 @@ context to decide, name what it would do next, and wait. A bare "yes" from *any*
 channel runs it. Offers are persisted and expiring (`ASTA_OFFER_TTL`, 6h): the
 question went to your phone and you may answer twenty minutes later from Telegram
 after a restart, but a "yes" tomorrow must not kick off work you've forgotten
-proposing. One is open at a time, because two plus a bare "yes" is ambiguous.
+proposing. One is **asked** at a time, because two plus a bare "yes" is ambiguous — later
+ones queue behind it rather than replacing it. That distinction matters: offers
+used to live in a single slot that every new one overwrote, and four background
+watchers stage offers, so a daemon could replace the question on your screen
+between you reading it and answering. A queued offer says so instead of asking
+for a yes it would not receive.
 
 An offer carries its own next step, in one of two forms:
 
@@ -846,7 +851,7 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  1,714 tests (conftest isolates the DB — see below)
+tests/                  1,738 tests (conftest isolates the DB — see below)
 ```
 
 `tests/conftest.py` points `store.DB_PATH` at a temp file for *every* test. A stray
@@ -858,7 +863,7 @@ roadmap this is being built against. Still ahead of it: one scheduler replacing 
 background loops, detached runs that survive a closed tab, adaptive context
 compaction, a people/contacts model, and deep research.
 
-`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 33 findings
+`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 37 findings
 raised against the *running* system — every number measured on the live install, not
 inferred from the source — each closed in place with what was done and how it was
 proved. Every fix was mutation-tested: the source was deliberately broken and the

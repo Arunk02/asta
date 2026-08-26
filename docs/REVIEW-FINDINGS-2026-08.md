@@ -70,6 +70,10 @@ first thing to revisit.
 | 31 | Medium | A blank setting in `.env` silently disabled a whole module | `diagnostics.TEMPORAL_PROXY` | **closed** |
 | 32 | **Critical** | A stopped turn could not say whether the work finished, was still running, or was wedged — and threw away everything it had done | `copilot_cli`, `claude_cli` | **closed** |
 | 33 | High | The code-task ceiling (30 min) sat BELOW the measured p90 (32 min), killing work that was going to succeed | `tasks.TASK_TIMEOUT` | **closed** |
+| 34 | **Critical** | A background daemon could replace the offer he was answering — his "yes" reached a question he never read | `offers.offer` | **closed** |
+| 35 | High | A read-only question waited behind a running code task | `main._dispatch`, `activity` | **closed** |
+| 36 | **Critical** | A workspace that is itself a repo reported ONE repo — the generated-context one — so worktrees, rollback and budget all targeted the wrong tree | `worktrees.repos_in` | **closed** |
+| 37 | Medium | A code budget flat across every task, regardless of how many repos it can touch | `tasks.code_timeout` | **closed** |
 
 ## Closed
 
@@ -543,10 +547,99 @@ longer has to double as a liveness check. That was the job it was doing badly.
 
 ---
 
+### 34 — his yes reached a question he had never read — CLOSED 2026-08-26
+From a WhatsApp transcript. Asta staged a Teams call to Vinish; Arun replied "Go
+ahead", then "Yes go ahead and call Vinish", then "Yes go ahead". Nothing rang.
+The brain eventually concluded approval must live "through a separate
+confirmation channel" — a reasonable inference from what it could see, and wrong.
+
+`offer()` wrote to one global slot and every new offer overwrote it. Four
+background daemons stage offers — `refresh`, `ci_watch`, and two in `meetings` —
+so a staleness proposal took the slot between the call being staged and him
+answering. His yes reached a question he had never read; the brain re-staged; the
+daemon clobbered it again; the loop repeated.
+
+The docstring defending the single slot was right about the *property* — two open
+questions plus a bare "yes" is ambiguous — and wrong about the implementation.
+One is still ASKED at a time; later ones queue behind it. The head is immutable
+while unanswered, so the thing he approves is the thing he was shown.
+
+The dangerous version is the quiet one: the same race could have had his yes
+accept an outward write that replaced the one on screen.
+
+One consequence needed handling. Every producer pushes `o.render()` the moment it
+stages, so a queued offer would still have *asked* him a question his yes would
+not answer — reintroducing the ambiguity from the other side. `render()` decides
+its own wording from whether it is the asked one, which makes all four producers
+correct without being touched.
+
+Four mutations caught, including restoring the clobbering. A pre-existing test
+asserted the old behaviour — kept its intent, changed what it verifies.
+
+### 35 — a question waited behind a forty-minute implementation — CLOSED 2026-08-26
+Same transcript: *"What is the ci status of above PR"* → **"still finishing the
+previous one — I'll answer this right after."** Reading a PR's checks does not
+conflict with writing code. The serialisation was protecting the conversation,
+not the repo.
+
+`activity` gains an `independent` verdict for read-shaped asks carrying no write
+verb, and `main` answers those in a concurrent side turn bounded by
+`ASTA_SIDE_TURNS_MAX`.
+
+**The safety is in the toolset, not the classifier.** A side turn runs with
+`capabilities.READ_ONLY_TURN` set, so it cannot reach any of the 17 write
+capabilities — the worst a misclassified message can do is read something and
+answer. A ContextVar, because asyncio copies the context when a task is created:
+it applies to that turn and everything it awaits, and the implementation already
+running is unaffected. A test pins exactly that, since a leak would strip write
+tools from work in flight.
+
+`independent` can only ever narrow what would have been `ambiguous`, so nothing
+that used to augment or redirect now runs concurrently instead.
+
+### 36 — the workspace reported the wrong repos — CLOSED 2026-08-26
+Found while sizing the budget in finding 37, and much worse than the thing that
+found it.
+
+`~/booking-workspace` is itself a git repo — `Arunk540/booking-workspace`,
+tracking the 234 generated files under `.contmark/` — with the three service
+repos inside it as ordinary directories. `repos_in` returned `[root]` the moment
+the root had a `.git`, so it reported **one** repo, and that repo was the
+generated context rather than any code.
+
+Everything downstream inherited it:
+
+- **worktrees** cut a worktree of the context repo, so the parallel-task isolation
+  added earlier in this register was isolating the wrong tree;
+- **rollback** (`tasks._repos_under`, a second copy of the same rule with the same
+  bug) looked for a task's changes where they were never written;
+- the new scope-based budget sized a three-repo job as a one-repo job.
+
+None of it failed loudly, because a wrong repo still exists and still answers git
+commands. Inner repos now win over the root; `all_repos_in` keeps the superset for
+rollback, where a change written to the root still needs undoing; and
+`_repos_under` delegates instead of restating, so the two cannot drift again.
+
+### 37 — one budget for every code task — CLOSED 2026-08-26
+Arun's point: *"even small changes getting affected in multiple repos take more
+time right does it make sense?"* It does not. Verification is per-repo — `mvn
+clean test` on each — so a change landing across three repos pays it three times,
+while a one-line fix in one repo does not need the same hour.
+
+`code_timeout` is base + per-repo, capped: 35 min for one repo (clearing the
+measured p90 of 32), 65 for three, 90 max. Scope rather than difficulty, because
+scope is a fact available before the work starts and difficulty is not.
+
+Safe only because finding 32 landed first: a wedged brain is caught by two
+minutes of silence regardless of remaining ceiling, so the ceiling no longer has
+to double as a liveness check.
+
+---
+
 ## Where this leaves the review
 
-**33 findings raised, 32 closed**, plus finding 4 recorded as Arun's accepted
-risk. 1,714 tests pass. Every fix was mutation-tested — the source was
+**37 findings raised, 36 closed**, plus finding 4 recorded as Arun's accepted
+risk. 1,738 tests pass. Every fix was mutation-tested — the source was
 deliberately broken and the suite had to notice.
 
 Still needing Arun rather than code:

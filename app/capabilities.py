@@ -22,6 +22,7 @@ Adding a capability is one row plus a docstring, not a hunt through three files.
 from __future__ import annotations
 
 import inspect
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -340,13 +341,39 @@ def names() -> tuple[str, ...]:
     return tuple(registry())
 
 
+#: Set for the whole life of a turn that runs ALONGSIDE another one.
+#:
+#: A read-only question — "what's the CI status", "what did Vinish say" — has no
+#: conflict with work already running, and queueing it behind a forty-minute
+#: implementation is why Arun got "still finishing the previous one" instead of an
+#: answer. So those are answered concurrently.
+#:
+#: The safety comes from here rather than from the classifier being right. A
+#: side turn simply cannot reach a capability that writes, so the worst a
+#: misclassified message can do is read something and answer. That is the
+#: difference between a heuristic that has to be perfect and one that only has to
+#: be useful.
+#:
+#: A ContextVar because asyncio copies the context when a task is created: set it
+#: before spawning the side turn and it applies to that turn and everything it
+#: awaits, with no flag threaded through five signatures — and the parent turn,
+#: created earlier, is unaffected.
+READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=False)
+
+
+def writes(name: str) -> bool:
+    cap = registry().get(name)
+    return bool(cap and cap.write)
+
+
 def tools_for(selected: list[str] | tuple[str, ...] | None = None) -> list[Callable]:
     """The callables to hand pydantic-ai. None = everything (the old behaviour)."""
     reg = registry()
+    read_only = READ_ONLY_TURN.get()
     if selected is None:
-        return [c.fn for c in reg.values()]
+        return [c.fn for c in reg.values() if not (read_only and c.write)]
     keep = list(dict.fromkeys(list(selected) + [n for n in ALWAYS if n in reg]))
-    return [reg[n].fn for n in keep if n in reg]
+    return [reg[n].fn for n in keep if n in reg and not (read_only and reg[n].write)]
 
 
 def notes_block(selected: list[str] | tuple[str, ...] | None = None) -> str:

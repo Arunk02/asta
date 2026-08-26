@@ -66,6 +66,48 @@ REVIEW_OWN_DIFF = os.environ.get("ASTA_REVIEW_OWN_DIFF", "1").strip().lower() \
 #: silence regardless of how much ceiling is left.
 TASK_TIMEOUT = {"analysis": 900, "code": 2700, "teams_draft": 300}
 
+# --- how long a code task may take, given what it can touch -------------------
+#
+# A flat number is wrong in both directions, which is Arun's point: "even small
+# changes getting affected in multiple repos take more time." A one-line fix in
+# one repo does not need 45 minutes, and a rename that lands across three repos —
+# each with its own build, its own checkstyle, its own multi-module Maven reactor —
+# is not the same job at all. Verification alone is per-repo: `mvn clean test` on
+# the booking service is minutes, and a task touching three pays it three times.
+#
+# So the budget is a function of scope. Not of DIFFICULTY, which nobody can
+# estimate up front — of how many repos are in reach, which is a fact available
+# before the work starts.
+#
+# This is only safe because the idle watchdog landed first (`turn_budget`): a
+# wedged brain is stopped after two minutes of silence no matter how much ceiling
+# remains. Before that, the ceiling was doubling as a liveness check and had to
+# stay tight; now it can be honest about how long real work takes.
+
+CODE_BASE_SECONDS = int(os.environ.get("ASTA_CODE_BASE_SECONDS", "1200"))     # 20 min
+CODE_PER_REPO_SECONDS = int(os.environ.get("ASTA_CODE_PER_REPO_SECONDS", "900"))  # +15
+CODE_MAX_SECONDS = int(os.environ.get("ASTA_CODE_MAX_SECONDS", "5400"))      # 90 min
+
+
+def code_timeout(workspace: str | None) -> int:
+    """Budget for a code task: a base, plus room for each repo it could touch.
+
+    One repo -> 35 min, which already clears the measured p90 of 32 (n=46).
+    Three repos -> 65 min. Capped, because past a point a run that long is not a
+    slow task, it is a task that should have been split — and the cap is what
+    turns that into a reported budget overrun rather than an afternoon of silence.
+    """
+    repos = 1
+    if workspace:
+        try:
+            from . import workspace as workspace_mod, worktrees
+            root = workspace_mod.WORKSPACES.get(workspace)
+            if root:
+                repos = max(1, len(worktrees.repos_in(Path(root))))
+        except Exception:                       # noqa: BLE001
+            repos = 1
+    return min(CODE_MAX_SECONDS, CODE_BASE_SECONDS + CODE_PER_REPO_SECONDS * repos)
+
 # Pipelines are Asta's own (agents/), not the workspace's. One definition for
 # both executors and every workspace, so improving it improves every run — which
 # is the point: the agents are iterated on to cut token waste, and that only
@@ -746,7 +788,7 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
     if ex == "claude":
         try:
             return await claude_cli.one_shot(
-                prompt, cwd=cwd, timeout=TASK_TIMEOUT["code"],
+                prompt, cwd=cwd, timeout=code_timeout(workspace),
                 agent_file=_agent_file("code", _pipeline_for(task_id)),
                 effort=effort, session_id=sid, resume=resume, on_progress=watcher,
                 mcp_config=dev_cfg)
@@ -763,7 +805,7 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         # directory. Asta owns the pipeline now, so the body rides in the
         # prompt instead and nothing is installed into the user's repo.
         return await copilot_cli.one_shot(
-            _with_pipeline(pipeline, prompt), cwd=cwd, timeout=TASK_TIMEOUT["code"],
+            _with_pipeline(pipeline, prompt), cwd=cwd, timeout=code_timeout(workspace),
             effort=effort, session_id=sid, resume=resume, on_progress=watcher,
             mcp_config=dev_cfg)
     except RuntimeError as exc:
@@ -787,7 +829,9 @@ async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
     """Non-pipeline kinds (analysis, teams_draft, agent-less code): one leg,
     executor-aware, with transparent claude failover when copilot's quota dies."""
     ex = _resolve_executor(task_id)
-    cwd, tout = _cwd(t["workspace"]), TASK_TIMEOUT[t["kind"]]
+    cwd = _cwd(t["workspace"])
+    tout = (code_timeout(t["workspace"]) if t["kind"] == "code"
+            else TASK_TIMEOUT[t["kind"]])
     agent = _agent_for(t)
     eff = _effort_for(t["kind"], ex)
     pipeline = _pipeline_name(t["kind"]) if agent else ""
@@ -996,7 +1040,18 @@ async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
 # --- what a task did to git, and how to undo it -------------------------------
 
 def _repos_under(root: Path) -> list[Path]:
-    """Every git repo a task could touch: the workspace, or the repos inside it."""
+    """Every git repo a task could touch — the superset, used for rollback.
+
+    Was a second copy of the rule in `worktrees` and carried the same bug: it
+    returned `[root]` whenever the workspace root was itself a repo, which for the
+    booking workspace means the generated-context repo and none of the three
+    services. Delegated now rather than restated, so the two cannot drift.
+    """
+    from . import worktrees
+    return worktrees.all_repos_in(root)
+
+
+def _repos_under_unused(root: Path) -> list[Path]:
     if (root / ".git").is_dir():
         return [root]
     try:

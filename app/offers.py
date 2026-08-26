@@ -88,25 +88,109 @@ class Offer:
         Both answers are spelled out. "(reply yes)" alone made declining feel like
         it needed an explanation, so the honest no — the one that should be cheap —
         was the harder of the two to give.
+
+        A QUEUED offer renders as a heads-up rather than a question. Every producer
+        pushes `o.render()` the moment it stages, and once offers queue instead of
+        clobbering, some of those are not the one a "yes" would answer. Inviting
+        him to say yes to a question that is not the open one is precisely the
+        ambiguity the single-slot design was protecting against — so the wording
+        is decided HERE, by whether this offer is actually the one being asked,
+        and every existing caller becomes correct without being touched.
         """
         body = f"{self.subject}\n{self.context}".strip()
+        if not self.is_asked():
+            head = pending()
+            behind = f" behind “{head.subject}”" if head else ""
+            return (f"{body}\n\n⏳ Queued{behind} — I'll ask when that one is "
+                    f"answered. Say “{self.subject[:40]}” to jump to it.")
         return f"{body}\n\n▶ {self.prompt}\n   reply “yes” to go ahead, “no” to drop it."
+
+    def is_asked(self) -> bool:
+        """True when this is the offer a bare "yes" would accept."""
+        head = pending()
+        return head is not None and head.id == self.id
+
+
+#: Offers waiting behind the one he was actually shown.
+QUEUE_KEY = "offer_queue"
+
+#: How many can wait. Past this the oldest is dropped: a backlog he will never
+#: work through is not a queue, it is a way to lose the recent ones.
+QUEUE_MAX = int(os.environ.get("ASTA_OFFER_QUEUE_MAX", "5"))
 
 
 def offer(kind: str, subject: str, context: str, prompt: str,
           payload: dict | None = None, action: str = "",
           op: dict | None = None) -> Offer:
-    """Record a proposal and return it. Replaces any earlier pending one.
+    """Record a proposal. QUEUES behind an unanswered one rather than replacing it.
 
-    One at a time on purpose: two open questions and a bare "yes" is ambiguous,
-    and guessing which one he meant is exactly the kind of confident wrong move
-    that makes an assistant untrustworthy.
+    One is ASKED at a time, which is the property worth keeping: two open
+    questions and a bare "yes" is ambiguous, and guessing is the confident wrong
+    move that makes an assistant untrustworthy.
+
+    But "one at a time" used to be implemented as one global slot that every new
+    offer overwrote — and four background daemons stage offers (`refresh`,
+    `ci_watch`, and two in `meetings`). So the sequence Arun hit was:
+
+        12:59  "Ring Vinish on Teams?"        <- staged, shown to him
+        ~13:00  a daemon offers something else <- silently takes the slot
+        13:00  "Go ahead"                      <- lands on nothing, or worse,
+                                                  on a question he never read
+
+    He said yes three times and nothing rang. The brain re-staged each turn, was
+    clobbered each turn, and eventually concluded approval must live in some
+    other channel — a reasonable inference from what it could see, and wrong.
+
+    The dangerous version of the same race is quieter: his yes accepts an outward
+    write that replaced the one on screen. Whatever else is true, the thing he
+    approves must be the thing he was shown.
+
+    So the head is immutable while it is unanswered, and later offers wait.
     """
     o = Offer(id=uuid.uuid4().hex[:12], kind=kind, subject=subject, context=context,
               prompt=prompt, created=time.time(), payload=payload or {},
               action=action, op=op or {})
-    store.kv_set(KEY, json.dumps(asdict(o)))
+    if pending() is None:
+        store.kv_set(KEY, json.dumps(asdict(o)))
+        return o
+    queued = _queue()
+    queued.append(asdict(o))
+    # Newest wins when full. An offer he has not reached in five proposals is
+    # stale anyway, and dropping the newest would hide what is happening NOW.
+    store.kv_set(QUEUE_KEY, json.dumps(queued[-QUEUE_MAX:]))
     return o
+
+
+def _queue() -> list[dict]:
+    try:
+        raw = store.kv_get(QUEUE_KEY)
+        return json.loads(raw) if raw else []
+    except (ValueError, TypeError):
+        return []
+
+
+def waiting() -> list[Offer]:
+    """Offers queued behind the current one, oldest first."""
+    out = []
+    for row in _queue():
+        o = _load(json.dumps(row))
+        if o is not None and not o.expired():
+            out.append(o)
+    return out
+
+
+def _promote() -> Offer | None:
+    """Move the next unexpired queued offer into the asked slot."""
+    queued = _queue()
+    while queued:
+        row = queued.pop(0)
+        o = _load(json.dumps(row))
+        if o is not None and not o.expired():
+            store.kv_set(KEY, json.dumps(asdict(o)))
+            store.kv_set(QUEUE_KEY, json.dumps(queued))
+            return o
+    store.kv_set(QUEUE_KEY, json.dumps([]))
+    return None
 
 
 def _load(raw: str) -> Offer | None:
@@ -134,28 +218,38 @@ def pending() -> Offer | None:
     if o is None:
         return None
     if o.expired():
-        clear()
-        return None
+        store.kv_set(KEY, "")
+        return _promote()
     return o
 
 
 def accept() -> Offer | None:
     """Consume the open offer — returns it exactly once, so a double "yes"
-    cannot run the same work twice."""
+    cannot run the same work twice. The next queued offer takes its place."""
     o = pending()
     if o:
         clear()
+        _promote()
     return o
 
 
 def decline() -> Offer | None:
     o = pending()
-    clear()
+    if o:
+        clear()
+        _promote()
     return o
 
 
 def clear() -> None:
+    """Drop the ASKED offer only. The queue behind it is untouched."""
     store.kv_set(KEY, "")
+
+
+def drop_all() -> None:
+    """Forget everything waiting — he changed the subject entirely."""
+    store.kv_set(KEY, "")
+    store.kv_set(QUEUE_KEY, json.dumps([]))
 
 
 # --- proposing anything -----------------------------------------------------

@@ -78,7 +78,11 @@ fi
 if ! vault token lookup >/dev/null 2>&1; then
   echo "Vault token is expired or missing for $VAULT_ADDR." >&2
   echo "Log in first (this opens a browser):" >&2
-  echo "  vault login -method=oidc -role=telikos-nonprod" >&2
+  # `role=` and not `-role=`: with -method, extra parameters are key=value pairs,
+  # not flags. `-role=...` fails with "flag provided but not defined: -role",
+  # which does not hint at the fix.
+  echo "  vault login -method=oidc role=${VAULT_OIDC_ROLE:-<your-role>}" >&2
+  echo "  (e.g. role=telikos-nonprod — see: vault auth help oidc)" >&2
   exit 77
 fi
 

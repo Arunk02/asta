@@ -1971,15 +1971,40 @@ async def test_a_score_is_recorded_so_change_is_visible(monkeypatch):
 
 # --- the faults the first eval run exposed -----------------------------------
 
-def test_the_answering_brain_falls_back_to_a_cli(monkeypatch):
+def test_the_answering_brain_reaches_a_cli_and_records_the_failure(monkeypatch):
     """`ANTHROPIC_API_KEY` was set, `available("claude")` said yes because a key
     was PRESENT, and every call 401'd. The in-call brain returned "" and said
-    nothing while two working CLI subscriptions sat unused."""
-    import inspect
-    from app import meetings
-    src = inspect.getsource(meetings.answer_from_knowledge)
-    assert "claude_cli" in src and "copilot" in src, "no fallback when the API fails"
-    assert "quiet.note" in src, "an API failure is still silent"
+    nothing while two working CLI subscriptions sat unused.
+
+    Checked behaviourally. This was a source grep for "claude_cli" inside
+    `answer_from_knowledge`, which broke the moment the CLI loop moved into a
+    helper — and would equally have passed if that loop were dead code. A grep
+    tests where a string sits; the property is that a CLI is actually reached and
+    the in-process failure is not swallowed silently.
+    """
+    from app import agent as agent_mod, call_brain, quiet
+
+    asked: list[str] = []
+
+    class _Runner:
+        async def one_shot(self, prompt, cwd=None, timeout=120, **kw):
+            asked.append("cli")
+            return "the CLI answered"
+
+    def _dead_api():
+        raise RuntimeError("401 invalid x-api-key")
+
+    monkeypatch.setattr(call_brain, "_cli_first", lambda: False)   # API first
+    monkeypatch.setattr(agent_mod, "best_model_name", _dead_api, raising=False)
+    monkeypatch.setattr(agent_mod, "available", lambda n: n in ("claude_cli", "copilot"))
+    monkeypatch.setattr(agent_mod, "quota_down", lambda n: False)
+    monkeypatch.setattr(agent_mod, "runner", lambda n: _Runner())
+
+    out = asyncio.run(call_brain.answer_from_knowledge("where do vessel dates live?"))
+    assert out == "the CLI answered", "the CLI fallback was never reached"
+    assert asked == ["cli"]
+    assert any(k.startswith("brain.") for k in quiet.counts()), \
+        "the in-process failure was swallowed with no record"
 
 
 def test_the_answering_brain_is_given_his_lessons():

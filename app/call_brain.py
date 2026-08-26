@@ -164,12 +164,23 @@ async def answer_from_knowledge(question: str, extra_context: str = "") -> str:
         prompt += ("\n\nTHE PLAYBOOK FOR THIS KIND OF QUESTION — follow it "
                    "exactly; it encodes what already went wrong when it was "
                    "ignored:\n" + extra_context[:8000] + "\n")
-    # The API model first when it works, then the CLI subscriptions Arun already
-    # pays for. Measured reason for the fallback: `ANTHROPIC_API_KEY` was set,
-    # `available("claude")` said yes because a key was PRESENT, and every call
-    # 401'd because the key was invalid. This function returned "" each time and
-    # said nothing, so the in-call brain was silently dead while two working CLI
-    # brains sat unused.
+    # CLI FIRST — Arun's instruction, 2026-08-26: "ignore api key, use cli as well
+    # always either copilot or claude cli".
+    #
+    # It is also the better order on the evidence. `best_model_name()` returns
+    # `local` on this machine (the API key is refused and stays refused), so this
+    # path was sending code questions to a 9B model in LM Studio — measured at
+    # 15.9s for gemma and 38.9s for qwen on a single lookup, and weaker on exactly
+    # the questions worth asking. The CLI brains are subscriptions he already pays
+    # for, and they read the workspace directly: for a question about his own code
+    # that is not a downgrade, it is the same tooling a code task uses.
+    #
+    # In-process models stay as the last resort, for when both CLIs are down or
+    # out of quota — which is the case the fallback below was written for.
+    if _cli_first():
+        answer = await _ask_cli(ws, prompt)
+        if answer:
+            return answer
     try:
         from pydantic_ai import Agent
         name = agent_mod.best_model_name()
@@ -185,24 +196,10 @@ async def answer_from_knowledge(question: str, extra_context: str = "") -> str:
         if agent_mod.credential_failure(str(exc)):
             agent_mod.mark_key_rejected("claude", str(exc))
 
-    # A CLI brain reads the workspace directly, which for a question about his
-    # own code is not a downgrade — it is the same tooling a code task uses.
-    from .workspace import registry as _reg
-    root = ""
-    with contextlib.suppress(Exception):
-        entry = _reg.get(ws) if ws else None
-        root = str(entry.root) if entry else ""
-    for cli in ("claude_cli", "copilot"):
-        if not agent_mod.available(cli) or agent_mod.quota_down(cli):
-            continue
-        try:
-            text = await agent_mod.runner(cli).one_shot(prompt, cwd=root or None,
-                                                        timeout=120)
-        except Exception as exc:                      # noqa: BLE001
-            quiet.note(f"brain.{cli}_answer", exc)
-            continue
-        if (text or "").strip():
-            return text.strip()
+    if not _cli_first():
+        answer = await _ask_cli(ws, prompt)
+        if answer:
+            return answer
     return ""
 
 def spoken_form(answer: str) -> str:
@@ -260,3 +257,38 @@ async def confident(line: str) -> bool:
 def pending_for_him(lines: list[str]) -> list[str]:
     """Things aimed at HIM, to hand back when the call ends."""
     return [l.strip() for l in lines if classify_line(l) == "his"]
+
+
+def _cli_first() -> bool:
+    """Whether a CLI subscription answers before an in-process model.
+
+    On by default. Off (`ASTA_CLI_FIRST=0`) restores the old order for anyone
+    whose hosted key actually works and who wants its lower latency.
+    """
+    return os.environ.get("ASTA_CLI_FIRST", "1").lower() in ("1", "true", "yes", "on")
+
+
+async def _ask_cli(ws: str, prompt: str) -> str:
+    """Ask whichever CLI brain is up. '' when none could answer.
+
+    A CLI brain reads the workspace directly, which for a question about his own
+    code is not a downgrade — it is the same tooling a code task uses.
+    """
+    from . import agent as agent_mod
+    from .workspace import registry as _reg
+    root = ""
+    with contextlib.suppress(Exception):
+        entry = _reg.get(ws) if ws else None
+        root = str(entry.root) if entry else ""
+    for cli in ("claude_cli", "copilot"):
+        if not agent_mod.available(cli) or agent_mod.quota_down(cli):
+            continue
+        try:
+            text = await agent_mod.runner(cli).one_shot(prompt, cwd=root or None,
+                                                        timeout=120)
+        except Exception as exc:                      # noqa: BLE001
+            quiet.note(f"brain.{cli}_answer", exc)
+            continue
+        if (text or "").strip():
+            return text.strip()
+    return ""

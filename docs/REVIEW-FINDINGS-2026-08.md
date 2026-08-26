@@ -78,6 +78,8 @@ first thing to revisit.
 | 39 | High | A watcher repeating itself filled the bounded offer queue and evicted real offers | `offers.offer` | **closed** |
 | 40 | **Critical** | Two MORE inline copies of the repo-discovery rule, one of them deciding where PRs get raised | `tasks.py` | **closed** |
 | 41 | High | A read-only side turn could still spawn a CODE task — the guard that would catch it is behind a flag that is off | `agent.delegate_task` | **closed** |
+| 42 | Medium | Code questions went to a 9B local model before the CLI subscriptions already paid for | `call_brain` | **closed** |
+| 43 | High | The documented cert command truncates its target before fetching, so a failed fetch leaves a 0-byte cert | `deploy/fetch-temporal-cert.sh` | **closed** |
 
 ## Closed
 
@@ -731,10 +733,56 @@ actually verify. That is the same failure as finding 29, caught the same way.
 
 ---
 
+### 42 — the weakest brain was answering first — CLOSED 2026-08-26
+Arun: *"ignore api key, use cli as well always either copilot or claude cli."*
+
+The order was in-process model first, CLI second. With the hosted key refused and
+staying refused, `best_model_name()` resolves to **`local`** on this machine — so
+code questions were going to a 9B model in LM Studio, measured at 15.9s (gemma)
+to 38.9s (qwen) for a single lookup, and weaker on exactly the questions worth
+asking. Two CLI subscriptions he already pays for sat behind it.
+
+CLI first now (`ASTA_CLI_FIRST`, on by default). In-process models stay as the
+last resort, which is the case that fallback was written for: both CLIs down or
+out of quota.
+
+A pre-existing test broke, and deserved to. It grepped `answer_from_knowledge`'s
+source for the string `"claude_cli"`, so it failed the moment the loop moved into
+a helper — and would equally have passed if that loop were dead code. Replaced
+with a behavioural test: a CLI is actually reached, and the in-process failure is
+recorded rather than swallowed.
+
+### 43 — the documented fix was how the cert broke — CLOSED 2026-08-26
+Finding 26 found `preprod.pem` and `preprod.key` at **0 bytes**. This is how they
+got that way, and it is worth stating because the instruction is the one printed
+by the tool itself:
+
+    vault kv get ... -field=TEMPORAL_CERT_PEM | ... > ~/.config/temporal-mcp/preprod.pem
+
+The shell creates and **truncates the redirect target before `vault` runs**. An
+expired token, a wrong path, or no VPN therefore leaves a 0-byte file behind —
+which passes every `os.path.exists` check and surfaces much later from inside TLS
+as "failed to find any PEM data". The documented remedy manufactures the exact
+failure state finding 26 had to diagnose.
+
+`deploy/fetch-temporal-cert.sh` writes to a temp file, checks it is non-empty,
+checks it *parses* as the right kind of object, and only then moves it into
+place. A failed fetch leaves whatever was there before untouched, and says which
+of the three usual causes to look at.
+
+It reads the env → cert-name → vault-path mapping **from the proxy** rather than
+restating it, for the same reason the Temporal playbook is generated: a second
+copy is how a newly added env goes missing in one of them.
+
+Verified refusing cleanly with no `VAULT_ADDR` set, leaving the existing 0-byte
+files exactly as they were rather than making them worse.
+
+---
+
 ## Where this leaves the review
 
-**41 findings raised, 40 closed**, plus finding 4 recorded as Arun's accepted
-risk. 1,763 tests pass. Every fix was mutation-tested — the source was
+**43 findings raised, 42 closed**, plus finding 4 recorded as Arun's accepted
+risk. 1,766 tests pass. Every fix was mutation-tested — the source was
 deliberately broken and the suite had to notice.
 
 Still needing Arun rather than code:

@@ -236,3 +236,65 @@ def test_a_normal_turn_may_still_spawn_a_code_task(monkeypatch):
     finally:
         capabilities.READ_ONLY_TURN.reset(token)
     assert spawned.get("kind") == "code", "a normal turn was blocked from delegating"
+
+
+# --- a CLI subscription answers before an in-process model -------------------
+
+def test_a_cli_brain_answers_before_the_in_process_model(monkeypatch):
+    """Arun, 2026-08-26: "ignore api key, use cli as well always".
+
+    Also the better order on the evidence. `best_model_name()` returns `local` on
+    this machine, so code questions were going to a 9B model in LM Studio —
+    measured at 15.9s (gemma) and 38.9s (qwen) for a single lookup, and weaker on
+    exactly the questions worth asking. The CLI brains are subscriptions he
+    already pays for and they read the workspace directly.
+    """
+    from app import agent as agent_mod, call_brain
+
+    order: list[str] = []
+
+    class _Runner:
+        async def one_shot(self, prompt, cwd=None, timeout=120, **kw):
+            order.append("cli")
+            return "answered by the CLI"
+
+    def _in_process(*a, **k):
+        order.append("in_process")
+        raise AssertionError("the in-process model was asked first")
+
+    monkeypatch.setattr(agent_mod, "available", lambda n: n == "claude_cli")
+    monkeypatch.setattr(agent_mod, "quota_down", lambda n: False)
+    monkeypatch.setattr(agent_mod, "runner", lambda n: _Runner())
+    monkeypatch.setattr(agent_mod, "best_model_name", _in_process, raising=False)
+
+    out = asyncio.run(call_brain.answer_from_knowledge("where do vessel dates live?"))
+    assert out == "answered by the CLI"
+    assert order == ["cli"], f"wrong order: {order}"
+
+
+def test_the_in_process_model_is_still_the_last_resort(monkeypatch):
+    """When both CLIs are down, a local model is better than no answer."""
+    from app import agent as agent_mod, call_brain
+
+    monkeypatch.setattr(agent_mod, "available", lambda n: False)
+    monkeypatch.setattr(agent_mod, "quota_down", lambda n: True)
+
+    reached = {"in_process": False}
+
+    def _best():
+        reached["in_process"] = True
+        raise RuntimeError("no model")     # keeps the test off any real brain
+
+    monkeypatch.setattr(agent_mod, "best_model_name", _best, raising=False)
+    out = asyncio.run(call_brain.answer_from_knowledge("anything?"))
+    assert out == "", "a failed everything must return '' not an apology"
+    assert reached["in_process"], "the in-process fallback was never reached"
+
+
+def test_the_order_is_switchable(monkeypatch):
+    """Anyone whose hosted key works can have the lower-latency order back."""
+    from app import call_brain
+    monkeypatch.setenv("ASTA_CLI_FIRST", "0")
+    assert call_brain._cli_first() is False
+    monkeypatch.setenv("ASTA_CLI_FIRST", "1")
+    assert call_brain._cli_first() is True

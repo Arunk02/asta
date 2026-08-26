@@ -747,6 +747,16 @@ def open_questions() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def answered_questions(since: float, limit: int = 50) -> list[dict]:
+    """Questions Arun actually answered since `since`, newest first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM questions WHERE status='answered' AND answer<>''"
+            " AND answered_at>=? ORDER BY answered_at DESC LIMIT ?",
+            (since, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def close_question(qid: int, answer: str, status: str = "answered") -> None:
     with _connect() as conn:
         conn.execute(

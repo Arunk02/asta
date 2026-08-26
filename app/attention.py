@@ -43,6 +43,32 @@ P_MUTE = 3       # recorded, never pushed — the audit trail for a suppression
 
 SETTLED = ("acted", "dropped")
 
+#: Things Asta itself said. An announcement is not an obligation — a health
+#: report, a finished task, a meeting reminder and a question Asta asked are all
+#: things Asta PRODUCED, and none of them is owed back to anyone.
+#:
+#: Filing them under the same source as an arriving mail made the ledger read
+#: Asta's own speech as Arun's backlog. And because a chase message is itself a
+#: push, each chase was filed and then chased in turn: "still waiting on you (2)"
+#: whose single item was "still waiting on you (3)" whose single item was "still
+#: waiting on you (13)". Live rows, not a hypothetical.
+#:
+#: They are still RECORDED — the audit trail is worth having, and an identical
+#: repeat is still suppressed. They are simply never owed.
+SELF_SOURCE = "asta"
+
+
+def self_originated(row: dict) -> bool:
+    """True when everything that produced this row was Asta itself.
+
+    Checks the accumulated `sources`, not just the first one, so the judgement
+    survives a merge in either direction: a real arrival landing on a key Asta
+    happened to create makes the row owed again, which is the honest answer.
+    """
+    joined = row.get("sources") or row.get("source") or ""
+    sources = [s for s in joined.split(",") if s]
+    return bool(sources) and all(s == SELF_SOURCE for s in sources)
+
 
 def enabled() -> bool:
     return os.environ.get("ASTA_ATTENTION", "").strip().lower() in _TRUEY
@@ -343,7 +369,10 @@ def settle_stale(days: int = 7, now: float | None = None) -> int:
     cutoff = now - days * 86400
     settled = 0
     for row in store.attention_open(limit=500, max_priority=P_FYI):
-        if row.get("state") != "notified":
+        if row.get("state") != "notified" or self_originated(row):
+            # Labelling Asta's own announcement "ignored" would teach the filter
+            # that its own voice is noise, and the precision numbers that decide
+            # whether a tier means anything would be measuring the wrong thing.
             continue
         if float(row.get("notified_at") or 0) > cutoff:
             continue
@@ -398,7 +427,8 @@ def open_items(limit: int = 50, max_priority: int = P_FYI) -> list[dict]:
     calendar in a fresh Playwright session, ~20s, for data a watcher read five
     minutes earlier. Once things are recorded, that read is free.
     """
-    return store.attention_open(limit=limit, max_priority=max_priority)
+    return [r for r in store.attention_open(limit=limit, max_priority=max_priority)
+            if not self_originated(r)]
 
 
 def purge(days: int = 14, now: float | None = None) -> int:

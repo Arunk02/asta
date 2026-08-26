@@ -175,10 +175,22 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     # `considered=True` is the opt-out for the callers that already asked; a
     # second upsert of the same key would read as "already notified" and
     # suppress the very push their own check had just approved.
+    #
+    # An unnamed source is Asta speaking on its own initiative, and is filed as
+    # such. Every one of the fifty-odd call sites here is Asta ANNOUNCING —
+    # a health report, a finished task, a meeting reminder, a question it is
+    # asking — and none of it is owed back to him. Calling it "notify" put
+    # Asta's own voice in his backlog and made the chase loop chase its own
+    # last chase; see attention.SELF_SOURCE for what that produced.
     if not considered:
         from . import attention, triage
         ledger_key = key or triage.stable_key(text)
-        if not attention.consider(source or "notify", ledger_key, what=text[:200],
+        from . import clip as clip_mod
+        if not attention.consider(source or attention.SELF_SOURCE, ledger_key,
+                                  # `what` is rendered back to him in chases and
+                                  # in "what's on my plate", so it must read as a
+                                  # sentence rather than stop mid-word.
+                                  what=clip_mod.clip(text, 200),
                                   priority=_ledger_priority(urgency, priority)):
             # Recorded, and deliberately not pushed. The bell above still has it,
             # so nothing is lost — it simply does not buzz twice for one thing.

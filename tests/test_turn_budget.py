@@ -13,6 +13,11 @@ import pytest
 
 from app import turn_budget as tb
 
+# The DEFAULT context directory, not the one Arun's .env names. Hardcoding
+# ".contmark" made these pass on his laptop and fail on the first CI run.
+from app.workspace.providers.indexed import DEFAULT_CONTEXT_DIR as _CTX
+
+
 
 class _Stream:
     """A stdout that yields planned chunks, with planned gaps between them."""
@@ -184,7 +189,7 @@ def test_a_workspace_that_is_itself_a_repo_still_finds_the_code_repos(tmp_path):
     """The booking workspace shape, which was silently mis-read.
 
     `~/booking-workspace` is a git repo of its own — Arunk540/booking-workspace,
-    tracking 234 generated files under .contmark/ — with the three service repos
+    tracking 234 generated files under {_CTX}/ — with the three service repos
     inside it as ordinary directories. The old rule returned `[root]` the moment
     the root had a .git, so it reported ONE repo and that repo was the context
     repo, not the code.

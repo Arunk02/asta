@@ -181,12 +181,12 @@ from app.workspace.providers.indexed import IndexedProvider
 def _workspace(tmp_path: Path, repos: dict) -> Path:
     """Build a workspace on disk. repos maps name -> ('git'|'nogit', recorded_sha)."""
     root = tmp_path / "ws"
-    (root / ".contmark" / "repos").mkdir(parents=True)
+    (root / _CTX / "repos").mkdir(parents=True)
     for name, (kind, sha) in repos.items():
         (root / name).mkdir(parents=True, exist_ok=True)
         if kind == "git":
             (root / name / ".git").mkdir()
-        d = root / ".contmark" / "repos" / name
+        d = root / _CTX / "repos" / name
         d.mkdir(parents=True, exist_ok=True)
         (d / "_index.json").write_text(json.dumps({"verified_against": sha}))
     return root
@@ -220,7 +220,7 @@ async def test_an_index_with_no_recorded_sha_is_reported(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_an_unreadable_index_is_reported(tmp_path, monkeypatch):
     root = _workspace(tmp_path, {"booking-service": ("git", "abc12345")})
-    (root / ".contmark" / "repos" / "booking-service" / "_index.json").write_text("{not json")
+    (root / _CTX / "repos" / "booking-service" / "_index.json").write_text("{not json")
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: ["booking-service"])
     stale = await ctx._sha_drift()
@@ -232,7 +232,7 @@ async def test_a_missing_index_is_still_skipped_quietly(tmp_path, monkeypatch):
     """No index means the repo was never in the context — not a staleness claim,
     so it must NOT become noise on every check."""
     root = tmp_path / "ws"
-    (root / ".contmark" / "repos").mkdir(parents=True)
+    (root / _CTX / "repos").mkdir(parents=True)
     (root / "booking-service").mkdir(parents=True)
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: ["booking-service"])
@@ -246,7 +246,7 @@ async def test_the_resolver_states_its_freshness(tmp_path, monkeypatch):
     root = _workspace(tmp_path, {"booking-service": ("nogit", "abc12345")})
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: ["booking-service"])
-    (root / ".contmark" / indexed_mod.RESOLVER).write_text("// stub")
+    (root / _CTX / indexed_mod.RESOLVER).write_text("// stub")
 
     async def fake_run(cmd, cwd, timeout, ctx_dir=""):
         return 0, "TmsServiceImpl handles the ATA fallback."
@@ -263,7 +263,7 @@ async def test_a_verified_context_says_so_without_alarming(tmp_path, monkeypatch
     root = _workspace(tmp_path, {"booking-service": ("git", "abc12345")})
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: [])       # nothing to verify
-    (root / ".contmark" / indexed_mod.RESOLVER).write_text("// stub")
+    (root / _CTX / indexed_mod.RESOLVER).write_text("// stub")
 
     async def fake_run(cmd, cwd, timeout, ctx_dir=""):
         return 0, "the answer"
@@ -284,7 +284,7 @@ async def test_a_broken_drift_check_does_not_break_the_answer(tmp_path, monkeypa
         raise RuntimeError("git is gone")
 
     monkeypatch.setattr(ctx, "services", explode)
-    (root / ".contmark" / indexed_mod.RESOLVER).write_text("// stub")
+    (root / _CTX / indexed_mod.RESOLVER).write_text("// stub")
 
     async def fake_run(cmd, cwd, timeout, ctx_dir=""):
         return 0, "the answer survives"
@@ -300,7 +300,7 @@ async def test_the_resolver_payload_is_capped_to_its_contract(tmp_path, monkeypa
     root = _workspace(tmp_path, {"booking-service": ("git", "abc12345")})
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: [])
-    (root / ".contmark" / indexed_mod.RESOLVER).write_text("// stub")
+    (root / _CTX / indexed_mod.RESOLVER).write_text("// stub")
 
     async def fake_run(cmd, cwd, timeout, ctx_dir=""):
         return 0, "x" * 50_000
@@ -1891,10 +1891,18 @@ def test_every_case_is_grounded_in_something_verified():
         assert c.get("must") or c.get("must_not"), f"{c['id']} asserts nothing"
 
 
-def test_the_cited_ground_truth_actually_says_what_the_case_claims():
+def test_the_cited_ground_truth_actually_says_what_the_case_claims(live_workspace_context):
     """The cases must track the workspace. If a lesson is rewritten and the case
-    is not, the eval quietly starts measuring history."""
+    is not, the eval quietly starts measuring history.
+
+    Asks for the machine's real context directory, because it reads the real
+    workspace. Every other test gets the default — hardcoding one developer's
+    directory name is what made the suite pass locally and fail on the first CI
+    run it ever had.
+    """
     from app import workspace as ws_mod
+    if not live_workspace_context:
+        pytest.skip("no context directory configured on this machine (e.g. CI)")
     conv = ws_mod.conventions("booking")
     if not conv.strip():
         pytest.skip("no workspace conventions on this machine")
@@ -2414,6 +2422,11 @@ def test_meetings_actually_got_smaller():
 # builds from, so the guards are the point, not the plumbing.
 
 from app import ops, review as review_mod
+
+# The DEFAULT context directory, not the one Arun's .env names. Hardcoding
+# ".contmark" made these pass on his laptop and fail on the first CI run.
+from app.workspace.providers.indexed import DEFAULT_CONTEXT_DIR as _CTX
+
 
 OPEN_CLEAN = {"number": 11, "title": "BEPTELIKOS-9397 vessel dates", "state": "OPEN",
               "draft": False, "mergeable": "MERGEABLE", "merge_state": "CLEAN",

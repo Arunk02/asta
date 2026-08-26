@@ -21,6 +21,11 @@ from pathlib import Path
 
 import pytest
 
+# The DEFAULT context directory, not the one Arun's .env names. Hardcoding
+# ".contmark" made these pass on his laptop and fail on the first CI run.
+from app.workspace.providers.indexed import DEFAULT_CONTEXT_DIR as _CTX
+
+
 RESOURCES = Path(__file__).resolve().parents[1] / "skills" / "workspace-context" / "resources"
 CHECK_DRIFT = RESOURCES / "check-drift.js"
 RESOLVE_TASK = RESOURCES / "resolve-task.js"
@@ -94,7 +99,7 @@ def _run(script: Path, root: Path, *args: str, env: dict | None = None):
 @pytest.fixture
 def drifted(tmp_path):
     """A workspace whose repo has moved on, with a mix of real and inert changes."""
-    ctx = _workspace(tmp_path, ".contmark", ["acme-billing-service"])
+    ctx = _workspace(tmp_path, _CTX, ["acme-billing-service"])
     first = _repo(tmp_path, "acme-billing-service",
                   {"src/main/java/Billing.java": "class Billing {}"})
     _mini_skill(ctx, "acme-billing-service", "runtime/billing-flow.md",
@@ -191,7 +196,7 @@ def test_drift_exits_nonzero_so_ci_can_gate_on_it(drifted):
 # --- self-location -----------------------------------------------------------
 
 def test_the_script_finds_the_context_dir_when_copied_into_it(drifted):
-    """`node .contmark/check-drift.js .` must work. It used to default to
+    """`node {_CTX}/check-drift.js .` must work. It used to default to
     `.asta-context` and report a perfectly bootstrapped workspace as not
     bootstrapped."""
     root, ctx = drifted
@@ -206,7 +211,7 @@ def test_the_script_finds_the_context_dir_when_copied_into_it(drifted):
 
 
 def test_it_probes_for_the_layout_when_run_from_the_plugin(drifted):
-    """No env, script outside the workspace: it must still find `.contmark`."""
+    """No env, script outside the workspace: it must still find `{_CTX}`."""
     root, _ = drifted
     r = _run(CHECK_DRIFT, root, "--json",
              env={k: v for k, v in os.environ.items() if k != "ASTA_CONTEXT_DIR"})
@@ -231,7 +236,7 @@ def test_a_workspace_that_was_never_bootstrapped_says_so(tmp_path):
 # --- the org prefix is derived, never hardcoded ------------------------------
 
 def _routing_ws(tmp_path, keys, disambiguation=None):
-    ctx = _workspace(tmp_path, ".contmark", keys)
+    ctx = _workspace(tmp_path, _CTX, keys)
     for k in keys:
         sha = _repo(tmp_path, k, {"src/main/java/A.java": "class A {}"})
         _index(ctx, k, sha)

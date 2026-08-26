@@ -13,6 +13,7 @@ work — they just override an already-safe default.
 from __future__ import annotations
 
 import contextlib
+import os
 
 import pytest
 
@@ -40,12 +41,57 @@ def _isolated_db(tmp_path, monkeypatch):
 #: with monkeypatch.setenv, which still works and now states its intent out loud.
 _TIME_DEPENDENT_ENV = ("ASTA_QUIET_HOURS",)
 
+#: Settings that decide what a test's FIXTURES mean. Same argument as the clock
+#: above, found the same way — by something failing where the real .env is absent.
+#:
+#: `ASTA_CONTEXT_DIRNAMES=.contmark` is set in Arun's .env, and the context tests
+#: build workspaces containing a `.contmark/` directory. So they passed on his
+#: laptop and, on the first CI run ever, failed on seven assertions that all said
+#: some version of "the context is fine" — because with the default dirname the
+#: provider looked for `.asta-context`, found nothing, and reported nothing stale.
+#: A green suite that depends on one developer's .env is not a green suite.
+#:
+#: Cleared for every test. A test that is ABOUT a non-default context directory
+#: sets it itself, which states the assumption instead of inheriting it.
+_FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
+
+
+#: What this machine's .env said, captured before it is cleared. A handful of
+#: tests are genuinely ABOUT the live workspace — checking that eval ground truth
+#: still matches the lessons it cites — and those need the real directory name
+#: back. Handed over through a fixture so the need is declared rather than
+#: inherited, and so a test that forgets to ask gets the default like everyone else.
+_REAL_CONTEXT_DIRNAMES = {n: os.environ.get(n) for n in
+                          ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")}
+
 
 @pytest.fixture(autouse=True)
 def _no_wall_clock_dependence(monkeypatch):
-    for name in _TIME_DEPENDENT_ENV:
+    for name in _TIME_DEPENDENT_ENV + _FIXTURE_SHAPING_ENV:
         monkeypatch.delenv(name, raising=False)
     yield
+
+
+@pytest.fixture
+def live_workspace_context(monkeypatch):
+    """Restore this machine's real context directory name.
+
+    For the few tests that read Arun's actual workspace rather than a fixture.
+    They skip where it is absent — which is every CI runner — so restoring the
+    name costs nothing there and is the difference between measuring the real
+    thing and measuring a default that matches no directory on disk.
+    """
+    restored = False
+    for name, value in _REAL_CONTEXT_DIRNAMES.items():
+        if value:
+            monkeypatch.setenv(name, value)
+            restored = True
+    # Yields whether there was anything to restore, so a test can skip rather
+    # than validate against a default that matches no directory on disk. Without
+    # this the ground-truth test read the generic AGENTS.md fallback — non-empty,
+    # so its "skip if empty" guard did not fire — and asserted against text that
+    # was never going to contain the facts it was checking for.
+    yield restored
 
 
 @pytest.fixture(autouse=True)

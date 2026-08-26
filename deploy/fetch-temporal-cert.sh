@@ -49,10 +49,37 @@ CERT="$CONFIG_DIR/$CERT_NAME.pem"
 KEY="$CONFIG_DIR/$CERT_NAME.key"
 echo "env $ENV_NAME -> cert '$CERT_NAME'  (vault: $VAULT_ARGS)"
 
+# Remembered locally, never committed. The repo deliberately carries no internal
+# hostnames — the same reason the eval cases and the Temporal playbook are
+# gitignored — so the address lives in a file beside the certs it fetches.
+ADDR_FILE="$CONFIG_DIR/vault-addr"
+if [ -z "${VAULT_ADDR:-}" ] && [ -r "$ADDR_FILE" ]; then
+  VAULT_ADDR="$(tr -d '[:space:]' < "$ADDR_FILE")"
+  export VAULT_ADDR
+  echo "using remembered VAULT_ADDR from $ADDR_FILE"
+fi
+
 if [ -z "${VAULT_ADDR:-}" ]; then
-  echo "VAULT_ADDR is not set — vault would try localhost:8200 and fail." >&2
-  echo "Export your Vault address first, then re-run." >&2
+  cat >&2 <<'MSG'
+VAULT_ADDR is not set — vault would try localhost:8200 and fail.
+
+Set it once and it will be remembered for next time:
+
+  export VAULT_ADDR=https://<your-vault>
+  mkdir -p ~/.config/temporal-mcp
+  echo "$VAULT_ADDR" > ~/.config/temporal-mcp/vault-addr
+
+MSG
   exit 78
+fi
+
+# A stale token is the most common cause and gives the least helpful error later,
+# so it is checked up front rather than discovered mid-fetch.
+if ! vault token lookup >/dev/null 2>&1; then
+  echo "Vault token is expired or missing for $VAULT_ADDR." >&2
+  echo "Log in first (this opens a browser):" >&2
+  echo "  vault login -method=oidc -role=telikos-nonprod" >&2
+  exit 77
 fi
 
 mkdir -p "$CONFIG_DIR"

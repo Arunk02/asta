@@ -40,11 +40,20 @@ DYNAMIC_PREFIXES = ("ASTA_EFFORT_",)
 
 _READ = re.compile(r"""environ(?:\.get\(|\[)\s*["'](ASTA_[A-Z0-9_]+)["']""")
 
+#: Flag names the brain spec table carries as DATA — `"tier_env": "ASTA_..."`,
+#: later read through `os.environ.get(env_var)`. The code reads these as surely
+#: as a literal call does; the name simply sits one indirection away, where a
+#: regex over call sites cannot see it. Deliberately narrow (a key ending in
+#: `_env`) rather than "any ASTA_ string anywhere", which would let a flag
+#: mentioned only in a comment pass as implemented.
+_DECLARED = re.compile(r"""["']\w*_env["']\s*:\s*\(?\s*["'](ASTA_[A-Z0-9_]+)["']""")
+
 
 def _flags_in_code() -> set[str]:
     found: set[str] = set()
     for path in APP.rglob("*.py"):
-        found |= set(_READ.findall(path.read_text(encoding="utf-8", errors="replace")))
+        text = path.read_text(encoding="utf-8", errors="replace")
+        found |= set(_READ.findall(text)) | set(_DECLARED.findall(text))
     return found
 
 

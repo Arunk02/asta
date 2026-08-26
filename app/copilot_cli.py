@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import memory, store, untrusted, workspace_tools
+from . import memory, store, turn_budget, untrusted, workspace_tools
 
 COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
 
@@ -31,6 +31,24 @@ def mcp_cli_enabled() -> bool:
     return os.environ.get("ASTA_CLI_MCP", "0").lower() in ("1", "true", "yes", "on")
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: What a chat turn may not do here, in THIS CLI's syntax. The decision lives in
+#: capabilities.chat_may_write(); only the spelling is local.
+#:
+#: Every entry was verified against the real `copilot` binary on 2026-08-26, and
+#: two things came out of that which no amount of reading would have:
+#:
+#:   · `--deny-tool edit` — what this code passed until today — is a NO-OP. The
+#:     tool is called `write`. Asked to create a file with `edit` denied, copilot
+#:     created it. The chat write-block had never once worked.
+#:   · denying `write` alone is not enough either: copilot simply falls back to
+#:     the shell and writes the file that way. Measured, not assumed.
+#:
+#: `gh` is denied only for `pr create`. Chat legitimately reads CI with
+#: `gh run list` and `gh pr view`, and banning the whole command would break the
+#: thing he uses most.
+_CHAT_DENY = ("write", "shell(git commit)", "shell(git push)", "shell(gh pr create)")
 
 
 def turn_timeout() -> int:
@@ -301,6 +319,24 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
         # enough: it grants file access, not execution.
         "--allow-all-paths",
     ]
+    # Defence in depth behind the routing in `_dispatch`: the CHAT path may not
+    # edit files.
+    #
+    # The instruction has said "never plan or implement in chat yourself" for a
+    # long time and the model implemented anyway, burning the 300s turn budget
+    # mid-edit. Routing catches the clear cases; this catches the rest, by making
+    # the wrong thing impossible rather than discouraged.
+    #
+    # Reading stays: `view`, `grep` and the shell generally are most of what chat
+    # legitimately does, and taking the shell away would break every Teams, git
+    # and log command — including the CI checks he asks for constantly. What goes
+    # is writing and the three outward acts that cannot be taken back.
+    #
+    # Task runs (`one_shot`) are untouched: implementing is their whole job.
+    from . import capabilities
+    if not capabilities.chat_may_write():
+        for tool in _CHAT_DENY:
+            cmd += ["--deny-tool", tool]
     # Native asta tools instead of curl, when enabled. Copilot takes the config
     # as inline JSON (its flag differs from Claude's --mcp-config). --allow-all-
     # tools above already clears the MCP tools. Kept in lockstep with the shared
@@ -374,29 +410,36 @@ async def run_turn(conv: dict, user_text: str,
         stderr=asyncio.subprocess.PIPE,
         env={**os.environ, "CI": "1"},
     )
-    chunks: list[str] = []
-
-    async def _pump() -> None:
-        assert proc.stdout
-        while True:
-            chunk = await proc.stdout.read(512)
-            if not chunk:
-                break
-            text = chunk.decode(errors="replace")
-            chunks.append(text)
-            if on_delta:
-                await on_delta(text)
-
     limit = turn_timeout()
+    assert proc.stdout
+    stop = await turn_budget.drain(proc.stdout, on_delta, total=limit)
+    chunks = stop.chunks
     try:
-        await asyncio.wait_for(_pump(), timeout=limit)
+        if stop.answered():
+            # It said its piece and then went quiet waiting on something outside
+            # itself. That is an answer, not a failure: hand it back the way a
+            # clean finish would. The process is still killed — nothing further
+            # is coming, and leaving it alive holds a subprocess for nothing.
+            proc.kill()
+            store.record_outcome(
+                "turn", "answered_then_idle", subject="copilot",
+                detail=f"{stop.elapsed:.0f}s, silent {stop.silent_for:.0f}s, "
+                       f"{len(stop.partial)} chars")
+            return stop.partial
+        if not stop.ok:
+            # Everything it streamed is kept and travels with the error. The old
+            # branch discarded it for a one-line message, which is why "did it do
+            # anything?" had no answer but to go and look at the repo.
+            proc.kill()
+            raise turn_budget.TurnStopped(stop, already_shown=on_delta is not None)
         # Closing stdout is not the same as exiting. A copilot that streamed its
         # answer and then hung on shutdown held this await forever, outside the
         # ceiling above — the turn was finished and Arun still heard nothing.
         rc = await asyncio.wait_for(proc.wait(), timeout=30)
     except asyncio.TimeoutError:
         proc.kill()
-        raise RuntimeError(f"Copilot CLI turn timed out after {limit}s")
+        raise turn_budget.TurnStopped(
+            turn_budget.Stop("ceiling", limit, 0.0, chunks))
     except asyncio.CancelledError:
         # Arun corrected course mid-answer. Killing the process is the point:
         # it stops the wrong line of investigation from billing any further.

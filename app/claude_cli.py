@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import store
+from . import store, turn_budget
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -88,7 +88,8 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
             cmd += ["--append-system-prompt", Path(agent_file).read_text()]
     if effort and effort != "default":
         cmd += ["--effort", effort]
-    model = os.environ.get("ASTA_CLAUDE_CLI_MODEL", "")
+    from . import agent as agent_mod
+    model = agent_mod.tier_of("claude_cli")
     if model:
         cmd += ["--model", model]
     proc = await asyncio.create_subprocess_exec(
@@ -155,6 +156,15 @@ def _cwd(conv: dict) -> str:
     return str(ROOT)
 
 
+#: The same ban as copilot_cli._CHAT_DENY, in Claude Code's syntax — verified
+#: against the real binary on 2026-08-26 (a denied `git commit` is refused and
+#: the brain says so plainly). This path carried NO restriction at all before,
+#: so "chat may not implement" held or not depending purely on which brain was
+#: selected — the per-brain drift that one shared decision exists to prevent.
+_CHAT_DENY = ("Write", "Edit", "NotebookEdit",
+              "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh pr create:*)")
+
+
 def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     from . import copilot_cli, memory
     import datetime as _dt
@@ -192,6 +202,13 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         "--verbose",                       # required for stream-json
         "--permission-mode", "bypassPermissions",
     ]
+    # Same ban as the copilot chat path, for the same reason: a chat turn cannot
+    # ask for plan approval and cannot outlive ASTA_TURN_TIMEOUT, so work started
+    # here ends as a half-finished edit. Comma-separated in ONE argument, not
+    # variadic — a bare list would swallow the flags that follow it.
+    from . import capabilities
+    if not capabilities.chat_may_write():
+        cmd += ["--disallowed-tools", ",".join(_CHAT_DENY)]
     # Native tools instead of curl, when enabled: Claude Code spawns Asta's MCP
     # server and calls capabilities as `mcp__asta__*` tools that forward to the
     # running server. Off by default — the curl path is the proven one, and this
@@ -209,7 +226,8 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         selected = tool_index.select_sticky(conv["id"], ranking_text)
         cmd += ["--mcp-config", _json.dumps(mcp_server.config_entry(tools=selected)),
                 "--strict-mcp-config"]
-    model = os.environ.get("ASTA_CLAUDE_CLI_MODEL", "")
+    from . import agent as agent_mod
+    model = agent_mod.tier_of("claude_cli")
     if model:
         cmd += ["--model", model]
     effort = os.environ.get("ASTA_CLAUDE_EFFORT", "")
@@ -261,6 +279,7 @@ async def run_turn(conv: dict, user_text: str,
             block = await proc.stdout.read(4096)
             if not block:
                 break
+            beat.beat()          # still alive — see turn_budget.guard
             buf += block
             # stream-json is newline-delimited; a 4k read can split a line.
             *lines, buf = buf.split(b"\n")
@@ -312,6 +331,8 @@ async def run_turn(conv: dict, user_text: str,
                     else:
                         final = (e.get("result") or "").strip()
 
+    beat = turn_budget.Heartbeat()
+
     def _report() -> None:
         """Hand back whatever was spent — including on the paths that failed.
 
@@ -323,15 +344,35 @@ async def run_turn(conv: dict, user_text: str,
                 on_usage(usage)
 
     limit = turn_timeout()
+    stop = await turn_budget.guard(_pump(), beat, total=limit)
     try:
-        await asyncio.wait_for(_pump(), timeout=limit)
+        if not stop.ok:
+            proc.kill()
+            _report()          # a killed turn already burned its tokens
+            # Whatever it produced travels with the error. A turn that wrote three
+            # files and then ran out of budget is not the same event as one that
+            # wedged having done nothing, and reporting both as "timed out" is
+            # what made it impossible to tell finished from stuck.
+            #
+            # Streamed text first, `result` second — the same preference as the
+            # success path below, so a stop reports exactly what he was shown.
+            stop.chunks[:] = ["".join(chunks).strip() or final or ""]
+            if stop.answered():
+                # Answered in full, then silent: waiting on the world, not wedged.
+                store.record_outcome(
+                    "turn", "answered_then_idle", subject="claude",
+                    detail=f"{stop.elapsed:.0f}s, silent {stop.silent_for:.0f}s, "
+                           f"{len(stop.partial)} chars")
+                return stop.partial
+            raise turn_budget.TurnStopped(stop, already_shown=on_delta is not None)
         # Same reason as copilot_cli: end-of-output is not end-of-process, and an
         # unbounded wait here holds a finished turn open indefinitely.
         rc = await asyncio.wait_for(proc.wait(), timeout=30)
     except asyncio.TimeoutError:
         proc.kill()
         _report()
-        raise RuntimeError(f"CLI turn timed out after {limit}s")
+        raise turn_budget.TurnStopped(
+            turn_budget.Stop("ceiling", limit, 0.0, [final or ""]))
     except asyncio.CancelledError:
         # Arun redirected mid-answer. Killing the process is the point: it stops
         # the wrong line of work from consuming any more of the session quota.

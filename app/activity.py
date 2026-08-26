@@ -69,10 +69,49 @@ _ADD = re.compile(
     re.I)
 
 
+#: Verbs that change something. A message carrying one of these is NOT answered
+#: alongside running work, however question-shaped it looks — "can you push this?"
+#: is a request, not a query.
+_WRITE_VERB = re.compile(
+    r"\b(implement|fix|change|modif(y|ies)|edit|refactor|rename|push|merge|commit|"
+    r"send|call|ring|create|delete|remove|drop|update|raise|open|post|reply|draft|"
+    r"approve|reject|schedule|book|cancel|stop|move|deploy|release|revert|rollback|"
+    r"install|run|execute|apply|write|add)\b", re.I)
+
+#: Read-shaped openings. Deliberately narrow — this only ever REFINES a verdict
+#: that was already going to be "ambiguous", so a miss costs the old behaviour
+#: (queued, answered next) rather than anything new.
+_ASKS = re.compile(
+    r"^\s*(what|which|who|whose|when|where|why|how|is|are|was|were|does|do|did|"
+    r"has|have|had|can|could|any|status of|show|tell me|give me)\b", re.I)
+
+
+def is_read_only_ask(text: str) -> bool:
+    """A question that can be answered ALONGSIDE running work.
+
+    Arun asked "What is the ci status of above PR" while an implementation was
+    running and got "still finishing the previous one — I'll answer this right
+    after." Nothing about reading a PR's checks conflicts with writing code; the
+    serialisation was protecting the conversation, not the repo.
+
+    Conservative on purpose, and it does not have to be right. A side turn cannot
+    reach a capability that writes (see capabilities.READ_ONLY_TURN), so the worst
+    a false positive can do is read something and answer it. A false negative just
+    queues the message, which is exactly what happened before.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 300:
+        return False
+    if _WRITE_VERB.search(t):
+        return False
+    return bool(_ASKS.match(t) or t.endswith("?"))
+
+
 def classify_interjection(text: str) -> str:
     """How a follow-up sent mid-turn relates to the work already running:
     'status' (just asking for progress), 'augment' (fold in, keep working),
-    'redirect' (stop — it's wrong now), or 'ambiguous' (caller decides)."""
+    'redirect' (stop — it's wrong now), 'independent' (a read-only question with
+    no bearing on it — answer it alongside), or 'ambiguous' (caller decides)."""
     t = (text or "").strip()
     if not t:
         return "augment"
@@ -83,6 +122,10 @@ def classify_interjection(text: str) -> str:
         return "redirect"
     if _ADD.search(t):
         return "augment"
+    # Only ever narrows what would otherwise be "ambiguous", so nothing that used
+    # to fold in or redirect can start running concurrently instead.
+    if is_read_only_ask(t):
+        return "independent"
     return "ambiguous"
 
 

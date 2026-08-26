@@ -25,6 +25,7 @@ Two consequences worth knowing:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -51,16 +52,52 @@ def exists(workspace_root: Path, task_id: int) -> bool:
     return root.is_dir() and any(root.iterdir())
 
 
-def repos_in(workspace_root: Path) -> list[Path]:
-    """The git repos of a workspace — itself, or the repos inside it."""
-    root = Path(workspace_root)
-    if (root / ".git").exists():
-        return [root]
+def _inner_repos(root: Path) -> list[Path]:
     try:
         return sorted(p for p in root.iterdir()
                       if (p / ".git").exists() and p.name != DIRNAME)
     except OSError:
         return []
+
+
+def repos_in(workspace_root: Path) -> list[Path]:
+    """The repos where a code task actually changes code.
+
+    Inner repos win over the root, and that ordering is the whole point. This used
+    to return `[root]` the moment the workspace root had a `.git` — and Arun's
+    booking workspace IS a git repo: `Arunk540/booking-workspace`, tracking the
+    234 generated files under `.contmark/`, with the three service repos sitting
+    inside it as ordinary directories.
+
+    So it reported one repo, and the one it reported was the context repo.
+    Everything downstream inherited that: worktree isolation cut a worktree of the
+    generated context instead of the services, rollback looked in the wrong tree,
+    and the scope-based budget sized a three-repo job as a one-repo job. None of
+    it failed loudly, because a wrong repo still exists and still answers git.
+
+    A plain single-repo workspace — root is the repo, nothing inside — still
+    returns the root, which is the case the shortcut was written for.
+    """
+    root = Path(workspace_root)
+    inner = _inner_repos(root)
+    if inner:
+        return inner
+    return [root] if (root / ".git").exists() else []
+
+
+def all_repos_in(workspace_root: Path) -> list[Path]:
+    """Every repo a task could have touched, including a workspace-level one.
+
+    Rollback wants the superset: if the root is also a repo, a change written
+    there still needs undoing. Worktrees deliberately want the narrower set —
+    cutting a worktree of the context repo would isolate the wrong thing. Both
+    read from `_inner_repos`, so the two answers cannot drift apart.
+    """
+    root = Path(workspace_root)
+    repos = _inner_repos(root)
+    if (root / ".git").exists() and root not in repos:
+        repos = [root, *repos]
+    return repos
 
 
 async def _base_branch(repo: Path) -> str:
@@ -77,7 +114,52 @@ async def _base_branch(repo: Path) -> str:
     return ""
 
 
-async def create(workspace_root: Path, task_id: int, branch: str) -> list[dict]:
+def repos_for(workspace_root: Path, *hints: str) -> list[Path]:
+    """The repos a task plausibly needs, from what it says it is doing.
+
+    Preparing every repo in the workspace is what a task used to do, and once the
+    workspace stopped mis-reporting itself as one repo that became three `git
+    fetch`es and three checkouts for a one-line change in one service.
+
+    Arun's point: two tasks working on different things do not conflict, so
+    neither should be paying for the other's repos. Scope the preparation to what
+    the task actually names.
+
+    Falls back to EVERYTHING when nothing matches, and that direction is
+    deliberate. Preparing a repo that turns out unnecessary costs a fetch; failing
+    to prepare one the task then needs costs the task. A guess that is wrong must
+    fail towards doing more work, not towards a broken run.
+    """
+    repos = repos_in(workspace_root)
+    if len(repos) <= 1:
+        return repos
+    text = " ".join(h or "" for h in hints).lower()
+    if not text.strip():
+        return repos
+    named = [r for r in repos if _names(r.name) & _tokens(text)]
+    return named or repos
+
+
+def _tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _names(repo_name: str) -> set[str]:
+    """What a person might call this repo.
+
+    `telikos-booking-service` is "booking" far more often than its full name, so
+    matching only the exact directory name would make this fall back to
+    everything on nearly every real task.
+    """
+    parts = set(re.findall(r"[a-z0-9]+", repo_name.lower()))
+    # The generic halves say nothing about WHICH repo — matching on them would
+    # select every repo in a workspace whose repos share a prefix, which is the
+    # normal shape.
+    return parts - {"service", "telikos", "svc", "app", "api"}
+
+
+async def create(workspace_root: Path, task_id: int, branch: str,
+                 *hints: str) -> list[dict]:
     """A private checkout of every repo in the workspace, on `branch`.
 
     Reported, never raised: one repo that cannot be prepared must not kill a
@@ -87,7 +169,7 @@ async def create(workspace_root: Path, task_id: int, branch: str) -> list[dict]:
     root = root_for(workspace_root, task_id)
     root.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
-    for repo in repos_in(workspace_root):
+    for repo in repos_for(workspace_root, *hints):
         out: dict = {"repo": repo.name, "branch": branch, "base": "", "ok": False,
                      "note": "", "path": str(root / repo.name)}
         # Fetch so the branch is cut from what origin has now, not from whatever
@@ -116,7 +198,11 @@ async def create(workspace_root: Path, task_id: int, branch: str) -> list[dict]:
             rc, msg = await repo_ops.git(repo, "git", "worktree", "add",
                                          str(target), branch, timeout=300)
         if rc != 0:
-            out["note"] = f"could not create a worktree: {msg.strip()[:160]}"
+            # The REASON, not the first 160 characters: git narrates
+            # "Preparing worktree…" and fails afterwards, so a leading slice kept
+            # the narration and cut the reason off the end.
+            from . import clip as clip_mod
+            out["note"] = f"could not create a worktree: {clip_mod.problem(msg)}"
         else:
             out["ok"] = True
         results.append(out)

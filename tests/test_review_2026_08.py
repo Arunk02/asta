@@ -181,12 +181,12 @@ from app.workspace.providers.indexed import IndexedProvider
 def _workspace(tmp_path: Path, repos: dict) -> Path:
     """Build a workspace on disk. repos maps name -> ('git'|'nogit', recorded_sha)."""
     root = tmp_path / "ws"
-    (root / ".contmark" / "repos").mkdir(parents=True)
+    (root / _CTX / "repos").mkdir(parents=True)
     for name, (kind, sha) in repos.items():
         (root / name).mkdir(parents=True, exist_ok=True)
         if kind == "git":
             (root / name / ".git").mkdir()
-        d = root / ".contmark" / "repos" / name
+        d = root / _CTX / "repos" / name
         d.mkdir(parents=True, exist_ok=True)
         (d / "_index.json").write_text(json.dumps({"verified_against": sha}))
     return root
@@ -220,7 +220,7 @@ async def test_an_index_with_no_recorded_sha_is_reported(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_an_unreadable_index_is_reported(tmp_path, monkeypatch):
     root = _workspace(tmp_path, {"booking-service": ("git", "abc12345")})
-    (root / ".contmark" / "repos" / "booking-service" / "_index.json").write_text("{not json")
+    (root / _CTX / "repos" / "booking-service" / "_index.json").write_text("{not json")
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: ["booking-service"])
     stale = await ctx._sha_drift()
@@ -232,7 +232,7 @@ async def test_a_missing_index_is_still_skipped_quietly(tmp_path, monkeypatch):
     """No index means the repo was never in the context — not a staleness claim,
     so it must NOT become noise on every check."""
     root = tmp_path / "ws"
-    (root / ".contmark" / "repos").mkdir(parents=True)
+    (root / _CTX / "repos").mkdir(parents=True)
     (root / "booking-service").mkdir(parents=True)
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: ["booking-service"])
@@ -246,7 +246,7 @@ async def test_the_resolver_states_its_freshness(tmp_path, monkeypatch):
     root = _workspace(tmp_path, {"booking-service": ("nogit", "abc12345")})
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: ["booking-service"])
-    (root / ".contmark" / indexed_mod.RESOLVER).write_text("// stub")
+    (root / _CTX / indexed_mod.RESOLVER).write_text("// stub")
 
     async def fake_run(cmd, cwd, timeout, ctx_dir=""):
         return 0, "TmsServiceImpl handles the ATA fallback."
@@ -263,7 +263,7 @@ async def test_a_verified_context_says_so_without_alarming(tmp_path, monkeypatch
     root = _workspace(tmp_path, {"booking-service": ("git", "abc12345")})
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: [])       # nothing to verify
-    (root / ".contmark" / indexed_mod.RESOLVER).write_text("// stub")
+    (root / _CTX / indexed_mod.RESOLVER).write_text("// stub")
 
     async def fake_run(cmd, cwd, timeout, ctx_dir=""):
         return 0, "the answer"
@@ -284,7 +284,7 @@ async def test_a_broken_drift_check_does_not_break_the_answer(tmp_path, monkeypa
         raise RuntimeError("git is gone")
 
     monkeypatch.setattr(ctx, "services", explode)
-    (root / ".contmark" / indexed_mod.RESOLVER).write_text("// stub")
+    (root / _CTX / indexed_mod.RESOLVER).write_text("// stub")
 
     async def fake_run(cmd, cwd, timeout, ctx_dir=""):
         return 0, "the answer survives"
@@ -300,7 +300,7 @@ async def test_the_resolver_payload_is_capped_to_its_contract(tmp_path, monkeypa
     root = _workspace(tmp_path, {"booking-service": ("git", "abc12345")})
     ctx = _ctx(root)
     monkeypatch.setattr(ctx, "services", lambda: [])
-    (root / ".contmark" / indexed_mod.RESOLVER).write_text("// stub")
+    (root / _CTX / indexed_mod.RESOLVER).write_text("// stub")
 
     async def fake_run(cmd, cwd, timeout, ctx_dir=""):
         return 0, "x" * 50_000
@@ -509,7 +509,7 @@ def test_a_missing_or_broken_map_is_not_a_crash(tmp_path, monkeypatch):
     assert verify.resolve_command(str(root)) is None
 
 
-def test_asta_ships_a_map_covering_every_booking_repo():
+def test_asta_ships_a_map_covering_every_booking_repo(live_verify_commands):
     """The three repos must each be present, so a missing check is a visible
     empty string rather than a silently absent key."""
     import json
@@ -614,7 +614,7 @@ async def test_a_check_that_times_out_is_skipped_not_looped(monkeypatch, tmp_pat
         "a skipped check must say so, or it silently protects nothing"
 
 
-def test_the_booking_repos_all_have_a_real_check_configured():
+def test_the_booking_repos_all_have_a_real_check_configured(live_verify_commands):
     """The whole point of finding 2. An empty command here means the gate is on
     and verifying nothing, which looks exactly like a gate that works."""
     import json
@@ -628,7 +628,7 @@ def test_the_booking_repos_all_have_a_real_check_configured():
         assert "test" in cmd, f"{repo}'s check does not run tests: {cmd}"
 
 
-def test_the_multi_module_repo_builds_its_siblings_too():
+def test_the_multi_module_repo_builds_its_siblings_too(live_verify_commands):
     """service/ depends on persistence, event, booking-domain, common and
     workflow. Without -am those resolve from the repository rather than the
     working tree, so a change to a sibling module would not be checked at all."""
@@ -750,7 +750,7 @@ def test_analysis_tasks_keep_the_old_lenient_behaviour(monkeypatch):
     assert tasks._cwd(None) == str(tasks.ROOT)
 
 
-def test_booking_is_the_only_workspace_registered():
+def test_booking_is_the_only_workspace_registered(live_workspaces):
     """Arun removed iom-workspace on 2026-08-19. With exactly one registered,
     a workspace-less code task resolves rather than refuses — so this is load
     bearing for the case above, not decoration."""
@@ -1880,7 +1880,7 @@ def test_the_caption_reader_records_its_failures():
 from app import evals
 
 
-def test_every_case_is_grounded_in_something_verified():
+def test_every_case_is_grounded_in_something_verified(live_eval_cases):
     """A case whose ground truth cannot be pointed at is worse than no case — it
     measures agreement with a guess and calls the result quality."""
     cases = evals.load("booking")
@@ -1891,10 +1891,18 @@ def test_every_case_is_grounded_in_something_verified():
         assert c.get("must") or c.get("must_not"), f"{c['id']} asserts nothing"
 
 
-def test_the_cited_ground_truth_actually_says_what_the_case_claims():
+def test_the_cited_ground_truth_actually_says_what_the_case_claims(live_workspace_context):
     """The cases must track the workspace. If a lesson is rewritten and the case
-    is not, the eval quietly starts measuring history."""
+    is not, the eval quietly starts measuring history.
+
+    Asks for the machine's real context directory, because it reads the real
+    workspace. Every other test gets the default — hardcoding one developer's
+    directory name is what made the suite pass locally and fail on the first CI
+    run it ever had.
+    """
     from app import workspace as ws_mod
+    if not live_workspace_context:
+        pytest.skip("no context directory configured on this machine (e.g. CI)")
     conv = ws_mod.conventions("booking")
     if not conv.strip():
         pytest.skip("no workspace conventions on this machine")
@@ -1935,7 +1943,7 @@ def test_no_answer_is_a_failure_not_a_pass():
 
 
 @pytest.mark.asyncio
-async def test_a_brain_that_throws_is_reported_not_crashed(monkeypatch):
+async def test_a_brain_that_throws_is_reported_not_crashed(monkeypatch, live_eval_cases):
     async def explode(question):
         raise RuntimeError("401 API key is invalid")
 
@@ -1946,7 +1954,7 @@ async def test_a_brain_that_throws_is_reported_not_crashed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_report_says_what_the_answer_should_have_cited(monkeypatch):
+async def test_the_report_says_what_the_answer_should_have_cited(monkeypatch, live_eval_cases):
     async def vague(question):
         return "It is handled somewhere in the service layer."
 
@@ -1957,7 +1965,7 @@ async def test_the_report_says_what_the_answer_should_have_cited(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_score_is_recorded_so_change_is_visible(monkeypatch):
+async def test_a_score_is_recorded_so_change_is_visible(monkeypatch, live_eval_cases):
     async def perfect(question):
         return ("booking.references serviceDates VTS "
                 "VesselTrackingRegistrationActivityImpl clean MapStruct -am")
@@ -1971,15 +1979,40 @@ async def test_a_score_is_recorded_so_change_is_visible(monkeypatch):
 
 # --- the faults the first eval run exposed -----------------------------------
 
-def test_the_answering_brain_falls_back_to_a_cli(monkeypatch):
+def test_the_answering_brain_reaches_a_cli_and_records_the_failure(monkeypatch):
     """`ANTHROPIC_API_KEY` was set, `available("claude")` said yes because a key
     was PRESENT, and every call 401'd. The in-call brain returned "" and said
-    nothing while two working CLI subscriptions sat unused."""
-    import inspect
-    from app import meetings
-    src = inspect.getsource(meetings.answer_from_knowledge)
-    assert "claude_cli" in src and "copilot" in src, "no fallback when the API fails"
-    assert "quiet.note" in src, "an API failure is still silent"
+    nothing while two working CLI subscriptions sat unused.
+
+    Checked behaviourally. This was a source grep for "claude_cli" inside
+    `answer_from_knowledge`, which broke the moment the CLI loop moved into a
+    helper — and would equally have passed if that loop were dead code. A grep
+    tests where a string sits; the property is that a CLI is actually reached and
+    the in-process failure is not swallowed silently.
+    """
+    from app import agent as agent_mod, call_brain, quiet
+
+    asked: list[str] = []
+
+    class _Runner:
+        async def one_shot(self, prompt, cwd=None, timeout=120, **kw):
+            asked.append("cli")
+            return "the CLI answered"
+
+    def _dead_api():
+        raise RuntimeError("401 invalid x-api-key")
+
+    monkeypatch.setattr(call_brain, "_cli_first", lambda: False)   # API first
+    monkeypatch.setattr(agent_mod, "best_model_name", _dead_api, raising=False)
+    monkeypatch.setattr(agent_mod, "available", lambda n: n in ("claude_cli", "copilot"))
+    monkeypatch.setattr(agent_mod, "quota_down", lambda n: False)
+    monkeypatch.setattr(agent_mod, "runner", lambda n: _Runner())
+
+    out = asyncio.run(call_brain.answer_from_knowledge("where do vessel dates live?"))
+    assert out == "the CLI answered", "the CLI fallback was never reached"
+    assert asked == ["cli"]
+    assert any(k.startswith("brain.") for k in quiet.counts()), \
+        "the in-process failure was swallowed with no record"
 
 
 def test_the_answering_brain_is_given_his_lessons():
@@ -2389,6 +2422,11 @@ def test_meetings_actually_got_smaller():
 # builds from, so the guards are the point, not the plumbing.
 
 from app import ops, review as review_mod
+
+# The DEFAULT context directory, not the one Arun's .env names. Hardcoding
+# ".contmark" made these pass on his laptop and fail on the first CI run.
+from app.workspace.providers.indexed import DEFAULT_CONTEXT_DIR as _CTX
+
 
 OPEN_CLEAN = {"number": 11, "title": "BEPTELIKOS-9397 vessel dates", "state": "OPEN",
               "draft": False, "mergeable": "MERGEABLE", "merge_state": "CLEAN",

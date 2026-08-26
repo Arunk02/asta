@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, quiet, router, quality, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, quiet, router, quality, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -754,6 +754,26 @@ async def api_debug_stack():
 async def api_selector_check():
     """Check the critical Teams selectors against the live DOM. Read-only."""
     return {"report": await selector_health.check_and_report()}
+
+
+@app.post("/api/model-tier", dependencies=[Depends(require_auth)])
+async def api_model_tier(request: Request):
+    """Pick which model of a brain answers — the UI half of "use opus".
+
+    Refuses a tier the brain does not declare rather than passing it through: an
+    unknown --model reaches the CLI as an argument error mid-turn, which reads to
+    him as the brain being broken.
+    """
+    b = await request.json() if await request.body() else {}
+    brain = agent_mod.normalize_model(str(b.get("brain") or ""))
+    tier = str(b.get("tier") or "").strip()
+    offered = agent_mod.tier_options(brain)
+    if not offered:
+        raise HTTPException(400, f"{brain or 'that brain'} has no model choice")
+    if tier and tier not in offered:
+        raise HTTPException(400, f"{brain} offers {', '.join(offered)}")
+    agent_mod.set_tier(brain, tier)
+    return {"brain": brain, "tier": agent_mod.tier_of(brain)}
 
 
 @app.post("/api/evals", dependencies=[Depends(require_auth)])
@@ -1740,10 +1760,65 @@ def _clear_inflight(job: asyncio.Task, cid: str) -> None:
         _inflight.pop(cid, None)
 
 
+def _workspace_repos(workspace: str) -> tuple[str, ...]:
+    """Repo names in this workspace, so naming one counts as code evidence.
+
+    "fix the mapper in telikos-booking-service" is unmistakably code work; the
+    generic noun list alone would not always catch it.
+    """
+    try:
+        from pathlib import Path as _P
+        from . import worktrees
+        root = workspace_tools.WORKSPACES.get(workspace)
+        return tuple(p.name for p in worktrees.repos_in(_P(root))) if root else ()
+    except Exception:                                  # noqa: BLE001
+        return ()
+
+
 def _start_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task:
     job = asyncio.create_task(_conducted_turn(conv, user_text, sink, channel))
     _inflight[conv["id"]] = job
     job.add_done_callback(lambda j: _clear_inflight(j, conv["id"]))
+    return job
+
+
+#: How many read-only questions may be answered alongside running work, across
+#: all conversations. A bound rather than none: each one is a real brain turn, and
+#: an unbounded fan-out on a phone channel is how a burst of messages becomes a
+#: burst of billing.
+SIDE_TURNS_MAX = int(os.environ.get("ASTA_SIDE_TURNS_MAX", "2"))
+_side_turns: set[asyncio.Task] = set()
+
+
+def _start_side_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task | None:
+    """Answer a read-only question WITHOUT waiting for the running turn.
+
+    Arun asked for a PR's CI status while an implementation was running and was
+    told "still finishing the previous one". Reading a PR does not conflict with
+    writing code — the serialisation was protecting the conversation, not the repo.
+
+    Two things keep this safe rather than clever:
+
+    * The turn is READ-ONLY, enforced by the toolset and not by the classifier
+      being right. `capabilities.READ_ONLY_TURN` is set before the task is
+      created, and asyncio copies the context at that moment — so it holds for
+      this turn and everything it awaits, and not for the turn already running.
+    * It does not touch `_inflight`, so the primary turn still owns redirect,
+      augment and cancellation. A side turn is an answer, never the work.
+    """
+    live = {t for t in _side_turns if not t.done()}
+    _side_turns.clear()
+    _side_turns.update(live)
+    if len(live) >= SIDE_TURNS_MAX:
+        return None
+    token = capabilities.READ_ONLY_TURN.set(True)
+    try:
+        job = asyncio.create_task(_conducted_turn(conv, user_text, sink, channel))
+    finally:
+        # The task kept the read-only context; this turn's caller must not.
+        capabilities.READ_ONLY_TURN.reset(token)
+    _side_turns.add(job)
+    job.add_done_callback(_side_turns.discard)
     return job
 
 
@@ -2003,6 +2078,36 @@ _MODEL_CMD_LOOSE = re.compile(
     r"([\w.\- ]{2,40})\s*[.!]*\s*$", re.I)
 _MODEL_ASK = re.compile(r"^\s*(which model|what model|models|list models|brains?)\s*\??\s*$", re.I)
 
+# "ignore claude-key", "stop telling me about context_booking" — the other half of
+# the health report. It could say a thing was broken and he had no way to say "I
+# know, and I am not fixing it", so a fault he had ruled out came back on every
+# set change and was then chased.
+#
+# Same shape as _MODEL_CMD_LOOSE and for the same reason: loose about how he says
+# it, strict about what it names. A hit counts ONLY when the name resolves to a
+# health key that actually exists, so "ignore that message" stays an ordinary
+# message instead of silencing something at random.
+_MUTE_CMD = re.compile(
+    r"^\s*(?:ignore|mute|silence|stop (?:telling|reporting|flagging|showing)"
+    r"(?:\s+me)?(?:\s+about)?)\s+(?:the\s+|that\s+)?([\w .:\-]{2,60}?)"
+    r"(?:\s+(?:issue|problem|warning|error|flag|for now|please))?\s*[.!]*\s*$", re.I)
+_UNMUTE_CMD = re.compile(
+    r"^\s*(?:unmute|un-?mute|stop ignoring|start reporting)\s+(?:the\s+)?"
+    r"([\w .:\-]{2,60})\s*[.!]*\s*$", re.I)
+_MUTED_ASK = re.compile(
+    r"^\s*(muted|what'?s muted|show mutes?|mute list|what am i ignoring)\s*\??\s*[.!]*\s*$", re.I)
+
+
+def _known_health_keys() -> list[str]:
+    """Health keys a mute command may name: the last known faults, plus the
+    already-muted ones so "unmute X" still resolves after the fault stops being
+    reported."""
+    try:
+        last = json.loads(store.kv_get("health_problems") or "[]")
+    except ValueError:
+        last = []
+    return sorted({*(k for k in last if isinstance(k, str)), *health.muted()})
+
 # Deliberately NOT a bare "continue": that word already belongs to the conductor
 # loop's pause, and stealing it would break the more common of the two.
 _RESUME_CMD = re.compile(
@@ -2069,8 +2174,12 @@ def _model_listing(current: str) -> str:
         mark = "→" if name == current else ("·" if info.get("available") else "×")
         state = "" if info.get("available") else f"  — {info.get('detail') or 'not configured'}"
         lines.append(f" {mark} {name}: {info.get('label') or name}{state}")
+    tiers = sorted({t for info in agent_mod.model_registry().values()
+                    for t in info.get("tiers") or ()})
+    pick = (f"\n\nModels: {', '.join(tiers)} — say “use opus” or “use sonnet” "
+            f"to change which one answers." if tiers else "")
     return ("Brains:\n" + "\n".join(lines) +
-            "\n\nSay “use <name>” to switch. The switch sticks for this chat.")
+            "\n\nSay “use <name>” to switch. The switch sticks for this chat." + pick)
 
 
 def _resolve_brain(wanted: str) -> str:
@@ -2113,6 +2222,25 @@ def _model_request(text: str) -> str:
     return ""
 
 
+def _switch_tier(conv: dict, brain: str, tier: str) -> str:
+    """Point Asta at a different model of the same brain — "use opus".
+
+    Deliberately global rather than per-chat: the tier is a statement about how
+    hard the work is, and a code task delegated from this chat runs in its own
+    lane. A preference that stopped at the chat boundary would be exactly wrong
+    for the case he asks for it in.
+    """
+    agent_mod.set_tier(brain, tier)
+    label = agent_mod.model_registry().get(brain, {}).get("label") or brain
+    moved = ""
+    if agent_mod.normalize_model(conv.get("model", "")) != brain:
+        store.update_conversation(conv["id"], model=brain)
+        conv["model"] = brain
+        moved = f" This chat is now on {brain}, which is the brain that runs it."
+    return (f"✅ Now using {tier}. ({label}){moved}\n\n"
+            f"Applies everywhere — chat and delegated tasks — until you say otherwise.")
+
+
 def _switch_model(conv: dict, wanted: str) -> str:
     """Point this conversation at another brain. Returns what to tell him.
 
@@ -2123,6 +2251,12 @@ def _switch_model(conv: dict, wanted: str) -> str:
     registry = agent_mod.model_registry()
     want = agent_mod.normalize_model(wanted.strip().lower().replace(" ", "_"))
     if want not in registry:
+        # He may be naming the MODEL rather than the brain — "use opus". That is
+        # how he thinks about the choice, and exactly one brain offers each tier,
+        # so it is unambiguous. Ambiguity would resolve to nothing and fall through.
+        tier_brain = agent_mod.brain_for_tier(wanted)
+        if tier_brain:
+            return _switch_tier(conv, tier_brain, wanted.strip().lower())
         hit = [n for n in registry if want in n or n in want]
         if len(hit) != 1:
             return (f"I don't have a brain called “{wanted.strip()}”.\n\n"
@@ -2137,6 +2271,46 @@ def _switch_model(conv: dict, wanted: str) -> str:
         return (f"Switched to {want}, but it isn't configured yet — "
                 f"{info.get('label', want)} needs its key or CLI before it can answer.")
     return f"✅ Now using {info.get('label') or want} for this chat."
+
+
+def _health_mute_reply(text: str) -> str:
+    """Answer a mute/unmute/list command, or "" when this isn't one.
+
+    Returns the whole reply so the caller stays a router. Nothing here runs a
+    health pass: the keys come from the last recorded result, which is what he
+    was just shown, so silencing something is instant and costs nothing.
+    """
+    if _MUTED_ASK.match(text):
+        quiet_keys = health.muted()
+        if not quiet_keys:
+            return ("🔊 Nothing muted — every health issue is being reported.\n\n"
+                    "Say “ignore <name>” to silence one until it actually clears.")
+        return ("🔇 Muted (each returns on its own if the fault clears and comes "
+                "back):\n" + "\n".join(f"• {k}" for k in sorted(quiet_keys))
+                + "\n\nSay “unmute <name>” to hear about one again.")
+    m = _UNMUTE_CMD.match(text)
+    if m:
+        key = health.resolve_key(m.group(1), health.muted())
+        if key and health.unmute(key):
+            return f"🔊 Reporting {key} again."
+        return ""            # names nothing muted — an ordinary message
+    m = _MUTE_CMD.match(text)
+    if m:
+        keys = _known_health_keys()
+        key = health.resolve_key(m.group(1), keys)
+        if not key:
+            return ""        # names no known fault — an ordinary message
+        if key in health.muted():
+            return f"🔇 {key} was already muted."
+        try:
+            last = json.loads(store.kv_get("health_problems_detail") or "{}")
+        except ValueError:
+            last = {}
+        health.mute(key, str(last.get(key, "")))
+        return (f"🔇 Muted {key} — I won't raise it again.\n\n"
+                f"If it ever clears, the mute is forgotten, so the same thing "
+                f"breaking later is news again. “unmute {key}” to reverse this.")
+    return ""
 
 
 async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> asyncio.Task | None:
@@ -2169,6 +2343,12 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # the question and must not be mistaken for changing the subject.
     if _MODEL_ASK.match(user_text or ""):
         await sink.send({"type": "note", "text": _model_listing(conv.get("model", ""))})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+    _muted_note = _health_mute_reply(user_text or "")
+    if _muted_note:
+        await sink.send({"type": "note", "text": _muted_note})
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None
@@ -2306,9 +2486,11 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             offers.accept()
             return _start_turn(conv, _offer_prompt(open_offer, where=user_text.strip()),
                                sink, channel)
-        # Anything else: he moved on. Drop the offer instead of holding a stale
-        # question that would misread a much later "yes".
-        offers.clear()
+        # Anything else: he moved on. Drop the whole set instead of holding stale
+        # questions that would misread a much later "yes" — and promoting a queued
+        # one here would be worse: it would silently arm a question he has never
+        # read, which is the exact failure the queue was added to prevent.
+        offers.drop_all()
 
     # An open ask_user question owns the next message. Explicit form first
     # ("answer 3 the second one"), then the bare reply — which is how a person
@@ -2350,6 +2532,41 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         if await _route_to_task(live[0], user_text, sink, channel, conv.get("model", "")):
             return None
         # Not about the task — fall through and answer it as an ordinary message.
+
+    # Handing over CODE WORK goes to the task lane, not to this chat turn.
+    #
+    # Asta's own instruction already says to delegate work and "never plan or
+    # implement in chat yourself". The model ignored it and implemented inline,
+    # and the chat turn's 300s budget killed it mid-edit with a stack trace. An
+    # instruction the model may or may not follow is not a routing decision, so
+    # this makes it one.
+    #
+    # Safe to be imperfect, in one direction: a code task runs its context gate,
+    # plans, and STOPS for his approval — so a false positive costs him a plan he
+    # can decline. The failure it replaces is a half-finished edit and a
+    # five-minute wait ending in "timed out after 300s".
+    #
+    # Only when a workspace is known: `tasks.code_cwd` refuses to run code work
+    # without one, and routing into a refusal would be worse than not routing.
+    if (not live and (conv.get("workspace") or "").strip()
+            and work_intent.is_work_assignment(user_text, _workspace_repos(conv["workspace"]))):
+        try:
+            t = tasks.spawn(work_intent.title_for(user_text), user_text,
+                            "code", conv["workspace"])
+        except Exception as exc:                       # noqa: BLE001
+            # Never swallow the message: if the lane will not take it, the chat
+            # turn still answers, which is exactly the old behaviour.
+            quiet.note("dispatch.route_code_work", exc)
+        else:
+            tasks.link_task(cid, t["id"])
+            await sink.send({"type": "note", "text":
+                             f"🛠 Task #{t['id']} — {t['title']}\n"
+                             f"Planning it in {conv['workspace']} now; you'll get the "
+                             f"plan to approve before anything is written. "
+                             f"Say “stop {t['id']}” to drop it."})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
 
     # Nothing live, but something finished here recently. Feedback on it belongs
     # to THAT task — continuing its session keeps everything it already worked
@@ -2395,6 +2612,20 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         _addenda.setdefault(cid, []).append(user_text)
         await sink.send({"type": "note",
                          "text": "✚ adding that to what I'm doing — same task, no restart."})
+        return None
+    if intent == "independent":
+        # A read-only question with no bearing on the running work. Answer it now,
+        # in its own read-only turn, instead of making him wait out a forty-minute
+        # implementation for a one-line answer.
+        side = _start_side_turn(conv, user_text, sink, channel)
+        if side is not None:
+            return side
+        # At the concurrency bound — fall through and queue it, which is the old
+        # behaviour and still correct.
+        _followups.setdefault(cid, []).append(user_text)
+        await sink.send({"type": "note",
+                         "text": "💬 a couple of answers already in flight — "
+                                 "I'll take this one next."})
         return None
     if intent == "ambiguous":
         # Not clearly a refinement of the running work, so DON'T glue it on —

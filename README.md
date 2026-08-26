@@ -1,22 +1,53 @@
-# Asta — personal engineering assistant
+# Asta — a personal engineering assistant that runs on your laptop
 
-Runs on your own laptop. Streams chat over WebSocket, drives your MCP servers
-(temporal, grafana, github, context7, atlassian), answers questions about *your*
-repositories through generated project context, and keeps a memory that survives
-restarts.
+Asta is the colleague who has already read your repositories, your Jira, your
+inbox and your CI — and who will go and do the work, but never ships anything
+you did not approve.
 
-Beyond chat: it delegates real work to headless CLI executors behind human gates,
-reads and drafts Teams/Outlook/Jira, reviews pull requests, watches CI, and
-reaches you on WhatsApp or Telegram when something needs you.
+It is **not** a chatbot with tools bolted on. Chat is the thin part: real work is
+handed to a headless `copilot -p` or `claude -p` process that plans, stops for
+your approval, implements in its own git worktree, verifies itself, and hands
+back a reviewed diff. You say ship, and only then does anything leave the
+machine.
 
-The shape of it is **offers, not autonomy**. Asta reports what it found with enough
-context to decide, names the one thing it would do next, and waits — a bare "yes"
-from any channel runs it. Anything that leaves the machine is staged with its exact
-contents first, so what you approved is what goes out.
+```mermaid
+flowchart LR
+    You["You<br/>web · WhatsApp · Telegram · voice"]
 
-Everything about your work stays on your machine. The repo holds generic skills
-and pipelines; your workspaces, generated context, memory and credentials do not
-leave the laptop.
+    subgraph Laptop["Asta — entirely on your laptop"]
+        direction TB
+        Chat["Chat turn<br/>reads and answers<br/>cannot write, commit or push"]
+        Lane["Task lane<br/>plan → your approval → implement"]
+        Attn["Attention<br/>decides what is worth interrupting you for"]
+    end
+
+    Brains["Brains<br/>Copilot CLI · Claude CLI<br/>local LM Studio · API keys"]
+    World["Your world<br/>repos · Jira · Teams · Outlook<br/>Grafana · Temporal · GitHub CI"]
+
+    You <--> Laptop
+    Laptop <--> Brains
+    Laptop <--> World
+```
+
+## What you actually use it for
+
+| You say | What happens |
+|---|---|
+| *"implement BEPTELIKOS-10330 in booking"* | Reads the ticket and the code, plans, **stops for your approval**, implements on a fresh branch off `develop`, runs the scoped tests, hands back a reviewed diff |
+| *"why is the vessel ETA not updating in preprod?"* | Queries Temporal and Grafana with your certs, reads the service's own generated context, answers with the workflow id and the failing activity |
+| *"anything waiting on me?"* | One ranked list from mail, Teams, Jira and CI — not four inboxes |
+| *"ping Vinish about the CT failure"* | Drafts it, shows you the exact text, sends only on your "yes", and only to his 1:1 |
+| *"review PR 1409"* | Reads the diff, comments where it matters, watches CI to green |
+| *"use opus"* | Switches which model answers — chat and delegated tasks alike |
+| nothing at all | Watches CI *you* triggered, notices a Teams @mention, spots a stale cert, and reaches your phone — once, ranked, never at 2am |
+
+**Offers, not autonomy.** Asta reports what it found with enough context to decide,
+names the one thing it would do next, and waits — a bare "yes" from any channel
+runs it. Anything that leaves the machine is staged with its exact contents first,
+so what you approved is what goes out.
+
+**Everything stays on your machine.** The repo holds generic skills and pipelines;
+your workspaces, generated context, memory and credentials never leave the laptop.
 
 ## Run it
 
@@ -29,7 +60,7 @@ Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
 Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-.venv/bin/python -m pytest -q           # 1,705 tests
+.venv/bin/python -m pytest -q           # 1,920 tests
 ```
 
 ## How it is put together
@@ -59,6 +90,22 @@ damage is that nothing publishes, ships or sends without your approval.
 
 ## Work: task → plan → your approval → implement → you say ship
 
+```mermaid
+flowchart TB
+    A["“implement ABC-123 in booking”"] --> C{"Is the goal<br/>unambiguous?"}
+    C -- no --> Q["Asks ONE question<br/>cheap, before any discovery"]
+    Q --> C
+    C -- yes --> P["Reads the code, plans"]
+    P --> G{{"Your approval<br/>unconditional — even a one-line change"}}
+    G -- "feedback" --> P
+    G -- "“approve task N”" --> I["Implements in its own git worktree<br/>branch cut fresh off develop"]
+    I --> V["Runs scoped tests, reviews its own diff"]
+    V --> R["Reviewed diff — it stops here"]
+    R --> S{{"You say ship"}}
+    S --> PR["Branch pushed, PR opened per repo"]
+    PR --> CI["CI watched to green, review comments answered"]
+```
+
 Say "implement ABC-123 in booking" in chat, WhatsApp or Telegram. Routing is
 automatic: a Jira-key ticket runs the full staged pipeline with a plan gate, a
 small ad-hoc ask runs the micro pipeline (~25 turns) and escalates itself if it
@@ -75,13 +122,58 @@ turns out bigger.
 Kinds: **analysis** (read-only, runs in parallel), **code** (edits a repo),
 **teams_draft** (never sent automatically).
 
+**The plan is shaped to be read in thirty seconds, on a phone.** That is where
+you approve them, standing up — so a plan opens with a `STRUCTURE` block: the
+classes and files that change and how they relate, as an indented tree, one line
+each saying what happens to that thing.
+
+    STRUCTURE
+      EtaValidator                     NEW  · rejects an import ETA at/after gate-in
+        └─ called by BookingService.applyVesselEta()   ~10 lines changed
+             └─ reads ServicePlanLeg.portGateIn (LATEST)
+      BookingServiceTest               +3 cases (before / at / after gate-in)
+
+Then numbered steps, then a one-line RISK. No prose paragraph before the tree: a
+plan built on a misread shows up in the shape within seconds, where three
+paragraphs hide it. The trim that fits a gate to a notification **pins** that
+block — everything else prefers the tail, which is right for the question at the
+bottom and would otherwise drop the shape off the top — and keeps the tree even
+when the brain wraps it in a code fence, which the fence stripper used to delete
+outright.
+
+**Work is routed to a task, not answered in chat.** "implement the retry logic in
+booking" goes straight to the code lane — because a chat turn is capped at five
+minutes and a real implementation does not fit in one, which is how it used to end
+in `timed out after 300s` mid-edit. Routing is deliberately narrow: it needs a
+work verb *and* evidence the message is about code (a ticket key, a repo name, a
+code noun), so "change my status to busy" and "update me on the PR" keep their own
+flows. Anything ambiguous falls through to chat — which can no longer write files,
+commit, push, or open a PR, so the model has to delegate from there anyway.
+
+That ban is **one decision for every brain** (`capabilities.chat_may_write`),
+because the version before it was two and they disagreed: Copilot carried
+`--deny-tool edit` and Claude carried nothing at all, so the same message met
+different rules depending on which brain happened to be selected. Worse, the
+Copilot half never worked — run against the real binary, `edit` turns out not to
+be a tool name (it is `write`), and copilot cheerfully created the file. Denying
+`write` alone is not enough either: it falls back to the shell and writes it that
+way. So the ban names the three outward acts as well, and is honest about its
+reach — a brain with a shell can still write through `sed -i`, and no deny list
+fixes that. The real guarantee is the routing; this is the second lock on the
+same door. Reading is untouched, including `gh run list` and `gh pr view`, which
+is most of what chat legitimately does. `ASTA_CHAT_MAY_EDIT=1` puts it back.
+
 **Code tasks run in parallel too, on git worktrees.** They used to be serialised
 one-per-workspace, and the reason was sound — two tasks sharing a checkout fight
 over `HEAD`, and the loser silently commits onto the winner's branch. But the cost
 landed on the wrong person: a twenty-minute implementation blocked the two-minute
 question you asked while it ran. So `app/worktrees.py` cuts each code task its own
 worktree from `origin/develop`, and `ASTA_MAX_PARALLEL_TASKS` (3) bounds how many
-run at once. Separate working trees, one shared object store: no lock needed
+run at once — a limit on the machine, not on git: with separate worktrees two
+tasks never conflict, so the only real constraint is that each is a checkout plus
+a CLI process plus, at the gate, a Maven build, while you are working on the same
+laptop. A task prepares only the repos it names, falling back to all of them when
+it names none: over-preparing costs a fetch, under-preparing costs the run. Separate working trees, one shared object store: no lock needed
 because there is nothing left to contend over. Worktrees are removed when the task
 finishes and survive a crash for inspection.
 
@@ -104,6 +196,21 @@ of two signals instead:
   PR body). It is **staged, never sent**: Asta shows you the draft and asks "can I
   send this?" A bare "yes" sends it through the real channel tool; anything else is
   a revision. This is the one hard gate, and it holds for every channel.
+
+**A stopped turn says which of three things happened.** "Timed out after 300s" is
+true and answers none of the questions you actually have: did it finish, is it
+still going, is it stuck. `app/turn_budget.py` separates them — **done**, **idle**
+(silent for `ASTA_TURN_IDLE`, 120s: wedged, and more time will not help), and
+**ceiling** (still producing output when the budget ran out: a long job, where
+resuming continues it and retrying starts from nothing). Whatever the brain got
+through travels with the report, because the old path accumulated every step it
+narrated and then discarded all of it to raise one sentence.
+
+That split is also what let the code-task ceiling go up. It was 30 minutes against
+a measured p90 of 32 (n=46), so the slowest tenth of code tasks were killed by
+their own budget and re-run from scratch. It is 45 now, and a wedged brain is
+caught by silence rather than by the ceiling — which is the job the ceiling was
+doing badly.
 
 **Bounded by the clock, not just by steps.** A step count cannot bound latency when
 each step is a whole CLI turn of unknown length — four auto-steps of a ten-minute
@@ -131,7 +238,12 @@ context to decide, name what it would do next, and wait. A bare "yes" from *any*
 channel runs it. Offers are persisted and expiring (`ASTA_OFFER_TTL`, 6h): the
 question went to your phone and you may answer twenty minutes later from Telegram
 after a restart, but a "yes" tomorrow must not kick off work you've forgotten
-proposing. One is open at a time, because two plus a bare "yes" is ambiguous.
+proposing. One is **asked** at a time, because two plus a bare "yes" is ambiguous — later
+ones queue behind it rather than replacing it. That distinction matters: offers
+used to live in a single slot that every new one overwrote, and four background
+watchers stage offers, so a daemon could replace the question on your screen
+between you reading it and answering. A queued offer says so instead of asking
+for a yes it would not receive.
 
 An offer carries its own next step, in one of two forms:
 
@@ -193,6 +305,19 @@ is flushed when the turn ends, however it ended (`close()`, called from a
 backstop, so a hang nobody anticipated becomes a message that names the brain and
 tells you how to switch — the brain's own clearer error still wins normally.
 
+**Answered, then quiet, is not stuck.** A stop is named — `done`, `idle`,
+`ceiling` — and an idle stop splits once more, because two very different things
+look identical to a clock. A brain that wedged halfway through an edit has said
+nothing complete; a brain that answered in full and then sat waiting on a
+twelve-minute CI run has. The second used to be reported as *"stuck — more time
+would not have helped"*, with the answer reprinted underneath the warning: the
+same paragraphs to read twice, and paid for twice on the way out. Now a
+substantial, terminated answer IS the answer, and a stop never repeats text that
+was already streamed to you — it says how much there was instead. The length
+threshold is measured against real traffic, not chosen: complete answers run 127
+and 166 characters, and the dangerous near-miss (announcing intent and *then*
+wedging) runs 6 to 45.
+
 Meta-commands are answered before any of this, so `use claude cli` is never queued
 behind the dead brain it is meant to rescue you from. The phrasing is generous
 ("change the LLM model to claude cli") but a loose match must name a brain that
@@ -233,6 +358,16 @@ your phone, so the ability to act on it belongs there too. The choice sticks to 
 conversation; the default only fills in when you haven't picked one or the one you
 picked has since stopped being available. Resolved through the shared registry, so
 a brain added to the spec table is switchable from your phone the same day.
+
+**Which model, not just which brain.** "use opus", "use sonnet" and "use haiku"
+switch the model inside the Claude CLI brain, from any channel, and the picker
+shows which one is answering. The tier is deliberately **global** rather than
+per-chat: it is a statement about how hard the work is, and a code task delegated
+from a chat runs in its own lane — a preference that stopped at the chat boundary
+would be wrong in exactly the case you set it for. It lives on the brain's spec
+row (`tiers` / `tier_env`), so a brain that grows tiers becomes switchable with no
+change to the switching code, and `.env` remains the fallback when you have not
+chosen.
 
 Optional in `.env`: `ANTHROPIC_API_KEY` (Claude, with prompt caching),
 `OPENAI_API_KEY`, or LM Studio running locally — auto-detected, and it powers the
@@ -374,6 +509,12 @@ This exists because the approval gates are the right price for "approve this pla
 and far too expensive for "which repo did you mean?" — a re-plan cycle costs
 hundreds of thousands of tokens. Reply from any channel; a bare reply answers when
 one question is open, `answer 3 <text>` when several are.
+
+**It does not ask twice.** An answer you have already given stands for six hours,
+so a retried or resumed task reuses it instead of buzzing you again; two workers
+wanting the same answer wait on one question rather than sending the same sentence
+to your phone twice. A question that timed out is *not* treated as answered —
+reusing silence would put words in your mouth.
 
 ## Reviewing pull requests
 
@@ -533,6 +674,18 @@ attention to isn't spent approving something the workflow will reject.
 
 ### Notification etiquette
 
+```mermaid
+flowchart TB
+    In["Mail · Teams · Jira · CI · alerts"] --> T["Triage — does this need you,<br/>or is it just from a human?"]
+    T --> L[("Attention ledger<br/>one row per thing, cross-source deduped")]
+    L --> R{"Rank"}
+    R -- "P0 · something is broken" --> N["Straight to your phone, even at night"]
+    R -- "P1 · owed today" --> D["Delivery — quiet hours,<br/>one message instead of four"]
+    R -- "P2 · FYI" --> H["Held while you are at the laptop,<br/>released when you step away"]
+    Self["Anything Asta itself says<br/>health, task done, reminders, its own questions"]
+    Self -. "recorded, never owed" .-> L
+```
+
 While you're actually at the laptop, ambient pings are held — you'll ask. Direct
 things (a 1:1 message, an @mention, mail addressed to you) go out immediately
 regardless.
@@ -553,6 +706,31 @@ The quoted line is **the message's own**, not a paraphrase. When the ask is in t
 body, Asta quotes the sentence that does the asking — the *first* sentence of a mail
 is a greeting far more often than it is the point, so quoting it added length
 without adding information. When the subject already said it, nothing is appended.
+
+**Asta's own voice is never your backlog.** The attention ledger records what
+*arrived* and wants something from you. Every outbound push used to be filed there
+too — under an invented source, because none of the fifty-odd call sites named
+one — so health reports, finished tasks, meeting reminders and Asta's own
+questions all became things you owed a reply to. The hourly chase then re-raised
+them, and since a chase is itself a push, each chase was filed and chased in turn:
+
+    ⏳ Still waiting on you (2):
+      • ⏳ Still waiting on you (3):
+        • ⏳ Still waiting on you (13):
+          • Vinish Kumar (Jira): …
+
+One real item wrapped in three generations of Asta talking to itself, growing by a
+layer every hour. Announcements are now filed as `attention.SELF_SOURCE`: still
+recorded, never owed — not chased, not on your plate, and not scored as an
+interruption you ignored (which was quietly corrupting the precision numbers the
+ranking is judged by).
+
+**"I know — stop telling me."** `ignore claude-key` mutes a health issue from any
+channel; `muted` lists them, `unmute <name>` reverses it. A mute is scoped to the
+*fault*, not the key: it is forgotten the moment the problem actually clears, so
+the same thing breaking next month is news again. Muted issues still appear when
+you ask for a health report — a silent drop cannot explain itself later — and a
+run whose only remaining fault is muted does **not** claim everything is healthy.
 
 Dedup keys off identity, never rendering. The Teams activity feed draws each row
 with its relative age ("2m" → "1h"), and the old key was that raw string — so the
@@ -811,6 +989,7 @@ app/selector_health.py  are the Teams selectors still matching live Teams
 app/evals.py            are the ANSWERS right — grounded cases, two tiers
 app/quiet.py            swallowed errors, counted rather than lost
 app/diagnostics.py      are the debugging tools usable — certs, reachability
+app/turn_budget.py      why a turn stopped: finished, wedged, or out of budget
 app/router.py           local-first routing for trivial turns
 app/repo_ops.py         git, branch naming, repo playbooks
 app/agents.py           loads the pipelines in agents/
@@ -830,7 +1009,7 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  1,705 tests (conftest isolates the DB — see below)
+tests/                  1,920 tests (conftest isolates the DB — see below)
 ```
 
 `tests/conftest.py` points `store.DB_PATH` at a temp file for *every* test. A stray
@@ -842,7 +1021,7 @@ roadmap this is being built against. Still ahead of it: one scheduler replacing 
 background loops, detached runs that survive a closed tab, adaptive context
 compaction, a people/contacts model, and deep research.
 
-`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 31 findings
+`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 46 findings
 raised against the *running* system — every number measured on the live install, not
 inferred from the source — each closed in place with what was done and how it was
 proved. Every fix was mutation-tested: the source was deliberately broken and the

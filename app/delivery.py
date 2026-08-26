@@ -170,6 +170,11 @@ def chase_due(now: float | None = None) -> list[dict]:
     for row in store.attention_open(limit=200, max_priority=attention.P_TODAY):
         if row.get("state") != "notified" or row.get("chased_at"):
             continue
+        # Nothing Asta said is owed back to Arun, and a chase is itself something
+        # Asta says — so without this the loop chases its own last chase, and the
+        # nesting grows by one every hour until the message is unreadable.
+        if attention.self_originated(row):
+            continue
         due = row.get("due_at")
         if due is not None and now >= float(due):
             out.append(row)

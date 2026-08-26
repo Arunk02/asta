@@ -68,6 +68,21 @@ first thing to revisit.
 | 29 | High | The debugging eval cases were vacuous — parroting the playbook scored 6/8 | `data/evals/debugging.json` | **closed** |
 | 30 | High | No Temporal knowledge source existed — the env/namespace/cert map lived only in the proxy, unreadable by any brain | `skills/` | **closed** |
 | 31 | Medium | A blank setting in `.env` silently disabled a whole module | `diagnostics.TEMPORAL_PROXY` | **closed** |
+| 32 | **Critical** | A stopped turn could not say whether the work finished, was still running, or was wedged — and threw away everything it had done | `copilot_cli`, `claude_cli` | **closed** |
+| 33 | High | The code-task ceiling (30 min) sat BELOW the measured p90 (32 min), killing work that was going to succeed | `tasks.TASK_TIMEOUT` | **closed** |
+| 34 | **Critical** | A background daemon could replace the offer he was answering — his "yes" reached a question he never read | `offers.offer` | **closed** |
+| 35 | High | A read-only question waited behind a running code task | `main._dispatch`, `activity` | **closed** |
+| 36 | **Critical** | A workspace that is itself a repo reported ONE repo — the generated-context one — so worktrees, rollback and budget all targeted the wrong tree | `worktrees.repos_in` | **closed** |
+| 37 | Medium | A code budget flat across every task, regardless of how many repos it can touch | `tasks.code_timeout` | **closed** |
+| 38 | High | Every code task prepared every repo in the workspace, so a one-line change cost three fetches and three checkouts | `worktrees.create` | **closed** |
+| 39 | High | A watcher repeating itself filled the bounded offer queue and evicted real offers | `offers.offer` | **closed** |
+| 40 | **Critical** | Two MORE inline copies of the repo-discovery rule, one of them deciding where PRs get raised | `tasks.py` | **closed** |
+| 41 | High | A read-only side turn could still spawn a CODE task — the guard that would catch it is behind a flag that is off | `agent.delegate_task` | **closed** |
+| 42 | Medium | Code questions went to a 9B local model before the CLI subscriptions already paid for | `call_brain` | **closed** |
+| 43 | High | The documented cert command truncates its target before fetching, so a failed fetch leaves a 0-byte cert | `health`, `mcp-setup-bundle` | **closed** |
+| 44 | **Critical** | Code work ran in a 300s chat turn instead of the task lane — the original timeout | `main._dispatch`, `work_intent` | **closed** |
+| 45 | High | No CI: 1,800 tests were green only because someone ran them | `.github/workflows/tests.yml` | **closed** |
+| 46 | Medium | The project was not installable — `pip install -e .` fails on package discovery | `pyproject.toml` | **closed** |
 
 ## Closed
 
@@ -484,10 +499,376 @@ is: documenting a setting is supposed to be the safe act.
 
 ---
 
+### 32 — "timed out after 300s" answered none of the questions — CLOSED 2026-08-26
+Raised by Arun from a Teams screenshot: Asta implementing a VTS ETA validation,
+narrating a dozen real steps, then
+
+    RuntimeError: Copilot CLI turn timed out after 300s
+
+His objection is the right one: *"now it not making sense whether it actually
+completed does it doing or struck."* True, and useless.
+
+Two defects, compounding.
+
+**The work was thrown away.** Both drivers accumulate every chunk the brain
+streams — every file it opened, every edit it narrated — and the timeout branch
+discarded all of it to raise one sentence. The evidence existed, in memory, and
+the error path deleted it. There was no way to answer "did it do anything?"
+except to go and read the repo.
+
+**The budget was total elapsed time, never silence.** A brain streaming progress
+every few seconds and a brain wedged since second three were killed at the same
+moment with the same words. Those are opposite situations: one needs more time,
+the other needs stopping. Nothing ever looked at *when output last arrived*, so
+the system could not tell them apart even in principle.
+
+`app/turn_budget.py` names three outcomes instead of one:
+
+    done     the brain finished
+    idle     silent for ASTA_TURN_IDLE (120s) — wedged; more time will not help
+    ceiling  still producing output when the budget ran out — a long job, and
+             resuming continues it where retrying starts from nothing
+
+The partial output travels with the error, so the report says what it got
+through. One module for both brains rather than a copy each: the two pump loops
+were byte-identical and had drifted anyway, and `claude_cli` parses NDJSON so it
+reports liveness through a `Heartbeat` while the policy stays in one place.
+
+The abandoned pump is cancelled, because a brain still editing files behind an
+answer Arun has already read is how the next turn finds a repo that moved.
+
+Four mutations caught: reporting idle as ceiling, discarding the chunks, leaving
+the pump running, and lowering the ceiling back under p90. The cancellation test
+was itself vacuous first time — `asyncio.run` tore the loop down and killed the
+stray task regardless, so it passed either way. Rewritten to wait inside the same
+loop.
+
+### 33 — the code ceiling sat below the measured p90 — CLOSED 2026-08-26
+`TASK_TIMEOUT["code"]` was 1800s. The baseline measured at the top of this
+register: **median 7.7 min, p90 32 min (n=46)**. Thirty minutes is *below* the
+p90, so roughly the slowest tenth of code tasks were killed by their own budget —
+work that was going to succeed, re-run from nothing, paying the whole cost twice.
+
+Raised to 2700s (45 min), which clears the measured p90 with room. Safe to raise
+precisely because finding 32 landed first: a wedged brain is now caught after two
+minutes of silence regardless of how much ceiling remains, so the ceiling no
+longer has to double as a liveness check. That was the job it was doing badly.
+
+---
+
+### 34 — his yes reached a question he had never read — CLOSED 2026-08-26
+From a WhatsApp transcript. Asta staged a Teams call to Vinish; Arun replied "Go
+ahead", then "Yes go ahead and call Vinish", then "Yes go ahead". Nothing rang.
+The brain eventually concluded approval must live "through a separate
+confirmation channel" — a reasonable inference from what it could see, and wrong.
+
+`offer()` wrote to one global slot and every new offer overwrote it. Four
+background daemons stage offers — `refresh`, `ci_watch`, and two in `meetings` —
+so a staleness proposal took the slot between the call being staged and him
+answering. His yes reached a question he had never read; the brain re-staged; the
+daemon clobbered it again; the loop repeated.
+
+The docstring defending the single slot was right about the *property* — two open
+questions plus a bare "yes" is ambiguous — and wrong about the implementation.
+One is still ASKED at a time; later ones queue behind it. The head is immutable
+while unanswered, so the thing he approves is the thing he was shown.
+
+The dangerous version is the quiet one: the same race could have had his yes
+accept an outward write that replaced the one on screen.
+
+One consequence needed handling. Every producer pushes `o.render()` the moment it
+stages, so a queued offer would still have *asked* him a question his yes would
+not answer — reintroducing the ambiguity from the other side. `render()` decides
+its own wording from whether it is the asked one, which makes all four producers
+correct without being touched.
+
+Four mutations caught, including restoring the clobbering. A pre-existing test
+asserted the old behaviour — kept its intent, changed what it verifies.
+
+### 35 — a question waited behind a forty-minute implementation — CLOSED 2026-08-26
+Same transcript: *"What is the ci status of above PR"* → **"still finishing the
+previous one — I'll answer this right after."** Reading a PR's checks does not
+conflict with writing code. The serialisation was protecting the conversation,
+not the repo.
+
+`activity` gains an `independent` verdict for read-shaped asks carrying no write
+verb, and `main` answers those in a concurrent side turn bounded by
+`ASTA_SIDE_TURNS_MAX`.
+
+**The safety is in the toolset, not the classifier.** A side turn runs with
+`capabilities.READ_ONLY_TURN` set, so it cannot reach any of the 17 write
+capabilities — the worst a misclassified message can do is read something and
+answer. A ContextVar, because asyncio copies the context when a task is created:
+it applies to that turn and everything it awaits, and the implementation already
+running is unaffected. A test pins exactly that, since a leak would strip write
+tools from work in flight.
+
+`independent` can only ever narrow what would have been `ambiguous`, so nothing
+that used to augment or redirect now runs concurrently instead.
+
+### 36 — the workspace reported the wrong repos — CLOSED 2026-08-26
+Found while sizing the budget in finding 37, and much worse than the thing that
+found it.
+
+`~/booking-workspace` is itself a git repo — `Arunk540/booking-workspace`,
+tracking the 234 generated files under `.contmark/` — with the three service
+repos inside it as ordinary directories. `repos_in` returned `[root]` the moment
+the root had a `.git`, so it reported **one** repo, and that repo was the
+generated context rather than any code.
+
+Everything downstream inherited it:
+
+- **worktrees** cut a worktree of the context repo, so the parallel-task isolation
+  added earlier in this register was isolating the wrong tree;
+- **rollback** (`tasks._repos_under`, a second copy of the same rule with the same
+  bug) looked for a task's changes where they were never written;
+- the new scope-based budget sized a three-repo job as a one-repo job.
+
+None of it failed loudly, because a wrong repo still exists and still answers git
+commands. Inner repos now win over the root; `all_repos_in` keeps the superset for
+rollback, where a change written to the root still needs undoing; and
+`_repos_under` delegates instead of restating, so the two cannot drift again.
+
+### 37 — one budget for every code task — CLOSED 2026-08-26
+Arun's point: *"even small changes getting affected in multiple repos take more
+time right does it make sense?"* It does not. Verification is per-repo — `mvn
+clean test` on each — so a change landing across three repos pays it three times,
+while a one-line fix in one repo does not need the same hour.
+
+`code_timeout` is base + per-repo, capped: 35 min for one repo (clearing the
+measured p90 of 32), 65 for three, 90 max. Scope rather than difficulty, because
+scope is a fact available before the work starts and difficulty is not.
+
+Safe only because finding 32 landed first: a wedged brain is caught by two
+minutes of silence regardless of remaining ceiling, so the ceiling no longer has
+to double as a liveness check.
+
+---
+
+### 38 — every task prepared every repo — CLOSED 2026-08-26
+Arun's point: *"if u working on two parallel tasks that doesn't conflict, u may
+work on two diff stuffs so dont have to worry right?"* Correct, and the code did
+not reflect it.
+
+`worktrees.create` prepared every repo in the workspace. That was nearly free
+while the workspace mis-reported itself as one repo (finding 36) — and the moment
+that was fixed it became **three `git fetch`es and three checkouts for a one-line
+change in one service**. A regression introduced by a fix, an hour after the fix.
+
+`repos_for` scopes preparation to the repos the task actually names, matching on
+the distinctive part of a repo name — `telikos-booking-service` is "booking" far
+more often than its full name — while ignoring the generic halves (`service`,
+`telikos`) that every repo in the workspace shares and that would therefore match
+all of them while looking like it worked.
+
+**It falls back to preparing everything, and that direction is the design.**
+Preparing a repo that turns out unnecessary costs a fetch; failing to prepare one
+the task then needs costs the task. A wrong guess must fail towards more work.
+
+### 39 — a watcher repeating itself evicted real offers — CLOSED 2026-08-26
+The other half of Arun's point: *"even if u context refresh once u first big task
+done, second one that doesn't required."* A proposal already made does not need
+making again.
+
+The queue added in finding 34 was bounded but had no dedup. Watchers re-detect
+the same state every pass — a stale context is still stale five minutes later —
+so the queue would fill with restatements of one thing and evict the offers that
+genuinely differ. Which is precisely the failure a bounded queue exists to
+prevent, arriving by another route.
+
+Two rules now, both comparing what an offer would DO rather than how it is worded:
+
+- **Re-proposing the question already on screen is a no-op.** This is the loop
+  from the transcript directly: his yes was not reaching the staged call, so the
+  brain staged it again every turn. Each of those would have become a queue entry
+  and changed the id he was shown underneath him.
+- **A duplicate already waiting is replaced, not stacked** — replaced rather than
+  skipped, because the newer one carries fresher context ("21 days" rather than
+  "14") and it is the same question either way.
+
+A staged call is compared on the recorded op name and arguments, so two calls to
+the same person are one question and a call to someone else is not.
+
+### 40 — two more copies of the repo rule, and the worst one shipped — CLOSED 2026-08-26
+Finding 36 fixed `worktrees.repos_in` and `tasks._repos_under`. There were **three
+more inline copies** in `tasks.py`, all carrying the identical bug.
+
+One of them decides where PRs are raised. With the old shortcut, shipping a
+finished code task looked for the task's branch in the generated-context repo and
+would have **raised no PR at all** for the services the work was actually in — a
+task reporting success having delivered nothing.
+
+All of them now delegate, and a test asserts the rule appears exactly once:
+`iterdir() if (p / ".git")` must not appear in `tasks.py`. Five copies of one rule
+is not a coincidence, it is what happens when a rule is easy to restate — so the
+test forbids restating it rather than trusting the next reader to notice.
+
+Five mutations caught across findings 38-40, including restoring the buggy rule in
+the PR path.
+
+---
+
+### 41 — the read-only guarantee had a hole — CLOSED 2026-08-26
+Found by validating finding 35 rather than trusting it.
+
+The claim was: a side turn cannot write, so a misclassified question can at worst
+read something and answer. The enforcement was `write=True` on the capability
+table — and `delegate_task` is `write=False`, correctly, because it sends nothing
+outward. It also spawns a worker that edits repos.
+
+So a question answered alongside running work could have started a code task.
+
+`relevance.guard_spawn` exists for exactly this shape — "a question is not a
+request to go do work" — and it is behind `ASTA_RELEVANCE`, which is **off**, so
+today it returns None for every spawn. A safety property must not depend on an
+opt-in flag being set; that is a property that is true on the machine where the
+flag happens to be on.
+
+`delegate_task` now refuses `kind="code"` when `READ_ONLY_TURN` is set, and says
+why. Analysis is still allowed: it is read-only, and a question that wants a
+deeper look is a reasonable thing to answer with one.
+
+**Two of the tests written for this validation pass were themselves vacuous**, and
+mutation testing is what said so — one asserted a shortcut that the fallback
+already covered, the other checked that protected tools survived a tight cap
+without ever checking the cap still bound. Both rewritten to state what they
+actually verify. That is the same failure as finding 29, caught the same way.
+
+---
+
+### 42 — the weakest brain was answering first — CLOSED 2026-08-26
+Arun: *"ignore api key, use cli as well always either copilot or claude cli."*
+
+The order was in-process model first, CLI second. With the hosted key refused and
+staying refused, `best_model_name()` resolves to **`local`** on this machine — so
+code questions were going to a 9B model in LM Studio, measured at 15.9s (gemma)
+to 38.9s (qwen) for a single lookup, and weaker on exactly the questions worth
+asking. Two CLI subscriptions he already pays for sat behind it.
+
+CLI first now (`ASTA_CLI_FIRST`, on by default). In-process models stay as the
+last resort, which is the case that fallback was written for: both CLIs down or
+out of quota.
+
+A pre-existing test broke, and deserved to. It grepped `answer_from_knowledge`'s
+source for the string `"claude_cli"`, so it failed the moment the loop moved into
+a helper — and would equally have passed if that loop were dead code. Replaced
+with a behavioural test: a CLI is actually reached, and the in-process failure is
+recorded rather than swallowed.
+
+### 43 — the documented fix was how the cert broke — CLOSED 2026-08-26
+Finding 26 found `preprod.pem` and `preprod.key` at **0 bytes**. This is how they
+got that way, and it is worth stating because the instruction is the one printed
+by the tool itself:
+
+    vault kv get ... -field=TEMPORAL_CERT_PEM | ... > ~/.config/temporal-mcp/preprod.pem
+
+The shell creates and **truncates the redirect target before `vault` runs**. An
+expired token, a wrong path, or no VPN therefore leaves a 0-byte file behind —
+which passes every `os.path.exists` check and surfaces much later from inside TLS
+as "failed to find any PEM data". The documented remedy manufactures the exact
+failure state finding 26 had to diagnose.
+
+**A correct fetcher already existed and I did not look for it first.**
+`~/mcp-setup-bundle/fetch-temporal-cert.sh` writes to a temp file, verifies the
+decode, and additionally does two checks the replacement I wrote did not: it
+confirms the **key's modulus matches the cert**, and that the cert's **CN is
+scoped to the namespace that env actually targets**. Either check failing means
+an unusable cert that would otherwise be installed and fail later.
+
+It is also the only correct source for the Vault paths. The proxy's generic hint
+is `readable/{env}/common/temporal`, and **that is wrong for `perf`**, which
+really lives at `readable/spt/...`. My script derived its path from that hint, so
+it would have fetched the wrong secret for perf and failed in a way that looks
+like a permissions problem.
+
+So the duplicate was deleted rather than kept. `health` now names the canonical
+script in the remediation line for a broken cert, alongside the login that
+actually works:
+
+    vault login -method=oidc
+    ~/mcp-setup-bundle/fetch-temporal-cert.sh preprod
+
+No `role=` — the OIDC mount here has no named role, and `-role=` additionally
+fails as an unknown flag because with `-method` extra parameters are `key=value`
+pairs. Both wrong forms were tried live before the working one was found in
+Arun's own shell history from July.
+
+The lesson recorded is the one about looking: a weaker second implementation of
+something that already exists is worse than no implementation, because it gets
+maintained.
+
+---
+
+### 44 — implementation ran in the wrong lane — CLOSED 2026-08-26
+The finding this whole thread started from. "implement X" landed in a chat turn
+capped at `ASTA_TURN_TIMEOUT` (300s) instead of the code-task lane (35-65 min,
+with a plan gate), and died mid-edit.
+
+Asta's own instruction already said **"When Arun assigns work … delegate it as a
+background task right away"** and **"Never plan or implement in chat yourself"**.
+It implemented anyway. An instruction the model may or may not follow is not a
+routing decision, so this makes it one — structurally, in two layers.
+
+**`app/work_intent.py` routes clear work assignments to a code task.** Safe to be
+imperfect in one direction: a code task runs its context gate, plans, and STOPS
+for approval, so a false positive costs a plan he declines. The failure it
+replaces is a half-finished edit ending in a stack trace.
+
+**The first version was far too loose, and probing found it — not review.** A work
+verb alone matched "update me on the PR", "drop the call", "delete that message",
+and **"change my status to busy"** — every one a different flow that would have
+been hijacked into a spawned repo change. It now requires positive evidence the
+message is about *code*: a ticket key, a repo name from the workspace, or a code
+noun. Bare "fix it" deliberately does **not** route — nothing in it says code, so
+routing would be a guess.
+
+**Second layer: the chat brain may no longer edit files** (`--deny-tool edit`).
+Only `edit` — `bash`, `view` and `grep` stay, because reading is most of what chat
+legitimately does. So the bare "fix it" that does not route reaches a brain that
+cannot implement it and has to delegate. Task runs are untouched: implementing is
+their whole job.
+
+Mutation testing caught a first-pass classifier whose question guard was
+redundant, and my own `--deny-tool` test **passed while the code said
+`argv += …` against a list named `cmd`** — an UnboundLocalError on every chat
+turn. The delivery tests caught that; my grep-based test gave false confidence,
+so it now checks the append targets the same list the flags are built in.
+
+### 45 — nothing ran the tests but me — CLOSED 2026-08-26
+1,800 tests were green because they were run on a laptop. Nothing checked a push,
+so a regression would reach the branch and wait to be noticed — for a repo whose
+entire argument is "verify before you claim", the sharpest irony in it.
+
+`.github/workflows/tests.yml`, two jobs in parallel:
+
+- **pytest** — the suite on every push and PR, no `.env`. That is the point:
+  `conftest` already isolates the database, clears wall-clock-dependent settings
+  and blocks live brains, so anything needing a real key or browser must skip.
+- **dom** — the 11 Teams DOM tests, which need a real Chromium and skip without
+  one. **A skip fails the job**, because otherwise it goes green having run
+  nothing the moment the browser install breaks.
+
+Verified before committing by building a clean venv and running the suite the way
+CI would: **1,801 passed, 11 skipped**, and all 11 skips are the browser tests.
+
+### 46 — the project was never installable — CLOSED 2026-08-26
+Found by that verification, and it would have failed CI on its first run.
+`pip install -e .` dies in setuptools package discovery: it sees `app/`, `tests/`,
+`agents/`, `skills/`, `ui/`, `deploy/` at the top level and refuses to guess which
+is the package rather than choosing wrong.
+
+Nobody noticed because everything runs from a venv built by hand against a
+checkout, where the package is never installed at all. `[tool.setuptools.packages.find]`
+declares it. Test dependencies are declared as a `test` extra in the same file
+rather than as a loose list in the workflow, so "what the tests need" has one
+answer and CI cannot drift from a local checkout.
+
+---
+
 ## Where this leaves the review
 
-**31 findings raised, 30 closed**, plus finding 4 recorded as Arun's accepted
-risk. 1,705 tests pass. Every fix was mutation-tested — the source was
+**46 findings raised, 45 closed**, plus finding 4 recorded as Arun's accepted
+risk. 1,812 tests pass, now on every push. Every fix was mutation-tested — the source was
 deliberately broken and the suite had to notice.
 
 Still needing Arun rather than code:

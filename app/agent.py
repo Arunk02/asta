@@ -339,6 +339,7 @@ _SPECS: dict[str, dict] = {
     "claude_cli": {"kind": "cli", "runner": "claude_cli", "executes": True,  "effort": True,
                    "exec_name": "claude",
                    "identity": "system", "tools": "mcp", "context": 200000, "rank": 20,
+                   "tiers": ("opus", "sonnet", "haiku"), "tier_env": "ASTA_CLAUDE_CLI_MODEL",
                    "label": "Claude CLI (subscription)", "hint": "install/auth: claude login"},
     "claude":     {"kind": "api", "env": "ANTHROPIC_API_KEY", "executes": False, "effort": False,
                    "identity": "system", "tools": "in_process", "context": 200000, "rank": 40,
@@ -608,6 +609,95 @@ def limit_reset_at(msg: str, now: float | None = None) -> float | None:
     return target.timestamp()
 
 
+# --- which tier of a brain, as opposed to which brain -------------------------
+#
+# A brain and the model behind it are two different choices, and only the first
+# was ever switchable. The tier lived in ASTA_CLAUDE_CLI_MODEL, read from the
+# environment at call time — so it was fixed until a restart, invisible in the
+# UI, and unreachable from the phone, which is where Arun actually decides "this
+# one needs opus".
+#
+# Kept as DATA on the spec (`tiers` / `tier_env`) rather than a branch here, so a
+# brain that grows tiers becomes switchable without touching this code — the same
+# contract as `identity` / `tools` / `context`.
+
+TIER_KEY = "brain_tier"
+
+
+def _tiers() -> dict[str, str]:
+    try:
+        raw = json.loads(store.kv_get(TIER_KEY) or "{}")
+    except ValueError:
+        return {}
+    return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+
+def tiers_for(brain: str) -> tuple[str, ...]:
+    """The tiers this brain offers, or () when the choice does not apply."""
+    return tuple(spec(normalize_model(brain)).get("tiers", ()))
+
+
+def tier_options(brain: str) -> tuple[str, ...]:
+    """Every tier he may pick — the declared aliases, plus the env pin, plus live.
+
+    `.env` pins a full model id (`claude-sonnet-5`), which is a legitimate choice
+    and is not one of the short aliases. Offering the aliases alone would show a
+    picker whose current value is absent from its own list, and would reject the
+    setting the machine is actually running.
+
+    The env pin is offered ALWAYS, not only while it happens to be active. A live
+    end-to-end run caught the difference: after switching to `sonnet` the pinned
+    `claude-sonnet-5` dropped out of the list, so going back to the machine's own
+    default became impossible from the UI — a one-way door nobody would notice
+    until they wanted to walk back through it.
+    """
+    declared = tiers_for(brain)
+    if not declared:
+        return ()
+    env_var = spec(normalize_model(brain)).get("tier_env", "")
+    extra = [v for v in (os.environ.get(env_var, "").strip() if env_var else "",
+                         tier_of(brain))
+             if v and v not in declared]
+    return (*declared, *dict.fromkeys(extra))
+
+
+def tier_of(brain: str) -> str:
+    """The model argument to use for this brain: his live choice, else the env.
+
+    The environment stays the fallback rather than being replaced, so an
+    unattended box with no stored preference behaves exactly as it did.
+    """
+    name = normalize_model(brain)
+    chosen = _tiers().get(name, "").strip()
+    if chosen:
+        return chosen
+    env_var = spec(name).get("tier_env", "")
+    return os.environ.get(env_var, "").strip() if env_var else ""
+
+
+def set_tier(brain: str, tier: str) -> None:
+    """Record his choice. An empty tier hands the decision back to the env."""
+    name = normalize_model(brain)
+    current = _tiers()
+    if tier:
+        current[name] = tier
+    else:
+        current.pop(name, None)
+    store.kv_set(TIER_KEY, json.dumps(current))
+
+
+def brain_for_tier(tier: str) -> str:
+    """Which brain offers this tier, when exactly one does.
+
+    Lets "use opus" mean something on its own: he names the model he wants, not
+    the runner it happens to live behind. Ambiguity resolves to nothing rather
+    than to a guess.
+    """
+    want = (tier or "").strip().lower()
+    hit = [n for n in _SPECS if want in tiers_for(n)]
+    return hit[0] if len(hit) == 1 else ""
+
+
 def model_registry() -> dict[str, dict]:
     """name -> {label, available, detail}. Availability drives the UI picker."""
     local_id = _lmstudio_model_id()
@@ -625,7 +715,11 @@ def model_registry() -> dict[str, dict]:
             hint = f"set {s['env']} in .env"
         if ok and quota_down(name):
             ok, hint = False, "quota exhausted — it'll be retried automatically"
-        registry[name] = {"label": label, "available": ok, "detail": "" if ok else hint}
+        tiers, tier = tier_options(name), tier_of(name)
+        if tiers and tier:
+            label = f"{label} · {tier}"       # which MODEL, not just which brain
+        registry[name] = {"label": label, "available": ok, "detail": "" if ok else hint,
+                          "tiers": list(tiers), "tier": tier if tiers else ""}
     if os.environ.get("ASTA_TEST_MODEL"):
         registry["test"] = {"label": "Test (no LLM)", "available": True, "detail": ""}
     return registry
@@ -1402,7 +1496,24 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     chat context). kind: analysis (read-only, parallel) | code (edits code — set
     the workspace) | teams_draft (drafts a Teams reply — set teams_chat; the
     draft waits for Arun's approval, it is never sent automatically)."""
-    from . import relevance, tasks
+    from . import capabilities, relevance, tasks
+    # A turn running ALONGSIDE other work is answering a read-only question, and
+    # must not start work that edits code.
+    #
+    # `delegate_task` is marked write=False because it sends nothing outward —
+    # true, and not the point: it spawns a worker that changes repos. Without this
+    # a misclassified interjection could kick off a code task, and the guarantee
+    # that makes concurrent answering safe ("the worst it can do is read something
+    # and answer") would simply not hold.
+    #
+    # Not relying on relevance.guard_spawn for it: that guard is behind
+    # ASTA_RELEVANCE, which is OFF, so today it returns None for every spawn. A
+    # safety property must not depend on an opt-in flag being set.
+    if kind == "code" and capabilities.READ_ONLY_TURN.get():
+        return ("I'm answering this alongside other work that's already running, so "
+                "I won't start a code task from here — that would edit a repo off "
+                "the back of a question. Ask me directly when the current work is "
+                "done, or say so and I'll propose it properly.")
     # A question is not a request to go do work. If this turn was opened by a
     # passive question and the model is now trying to spawn work off it, hold and
     # ask first rather than silently running (and touching a repo) unasked.

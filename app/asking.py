@@ -30,6 +30,33 @@ DEFAULT_TIMEOUT = 15 * 60
 #: bare message stops being read as its answer.
 AUTO_ANSWER_WINDOW = 30 * 60
 
+#: How long an answer he has already given stands for. Ask the same question
+#: again inside this and his earlier answer is reused instead of buzzing him.
+#:
+#: This is the cheap half of a real complaint: a question was asked, he answered
+#: it, the work was done and the PR raised — and hours later the same question
+#: arrived again. The main cause was the ledger chasing Asta's own outbound
+#: question (see attention.SELF_SOURCE); this is the guard that holds even when
+#: the caller genuinely asks twice, which a retried or resumed task will do.
+REPEAT_WINDOW = 6 * 3600
+
+
+def _same(a: str, b: str) -> bool:
+    """Whitespace and case differ between two renderings of one question; the
+    words do not. Deliberately NOT fuzzy — reusing his answer to a question he
+    was never asked would be worse than asking once too often."""
+    return " ".join((a or "").split()).casefold() == " ".join((b or "").split()).casefold()
+
+
+def recent_answer(question: str, now: float | None = None) -> str:
+    """His answer to this exact question if he gave one inside REPEAT_WINDOW."""
+    since = (time.time() if now is None else now) - REPEAT_WINDOW
+    for row in store.answered_questions(since):
+        if _same(row.get("text", ""), question):
+            return row.get("answer") or ""
+    return ""
+
+
 NO_ANSWER = "NO ANSWER — Arun did not reply in time. Proceed on your best judgement " \
             "and say clearly what you assumed."
 
@@ -56,6 +83,21 @@ async def ask(question: str, source: str = "", timeout: float = DEFAULT_TIMEOUT)
     text = (question or "").strip()
     if not text:
         return NO_ANSWER
+    # He already answered this. Asking again is not diligence — it reads as not
+    # having listened, and it is the thing he called the worst of the lot.
+    prior = recent_answer(text)
+    if prior:
+        store.record_outcome("ask", "reused", detail=text[:200])
+        return prior
+    # The same question already in flight waits on the answer he is ALREADY being
+    # asked for, rather than putting the same sentence on his phone twice.
+    for row in store.open_questions():
+        fut = _waiters.get(row["id"])
+        if fut is not None and not fut.done() and _same(row.get("text", ""), text):
+            try:
+                return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+            except asyncio.TimeoutError:
+                return NO_ANSWER
     from . import notify
     q = store.create_question(text, source)
     qid = q["id"]

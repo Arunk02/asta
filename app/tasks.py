@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import agents, claude_cli, copilot_cli, repo_ops, store, workspace_tools
+from . import agents, claude_cli, clip, copilot_cli, repo_ops, store, workspace_tools
 
 
 class _LimitPaused(Exception):
@@ -53,7 +53,60 @@ ROOT = Path(__file__).resolve().parent.parent
 REVIEW_OWN_DIFF = os.environ.get("ASTA_REVIEW_OWN_DIFF", "1").strip().lower() \
     not in ("0", "false", "no", "off")
 
-TASK_TIMEOUT = {"analysis": 900, "code": 1800, "teams_draft": 300}
+#: Per-kind ceilings. `code` was 1800s — and the measured baseline for real code
+#: tasks is median 7.7 min with a **p90 of 32 min** (n=46), so the ceiling sat
+#: BELOW the p90 and killed roughly the slowest tenth of tasks with their own
+#: budget. A limit that fires on work which was going to succeed is not a safety
+#: net, it is a source of repeated work: the task is re-run from nothing and pays
+#: the whole cost again.
+#:
+#: 45 min clears the measured p90 with room, and the idle watchdog
+#: (`turn_budget`) is what actually catches a wedged brain now — which is the job
+#: this number was doing badly. A stuck turn is stopped after two minutes of
+#: silence regardless of how much ceiling is left.
+TASK_TIMEOUT = {"analysis": 900, "code": 2700, "teams_draft": 300}
+
+# --- how long a code task may take, given what it can touch -------------------
+#
+# A flat number is wrong in both directions, which is Arun's point: "even small
+# changes getting affected in multiple repos take more time." A one-line fix in
+# one repo does not need 45 minutes, and a rename that lands across three repos —
+# each with its own build, its own checkstyle, its own multi-module Maven reactor —
+# is not the same job at all. Verification alone is per-repo: `mvn clean test` on
+# the booking service is minutes, and a task touching three pays it three times.
+#
+# So the budget is a function of scope. Not of DIFFICULTY, which nobody can
+# estimate up front — of how many repos are in reach, which is a fact available
+# before the work starts.
+#
+# This is only safe because the idle watchdog landed first (`turn_budget`): a
+# wedged brain is stopped after two minutes of silence no matter how much ceiling
+# remains. Before that, the ceiling was doubling as a liveness check and had to
+# stay tight; now it can be honest about how long real work takes.
+
+CODE_BASE_SECONDS = int(os.environ.get("ASTA_CODE_BASE_SECONDS", "1200"))     # 20 min
+CODE_PER_REPO_SECONDS = int(os.environ.get("ASTA_CODE_PER_REPO_SECONDS", "900"))  # +15
+CODE_MAX_SECONDS = int(os.environ.get("ASTA_CODE_MAX_SECONDS", "5400"))      # 90 min
+
+
+def code_timeout(workspace: str | None) -> int:
+    """Budget for a code task: a base, plus room for each repo it could touch.
+
+    One repo -> 35 min, which already clears the measured p90 of 32 (n=46).
+    Three repos -> 65 min. Capped, because past a point a run that long is not a
+    slow task, it is a task that should have been split — and the cap is what
+    turns that into a reported budget overrun rather than an afternoon of silence.
+    """
+    repos = 1
+    if workspace:
+        try:
+            from . import workspace as workspace_mod, worktrees
+            root = workspace_mod.WORKSPACES.get(workspace)
+            if root:
+                repos = max(1, len(worktrees.repos_in(Path(root))))
+        except Exception:                       # noqa: BLE001
+            repos = 1
+    return min(CODE_MAX_SECONDS, CODE_BASE_SECONDS + CODE_PER_REPO_SECONDS * repos)
 
 # Pipelines are Asta's own (agents/), not the workspace's. One definition for
 # both executors and every workspace, so improving it improves every run — which
@@ -106,6 +159,21 @@ CODE_OVERRIDES = """
   The plan he approves is the definition of done — implement THAT, not a better
   idea you have afterwards. If implementing reveals the plan was wrong, stop
   and say so; do not quietly build something else.
+- THE PLAN MUST BE READABLE IN THIRTY SECONDS, ON A PHONE. He approves these
+  from WhatsApp, standing up. Open it with a `STRUCTURE` block — the classes and
+  files that change and how they relate, as an indented tree, one line each,
+  saying what happens to that thing:
+
+      STRUCTURE
+        EtaValidator                     NEW  · rejects an import ETA at/after gate-in
+          └─ called by BookingService.applyVesselEta()   ~10 lines changed
+               └─ reads ServicePlanLeg.portGateIn (LATEST)
+        BookingServiceTest               +3 cases (before / at / after gate-in)
+
+  Then the numbered steps, then a one-line RISK. No prose paragraph before the
+  tree: the tree is the part he actually reads, and a plan built on a misread
+  shows up there in seconds where three paragraphs hide it. Keep it under about
+  twelve lines — this is a shape, not a specification.
 - Skip Stage 1.5 and never run Stage 6: no push, no PR, and no Jira writes of
   any kind (no subtasks, no comments, no transitions). Stage 5 Evolution SHOULD
   still run — lessons and skill patches are wanted. After the Stage 4 (and 4b)
@@ -511,6 +579,34 @@ def learn_from_stop(task_id: int, t: dict, status: str, why: str = "") -> None:
                           outcome=status, escalated=_escalated(task_id)))
 
 
+#: The heading that opens a plan's shape-at-a-glance block. Matched loosely
+#: because the brain writes the heading, not this code — "STRUCTURE",
+#: "## Structure", "Class diagram:" all mean the same thing to Arun.
+_STRUCTURE_HEAD = re.compile(r"^[#*\s]*(structure|class diagram|shape)\b\s*:?[#*\s]*$", re.I)
+
+
+def _structure_span(lines: list[str]) -> tuple[int, int]:
+    """(start, end) of the structure block in `lines`, or (-1, -1).
+
+    Ends at the first blank line followed by something that is not part of the
+    tree — a heading, a numbered step — so the block keeps its internal blank
+    lines without swallowing the rest of the plan.
+    """
+    start = next((i for i, ln in enumerate(lines) if _STRUCTURE_HEAD.match(ln)), -1)
+    if start < 0:
+        return -1, -1
+    end = start + 1
+    for i in range(start + 1, len(lines)):
+        nxt = lines[i]
+        if not nxt.strip():
+            following = next((x for x in lines[i + 1:] if x.strip()), "")
+            if following and not following.startswith((" ", "\t")):
+                break
+            continue
+        end = i + 1
+    return start, end
+
+
 def _phone_text(result: str, limit: int = 1100) -> str:
     """A gate's output, made readable on a phone.
 
@@ -518,16 +614,27 @@ def _phone_text(result: str, limit: int = 1100) -> str:
     tool noise and table pipes, and ran past the notification cap. This keeps the
     structure that matters (headings, bullets, numbered steps), drops the noise,
     and cuts on a LINE boundary so it never ends mid-word.
+
+    The STRUCTURE block is PINNED. Everything else prefers the tail, which is
+    right for a gate's question — but the shape of the change is what Arun reads
+    first to decide whether the plan is built on a misread, and it opens the
+    plan, so a pure tail cut is exactly what would drop it.
     """
     lines = (result or "").splitlines()
     keep: list[str] = []
     in_fence = False
+    fenced_structure = False
     for raw in lines:
         line = raw.rstrip()
         if line.strip().startswith("```"):
+            # A fence right after the STRUCTURE heading holds the tree itself, so
+            # its CONTENTS are kept (without the fence markers). Every other fence
+            # is code or build output and stays dropped.
+            fenced_structure = (not in_fence
+                                and bool(keep) and _STRUCTURE_HEAD.match(keep[-1]))
             in_fence = not in_fence
             continue
-        if in_fence:
+        if in_fence and not fenced_structure:
             continue
         s = line.strip()
         if not s:
@@ -537,11 +644,15 @@ def _phone_text(result: str, limit: int = 1100) -> str:
         if s.startswith("|") or set(s) <= set("-=_|+ "):   # table rows / rules
             continue
         keep.append(line)
+    start, end = _structure_span(keep)
+    shape = keep[start:end] if start >= 0 else []
+    rest = keep[:start] + keep[end:] if start >= 0 else keep
+    budget = limit - sum(len(ln) + 1 for ln in shape)
     # Prefer the tail (the plan + the ask), but start on a real heading/bullet.
     out: list[str] = []
     total = 0
-    for line in reversed(keep):
-        if total + len(line) + 1 > limit:
+    for line in reversed(rest):
+        if total + len(line) + 1 > budget:
             break
         out.append(line)
         total += len(line) + 1
@@ -551,7 +662,8 @@ def _phone_text(result: str, limit: int = 1100) -> str:
         out.pop(0)
         if len(out) <= 3:
             break
-    return "\n".join(out).strip() or (result or "").strip()[-limit:]
+    body = "\n".join((shape + [""] + out) if shape and out else (shape or out)).strip()
+    return body or (result or "").strip()[-limit:]
 
 
 def _audit_note(task_id: int) -> str:
@@ -735,7 +847,7 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
     if ex == "claude":
         try:
             return await claude_cli.one_shot(
-                prompt, cwd=cwd, timeout=TASK_TIMEOUT["code"],
+                prompt, cwd=cwd, timeout=code_timeout(workspace),
                 agent_file=_agent_file("code", _pipeline_for(task_id)),
                 effort=effort, session_id=sid, resume=resume, on_progress=watcher,
                 mcp_config=dev_cfg)
@@ -752,7 +864,7 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         # directory. Asta owns the pipeline now, so the body rides in the
         # prompt instead and nothing is installed into the user's repo.
         return await copilot_cli.one_shot(
-            _with_pipeline(pipeline, prompt), cwd=cwd, timeout=TASK_TIMEOUT["code"],
+            _with_pipeline(pipeline, prompt), cwd=cwd, timeout=code_timeout(workspace),
             effort=effort, session_id=sid, resume=resume, on_progress=watcher,
             mcp_config=dev_cfg)
     except RuntimeError as exc:
@@ -776,7 +888,9 @@ async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
     """Non-pipeline kinds (analysis, teams_draft, agent-less code): one leg,
     executor-aware, with transparent claude failover when copilot's quota dies."""
     ex = _resolve_executor(task_id)
-    cwd, tout = _cwd(t["workspace"]), TASK_TIMEOUT[t["kind"]]
+    cwd = _cwd(t["workspace"])
+    tout = (code_timeout(t["workspace"]) if t["kind"] == "code"
+            else TASK_TIMEOUT[t["kind"]])
     agent = _agent_for(t)
     eff = _effort_for(t["kind"], ex)
     pipeline = _pipeline_name(t["kind"]) if agent else ""
@@ -985,13 +1099,15 @@ async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
 # --- what a task did to git, and how to undo it -------------------------------
 
 def _repos_under(root: Path) -> list[Path]:
-    """Every git repo a task could touch: the workspace, or the repos inside it."""
-    if (root / ".git").is_dir():
-        return [root]
-    try:
-        return sorted(p for p in root.iterdir() if (p / ".git").is_dir())
-    except OSError:
-        return []
+    """Every git repo a task could touch — the superset, used for rollback.
+
+    Was a second copy of the rule in `worktrees` and carried the same bug: it
+    returned `[root]` whenever the workspace root was itself a repo, which for the
+    booking workspace means the generated-context repo and none of the three
+    services. Delegated now rather than restated, so the two cannot drift.
+    """
+    from . import worktrees
+    return worktrees.all_repos_in(root)
 
 
 async def mark_rollback_point(task_id: int, workspace: str | None) -> dict:
@@ -1120,7 +1236,7 @@ async def _self_review(task_id: int, t: dict, result: str) -> str:
     if not notes:
         return ""
     stat = " · ".join(f"{name}: {s.splitlines()[-1].strip()}" for name, s, _ in diffs)
-    return f"\n\n🔍 I read my own diff ({stat}):\n{notes[:900]}"
+    return f"\n\n🔍 I read my own diff ({stat}):\n{clip.clip(notes, 900)}"
 
 
 async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
@@ -1248,9 +1364,12 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     root = Path(_cwd(t.get("workspace")))
     if not root.exists() or root.resolve() == ROOT.resolve():
         return []
-    repos = [root] if (root / ".git").is_dir() else \
-        sorted(p for p in root.iterdir() if (p / ".git").is_dir())
-    repos = [r for r in repos if r.resolve() != ROOT.resolve()]
+    # One definition, in worktrees. This was the third inline copy of the rule and
+    # carried the same bug as the other two: `[root]` whenever the workspace root
+    # is itself a repo, which for the booking workspace is the generated-context
+    # repo and none of the three services.
+    from . import worktrees as _wt
+    repos = [r for r in _wt.repos_in(root) if r.resolve() != ROOT.resolve()]
     if not repos:
         return []
     branch = task_branch(t, task_id)
@@ -1261,7 +1380,15 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     # anything that genuinely needs the shared tree.
     from . import worktrees
     try:
-        results = await worktrees.create(root, task_id, branch)
+        # The task's own words decide which repos are prepared. A one-line change
+        # in the booking service should not cost three fetches and three
+        # checkouts — and two tasks on different services do not conflict, so
+        # neither should be paying for the other's repos. Falls back to all when
+        # nothing is named, because under-preparing breaks a run and
+        # over-preparing only costs a fetch.
+        results = await worktrees.create(root, task_id, branch,
+                                         t.get("title") or "", t.get("goal") or "",
+                                         t.get("prompt") or "")
     except Exception as exc:                          # noqa: BLE001
         results = [{"repo": r.name, "branch": branch, "ok": False, "dirty": False,
                     "note": f"{type(exc).__name__}: {exc}"} for r in repos]
@@ -1332,7 +1459,7 @@ async def _worker(task_id: int) -> None:
                               finished_at=time.time())
             await notify.notify(
                 f"📝 Task #{task_id} ({t['title']}) — draft for Teams chat "
-                f"'{t['teams_chat']}':\n\n{result[:600]}\n\n"
+                f"'{t['teams_chat']}':\n\n{clip.clip(result, 600)}\n\n"
                 f"Reply 'approve task {task_id}' to send it, or 'reject task {task_id}'.",
                 "task")
         elif t["kind"] == "code" and agent:
@@ -1610,8 +1737,11 @@ async def ship(task_id: int) -> str:
         raise ValueError(f"task #{task_id} is not a finished code task "
                          f"(kind={t['kind']}, status={t['status']})")
     root = Path(_cwd(t["workspace"]))
-    repos = [root] if (root / ".git").is_dir() else \
-        sorted(p for p in root.iterdir() if (p / ".git").is_dir())
+    # Same rule, same place. This copy mattered most: with the old shortcut,
+    # shipping looked for the task's branch in the generated-context repo and
+    # would have raised no PR at all for the services the work was actually in.
+    from . import worktrees as _wt
+    repos = _wt.repos_in(root)
     urls: list[str] = []
     for repo in repos:
         rc, cur = await repo_ops.git(repo, "git", "rev-parse", "--abbrev-ref", "HEAD")

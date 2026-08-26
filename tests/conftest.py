@@ -13,6 +13,7 @@ work — they just override an already-safe default.
 from __future__ import annotations
 
 import contextlib
+import os
 
 import pytest
 
@@ -40,12 +41,64 @@ def _isolated_db(tmp_path, monkeypatch):
 #: with monkeypatch.setenv, which still works and now states its intent out loud.
 _TIME_DEPENDENT_ENV = ("ASTA_QUIET_HOURS",)
 
+#: Settings that decide what a test's FIXTURES mean. Same argument as the clock
+#: above, found the same way — by something failing where the real .env is absent.
+#:
+#: `ASTA_CONTEXT_DIRNAMES=.contmark` is set in Arun's .env, and the context tests
+#: build workspaces containing a `.contmark/` directory. So they passed on his
+#: laptop and, on the first CI run ever, failed on seven assertions that all said
+#: some version of "the context is fine" — because with the default dirname the
+#: provider looked for `.asta-context`, found nothing, and reported nothing stale.
+#: A green suite that depends on one developer's .env is not a green suite.
+#:
+#: Cleared for every test. A test that is ABOUT a non-default context directory
+#: sets it itself, which states the assumption instead of inheriting it.
+_FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
+
+#: Settings this machine PINS that the code under test falls back to. Third
+#: member of the same family, and the one that would have bitten next: the model
+#: tier is "his stored choice, else the environment", and Arun's .env pins
+#: ASTA_CLAUDE_CLI_MODEL=claude-sonnet-5. A test asserting what an unset tier
+#: does would therefore pass here and fail on any machine that leaves it blank.
+_MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE")
+
+
+#: What this machine's .env said, captured before it is cleared. A handful of
+#: tests are genuinely ABOUT the live workspace — checking that eval ground truth
+#: still matches the lessons it cites — and those need the real directory name
+#: back. Handed over through a fixture so the need is declared rather than
+#: inherited, and so a test that forgets to ask gets the default like everyone else.
+_REAL_CONTEXT_DIRNAMES = {n: os.environ.get(n) for n in
+                          ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")}
+
 
 @pytest.fixture(autouse=True)
 def _no_wall_clock_dependence(monkeypatch):
-    for name in _TIME_DEPENDENT_ENV:
+    for name in _TIME_DEPENDENT_ENV + _FIXTURE_SHAPING_ENV + _MACHINE_PINNED_ENV:
         monkeypatch.delenv(name, raising=False)
     yield
+
+
+@pytest.fixture
+def live_workspace_context(monkeypatch):
+    """Restore this machine's real context directory name.
+
+    For the few tests that read Arun's actual workspace rather than a fixture.
+    They skip where it is absent — which is every CI runner — so restoring the
+    name costs nothing there and is the difference between measuring the real
+    thing and measuring a default that matches no directory on disk.
+    """
+    restored = False
+    for name, value in _REAL_CONTEXT_DIRNAMES.items():
+        if value:
+            monkeypatch.setenv(name, value)
+            restored = True
+    # Yields whether there was anything to restore, so a test can skip rather
+    # than validate against a default that matches no directory on disk. Without
+    # this the ground-truth test read the generic AGENTS.md fallback — non-empty,
+    # so its "skip if empty" guard did not fire — and asserted against text that
+    # was never going to contain the facts it was checking for.
+    yield restored
 
 
 @pytest.fixture(autouse=True)
@@ -140,4 +193,48 @@ def _no_live_brains(monkeypatch):
     for mod in ("copilot_cli", "claude_cli"):
         with contextlib.suppress(ImportError, AttributeError):
             monkeypatch.setattr(f"app.{mod}.one_shot", _no_cli, raising=False)
+    yield
+
+
+# --- tests about THIS machine's install --------------------------------------
+#
+# A few tests assert facts about Arun's real setup rather than about code: that
+# booking is the only registered workspace, that each of his repos has a verify
+# command, that the eval cases are grounded in lessons that still say what they
+# cited. They are worth having — they catch his configuration drifting — and they
+# cannot hold anywhere else, because everything they read lives under `data/`,
+# which is gitignored for holding the database, OAuth tokens and session cookies.
+#
+# So they SKIP off this machine instead of failing. That distinction matters: a
+# red CI run that means "this is not Arun's laptop" trains people to ignore red
+# runs, which is worth more than the tests are.
+
+def _needs(path: str, why: str):
+    from pathlib import Path as _P
+    if not _P(path).exists():
+        pytest.skip(f"{why} — {path} is gitignored and absent here")
+
+
+@pytest.fixture
+def live_verify_commands():
+    """His per-repo verify commands. Local-only: they name work repos."""
+    _needs("data/verify-commands.json", "no verify commands on this machine")
+    yield
+
+
+@pytest.fixture
+def live_eval_cases():
+    """The grounded eval cases. Local-only: they quote internal names."""
+    from app import evals
+    if not evals.load():
+        pytest.skip("no eval cases on this machine — data/evals/ is gitignored")
+    yield
+
+
+@pytest.fixture
+def live_workspaces():
+    """His registered workspaces, which live in the gitignored data/ config."""
+    from app.workspace import registry
+    if not list(registry.all_workspaces()):
+        pytest.skip("no workspaces registered on this machine")
     yield

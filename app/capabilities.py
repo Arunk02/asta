@@ -22,6 +22,7 @@ Adding a capability is one row plus a docstring, not a hunt through three files.
 from __future__ import annotations
 
 import inspect
+import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Callable
@@ -359,6 +360,31 @@ def names() -> tuple[str, ...]:
 #: awaits, with no flag threaded through five signatures — and the parent turn,
 #: created earlier, is unaffected.
 READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=False)
+
+
+def chat_may_write() -> bool:
+    """May a CHAT turn edit files, commit, push or open a PR? Default: no.
+
+    One answer for every brain, because the alternative was tried and failed:
+    Copilot carried `--deny-tool edit` and Claude carried nothing at all, so the
+    same message reached two different sets of rules depending on which brain
+    happened to be selected. That is the shape of bug that costs an evening.
+
+    Code work belongs in the task lane, where it plans and STOPS for his
+    approval. A chat turn is capped at ASTA_TURN_TIMEOUT, cannot ask for that
+    approval, and has none of the branch discipline — so an implementation
+    started here ends as a half-finished edit and a timeout, which is exactly
+    what it did.
+
+    Honest about its reach: this closes the named acts, not every conceivable
+    one. A brain with a shell can still write a file through `sed -i` or a
+    python one-liner, and no deny list fixes that. The real guarantee is the
+    ROUTING — work_intent sends code work to the lane before a brain is asked —
+    and this is the second lock on the same door, not the door.
+
+    `ASTA_CHAT_MAY_EDIT=1` puts chat editing back for anyone who wants it.
+    """
+    return os.environ.get("ASTA_CHAT_MAY_EDIT", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def writes(name: str) -> bool:

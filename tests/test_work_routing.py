@@ -252,39 +252,76 @@ def test_work_is_not_routed_while_a_task_is_already_live(monkeypatch):
     assert spawned["n"] == 0, "spawned a second task while one was live"
 
 
-# --- the chat brain cannot edit ----------------------------------------------
+# --- the chat brain cannot implement -----------------------------------------
+#
+# The previous version of this section asserted `--deny-tool edit`, by grepping
+# the source for that literal. It passed for weeks. Then the flag was run against
+# the real `copilot` binary: asked to create a file with `edit` denied, copilot
+# created it. **The tool is called `write`; `edit` is not a tool name, so the
+# whole block was a no-op.** A test that greps for a string can only ever prove
+# the string is there — never that it does anything.
+#
+# So these build the actual command and assert the actual flags, and the flags
+# themselves were verified against both binaries on 2026-08-26:
+#   · copilot: `write` denied stops the tool, and the shell then writes the file
+#     anyway — hence the git/gh denials alongside it.
+#   · claude:  `Bash(git commit:*)` denied is refused, and the brain says so.
 
-def test_the_chat_path_denies_the_edit_tool():
-    """Defence in depth: routing catches the clear cases, this catches the rest.
+import pytest
 
-    Only `edit` — bash, view and grep stay, because reading is most of what chat
-    legitimately does and removing bash would break every Teams, git and log
-    command.
-    """
-    import re
-    from pathlib import Path
-
-    from app import copilot_cli
-    assert copilot_cli._deny_edit_in_chat() is True
-
-    # Checked against the list it actually appends to, not by grepping for the
-    # string. The first version of this test grepped — and passed while the code
-    # said `argv += [...]` against a list named `cmd`, which raised
-    # UnboundLocalError on every chat turn. The delivery tests caught that; this
-    # one gave false confidence.
-    src = Path("app/copilot_cli.py").read_text()
-    m = re.search(r"\n    (\w+) = \[\n        \"copilot\",", src)
-    assert m, "could not find the copilot command list"
-    listname = m.group(1)
-    deny = re.search(r"_deny_edit_in_chat\(\):\s*\n\s*(\w+) \+= \[\"--deny-tool\", \"edit\"\]", src)
-    assert deny, "the chat path does not deny the edit tool"
-    assert deny.group(1) == listname, (
-        f"deny appends to {deny.group(1)!r} but the command list is {listname!r} — "
-        f"this raises UnboundLocalError on every chat turn")
+from app import capabilities, claude_cli, copilot_cli, store
 
 
-def test_task_runs_may_still_edit():
-    """Implementing is a task's whole job — the denial is chat-only."""
+@pytest.fixture
+def _conv():
+    store.create_conversation("c1", "copilot")
+    return {"id": "c1", "workspace": ""}
+
+
+def _copilot_denials(conv) -> list[str]:
+    cmd = copilot_cli._build_cmd(conv, "what changed in the mapper?")
+    return [cmd[i + 1] for i, flag in enumerate(cmd) if flag == "--deny-tool"]
+
+
+def _claude_denials(conv) -> list[str]:
+    cmd = claude_cli._build_cmd(conv, "what changed in the mapper?")
+    if "--disallowed-tools" not in cmd:
+        return []
+    return cmd[cmd.index("--disallowed-tools") + 1].split(",")
+
+
+def test_chat_cannot_write_files(_conv):
+    """`write`, not `edit` — the name the binary actually honours."""
+    assert "write" in _copilot_denials(_conv)
+    assert "Write" in _claude_denials(_conv)
+
+
+@pytest.mark.parametrize("act", ["git commit", "git push", "gh pr create"])
+def test_chat_cannot_perform_the_outward_acts(act, _conv):
+    """Denying the write tool alone is not enough: copilot falls back to the
+    shell and writes the file anyway. These three cannot be taken back, and a PR
+    raised from chat is what happened with no plan ever approved."""
+    assert any(act in d for d in _copilot_denials(_conv))
+    assert any(act in d for d in _claude_denials(_conv))
+
+
+def test_both_brains_agree(_conv):
+    """The drift this exists to end: copilot carried a (broken) rule and claude
+    carried none, so the same message met different rules depending on which
+    brain was selected."""
+    assert bool(_copilot_denials(_conv)) and bool(_claude_denials(_conv))
+
+
+def test_reading_is_untouched(_conv):
+    """Most of what chat legitimately does is read — including the CI checks he
+    asks for constantly. `gh` is denied only for `pr create`."""
+    denials = _copilot_denials(_conv) + _claude_denials(_conv)
+    assert not any(d in ("shell", "Bash", "view", "grep", "shell(gh)") for d in denials)
+    assert not any(d.startswith(("Bash(gh run", "shell(gh run", "Bash(git log")) for d in denials)
+
+
+def test_task_runs_may_still_implement():
+    """Implementing is a task's whole job — the ban is chat-only."""
     from pathlib import Path
     src = Path("app/copilot_cli.py").read_text()
     one_shot = src[src.index("async def one_shot"):]
@@ -292,11 +329,10 @@ def test_task_runs_may_still_edit():
         "the task path was barred from editing, which is its entire purpose"
 
 
-def test_the_chat_edit_ban_is_reversible():
-    import os
-    from app import copilot_cli
-    os.environ["ASTA_CHAT_MAY_EDIT"] = "1"
-    try:
-        assert copilot_cli._deny_edit_in_chat() is False
-    finally:
-        os.environ.pop("ASTA_CHAT_MAY_EDIT", None)
+def test_the_ban_is_one_decision_not_two(monkeypatch, _conv):
+    """Flipping the single policy function must move BOTH brains. Two copies of
+    a rule is how they came to disagree in the first place."""
+    monkeypatch.setenv("ASTA_CHAT_MAY_EDIT", "1")
+    assert capabilities.chat_may_write() is True
+    assert _copilot_denials(_conv) == []
+    assert _claude_denials(_conv) == []

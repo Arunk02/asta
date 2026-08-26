@@ -124,12 +124,18 @@ _ANSWER_PROMPT = (
     "live call is far worse than admitting you don't know."
 )
 
-async def answer_from_knowledge(question: str) -> str:
+async def answer_from_knowledge(question: str, extra_context: str = "") -> str:
     """What Asta can work out about a code question. '' when nothing could answer.
 
     Empty string rather than an apology template: the caller has to be able to
     tell "here is the answer" from "no brain was available", because one of those
     gets said out loud and the other must not be.
+
+    `extra_context` is the playbook a real turn would already have in hand — the
+    grafana-analyser skill for a logs question, say. It is a parameter rather than
+    a second answering function on purpose: an eval that measures a path nobody
+    takes measures nothing, and two answering paths would drift until the measured
+    one and the used one were different code.
     """
     from . import agent as agent_mod
     from .workspace import registry
@@ -154,6 +160,10 @@ async def answer_from_knowledge(question: str) -> str:
     prompt = _ANSWER_PROMPT.format(
         question=question[:500],
         ws=f"The workspace is '{ws}'. " if ws else "") + facts
+    if extra_context.strip():
+        prompt += ("\n\nTHE PLAYBOOK FOR THIS KIND OF QUESTION — follow it "
+                   "exactly; it encodes what already went wrong when it was "
+                   "ignored:\n" + extra_context[:8000] + "\n")
     # The API model first when it works, then the CLI subscriptions Arun already
     # pays for. Measured reason for the fallback: `ANTHROPIC_API_KEY` was set,
     # `available("claude")` said yes because a key was PRESENT, and every call

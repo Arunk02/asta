@@ -2637,3 +2637,44 @@ def test_clearing_one_source_does_not_clear_another():
     attention.note_scrape("teams")
     assert attention.last_error("teams") == ""
     assert "outlook broke" in attention.last_error("outlook")
+
+
+def test_the_always_core_survives_any_amount_of_trimming():
+    """The floor is not negotiable — least of all `prepare_to_send`.
+
+    It used to be appended LAST and the trim kept the first N, so the one group
+    documented as "never evicted" was the first evicted. Invisible while the
+    registry was small enough never to trim; three new capabilities crossed the
+    threshold and it surfaced.
+
+    The cost is not a slower turn. `prepare_to_send` is the staged-send gate — the
+    single hard rule that nothing leaves the machine unapproved. A long enough
+    conversation would have dropped it, leaving the rule enforced by a tool the
+    model could no longer call.
+    """
+    from app import capabilities, tool_index
+
+    floor = tool_index._floor()
+    # Far more carried-over tools than the cap, so a trim is guaranteed.
+    everything = [n for n in capabilities.names() if n not in floor]
+    prev = dict.fromkeys(everything)
+    picked = everything[:6]
+
+    out = tool_index._recent(prev, picked)
+
+    for name in floor:
+        assert name in out, f"{name} is in ALWAYS and was evicted"
+    for name in picked:
+        assert name in out, f"{name} was picked this turn and evicted"
+    assert "prepare_to_send" in out, "the staged-send gate was evicted"
+    assert len(out) <= tool_index.STICKY_MAX_TOOLS + tool_index.STICKY_SLACK + len(floor), \
+        "trimming stopped working entirely"
+
+
+def test_trimming_still_happens_for_carried_over_tools():
+    """Protecting the floor must not turn the cap off — that was the original bug."""
+    from app import capabilities, tool_index
+
+    everything = [n for n in capabilities.names()]
+    out = tool_index._recent(dict.fromkeys(everything), everything[:3])
+    assert len(out) < len(everything), "nothing was trimmed — the set grew to everything"

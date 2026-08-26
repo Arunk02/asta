@@ -62,6 +62,12 @@ first thing to revisit.
 | 23 | Medium | A pooled browser must be closed on shutdown or the process leaks Chromium | `main.py` lifespan | **closed** |
 | 24 | High | Three capabilities were unreachable: two modules called by nothing in `app/`, and a capability naming a route that did not exist | `selector_health.py`, `evals.py`, `main.py` | **closed** |
 | 25 | Medium | A watcher's failure reason outlives the failure — a healed fault keeps being reported as the cause | `attention.note_scrape` | **closed** |
+| 26 | High | Temporal cert checked for presence, not validity — an empty file passes and dies inside TLS | `temporal-mcp-proxy.py`, health | **closed** |
+| 27 | **Critical** | The always-available core could be evicted from the toolset — including `prepare_to_send`, the staged-send gate | `tool_index._recent` | **closed** |
+| 28 | Medium | The local model is whichever LM Studio lists first — an embedding model would answer every turn with silence | `agent._lmstudio_model_id` | **closed** |
+| 29 | High | The debugging eval cases were vacuous — parroting the playbook scored 6/8 | `data/evals/debugging.json` | **closed** |
+| 30 | High | No Temporal knowledge source existed — the env/namespace/cert map lived only in the proxy, unreadable by any brain | `skills/` | **closed** |
+| 31 | Medium | A blank setting in `.env` silently disabled a whole module | `diagnostics.TEMPORAL_PROXY` | **closed** |
 
 ## Closed
 
@@ -353,10 +359,135 @@ last state anyone happened to write down.
 
 ---
 
+### 26 — a cert that exists and cannot be used — CLOSED 2026-08-26
+`~/.config/temporal-mcp/preprod.pem` and `preprod.key` are both **0 bytes**. The
+proxy gates on `os.path.exists`, which an empty file passes, so the failure
+surfaces from inside TLS as
+
+    failed loading client cert key pair: tls: failed to find any PEM data in
+    certificate input
+
+— a sentence about PEM parsing that never mentions the empty file. Debugging
+preprod would fail with an error pointing at the wrong thing.
+
+`app/diagnostics.py` validates instead of checking presence: missing, empty,
+unparseable, expired, expiring, ok — and reads the env map **from the proxy**
+rather than restating it, because two copies of a mapping is how a newly added
+env goes missing in one of them.
+
+Health reports only *broken* certs — present and unusable. Four of the seven
+envs have no cert at all because Arun does not use them; reporting those every
+pass is how a health report becomes something people scroll past, which is the
+same correction the Teams selector check needed when it called unchecked
+selectors BROKEN.
+
+Live result: **3/7 usable** (sit, uat, prod — 260 and 304 days left); dev, qa,
+perf never configured; preprod broken. Four mutations caught.
+
+### 27 — the send gate could be evicted — CLOSED 2026-08-26
+The worst finding of the session, and it was latent.
+
+`_recent` built the sticky toolset as `picked + prev + floor` and then kept the
+first N. The floor — `capabilities.ALWAYS` — was appended **last**, so the one
+group whose own comment said "never evicted" was the first group evicted. It
+never fired while the registry was small enough that nothing trimmed; adding
+three capabilities crossed the threshold and a test caught it.
+
+What it would have cost: the floor is `ask_user`, `continue_working`,
+`load_skill`, `remember`, `delegate_task`, `search_memory`,
+`list_background_tasks` — and **`prepare_to_send`**. A long enough conversation
+would have dropped the staged-send gate, leaving the single hard rule in this
+system — nothing leaves the machine unapproved — enforced by a tool the model
+could no longer reach.
+
+Now this turn's picks and the floor are kept whatever the cap says, and only
+carried-over tools compete for the remaining room. Two mutations caught,
+including restoring the original trim.
+
+### 28 — the local brain was whichever model sorted first — CLOSED 2026-08-26
+`_lmstudio_model_id` returned `data[0]["id"]`. Arun has five models loaded and
+one of them is `text-embedding-nomic-embed-text-v1.5`; the day that sorted first,
+every local completion returns empty — and empty is indistinguishable here from
+"the brain had nothing to say", so it reports as Asta not knowing.
+
+The same shape as the refused API key: something was available, so it was used,
+and nobody checked it was the right thing.
+
+Now non-chat models are excluded, and `ASTA_LOCAL_MODEL` pins one — worth setting,
+because the choice is not cosmetic. Measured on this machine, same question:
+
+    google/gemma-4-e4b     15.9 s
+    qwen/qwen3.5-9b        38.9 s   (the difference is reasoning tokens)
+
+A pin naming an unloaded model falls through rather than disabling every local
+call. Two mutations caught.
+
+### 29 — the debugging evals measured the prompt, not the answer — CLOSED 2026-08-26
+The first debugging suite scored **8/8 against a real brain**. It also scored
+**6/8 against an asker that returned the playbook verbatim and reasoned about
+nothing** — because the playbook is in the prompt, so any token it contains is
+free. The score was real and meant almost nothing.
+
+This is the eval equivalent of a test that passes with the feature deleted, and
+it is exactly what finding 14 was supposed to prevent — caught only because the
+suite was checked against a deliberately stupid answerer, the same way every fix
+in this register is checked against a deliberately broken source.
+
+Rewritten so each case needs a value that appears only in the question (an
+identifier), or a **choice** between things the playbook lists — naming one env's
+namespace while not naming the others, which a recital fails by definition. Four
+degenerate answerers (parrot, silent, waffle, shotgun) now score **0/8**, and
+`test_debugging_evals_are_not_vacuous` keeps it that way. A companion test proves
+the guard can itself fail, so it is not decoration.
+
+---
+
+### 30 — Asta had no way to know anything about Temporal — CLOSED 2026-08-26
+Found by measuring rather than by reading. The first debugging eval run scored
+5/8, and two of the three failures were Temporal questions: *which namespace does
+sit use*, *which cert does uat use*. Not reasoning failures — Asta had no source
+to reason from. `grafana-analyser` existed; there was no Temporal equivalent, and
+the env→namespace→cert mapping lived only inside `temporal-mcp-proxy.py`, where
+no brain can read it.
+
+`skills/temporal-analyser.md` closes it: tool order (`list_workflows` first,
+`workflow_history` last and rarely), reading pending activities before history,
+correlating a workflow id into Loki as a line filter — and the env table, which is
+**generated from the proxy's own ENV_MAP**, not copied from it.
+
+The generator lives in `diagnostics.write_temporal_skill` and runs at startup, so
+the playbook is rebuilt from the mapping every boot and cannot be older than the
+code. The file itself stays gitignored, like `grafana-analyser.md` beside it —
+that one is a symlink into the booking-service repo, and both quote internal
+namespaces that have no business in this repository. Committing the generator and
+not the output is what makes the drift question answerable rather than a promise:
+a hand-written table is correct on the day it is written, and `_pins.yml`
+contradicting its own `lessons.md` is what the other outcome looks like.
+
+The two traps are stated explicitly, since both produce a wrong answer that looks
+right: the Temporal namespace is not the Grafana namespace (`telikos-sit-cdt` vs
+`telikos-sit`), and `preprod` runs in `telikos-spt-cdt`.
+
+Measured effect: **5/8 → 6/8, and 65s → 17s per question** — the second number
+being the larger point. The brain was previously hunting for something it had no
+way to find.
+
+### 31 — a blank line in .env switched off a module — CLOSED 2026-08-26
+Self-inflicted, while documenting `ASTA_TEMPORAL_PROXY` as the `.env` test
+requires. The line was added blank, and `os.environ.get(key, default)` uses its
+default only when the key is **absent** — a key present and empty gave `Path("")`,
+which does not exist, so every cert check returned "nothing to check". A module
+disabled by a blank line, reporting a healthy silence.
+
+Now `os.environ.get(...) or default`, with a test. Worth noting how ordinary this
+is: documenting a setting is supposed to be the safe act.
+
+---
+
 ## Where this leaves the review
 
-**25 findings raised, 24 closed**, plus finding 4 recorded as Arun's accepted
-risk. 1,683 tests pass. Every fix was mutation-tested — the source was
+**31 findings raised, 30 closed**, plus finding 4 recorded as Arun's accepted
+risk. 1,705 tests pass. Every fix was mutation-tested — the source was
 deliberately broken and the suite had to notice.
 
 Still needing Arun rather than code:

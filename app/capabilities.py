@@ -247,6 +247,11 @@ _TABLE: tuple[Capability, ...] = (
                     "outright on red CI, unfinished CI, conflicts, a draft, or requested "
                     "changes, and says which. Never work around a blocker; tell him what "
                     "is in the way. Only when he asks to merge in those words."),
+    Capability("debug_stack_health", "workspace", http="POST /api/debug-stack",
+               note="Read-only. Reach for it when a Grafana/Temporal/Jira answer comes "
+                    "back EMPTY — an empty answer from a broken tool and an empty answer "
+                    "from a healthy system look identical, and only this tells them "
+                    "apart. Never report 'nothing found' on an env whose cert is broken."),
     Capability("check_teams_selectors", "teams", http="POST /api/teams/selector-check",
                note="Read-only DOM check. Runs daily by itself — call it when Teams "
                     "reads have gone suspiciously quiet, or right after Microsoft "

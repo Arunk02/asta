@@ -16,7 +16,7 @@ import json
 import shutil
 import time
 
-from . import quiet, attention, copilot_cli, daemon, memory, msnotify, store, teams_bridge, telegram
+from . import quiet, attention, copilot_cli, daemon, diagnostics, memory, msnotify, store, teams_bridge, telegram
 
 CHECK_SECONDS = 6 * 3600
 MIN_FREE_GB = 5
@@ -134,6 +134,18 @@ async def checks() -> dict[str, str]:
                 "the API key is set but the provider REFUSED it — every paid call "
                 "fails. Replace or remove it in .env; this clears itself when the "
                 "key changes.")
+    # A Temporal cert that EXISTS and cannot be used. The proxy checks only that
+    # the file is there, so an empty one passes and dies inside TLS with "failed
+    # to find any PEM data" — a sentence that names PEM parsing and not the empty
+    # file. Cheap and local, so it runs on every pass.
+    #
+    # Deliberately NOT reporting envs with no cert at all: for an env he never
+    # touches that is a choice, and four permanent "problems" is how a health
+    # report becomes something people scroll past.
+    for cert in diagnostics.broken_certs():
+        problems[f"temporal-{cert['env']}"] = (
+            f"cert is present but unusable — {cert['why']}. Debugging on this env "
+            f"will fail inside TLS with an error that does not mention the file.")
     for bad in quiet.loud():
         problems[f"repeated:{bad['where']}"] = (
             f"failed {bad['count']}x and was ignored each time — {bad['error'][:70]}")

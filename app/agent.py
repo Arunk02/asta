@@ -124,13 +124,43 @@ def build_instructions(conversation_summary: str, recall_block: str, workspace: 
 
 # --- model registry ----------------------------------------------------------
 
+#: Substrings that mark a model as NOT a chat model. An embedding model answers a
+#: /chat/completions call with an error or with nothing, and "nothing" is
+#: indistinguishable here from "the brain had no answer" — so it would be reported
+#: as Asta not knowing, rather than as the wrong model being asked.
+_NOT_CHAT = ("embed", "embedding", "rerank", "whisper", "clip")
+
+
 def _lmstudio_model_id() -> str | None:
+    """A model that can actually hold a conversation, not just the first one listed.
+
+    This used to return `data[0]["id"]` — whatever LM Studio happened to list
+    first. On Arun's machine that list ends with `text-embedding-nomic-embed-
+    text-v1.5`, and the day it sorted first every local completion would have
+    returned empty while looking exactly like a model with nothing to say.
+
+    Same shape as the API key that was present and refused: something was
+    available, so it was used, and nobody checked it was the right thing.
+
+    `ASTA_LOCAL_MODEL` pins a specific one — worth setting, because the pick
+    otherwise depends on load order and the models differ by more than 2x in
+    latency (measured on this machine: gemma-4-e4b 15.9s, qwen3.5-9b 38.9s for
+    the same question, the difference being reasoning tokens).
+    """
     base = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1").rstrip("/")
     try:
         data = httpx.get(f"{base}/models", timeout=2).json().get("data", [])
-        return data[0]["id"] if data else None
     except Exception:
         return None
+    ids = [m.get("id", "") for m in data if m.get("id")]
+    chat = [i for i in ids if not any(bad in i.lower() for bad in _NOT_CHAT)]
+    pinned = (os.environ.get("ASTA_LOCAL_MODEL") or "").strip()
+    if pinned:
+        # Only if it is actually loaded — a pin naming an unloaded model must fall
+        # through to something that works, not fail every local call silently.
+        if pinned in chat:
+            return pinned
+    return chat[0] if chat else None
 
 
 _INTENT_SYSTEM = (
@@ -1250,6 +1280,21 @@ async def health_check() -> str:
     from . import health
     problems = await health.run_check(notify_transitions=False)
     return health.report_text(problems)
+
+
+async def debug_stack_health() -> str:
+    """Check the tools Arun debugs WITH — Temporal certs and reachability.
+
+    Jira says what was reported, Grafana what the logs say, Temporal what the
+    workflow did. Each fails in a way that reads as "nothing wrong": an empty cert
+    that passes an existence check and dies inside TLS, a cert that expired last
+    week, a VPN that is down.
+
+    Run it before trusting a debugging session that is coming back empty — an
+    empty answer from a broken tool looks exactly like an empty answer from a
+    healthy system."""
+    from . import diagnostics
+    return diagnostics.report(await diagnostics.run())
 
 
 async def check_teams_selectors() -> str:

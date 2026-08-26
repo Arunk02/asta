@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, router, quality, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, quiet, router, quality, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -90,6 +90,13 @@ async def startup() -> None:
     # stale one would swallow Arun's next message as its answer.
     asking.expire_stale()
     MCP_TOOLSETS, MCP_STATUS = mcp_loader.load_toolsets()
+    # Regenerate the Temporal playbook from the proxy's own ENV_MAP. Cheap — one
+    # file read, one file write — and it means the table a brain reads can never
+    # be older than the mapping the proxy actually uses. A playbook that drifts
+    # sends a query to the wrong namespace, which returns nothing, which reads as
+    # "no workflows" rather than as a wrong lookup.
+    with quiet.swallow("startup.temporal_skill"):
+        diagnostics.write_temporal_skill()
     asyncio.create_task(_probe_mcp())
     for name, ws in workspace.available_workspaces().items():
         # graph_pages() knows where this workspace keeps its context; the
@@ -733,6 +740,14 @@ async def api_teams_search(q: str = "", limit: int = 12):
     if not q.strip():
         raise HTTPException(400, "q is required")
     return {"result": agent_mod.teams_search(q, limit)}
+
+
+@app.post("/api/debug-stack", dependencies=[Depends(require_auth)])
+async def api_debug_stack():
+    """Are the debugging tools usable — certs, reachability. Read-only."""
+    from . import diagnostics
+    out = await diagnostics.run()
+    return {"report": diagnostics.report(out), "unusable": out["unusable"]}
 
 
 @app.post("/api/teams/selector-check", dependencies=[Depends(require_auth)])

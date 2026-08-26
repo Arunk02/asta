@@ -292,16 +292,34 @@ STICKY_SLACK = int(os.environ.get("ASTA_TOOL_STICKY_SLACK", "8"))
 
 
 def _recent(prev, picked: list[str]) -> dict:
-    """This turn's tools, then the previous ones. Newest wins when trimming."""
-    order: dict = dict.fromkeys(picked)          # dicts keep insertion order
+    """This turn's tools and the floor, then whatever else still fits.
+
+    Two sets are NOT negotiable, and saying so in a comment was not enough. The
+    floor used to be appended last and the trim kept the first N — so the one
+    group documented as "never evicted" was the first group evicted. It stayed
+    invisible while the registry was small enough that nothing ever trimmed;
+    adding three capabilities crossed the threshold and a test caught it.
+
+    What that bug actually costs: the floor is `capabilities.ALWAYS` — ask_user,
+    continue_working, load_skill, remember, and **prepare_to_send**. A long
+    conversation would quietly lose the staged-send gate, so the one hard rule in
+    the system — nothing goes out without being staged first — would have been
+    enforced by a tool the model could no longer reach.
+
+    So: this turn's picks and the floor are kept whatever the cap says, and only
+    the carried-over tools compete for what room is left.
+    """
+    # Order matters for the next turn's recency, so build it deliberately:
+    # what this turn asked for, then the always-core, then history.
+    protected: dict = dict.fromkeys(list(picked) + _floor())
+    order: dict = dict(protected)
     for name in (prev or {}):
-        order.setdefault(name, None)
-    # The floor is never evicted: those are the tools every turn may need.
-    for name in _floor():
         order.setdefault(name, None)
     if len(order) <= STICKY_MAX_TOOLS + STICKY_SLACK:
         return order
-    return dict(list(order.items())[:STICKY_MAX_TOOLS])
+    room = max(0, STICKY_MAX_TOOLS - len(protected))
+    carried = [n for n in order if n not in protected]
+    return dict.fromkeys(list(protected) + carried[:room])
 
 
 def forget(conv_id: str) -> None:

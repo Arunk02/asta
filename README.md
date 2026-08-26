@@ -29,7 +29,7 @@ Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
 Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-.venv/bin/python -m pytest -q           # 1,683 tests
+.venv/bin/python -m pytest -q           # 1,705 tests
 ```
 
 ## How it is put together
@@ -413,6 +413,45 @@ fact. And the blockers are **re-checked at the moment of merging**: you might sa
 an hour later, by which time CI can have gone red. That gap is exactly where
 irreversible actions go wrong. Methods: `squash` (default), `merge`, `rebase`.
 
+## Debugging: Jira, Grafana, Temporal
+
+Jira says what was reported, Grafana what the logs say, Temporal what the workflow
+actually did. "Why is booking X failing in sit" needs all three.
+
+Grafana work follows `skills/grafana-analyser.md`, which is query discipline
+earned from real investigations rather than a description of the tools: Loki first
+(Prometheus and Tempo are performance-only), **every query carries the env
+namespace matcher** and that alone spans every service, and an identifier is a
+line filter over a wide window — never a label matcher, because identifiers are
+high-cardinality. Empty is not healthy: a query that returns nothing means verify
+the label before concluding anything.
+
+Temporal goes through a proxy that maps an env name to the right cluster,
+namespace and mTLS cert, so no model has to remember that `preprod` runs in
+`telikos-spt-cdt` or that `uat` shares `sit`'s certificate.
+
+**`debug_stack_health` checks the tools you debug WITH.** Reach for it when an
+answer comes back empty, because an empty answer from a broken tool and an empty
+answer from a healthy system look identical. It validates rather than checks
+presence — the bug it was written for is a Temporal cert file that exists and is
+**0 bytes**, which passes every existence check and then fails inside TLS with
+"failed to find any PEM data", a sentence that never mentions the empty file.
+Missing, empty, unparseable, expired and expiring are all distinguished, and only
+*broken* ones reach health: an env with no cert at all is a choice, not a fault.
+
+Temporal work follows `skills/temporal-analyser.md`, which is **generated at
+startup** from the proxy's own env map rather than maintained by hand — so the
+table a brain reads can never be older than the mapping the proxy uses. A drifted
+playbook queries the wrong namespace, gets nothing back, and "nothing" reads as
+"no workflows" rather than as a wrong lookup.
+
+**Measured on this machine, 2026-08-26:** Grafana label query 4.2s · Temporal
+workflow list 5.0–14.2s · Jira REST read sub-second. Answer quality on grounded
+debugging cases: **6/8**, 17s per question — up from 5/8 at 65s before the
+Temporal playbook existed. The Temporal CLI's own gRPC
+deadline trips around the upper end and reports "context deadline exceeded", which
+names the symptom rather than the cause.
+
 ## MCP
 
 ### Servers Asta uses
@@ -771,6 +810,7 @@ app/worktrees.py        a worktree per code task, so three can run at once
 app/selector_health.py  are the Teams selectors still matching live Teams
 app/evals.py            are the ANSWERS right — grounded cases, two tiers
 app/quiet.py            swallowed errors, counted rather than lost
+app/diagnostics.py      are the debugging tools usable — certs, reachability
 app/router.py           local-first routing for trivial turns
 app/repo_ops.py         git, branch naming, repo playbooks
 app/agents.py           loads the pipelines in agents/
@@ -790,7 +830,7 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  1,683 tests (conftest isolates the DB — see below)
+tests/                  1,705 tests (conftest isolates the DB — see below)
 ```
 
 `tests/conftest.py` points `store.DB_PATH` at a temp file for *every* test. A stray
@@ -802,7 +842,7 @@ roadmap this is being built against. Still ahead of it: one scheduler replacing 
 background loops, detached runs that survive a closed tab, adaptive context
 compaction, a people/contacts model, and deep research.
 
-`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 25 findings
+`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 31 findings
 raised against the *running* system — every number measured on the live install, not
 inferred from the source — each closed in place with what was done and how it was
 proved. Every fix was mutation-tested: the source was deliberately broken and the

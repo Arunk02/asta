@@ -46,6 +46,30 @@ def load(workspace: str = "") -> list[dict]:
     return cases
 
 
+def _playbook(workspace: str) -> str:
+    """The skills a suite declares, concatenated — what a real turn would hold.
+
+    Declared per suite in its JSON (`"skills": ["grafana-analyser"]`) rather than
+    hardcoded here, so adding a suite for a new area does not mean editing this
+    file too.
+    """
+    from . import skills as skills_mod
+    wanted: list[str] = []
+    for f in sorted(CASES_DIR.glob("*.json")):
+        if workspace and f.stem != workspace:
+            continue
+        try:
+            wanted += json.loads(f.read_text()).get("skills", []) or []
+        except (OSError, ValueError):
+            continue
+    parts = []
+    for name in dict.fromkeys(wanted):
+        body = skills_mod.load(name)
+        if body:
+            parts.append(f"--- {name} ---\n{body}")
+    return "\n\n".join(parts)
+
+
 def grade(answer: str, case: dict) -> dict:
     """Did this answer contain what it had to, and avoid what it must not?
 
@@ -54,6 +78,13 @@ def grade(answer: str, case: dict) -> dict:
     """
     text = (answer or "").lower()
     missing = [m for m in case.get("must", []) if m.lower() not in text]
+    # `any_of` is a group where ONE member is enough. Without it a case has to
+    # name a single English word, which tests vocabulary rather than correctness:
+    # "verify the label first" and "confirm the label first" are the same answer,
+    # and a suite that fails one of them is measuring phrasing.
+    for group in case.get("any_of", []) or []:
+        if not any(str(m).lower() in text for m in group):
+            missing.append(" or ".join(str(m) for m in group))
     wrong = [m for m in case.get("must_not", []) if m.lower() in text]
     return {
         "id": case["id"], "ok": not missing and not wrong and bool(text.strip()),
@@ -69,10 +100,17 @@ async def run(workspace: str = "booking", ask=None) -> dict:
     Never raises: an eval run that dies tells him less than one that reports
     which cases it could not reach.
     """
+    cases = load(workspace)
     if ask is None:
         from . import meetings                      # the in-call brain: read-only tools
-        ask = meetings.answer_from_knowledge
-    cases = load(workspace)
+        # A suite may name the playbooks a real turn would already have loaded —
+        # the grafana-analyser skill for a logs question. Without them the eval
+        # measures a brain working blind, scores it badly, and the number says
+        # nothing about the path Arun actually uses.
+        playbook = _playbook(workspace)
+
+        async def ask(question: str) -> str:        # noqa: ANN001
+            return await meetings.answer_from_knowledge(question, playbook)
     results, started = [], time.monotonic()
     for case in cases:
         try:

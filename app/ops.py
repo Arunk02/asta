@@ -56,8 +56,14 @@ async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> s
 
 @op("teams_call", lambda a: f"Call {a.get('who', '?')} on Teams")
 async def _teams_call(who: str = "", video: bool = False) -> str:
+    import asyncio as _asyncio
     result = await meetings.call_person(who, video=video)
-    return f"📞 Calling {result} — the call window is open."
+    # The join paths have always spawned a watcher; this one never did. Without
+    # it a placed call is never noticed ringing out, never hung up, never
+    # reported — and `teams_in_call` stays set, so the NEXT call is refused as
+    # "already in a call" until the server restarts.
+    _asyncio.create_task(meetings.call_watch(result))
+    return f"📞 Calling {result} — I'll tell you if they pick up, and how it went."
 
 
 @op("jira_comment", lambda a: f"Comment on {a.get('key', '?')}")
@@ -77,6 +83,13 @@ async def _jira_transition(key: str = "", to_status: str = "") -> str:
 async def _pr_review(pr: str = "", workspace: str = "", repo: str = "",
                      action: str = "comment", body: str = "") -> str:
     return "✅ " + await review.post_review(pr, workspace, repo, action, body)
+
+
+@op("pr_merge", lambda a: f"Merge PR #{str(a.get('pr', '?')).lstrip('#')} "
+                          f"({a.get('method', 'squash')})")
+async def _pr_merge(pr: str = "", workspace: str = "", repo: str = "",
+                    method: str = "squash", delete_branch: bool = True) -> str:
+    return "🔀 " + await review.merge(pr, workspace, repo, method, delete_branch)
 
 
 @op("calendar_send", lambda a: f"Send the invite: {a.get('summary', 'calendar invite')}")

@@ -139,6 +139,13 @@ _TABLE: tuple[Capability, ...] = (
                     "to a relationship, not to him — 'bro' is attested with one "
                     "colleague only, and it is stripped automatically for anyone "
                     "else, so never assume one fits."),
+    Capability("teams_search", "teams",
+               http="GET /api/teams/search?q={query}",
+               shell='python -m app.teams_bridge search "<topic>"',
+               note="Searches only what Asta has ALREADY read — its own record, not all "
+                    "of Teams. Say so when nothing matches: 'I have no record of that' is "
+                    "true, 'nobody said that' is not. For something that may never have "
+                    "been read, teams_history goes and fetches it."),
     Capability("teams_history", "teams",
                shell='python -m app.teams_bridge history "<chat name>" "<when>"',
                note="USE THIS, not teams_read_chat, whenever the question has a WHEN in "
@@ -232,6 +239,23 @@ _TABLE: tuple[Capability, ...] = (
     Capability("review_pr", "tasks", http='POST /api/review {"pr":"123","workspace":"…","repo":""}',
                note="Produces notes for ARUN. Read-only — to actually post them, use "
                     "pr_review_post, and only when he asked you to."),
+    Capability("merge_pr", "tasks",
+               http='POST /api/pr-merge {"pr":"123","workspace":"…","repo":"","method":"squash"}',
+               write=True,
+               note="STAGES a merge; his yes performs it. The least reversible thing here — "
+                    "it puts code on the branch everyone builds from — so it refuses "
+                    "outright on red CI, unfinished CI, conflicts, a draft, or requested "
+                    "changes, and says which. Never work around a blocker; tell him what "
+                    "is in the way. Only when he asks to merge in those words."),
+    Capability("check_teams_selectors", "teams", http="POST /api/teams/selector-check",
+               note="Read-only DOM check. Runs daily by itself — call it when Teams "
+                    "reads have gone suspiciously quiet, or right after Microsoft "
+                    "ships a Teams update. It never guesses a replacement selector: "
+                    "one chosen blind is how a message lands in the wrong thread."),
+    Capability("answer_quality", "workspace", http="POST /api/evals {\"workspace\":\"booking\"}",
+               note="Spends a brain call per case, so not routine. Say the score AND "
+                    "which cases failed — a bare percentage tells him nothing about "
+                    "what to fix."),
     Capability("pr_review_post", "tasks",
                http='POST /api/pr-review {"pr":"123","action":"approve|comment|'
                     'request_changes","body":"…","workspace":"…","repo":""}',

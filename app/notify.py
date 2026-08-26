@@ -133,8 +133,22 @@ async def deliver(text: str) -> dict:
     return {"bell": True, "held": False, "whatsapp": wa, "telegram": tg}
 
 
+def _ledger_priority(urgency: str, priority: int | None) -> int:
+    """Translate a push's urgency into the ledger's ranking.
+
+    `notify` has always spoken in urgency ("is this addressed to him?"); the
+    ledger ranks by what it costs to miss. They are close enough to map, and
+    mapping here keeps every caller speaking the vocabulary it already uses.
+    """
+    from . import attention
+    if priority is not None:
+        return int(priority)
+    return attention.P_TODAY if urgency == "direct" else attention.P_FYI
+
+
 async def notify(text: str, level: str = "info", urgency: str = "direct",
-                 priority: int | None = None) -> dict:
+                 priority: int | None = None, *, source: str = "",
+                 key: str = "", considered: bool = False) -> dict:
     """Record for the UI bell and fan out to WhatsApp + Telegram.
 
     urgency="direct"  — someone is actually addressing Arun (1:1 message, @mention,
@@ -150,6 +164,27 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     no one was looking at.
     """
     store.add_notification(text, level)  # the bell always gets everything
+
+    # The ledger decides WHETHER, the same way `delivery` below decides WHEN.
+    # It used to be consulted by three call sites out of fifty-six, so the
+    # cross-source deduplication it exists for — one incident arriving as mail
+    # AND as a Teams mention — covered two sources and nothing else. Asking here
+    # means every source is covered by construction rather than by each caller
+    # remembering to ask, which is how `delivery` was already done correctly.
+    #
+    # `considered=True` is the opt-out for the callers that already asked; a
+    # second upsert of the same key would read as "already notified" and
+    # suppress the very push their own check had just approved.
+    if not considered:
+        from . import attention, triage
+        ledger_key = key or triage.stable_key(text)
+        if not attention.consider(source or "notify", ledger_key, what=text[:200],
+                                  priority=_ledger_priority(urgency, priority)):
+            # Recorded, and deliberately not pushed. The bell above still has it,
+            # so nothing is lost — it simply does not buzz twice for one thing.
+            return {"bell": True, "held": False, "suppressed": True,
+                    "whatsapp": False, "telegram": False}
+
     from . import delivery
     # Night first, because it outranks every other reason to speak. Held items
     # wait for morning rather than for him to walk away — at 2am he has already

@@ -36,7 +36,21 @@ def _wav(seconds: float = 0.1, rate: int = 24000) -> bytes:
 
 
 class FakePage:
-    """Stands in for the Teams tab. Records nothing but what matters."""
+    """Stands in for the Teams tab, showing a call somebody has answered.
+
+    It has to answer `call_state`'s probes now: every spoken line checks the call
+    is still alive, because the far end hanging up — or the Mac sleeping and
+    taking the browser with it — used to leave Asta playing audio into a
+    microphone nobody was listening to and reporting it as said.
+    """
+
+    async def evaluate(self, js, *args):
+        if "innerText" in js and "document.body" in js:
+            return "Vinish\nYou are connected"
+        return False
+
+    async def query_selector(self, sel):
+        return object()                    # the call-duration marker is present
 
 
 @pytest.fixture
@@ -45,7 +59,10 @@ def in_call(monkeypatch):
     monkeypatch.setattr(meetings, "can_speak", lambda: True)
     monkeypatch.setattr(meetings, "AUDIO_DEVICE", "BlackHole 2ch")
     monkeypatch.setattr(meetings, "HIS_MIC", "MacBook Pro Microphone")
-    meetings._CALL["page"] = FakePage()
+    # A call somebody ANSWERED, which is what these tests are about. Without
+    # `answered_at` this is a phone still ringing, and `say_in_call` now
+    # correctly refuses to talk into one.
+    meetings._CALL.update(page=FakePage(), answered_at=1.0, speaks=True, who="Vinish")
     yield
     store.kv_set("teams_in_call", "")
     meetings._CALL.clear()
@@ -286,3 +303,56 @@ async def test_no_offer_is_made_for_something_he_must_answer(monkeypatch):
     await meetings.offer_to_analyse(
         {"kind": "his", "line": "can you review the PR", "key": "k"})
     assert told == {}, "it offered to answer something only Arun can answer"
+
+
+# --- switching the system input, not the Teams UI ----------------------------
+#
+# The first implementation drove Teams' own device picker in Playwright. A
+# pre-flight against live Teams returned False on every selector: the settings
+# live behind a React flyout off "Settings and more" and the picker carries no
+# stable data-tid. Had it shipped, a call would have connected and then sat in
+# silence while the other person waited. Switching the SYSTEM default input
+# instead has no DOM in it at all.
+
+@pytest.mark.asyncio
+async def test_a_switch_is_verified_not_assumed(monkeypatch):
+    """SwitchAudioSource exits 0 for a device name it did not actually apply,
+    so the return code alone is not evidence."""
+    async def fake_exec(*args, **kw):
+        class P:
+            returncode = 0
+            async def wait(self): return 0
+            async def communicate(self): return (b"MacBook Pro Microphone\n", b"")
+        return P()
+
+    monkeypatch.setattr(meetings.asyncio, "create_subprocess_exec", fake_exec)
+    # asked for BlackHole, the system still reports the built-in mic
+    assert await meetings.set_call_mic(None, "BlackHole 2ch") is False
+
+
+@pytest.mark.asyncio
+async def test_a_switch_that_took_returns_true(monkeypatch):
+    async def fake_exec(*args, **kw):
+        class P:
+            returncode = 0
+            async def wait(self): return 0
+            async def communicate(self): return (b"BlackHole 2ch\n", b"")
+        return P()
+
+    monkeypatch.setattr(meetings.asyncio, "create_subprocess_exec", fake_exec)
+    assert await meetings.set_call_mic(None, "BlackHole 2ch") is True
+
+
+@pytest.mark.asyncio
+async def test_a_missing_switcher_is_not_a_crash(monkeypatch):
+    async def explode(*args, **kw):
+        raise FileNotFoundError("SwitchAudioSource")
+
+    monkeypatch.setattr(meetings.asyncio, "create_subprocess_exec", explode)
+    assert await meetings.set_call_mic(None, "BlackHole 2ch") is False
+    assert await meetings.current_mic() == ""
+
+
+@pytest.mark.asyncio
+async def test_no_device_named_means_no_switch():
+    assert await meetings.set_call_mic(None, "") is False

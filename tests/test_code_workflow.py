@@ -211,11 +211,18 @@ async def test_every_repo_in_a_workspace_gets_the_same_branch(monkeypatch, tmp_p
 
     prepared = []
 
-    async def spy(repo, branch):
-        prepared.append((repo.name, branch))
-        return {"repo": repo.name, "branch": branch, "ok": True, "note": "", "dirty": False}
+    # Preparation now cuts a WORKTREE per repo rather than moving the shared
+    # checkout, so two tasks can run at once and Arun's editor never has a branch
+    # changed underneath it. The behaviour asserted here is unchanged: every repo
+    # in the workspace lands on the same branch.
+    async def spy(ws_root, task_id, branch):
+        return [{"repo": r.name, "branch": branch, "ok": True, "note": "",
+                 "dirty": False, "path": str(ws_root / r.name)}
+                for r in sorted((tmp_path).iterdir()) if (r / ".git").exists()
+                and not prepared.append((r.name, branch))]
 
-    monkeypatch.setattr(repo_ops, "start_branch", spy)
+    from app import worktrees
+    monkeypatch.setattr(worktrees, "create", spy)
     monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
 
     t = {"title": "BEPTELIKOS-9: fix", "prompt": "", "workspace": "booking-workspace"}
@@ -231,17 +238,18 @@ async def test_one_broken_repo_does_not_stop_the_others(monkeypatch, tmp_path):
     for name in ("good", "broken"):
         (tmp_path / name / ".git").mkdir(parents=True)
 
-    async def flaky(repo, branch):
-        if repo.name == "broken":
-            raise RuntimeError("index.lock exists")
-        return {"repo": repo.name, "branch": branch, "ok": True, "note": "", "dirty": False}
+    async def flaky(ws_root, task_id, branch):
+        return [{"repo": "good", "branch": branch, "ok": True, "note": "", "dirty": False},
+                {"repo": "broken", "branch": branch, "ok": False, "dirty": False,
+                 "note": "could not create a worktree: index.lock exists"}]
 
-    monkeypatch.setattr(repo_ops, "start_branch", flaky)
+    from app import worktrees
+    monkeypatch.setattr(worktrees, "create", flaky)
     monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
 
     sent = {}
 
-    async def spy(text, level="info", urgency="direct", priority=None):
+    async def spy(text, level="info", urgency="direct", priority=None, **kw):
         sent["text"] = text
 
     from app import notify
@@ -261,12 +269,16 @@ async def test_a_clean_preparation_is_silent(monkeypatch, tmp_path):
     async def fine(repo, branch):
         return {"repo": repo.name, "branch": branch, "ok": True, "note": "", "dirty": False}
 
-    monkeypatch.setattr(repo_ops, "start_branch", fine)
+    async def fine_worktrees(ws_root, task_id, branch):
+        return [{"repo": "solo", "branch": branch, "ok": True, "note": "", "dirty": False}]
+
+    from app import worktrees
+    monkeypatch.setattr(worktrees, "create", fine_worktrees)
     monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
 
     spoke = []
 
-    async def spy(text, level="info", urgency="direct", priority=None):
+    async def spy(text, level="info", urgency="direct", priority=None, **kw):
         spoke.append(text)
 
     from app import notify

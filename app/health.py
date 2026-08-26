@@ -16,7 +16,7 @@ import json
 import shutil
 import time
 
-from . import attention, copilot_cli, daemon, memory, msnotify, store, teams_bridge, telegram
+from . import quiet, attention, copilot_cli, daemon, memory, msnotify, store, teams_bridge, telegram
 
 CHECK_SECONDS = 6 * 3600
 MIN_FREE_GB = 5
@@ -54,7 +54,7 @@ def stale_contexts(now: float | None = None) -> dict[str, float]:
 
 async def checks() -> dict[str, str]:
     """key -> problem description; empty dict = all healthy."""
-    from . import notify
+    from . import agent, notify
     problems: dict[str, str] = {}
     try:
         wa = await notify.wa_status()
@@ -110,10 +110,33 @@ async def checks() -> dict[str, str]:
     if not copilot_cli.available():
         problems["copilot"] = "Copilot CLI missing/unauthenticated (run: copilot login)"
     if not memory.local_llm_model():
-        problems["lmstudio"] = "LM Studio not running — background digests fall back to heuristics"
+        # Understated before. The local model is not only a cheap digest writer:
+        # it is the EMBEDDER that re-ranks memory recall, and the second opinion
+        # that decides whether Asta may answer aloud in a call. Without it,
+        # recall degrades to keyword matching — "vessel eta not updating" returns
+        # a memory titled "WhatsApp" — and Asta stays silent in calls by design.
+        problems["lmstudio"] = (
+            "LM Studio not running — memory recall is keyword-only (no semantic "
+            "re-ranking), Asta will not answer aloud in calls, and digests fall "
+            "back to heuristics")
     free_gb = shutil.disk_usage("/").free / 1e9
     if free_gb < MIN_FREE_GB:
         problems["disk"] = f"only {free_gb:.1f} GB free"
+    # Errors this process handled and moved past. Ninety-two places deliberately
+    # ignore a failure, and nearly all are right to — but a selector that quietly
+    # stopped matching, or a store write that quietly failed, degrades Asta with
+    # no record anywhere. One site failing repeatedly is a fault, not noise.
+    # A credential the provider has refused. Presence of a key was being treated
+    # as a working key, so this failed silently everywhere it was used.
+    for brain in ("claude", "openai"):
+        if agent.key_rejected(brain):
+            problems[f"{brain}-key"] = (
+                "the API key is set but the provider REFUSED it — every paid call "
+                "fails. Replace or remove it in .env; this clears itself when the "
+                "key changes.")
+    for bad in quiet.loud():
+        problems[f"repeated:{bad['where']}"] = (
+            f"failed {bad['count']}x and was ignored each time — {bad['error'][:70]}")
     return problems
 
 

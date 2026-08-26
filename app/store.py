@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -125,6 +126,17 @@ CREATE TABLE IF NOT EXISTS teams_messages (
     stamp TEXT NOT NULL DEFAULT '',
     seen_at REAL NOT NULL
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS teams_fts USING fts5(
+    chat, sender, text, content=teams_messages, content_rowid=rowid
+);
+CREATE TRIGGER IF NOT EXISTS teams_fts_ins AFTER INSERT ON teams_messages BEGIN
+    INSERT INTO teams_fts(rowid, chat, sender, text)
+    VALUES (new.rowid, new.chat, new.sender, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS teams_fts_del AFTER DELETE ON teams_messages BEGIN
+    INSERT INTO teams_fts(teams_fts, rowid, chat, sender, text)
+    VALUES ('delete', old.rowid, old.chat, old.sender, old.text);
+END;
 CREATE INDEX IF NOT EXISTS idx_teams_messages_chat ON teams_messages(chat, sent_at);
 -- One row per THING THAT WANTS ARUN, whatever channel carried it.
 --
@@ -253,12 +265,56 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
+#: One connection per thread, reused. Measured before this existed: a `kv_get`
+#: took 0.231 ms, of which the QUERY was 0.002 ms — 99% of every store call in the
+#: system was opening a connection and re-running `PRAGMA journal_mode=WAL`, then
+#: throwing it away. Cheap when the system did one thing at a time; less so now
+#: that three tasks run in parallel, the activity feed polls every sixty seconds,
+#: and every stored message maintains an FTS index.
+#:
+#: Thread-local because a sqlite3 connection may not cross threads, and this
+#: codebase uses `asyncio.to_thread` in several places. Keyed on the path as well,
+#: so a test that repoints DB_PATH gets its own connection rather than the last
+#: one — the isolation rule in conftest depends on that.
+_local = threading.local()
+
+
 def _connect() -> sqlite3.Connection:
+    """The connection for this thread, opening one only if there isn't one.
+
+    Callers use this as `with _connect() as conn:`, which in sqlite3 is a
+    TRANSACTION context manager rather than a closing one — so reusing the
+    connection changes nothing about how every existing call site behaves.
+    """
+    cached = getattr(_local, "conn", None)
+    if cached is not None and getattr(_local, "path", None) == DB_PATH:
+        return cached
+    if cached is not None:
+        try:
+            cached.close()                 # DB_PATH moved (a test): drop the old one
+        except sqlite3.Error:
+            pass
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # Wait rather than fail when another connection holds the write lock. With
+    # parallel tasks there now IS another connection, and "database is locked"
+    # would surface as a lost notification rather than a delay.
+    conn.execute("PRAGMA busy_timeout=5000")
+    _local.conn, _local.path = conn, DB_PATH
     return conn
+
+
+def close_connection() -> None:
+    """Drop this thread's connection. For shutdown and for tests."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+    _local.conn = _local.path = None
 
 
 def init() -> None:
@@ -768,7 +824,10 @@ def save_teams_messages(rows: list[dict]) -> int:
         return 0
     now = time.time()
     with _connect() as conn:
-        before = conn.total_changes
+        # Counted by rows in the TABLE, not by `total_changes`: the FTS index has
+        # an insert trigger, so every stored message now counts as several
+        # changes and "how many were new" became three times the truth.
+        before = conn.execute("SELECT COUNT(*) FROM teams_messages").fetchone()[0]
         conn.executemany(
             "INSERT INTO teams_messages (key, chat, sender, text, sent_at, stamp, seen_at) "
             "VALUES (:key, :chat, :sender, :text, :sent_at, :stamp, :seen_at) "
@@ -777,7 +836,87 @@ def save_teams_messages(rows: list[dict]) -> int:
               "text": r.get("text", ""), "sent_at": r.get("sent_at"),
               "stamp": r.get("stamp", ""), "seen_at": now} for r in rows],
         )
-        return conn.total_changes - before
+        after = conn.execute("SELECT COUNT(*) FROM teams_messages").fetchone()[0]
+        return after - before
+
+
+#: How stale a read may be and still count as covering a window that is still
+#: open. Anything sent in the last few minutes may not have been seen yet; beyond
+#: that the cached answer starts being a guess about the present.
+HISTORY_FRESH_SECONDS = 300.0
+
+
+def teams_search(query: str, limit: int = 12) -> list[dict]:
+    """Messages that are ABOUT something, rather than containing a substring.
+
+    History was reachable two ways: by chat name, or by time window. Neither
+    answers "what did we decide about the ATA fallback" — the question he
+    actually asks — and `LIKE '%...%'` cannot, because it matches letters rather
+    than words: it finds "ata" inside "data", ranks nothing, and misses a thread
+    that said "transport order" instead.
+
+    FTS5 is already in this file for memory, so this is the same mechanism
+    pointed at the other corpus rather than a new one.
+    """
+    words = [w for w in "".join(c if c.isalnum() else " " for c in (query or "").lower()).split()
+             if len(w) > 2 and w not in _RECALL_STOPWORDS]
+    if not words:
+        return []
+    match = " OR ".join(dict.fromkeys(words[:12]))
+    with _connect() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT m.*, bm25(teams_fts) AS score FROM teams_fts "
+                "JOIN teams_messages m ON m.rowid = teams_fts.rowid "
+                "WHERE teams_fts MATCH ? ORDER BY score LIMIT ?",
+                (match, limit)).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [dict(r) for r in rows]
+
+
+def teams_history_covers(chat: str, since: float, until: float) -> bool:
+    """Whether stored history demonstrably covers the whole window.
+
+    The bug this exists for: the caller used to accept ANY stored row as
+    "history", so one message already seen from last night short-circuited the
+    live scrollback and a partial thread was reported as complete. Having a row
+    in a window says nothing about holding all of it.
+
+    Coverage needs both edges to hold:
+
+      back  — the oldest message stored for this chat sits at or before `since`,
+              which is only true if a read once scrolled back past the window.
+              A cache that starts inside the window is missing its beginning.
+      front — the chat was last READ at or after `until`, so anything sent
+              before the window closed had already arrived by then.
+
+    Either edge open means fetch. Answering "nothing was sent" from a cache that
+    simply never looked is the failure being closed here.
+    """
+    if not chat or since is None or until is None:
+        return False
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT MIN(sent_at) AS oldest, MAX(seen_at) AS last_read "
+            "FROM teams_messages WHERE lower(chat) LIKE ? AND sent_at IS NOT NULL",
+            (f"%{chat.strip().lower()}%",)).fetchone()
+    if not row or row["oldest"] is None or row["last_read"] is None:
+        return False
+    # A window can still be OPEN. "Last night" runs to six this morning, so at
+    # half past midnight `until` is in the future — and nobody can have read a
+    # chat after a moment that has not happened. For an open window the honest
+    # requirement is that the thread was read RECENTLY, not that it was read after
+    # a moment still to come; demanding the latter re-opens a browser for every
+    # such question, and demanding "read this instant" is the same thing with
+    # extra steps.
+    # Never demand a read more recent than the freshness window. A window that
+    # ended long ago must have been read after it closed; one that ends now — or
+    # has not ended at all, like "last night" at half past midnight — only needs a
+    # recent read. Without the floor this asked for a read in the same instant the
+    # question was asked, which nothing can satisfy.
+    front = min(float(until), time.time() - HISTORY_FRESH_SECONDS)
+    return float(row["oldest"]) <= float(since) and float(row["last_read"]) >= front
 
 
 def teams_messages(chat: str = "", since: float | None = None,

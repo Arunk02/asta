@@ -3,6 +3,22 @@
 Last updated 2026-07-23. Everything previously listed here is now built and
 verified; what remains is at the bottom.
 
+> **Superseded for the current state.** The August 2026 architecture review and its
+> findings register live in [docs/REVIEW-FINDINGS-2026-08.md](docs/REVIEW-FINDINGS-2026-08.md).
+> Read that first — this file is the July record.
+>
+> Three things still need Arun rather than code:
+>
+> - **`ANTHROPIC_API_KEY` is refused by the provider.** Health reports it; the
+>   rejection is fingerprinted, so it clears itself the moment the key changes.
+> - **Atlassian MCP needs re-authorising.** Its stored OAuth state still pointed at
+>   the old `help/jarvis` path — repaired (backup in `data/oauth/`), so it now reaches
+>   the OAuth step. Sign in with
+>   `.venv/bin/python -m app.mcp_login atlassian`.
+> - **`telikos-email-service/_pins.yml` contradicts its own `lessons.md`** — the pin
+>   omits `clean`, the lesson says it is mandatory. `verify._with_clean` retries once
+>   when MapStruct's FilerException appears, but the pin is worth correcting.
+
 ---
 
 ## Closed on 2026-07-23

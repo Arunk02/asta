@@ -49,6 +49,71 @@ def _no_wall_clock_dependence(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _a_workspace_to_run_code_in(request, tmp_path, monkeypatch):
+    """A registered workspace for the whole suite.
+
+    Code tasks now REFUSE to run without one — `tasks.code_cwd` raises rather
+    than falling back to Asta's own root, because that fallback is how a task
+    with no workspace once ran real git commands in this repository and moved a
+    branch carrying five unpushed commits.
+
+    Most task tests were written when the fallback existed and create their tasks
+    with `workspace=None`. Rather than teach every one of them about workspaces,
+    the suite gets a real registered one pointing at a tmp directory — which is
+    also the right default: a test that runs a code task somewhere unspecified
+    should land somewhere disposable, never in the working tree.
+    """
+    from app import workspace as workspace_mod, workspace_tools
+    # The registry's OWN tests exercise this view — add/get/remove and the
+    # "known workspaces" listing — so they must see the real thing, not a stub.
+    if request.module.__name__.endswith("test_workspace"):
+        yield None
+        return
+    root = tmp_path / "test-workspace"
+    root.mkdir(parents=True, exist_ok=True)
+    # BOTH modules, because `workspace_tools` re-exports the name at import time:
+    # patching only `app.workspace` leaves `tasks` looking at the real registry,
+    # and a code task resolving `None` would then land in Arun's actual booking
+    # workspace. Same rule as the database — no test reaches live state.
+    stub = {"test-workspace": root}
+    monkeypatch.setattr(workspace_mod, "WORKSPACES", stub, raising=False)
+    monkeypatch.setattr(workspace_tools, "WORKSPACES", stub, raising=False)
+    yield root
+
+
+@pytest.fixture(autouse=True)
+def _no_carried_over_browser():
+    """No test inherits another test's Teams browser.
+
+    The bridge now keeps ONE context alive across operations — that is the whole
+    2.49-seconds-per-operation fix. Module-level state, so a test that stubs the
+    launcher leaves its fake in the pool and the next test silently reuses it,
+    failing somewhere unrelated to the change that broke it. Same argument as the
+    database and the speech cache.
+    """
+    from app import teams_bridge
+    teams_bridge._POOL.clear()
+    yield
+    teams_bridge._POOL.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_carried_over_speech():
+    """Each test synthesises its own audio.
+
+    Speech is cached by (voice, text) so a call never pays to say "let me check
+    that" twice — which is the whole latency fix, and exactly wrong between
+    tests. A line one test spoke is served from memory in the next, the `speak`
+    monkeypatch is never called, and the assertion fails somewhere unrelated to
+    the change that broke it. Same argument as the database above.
+    """
+    from app import meetings
+    meetings._VOICE_CACHE.clear()
+    yield
+    meetings._VOICE_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_live_brains(monkeypatch):
     """No test may spend money or spawn a subprocess to reach a model.
 

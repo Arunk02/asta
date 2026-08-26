@@ -296,7 +296,16 @@ def teams_on(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_tool_answers_from_stored_history_without_a_browser(teams_on, monkeypatch):
-    """Asking twice about the same evening must not cost another 20-second scrape."""
+    """Asking twice about the same evening must not cost another 20-second scrape.
+
+    The setup is deliberately a thread that was genuinely read ACROSS the window:
+    a message from before it opened (so the stored history reaches back past the
+    start) and a last-read stamp from after it closed (so nothing arrived
+    unseen). An earlier version of this test stored a single message inside the
+    window and asserted the same thing — which is not a cache hit, it is the bug
+    in `teams_history` that reported one message as a whole evening. The test
+    passed for as long as the bug existed.
+    """
     async def must_not_run(*a, **k):
         raise AssertionError("opened a browser when history already had the answer")
 
@@ -305,7 +314,14 @@ async def test_the_tool_answers_from_stored_history_without_a_browser(teams_on, 
     now = dt.datetime.now()
     last_night = (now.replace(hour=21, minute=14, second=0, microsecond=0)
                   - dt.timedelta(days=1)).timestamp()
-    store.save_teams_messages([_msg("the bug is in TmsServiceImpl", at=last_night)])
+    store.save_teams_messages([
+        _msg("earlier in the day", at=last_night - 6 * 3600),
+        _msg("the bug is in TmsServiceImpl", at=last_night),
+    ])
+    # Read after the window closed — this morning.
+    with store._connect() as c:
+        c.execute("UPDATE teams_messages SET seen_at=? WHERE chat=?",
+                  (now.timestamp(), "Vinish Kumar"))
 
     out = await agent.teams_history("Vinish", when="last night")
     assert "TmsServiceImpl" in out

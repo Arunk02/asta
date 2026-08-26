@@ -192,7 +192,8 @@ async def _report_stale(workspace: str, ws_root, detail: str, lines: list[str],
                 f"and say so. Then re-index and stamp verified_against = HEAD."),
         payload={"workspace": workspace})
     await notify.notify(offers.pending().render(), "info",
-                        priority=priority if attention.enabled() else None)
+                        priority=priority if attention.enabled() else None,
+                        considered=True)   # attention.consider ran above
     store.kv_set(f"last_refresh:{workspace}", str(time.time()))
     return summary
 

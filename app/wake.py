@@ -208,6 +208,13 @@ async def watch_loop() -> None:
                 # Telling him is nice; scanning is the job. A dead WhatsApp
                 # bridge must not be why the catch-up never happens.
                 pass
+        # Before the watchers catch up on what they missed: a call cannot have
+        # survived the sleep, and believing it did blocks every later call.
+        try:
+            from . import meetings
+            await meetings.drop_call_lost_to_sleep(gap)
+        except Exception:
+            pass
         _mark_wake(gap)
         # Re-baseline against now rather than the top of the tick: probing and
         # announcing can take a couple of minutes, and leaving that time on the

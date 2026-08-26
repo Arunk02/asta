@@ -47,6 +47,12 @@ class _LimitPaused(Exception):
 _RESUME_BUFFER = 120
 
 ROOT = Path(__file__).resolve().parent.parent
+#: Whether a finished code task reads its own diff before handing it over.
+#: On by default: the reviewer already exists, and Arun reading every diff by
+#: hand is what makes him the bottleneck on the work this exists to take off him.
+REVIEW_OWN_DIFF = os.environ.get("ASTA_REVIEW_OWN_DIFF", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+
 TASK_TIMEOUT = {"analysis": 900, "code": 1800, "teams_draft": 300}
 
 # Pipelines are Asta's own (agents/), not the workspace's. One definition for
@@ -174,7 +180,7 @@ _HANDOFF_MARKS = ("handoff.md", "re-run me for")
 _MAX_REPO_HOPS = 3   # multi-repo runs: one fresh window per repo, bounded
 
 # One code-editing worker per workspace at a time; analysis/drafts don't lock.
-_ws_locks: dict[str, asyncio.Lock] = {}
+_ws_locks: dict[str, asyncio.Semaphore] = {}
 
 # Live workers, so rejecting one can actually stop it. Without this a rejected
 # task ran to completion anyway: it kept billing model turns, kept editing the
@@ -332,17 +338,83 @@ def _drain_addenda(task_id: int) -> str:
             "apply these too]\n" + extra)
 
 
-def _ws_lock(workspace: str | None) -> asyncio.Lock:
+def _ws_lock(workspace: str | None) -> asyncio.Semaphore:
+    """How many code tasks may run in this workspace at once.
+
+    This was an `asyncio.Lock` held for up to thirty minutes, so two tickets in
+    the same repo ran strictly one after the other. It existed because tasks
+    shared one checkout and would fight over the branch, the index and the
+    working tree — and with `worktrees` they no longer share anything.
+
+    A semaphore rather than nothing at all: each task is a full checkout plus a
+    CLI subprocess plus, at the gate, a Maven build. The limit is the machine, not
+    the git model, and Arun is working on this laptop while they run.
+    """
+    from . import worktrees
     key = workspace or "_root"
     if key not in _ws_locks:
-        _ws_locks[key] = asyncio.Lock()
+        _ws_locks[key] = asyncio.Semaphore(max(1, worktrees.MAX_PARALLEL))
     return _ws_locks[key]
 
 
 def _cwd(workspace: str | None) -> str:
+    """Where a task runs. Falls back to Asta's own root for workspace-less work.
+
+    That fallback is fine for an analysis task, which only reads — and was very
+    much not fine for a code task. A code task with no workspace once ran real
+    git commands in Asta's own repository and moved a branch carrying five
+    unpushed commits. `code_cwd` below is the version code tasks must use.
+    """
     if workspace and workspace in workspace_tools.WORKSPACES:
         return str(workspace_tools.WORKSPACES[workspace])
     return str(ROOT)
+
+
+def task_cwd(task_id: int, workspace: str | None) -> str:
+    """Where THIS task works: its own checkout when it has one.
+
+    A task with a worktree never touches the shared checkout, which is what lets
+    several run at once — and what stops Arun's editor moving underneath him.
+    Falls back to the workspace itself for tasks created before worktrees existed
+    and for repos where one could not be made.
+    """
+    from . import worktrees
+    root = Path(code_cwd(workspace))
+    if worktrees.exists(root, task_id):
+        return str(worktrees.root_for(root, task_id))
+    return str(root)
+
+
+def code_cwd(workspace: str | None) -> str:
+    """Where a CODE task runs — or a refusal.
+
+    A code task with nowhere to work is a bug in whoever created it, not a task
+    to run somewhere convenient. The old behaviour silently chose Asta's own
+    repository, which is how a branch with five unpushed commits got moved by a
+    task that had nothing to do with this project.
+
+    A guard was added at the time to the one path that caused it. This is the
+    mechanism instead of the symptom: every code path that resolves a working
+    directory for a code task comes through here.
+    """
+    if not workspace:
+        # One registered workspace and no ambiguity about which: use it rather
+        # than refuse. Refusing outright would be correct and useless — the only
+        # place the task could possibly mean is the only place there is.
+        known = sorted(workspace_tools.WORKSPACES)
+        if len(known) == 1:
+            return str(workspace_tools.WORKSPACES[known[0]])
+        raise RuntimeError(
+            "this code task has no workspace, and there is more than one to choose "
+            "from — refusing to guess, and refusing to fall back to Asta's own "
+            f"repository. Name one of: {', '.join(known) or 'none registered'}."
+            if known else
+            "this code task has no workspace and none is registered — refusing to "
+            "run it against Asta's own repository. Register the workspace first.")
+    if workspace not in workspace_tools.WORKSPACES:
+        known = ", ".join(sorted(workspace_tools.WORKSPACES)) or "none registered"
+        raise RuntimeError(f"unknown workspace '{workspace}' — known: {known}")
+    return str(workspace_tools.WORKSPACES[workspace])
 
 
 def spawn(title: str, prompt: str, kind: str = "analysis",
@@ -397,16 +469,46 @@ def is_running(task_id: int) -> bool:
     return bool(job and not job.done())
 
 
-async def cancel(task_id: int, status: str = "cancelled") -> bool:
+async def cancel(task_id: int, status: str = "cancelled", why: str = "") -> bool:
     """Stop a running worker and kill its copilot process. True if one was killed."""
     job = _running.get(task_id)
     if not job or job.done():
         return False
+    t = store.get_task(task_id) or {}
     job.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await job
     store.update_task(task_id, status=status, finished_at=time.time())
+    learn_from_stop(task_id, t, status, why)
     return True
+
+
+def learn_from_stop(task_id: int, t: dict, status: str, why: str = "") -> None:
+    """Learn from a run Arun stopped.
+
+    Nothing used to. `should_extract` required a status of done or sent, so 39%
+    of code tasks — the largest category after success — taught nothing, while a
+    run that merely needed two attempts taught something. Exactly backwards: a
+    task he kills is him saying "you misread what I wanted", within minutes of it
+    happening, which is the most informative thing that occurs all day.
+
+    Fire-and-forget, like every other extraction: he has already moved on, and a
+    slow distillation must not hold up the cancel he just asked for.
+    """
+    from . import learn
+    if not learn.should_extract(_rounds(task_id), _escalated(task_id), status):
+        return
+    asked = (t.get("prompt") or "")[:2000]
+    did = (t.get("result") or "")[-2000:]
+    transcript = (f"WHAT ARUN ASKED FOR:\n{asked}\n\n"
+                  f"WHAT ASTA HAD DONE WHEN HE STOPPED IT:\n{did or '(nothing recorded yet)'}"
+                  + (f"\n\nWHY HE STOPPED IT, IN HIS OWN WORDS:\n{why[:1000]}" if why else
+                     "\n\n(He gave no reason — infer it from the gap above, and say so if "
+                     "you cannot.)"))
+    with contextlib.suppress(RuntimeError):        # no loop in a sync caller
+        asyncio.get_running_loop().create_task(
+            learn.extract(t.get("title") or f"task #{task_id}", transcript,
+                          outcome=status, escalated=_escalated(task_id)))
 
 
 def _phone_text(result: str, limit: int = 1100) -> str:
@@ -880,6 +982,147 @@ async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
                               reason=f"still failing after {verify.max_rounds()} fix attempts")
 
 
+# --- what a task did to git, and how to undo it -------------------------------
+
+def _repos_under(root: Path) -> list[Path]:
+    """Every git repo a task could touch: the workspace, or the repos inside it."""
+    if (root / ".git").is_dir():
+        return [root]
+    try:
+        return sorted(p for p in root.iterdir() if (p / ".git").is_dir())
+    except OSError:
+        return []
+
+
+async def mark_rollback_point(task_id: int, workspace: str | None) -> dict:
+    """Record where every repo stood before the task touched it.
+
+    A task commits, branches and moves HEAD, and nothing recorded what it did in
+    a form that could be reversed — recovery from the branch incident was manual
+    reflog archaeology. Ten lines here turn a bad run from an incident into an
+    inconvenience, which is the difference between a tool he supervises and one
+    he can let run.
+    """
+    try:
+        root = Path(code_cwd(workspace))
+    except RuntimeError:
+        return {}
+    marks: dict = {}
+    for repo in _repos_under(root):
+        rc_b, branch = await repo_ops.git(repo, "git", "rev-parse", "--abbrev-ref", "HEAD")
+        rc_s, sha = await repo_ops.git(repo, "git", "rev-parse", "HEAD")
+        if rc_b or rc_s:
+            continue
+        marks[repo.name] = {"branch": branch.strip(), "sha": sha.strip(),
+                            "path": str(repo)}
+    if marks:
+        store.kv_set(f"task_rollback:{task_id}", _json.dumps(marks))
+    return marks
+
+
+def rollback_point(task_id: int) -> dict:
+    raw = store.kv_get(f"task_rollback:{task_id}")
+    try:
+        return _json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+
+
+async def rollback(task_id: int) -> str:
+    """Put every repo back where it stood before this task ran.
+
+    Deliberately does NOT delete the task's branch — the work is still there to
+    look at, it simply stops being checked out. Undo should be reversible too.
+    """
+    # A task with its own checkout never moved the shared one, so undoing it is
+    # removing a directory rather than resetting a branch Arun may be standing
+    # on. Strictly the safer operation, and the common case now.
+    from . import worktrees
+    t = store.get_task(task_id) or {}
+    try:
+        ws_root = Path(code_cwd(t.get("workspace")))
+    except RuntimeError:
+        ws_root = None
+    if ws_root is not None and worktrees.exists(ws_root, task_id):
+        notes = await worktrees.remove(ws_root, task_id)
+        kept = [n for n in notes if "uncommitted" in n]
+        if kept:
+            return ("Kept, because the work is only there: " + "; ".join(kept)
+                    + " — commit or discard it, then ask again.")
+        return f"Removed task #{task_id}'s checkout. Your own tree never moved. " + "; ".join(notes)
+
+    marks = rollback_point(task_id)
+    if not marks:
+        return f"No rollback point for task #{task_id} — nothing to undo."
+    done, failed = [], []
+    for name, mark in marks.items():
+        repo = Path(mark["path"])
+        rc_d, dirty = await repo_ops.git(repo, "git", "status", "--porcelain")
+        if rc_d == 0 and dirty.strip():
+            failed.append(f"{name}: uncommitted changes — left alone")
+            continue
+        rc, out = await repo_ops.git(repo, "git", "checkout", mark["branch"])
+        if rc != 0:
+            failed.append(f"{name}: {out.strip()[:80]}")
+            continue
+        rc, out = await repo_ops.git(repo, "git", "reset", "--hard", mark["sha"])
+        if rc != 0:
+            failed.append(f"{name}: {out.strip()[:80]}")
+            continue
+        done.append(f"{name} → {mark['branch']} @ {mark['sha'][:8]}")
+    parts = []
+    if done:
+        parts.append("Restored: " + "; ".join(done))
+    if failed:
+        parts.append("Could not restore: " + "; ".join(failed))
+    return " · ".join(parts) or "Nothing to restore."
+
+
+# --- reading its own work before handing it over ------------------------------
+
+async def _self_review(task_id: int, t: dict, result: str) -> str:
+    """Read the diff this task just produced, the way it reads anyone else's PR.
+
+    `review.py` gathers a diff, its checks and the project conventions and
+    produces real reviewer notes — and was only ever pointed at OTHER people's
+    pull requests. The code Asta itself wrote went to a PR unread by Asta, with
+    Arun's own eyes as the only safety net. That does not scale: it makes him the
+    bottleneck on exactly the work this exists to take off him.
+
+    Returns a short note to append to the completion message, or "" when there is
+    nothing to say. Never raises and never blocks completion — a review that
+    fails is worth less than the diff it was reviewing.
+    """
+    from . import review
+    if not REVIEW_OWN_DIFF:
+        return ""
+    try:
+        root = Path(code_cwd(t.get("workspace")))
+    except RuntimeError:
+        return ""
+    diffs = []
+    for repo in _repos_under(root):
+        mark = rollback_point(task_id).get(repo.name)
+        base = mark["sha"] if mark else "HEAD~1"
+        rc, out = await repo_ops.git(repo, "git", "diff", "--stat", base, "HEAD")
+        if rc == 0 and out.strip():
+            rc2, full = await repo_ops.git(repo, "git", "diff", base, "HEAD")
+            if rc2 == 0 and full.strip():
+                diffs.append((repo.name, out.strip(), full))
+    if not diffs:
+        return ""
+    try:
+        notes = await review.review_own_diff(
+            "\n\n".join(f"### {name}\n{full[:20000]}" for name, _stat, full in diffs),
+            t.get("workspace") or "")
+    except Exception:
+        return ""
+    if not notes:
+        return ""
+    stat = " · ".join(f"{name}: {s.splitlines()[-1].strip()}" for name, s, _ in diffs)
+    return f"\n\n🔍 I read my own diff ({stat}):\n{notes[:900]}"
+
+
 async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     """Route a finished code leg: paused at a gate → ask Arun; handoff → next
     repo in a fresh window; otherwise done with the diff."""
@@ -900,7 +1143,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
             f"⤴️ Task #{task_id}: bigger than micro ({reason}) — rerunning "
             f"through the full pipeline with plan gate.", "task")
         result2 = await _run_code_leg(
-            task_id, t["prompt"] + CODE_OVERRIDES, _cwd(t["workspace"]),
+            task_id, t["prompt"] + CODE_OVERRIDES, task_cwd(task_id, t["workspace"]),
             resume=False, effort=_effort_for("code", _resolve_executor(task_id)),
             workspace=t["workspace"])
         if (store.get_task(task_id) or {}).get("status") in FINAL:
@@ -937,7 +1180,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
             task_id,
             "Resume from .asta-context/todos.md + handoff.md — continue with the next "
             "repo." + CODE_OVERRIDES,
-            _cwd(t["workspace"]), resume=False,
+            task_cwd(task_id, t["workspace"]), resume=False,
             effort=_impl_effort(_resolve_executor(task_id)),
             workspace=t["workspace"])
         if (store.get_task(task_id) or {}).get("status") in FINAL:
@@ -949,8 +1192,9 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     store.update_task(task_id, status="done", result=result, finished_at=time.time())
     _learn_from(task_id, t["title"], result)
     waste = _audit_note(task_id)
+    own = await _self_review(task_id, t, result)
     await notify.notify(
-        f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}\n\n"
+        f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}{own}\n\n"
         f"Diff is local only — nothing pushed. Say 'ship' when you're happy, "
         f"or just reply with changes and I'll continue THIS task rather than "
         f"starting a new one."
@@ -980,6 +1224,10 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     Reported, never raised: one repo that cannot be prepared must not kill a
     multi-repo run, and he is told which one and why.
     """
+    # Where everything stood before this task touched git. Taken here because
+    # this is the first thing in a code task that moves a branch — after this
+    # point "put it back" needs a record, and there was none.
+    await mark_rollback_point(task_id, t.get("workspace"))
     from . import notify
     # A task with no workspace is NOT a task with no repo — `_cwd(None)` falls
     # back to ROOT, which is Asta's own checkout. Branching there means the
@@ -1007,13 +1255,16 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
         return []
     branch = task_branch(t, task_id)
 
-    results = []
-    for repo in repos:
-        try:
-            results.append(await repo_ops.start_branch(repo, branch))
-        except Exception as exc:                      # noqa: BLE001
-            results.append({"repo": repo.name, "branch": branch, "ok": False,
-                            "note": f"{type(exc).__name__}: {exc}", "dirty": False})
+    # A private checkout per repo rather than moving the shared one. Two tasks
+    # can then run at the same time — which is the whole point — and the checkout
+    # Arun has open in his editor is never touched. `start_branch` remains for
+    # anything that genuinely needs the shared tree.
+    from . import worktrees
+    try:
+        results = await worktrees.create(root, task_id, branch)
+    except Exception as exc:                          # noqa: BLE001
+        results = [{"repo": r.name, "branch": branch, "ok": False, "dirty": False,
+                    "note": f"{type(exc).__name__}: {exc}"} for r in repos]
 
     store.kv_set(f"task_branch:{task_id}", branch)
     # Only speak when there is something he would want to know: a repo that
@@ -1158,7 +1409,7 @@ async def _resume_worker(task_id: int, text: str, approved: bool = False) -> Non
     try:
         async with _ws_lock(t["workspace"]):
             result = await _run_code_leg(task_id, spec_preamble + text + CODE_OVERRIDES,
-                                         _cwd(t["workspace"]), resume=True,
+                                         task_cwd(task_id, t["workspace"]), resume=True,
                                          effort=effort, workspace=t["workspace"])
         if (store.get_task(task_id) or {}).get("status") in FINAL:
             return
@@ -1700,15 +1951,21 @@ async def refine(task_id: int, feedback: str) -> str:
     return f"Task #{task_id}: continuing {where} with your feedback (same session, full context)."
 
 
-async def reject(task_id: int) -> str:
+async def reject(task_id: int, why: str = "") -> str:
     """Reject a task AND stop it. Rejecting used to be cosmetic — the worker kept
-    running, kept spending, and finished by marking itself done."""
+    running, kept spending, and finished by marking itself done.
+
+    `why` is whatever Arun said when he stopped it, and it is the single most
+    valuable sentence in the whole run: it is him naming the gap between what he
+    asked for and what Asta started doing, minutes after it happened.
+    """
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
-    store.record_outcome("task", "rejected", subject=str(task_id))
-    killed = await cancel(task_id, status="rejected")
+    store.record_outcome("task", "rejected", subject=str(task_id), detail=why[:300])
+    killed = await cancel(task_id, status="rejected", why=why)
     if not killed:
         store.update_task(task_id, status="rejected")
+        learn_from_stop(task_id, t, "rejected", why)
     return (f"Task #{task_id} rejected and its worker killed."
             if killed else f"Task #{task_id} rejected (it had already finished).")

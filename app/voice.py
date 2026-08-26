@@ -203,6 +203,23 @@ async def _wait_for_generation(client: httpx.AsyncClient, gen_id: str) -> None:
     raise RuntimeError("status stream ended before the audio was ready")
 
 
+async def profile_id(name: str) -> str:
+    """UUID for a profile name — what /generate actually wants.
+
+    Voicebox identifies voices by id; a name means nothing to it. Passing the
+    name is silently ignored rather than rejected, so this lookup is the only
+    thing standing between "speak as Arun" and "speak as whoever the default
+    happens to be".
+    """
+    if not name:
+        return ""
+    wanted = name.strip().lower()
+    for p in await profiles():
+        if (p.get("name") or "").strip().lower() == wanted:
+            return p.get("id") or ""
+    return ""
+
+
 def pick_profile(text: str, requested: str = "") -> str:
     """Match the voice to the script the reply is written in.
 
@@ -235,7 +252,12 @@ async def speak(text: str, profile: str = "", engine: str = "",
     body: dict = {"text": text[:10000], "engine": engine or DEFAULT_ENGINE}
     chosen = pick_profile(text, profile)
     if chosen:
-        body["profile"] = chosen
+        # /speak takes `profile` as a name OR an id. The id is sent when it can
+        # be resolved: a name that has drifted (renamed, re-cloned, deleted)
+        # otherwise falls through to Voicebox's default voice, and the failure
+        # is silent — audio comes back sounding like a stranger with nothing in
+        # any response to say why. Resolving first turns that into an error.
+        body["profile"] = await profile_id(chosen) or chosen
     async with httpx.AsyncClient(timeout=GENERATE_TIMEOUT) as c:
         r = await c.post(f"{BASE}/speak", json=body)
         if r.status_code != 200:

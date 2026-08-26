@@ -28,14 +28,35 @@ refuses; it does not join silently and let him believe something was said.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import os
 import re
+import time
 import urllib.parse
 from datetime import datetime, timedelta
 
-from . import store
+from . import quiet, store
+from .call_brain import (  # noqa: F401  (re-exported: callers and tests use these)
+    _ANSWERABLE, _ANSWER_PROMPT, _ASKED, _HIS_TO_ANSWER, _ask_key, _call_tools,
+    answer_from_knowledge, classify_line, clear_noticed, confident, notice_asks,
+    pending_for_him, spoken_form, CONFIRM_SPEECH, SPOKEN_ANSWER_WORDS)
+
 
 COMPOSE_URL = "https://outlook.office.com/calendar/deeplink/compose"
+
+
+def _now() -> float:
+    """The clock everything in a call is measured against.
+
+    `monotonic` rather than the event loop's clock, which was the original here.
+    Loop time reads fine inside a coroutine and raises outside one, so anything
+    that wanted to know how long a call had been running from ordinary code —
+    a report, a status line, a test — depended on there happening to be a loop.
+    It also cannot go backwards when the clock is adjusted, which `time.time()`
+    can, and a call whose duration jumps is a call he cannot trust.
+    """
+    return time.monotonic()
 
 #: The macOS virtual audio device Teams must be pointed at for Asta to be heard
 #: (BlackHole, Loopback, or similar). Empty = speaking is not available, and
@@ -47,8 +68,23 @@ AUDIO_DEVICE = os.environ.get("ASTA_CALL_AUDIO_DEVICE", "").strip()
 MAX_CALL_MINUTES = int(os.environ.get("ASTA_MAX_CALL_MINUTES", "90"))
 #: Captions scroll out of their window within seconds, so they are read far more
 #: often than the call-ended check. A caption missed is gone; a call noticed as
-#: ended a few seconds late costs nothing.
-CAPTION_POLL_SECONDS = float(os.environ.get("ASTA_CAPTION_POLL", "4"))
+#: ended a few seconds late costs nothing. Two seconds rather than four because a
+#: caption is now the trigger for answering out loud, and every second spent not
+#: having noticed the question is a second of silence on the line.
+CAPTION_POLL_SECONDS = float(os.environ.get("ASTA_CAPTION_POLL", "2"))
+
+#: How long a placed call is allowed to ring before Asta hangs up. Someone who
+#: has not picked up in this long is not about to, and a call left ringing holds
+#: the browser context — and therefore the next call — open indefinitely.
+RING_SECONDS = float(os.environ.get("ASTA_RING_SECONDS", "45"))
+
+#: How long an answer may take before it is too late to say out loud. Measured
+#: rather than guessed: a warm kokoro line costs ~1.1s to synthesise and ~0.4s to
+#: switch the microphone, so the budget is almost entirely thinking time. Past it
+#: the moment has gone, and the answer goes to his phone instead of arriving in
+#: the call forty seconds after anybody wanted it.
+ANSWER_BUDGET_SECONDS = float(os.environ.get("ASTA_ANSWER_BUDGET", "25"))
+
 
 
 # --- building an invite ------------------------------------------------------
@@ -269,8 +305,15 @@ async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
         if not await _click_first(page, _JOIN_BUTTONS, timeout=6000):
             raise RuntimeError("couldn't find the Join button — did not join")
         joined = True
+        # `speaks` is False for a JOINED meeting. Asta placing a call is Asta
+        # having a conversation on his behalf; Asta sitting in on a meeting is a
+        # room full of people who did not ask for an assistant's opinion, and he
+        # may well be in it himself. Silence is the default, and `say_in_call`
+        # with words he gave is how it gets broken.
         _CALL.update(pw=pw, ctx=ctx, page=page, url=join_url,
-                     joined_at=asyncio.get_event_loop().time(), captions=[])
+                     joined_at=_now(), captions=[],
+                     answered_at=_now(), speaks=False,
+                     who="")
         store.kv_set("teams_in_call", join_url)
         # Captions are what make a recap possible at all. Failing to turn them on
         # is not a reason to abandon a call that has already been joined, so it
@@ -286,14 +329,121 @@ async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
 
 #: The call controls in an open chat header.
 _CALL_BUTTONS = {
-    "audio": ['button[aria-label="Audio call"]', 'button[aria-label*="Audio call" i]',
+    # Captured off the live chat header, not guessed. The previous set required a
+    # <button> TAG — 'button[aria-label="Audio call"]' — and Teams renders this
+    # as a div with role=button, so every selector missed, _click_first returned
+    # False, and the call was reported as "clicked but never started". The
+    # data-tid is the stable one; the tagless aria selectors are the fallbacks.
+    "audio": ['[data-tid="default-chat-call-audio-button"]',
+              '[aria-label="Audio call"]', '[aria-label*="Audio call" i]',
               '[data-tid="calling-audio-button"]'],
-    "video": ['button[aria-label="Video call"]', 'button[aria-label*="Video call" i]',
+    # Same tag problem as audio above.
+    "video": ['[data-tid="default-chat-call-video-button"]',
+              '[aria-label="Video call"]', '[aria-label*="Video call" i]',
               '[data-tid="calling-video-button"]'],
 }
-#: Proof a call is actually up, rather than a button having been clicked.
-_IN_CALL = ('[data-tid="calling-hangup-button"], [aria-label*="Hang up" i], '
-            '[data-tid="call-duration"], [data-tid="calling-screen"]')
+#: Proof a call SCREEN is up, rather than a button having been clicked. Present
+#: from the moment Teams starts dialling — so it proves the call was placed, and
+#: says nothing at all about whether anybody picked up.
+_CALL_PLACED = ('[data-tid="calling-hangup-button"], [aria-label*="Hang up" i], '
+                '[data-tid="call-duration"], [data-tid="calling-screen"]')
+
+#: Still ringing. Matched on visible text because that is the part of a calling
+#: screen Teams has reworded least.
+_RINGING = re.compile(r"\bringing\b|\bcalling\b|waiting for (others|them)", re.I)
+
+#: Somebody answered. UNVERIFIED against a live connected call — nobody was rung
+#: to find out — so it is deliberately not the only evidence `connected` accepts.
+#: The reliable half is captions: a caption line existing means a human is talking,
+#: which cannot happen before the call connects. If these selectors turn out to be
+#: wrong the cost is a slower answer, not a wrong one.
+_CONNECTED = '[data-tid="call-duration"], [data-tid="calling-timer"]'
+
+#: A running m:ss timer with no children — Teams renders the call clock this way
+#: whatever it names the element that day.
+_TIMER_JS = """() => {
+    for (const n of document.querySelectorAll('span,div')) {
+        if (n.children.length) continue;
+        if (/^\\d{1,2}:\\d{2}(:\\d{2})?$/.test((n.innerText || '').trim())) return true;
+    }
+    return false;
+}"""
+
+
+async def call_state(page) -> str:
+    """Where the call is: 'ringing', 'connected', 'ended', or 'unknown'.
+
+    Four states rather than a bool because the honest answer is sometimes "I
+    cannot tell", and the two ways of being wrong are not equally bad. Reporting
+    a ringing call as connected makes Asta talk to a phone nobody has picked up.
+    Reporting a connected call as ringing costs a few seconds of silence. So
+    'connected' is only ever returned on positive evidence, and everything else
+    that is not clearly ringing or ended is admitted as 'unknown'.
+    """
+    if page is None:
+        return "unknown"
+    try:
+        text = await page.evaluate("() => document.body.innerText || ''")
+    except Exception:
+        return "ended"                 # the page is gone; that counts as ended
+    if _ENDED.search(text[:4000]):
+        return "ended"
+    # A caption cannot exist before somebody is talking, and nobody talks into a
+    # phone that is still ringing. This is the one piece of connection evidence
+    # that runs on code already proven against live Teams.
+    if _CALL.get("captions"):
+        return "connected"
+    with contextlib.suppress(Exception):
+        if await page.query_selector(_CONNECTED):
+            return "connected"
+    if _RINGING.search(text[:4000]):
+        return "ringing"
+    with contextlib.suppress(Exception):
+        if await page.evaluate(_TIMER_JS):
+            return "connected"
+    return "unknown"
+
+
+async def wait_for_answer(page, seconds: float = 0) -> str:
+    """Wait for somebody to pick up. Returns the state it settled on.
+
+    'no answer' is only returned when the call is still visibly RINGING at the
+    deadline — an unreadable call screen returns 'unknown' and is left alone,
+    because hanging up on a call that is actually connected is a far worse
+    outcome than staying on one that is not.
+    """
+    deadline = _now() + (seconds or RING_SECONDS)
+    state = "unknown"
+    while _now() < deadline:
+        state = await call_state(page)
+        if state in ("connected", "ended"):
+            return state
+        await asyncio.sleep(1.0)
+    return "no answer" if state == "ringing" else state
+
+
+#: How long to let a headed Teams window finish painting its chat list.
+_CHAT_LIST_ATTEMPTS = 15
+_CHAT_LIST_POLL = 0.6
+
+
+async def _wait_for_chat_list(page) -> bool:
+    """Wait until the chat rail has real entries in it.
+
+    The app shell renders before the chat list is populated, and Teams' search
+    returns nothing while that is still true. Waiting on the CONDITION rather
+    than on a duration is the difference between a call that works and one that
+    reports "no person match" for somebody who is plainly there.
+    """
+    for _ in range(_CHAT_LIST_ATTEMPTS):
+        try:
+            if await page.evaluate(
+                    """() => document.querySelectorAll('[role="treeitem"]').length > 3"""):
+                return True
+        except Exception:
+            pass                       # navigation in flight — look again
+        await asyncio.sleep(_CHAT_LIST_POLL)
+    return False
 
 
 async def call_person(who: str, video: bool = False) -> str:
@@ -322,21 +472,35 @@ async def call_person(who: str, video: bool = False) -> str:
     placed = False
     try:
         page = await teams_bridge._open_teams(ctx)
+        # A HEADED window paints far slower than the headless one every other
+        # code path uses: _open_teams returns as soon as the app shell exists,
+        # and searching that early found nothing at all — "no person match for
+        # 'Vinish' (saw: nothing)" on a name that resolves fine headless. Wait
+        # for the chat rail to actually be populated, which is the condition
+        # that makes search work, rather than sleeping a guessed number of
+        # seconds and hoping.
+        await _wait_for_chat_list(page)
         title = await teams_bridge._find_chat(page, who, allow_group=False)
         if not await _click_first(page, _CALL_BUTTONS[kind], timeout=5000):
             raise RuntimeError(
                 f"no {kind} call button in the chat with '{title}' — either the Teams "
                 f"UI changed or calling is not available for this account")
         try:
-            await page.wait_for_selector(_IN_CALL, timeout=25000)
+            await page.wait_for_selector(_CALL_PLACED, timeout=25000)
         except Exception as exc:
             raise RuntimeError(f"clicked {kind} call for '{title}' but no call ever "
                                f"started — treat as NOT called") from exc
         placed = True
+        # `speaks` is True because a call Asta placed on his behalf is one he is
+        # not on. The moment he is heard in it this flips off for good — see
+        # `_note_speaker`. Ringing is not talking, so nothing is said until
+        # `wait_for_answer` has seen somebody pick up.
         _CALL.update(pw=pw, ctx=ctx, page=page, url=f"teams-call:{title}",
-                     joined_at=asyncio.get_event_loop().time(), captions=[])
+                     joined_at=_now(), captions=[],
+                     answered_at=0.0, speaks=True, who=title)
         store.kv_set("teams_in_call", f"call:{title}")
         _CALL["captions_on"] = await start_captions(page)
+        warm_the_voice()
         return title
     finally:
         if not placed:
@@ -407,46 +571,60 @@ async def _click_first(page, selectors, timeout: float = 3000) -> bool:
 #: His real microphone — restored after every utterance.
 HIS_MIC = os.environ.get("ASTA_HIS_MIC", "MacBook Pro Microphone")
 
-_SETTINGS_MENU = ('button[data-tid="settings-button"]', 'button[aria-label*="Settings" i]',
-                  '[data-tid="callingSettingsButton"]', 'button[aria-label*="Device settings" i]')
-_MIC_PICKER = ('[data-tid="microphone-device-selector"]', 'select[aria-label*="Microphone" i]',
-               '[aria-label*="Microphone" i][role="combobox"]', '[data-tid="mic-dropdown"]')
-_SETTINGS_CLOSE = ('button[aria-label="Close settings"]', 'button[aria-label*="Close" i]')
+#: The macOS input switcher (brew install switchaudio-osx). Teams must have its
+#: microphone left on "Same as System" for this to reach it.
+SWITCH_AUDIO = os.environ.get("ASTA_SWITCH_AUDIO", "/opt/homebrew/bin/SwitchAudioSource")
 
 
-async def set_call_mic(page, device: str) -> bool:
-    """Point Teams' microphone at `device`. False when the UI would not cooperate.
+def can_switch_mic() -> bool:
+    """Whether the input device can be changed at all."""
+    from pathlib import Path as _P
+    return _P(SWITCH_AUDIO).is_file()
 
-    Deliberately returns a bool rather than raising: the caller has to be able to
-    tell "could not switch, so do not bother speaking" apart from "spoke and then
-    could not restore", and those two want very different reactions.
+
+async def set_call_mic(page=None, device: str = "") -> bool:
+    """Point the microphone at `device`. False when it could not be done.
+
+    This switches the SYSTEM default input rather than Teams' own setting.
+    Driving the Teams UI was the first attempt and it does not survive contact:
+    settings sit behind a React flyout off the "Settings and more" menu, the
+    picker has no stable data-tid, and a pre-flight against live Teams returned
+    False on every selector — meaning a call would have connected and then sat
+    silent. Teams follows the system default when its device is left on "Same as
+    System", so this is both simpler and one less thing to break when Teams
+    ships a UI change.
+
+    `page` is accepted and ignored so callers and tests keep the same shape.
+
+    Returns a bool rather than raising: the caller must tell "could not switch,
+    so do not speak" apart from "spoke and then could not restore", and those
+    two want very different reactions.
     """
-    if not page or not device:
+    if not device:
         return False
     try:
-        if not await _click_first(page, _SETTINGS_MENU, timeout=4000):
+        proc = await asyncio.create_subprocess_exec(
+            SWITCH_AUDIO, "-t", "input", "-s", device,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(proc.wait(), timeout=10)
+        if proc.returncode != 0:
             return False
-        for sel in _MIC_PICKER:
-            try:
-                await page.select_option(sel, label=device, timeout=3000)
-                await _click_first(page, _SETTINGS_CLOSE, timeout=2000)
-                return True
-            except Exception:
-                continue
-        # Not a <select> in every Teams build — fall back to opening the listbox
-        # and clicking the option by its visible name.
-        for sel in _MIC_PICKER:
-            try:
-                await page.click(sel, timeout=2500)
-                await page.click(f'text="{device}"', timeout=2500)
-                await _click_first(page, _SETTINGS_CLOSE, timeout=2000)
-                return True
-            except Exception:
-                continue
-        await _click_first(page, _SETTINGS_CLOSE, timeout=2000)
-        return False
     except Exception:
         return False
+    # Verified, not assumed: the switcher exits 0 for a name it did not apply.
+    return (await current_mic()) == device
+
+
+async def current_mic() -> str:
+    """Whatever the system input is right now ('' if it cannot be read)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            SWITCH_AUDIO, "-c", "-t", "input",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        return out.decode(errors="replace").strip()
+    except Exception:
+        return ""
 
 
 async def _restore_mic(page) -> None:
@@ -459,6 +637,137 @@ async def _restore_mic(page) -> None:
         f"🎙️ Could not switch the Teams mic back to {HIS_MIC} — you may be muted "
         f"to the call. Set it manually in Teams → Settings → Devices.",
         "warn", urgency="direct")
+
+
+def call_duration() -> float:
+    """Seconds since somebody picked up. Zero if nobody did.
+
+    Zero for an unanswered call is the honest number rather than a missing one —
+    "rang Vinish for 45 seconds" is not a 45-second call, and reporting it as one
+    would put a conversation in his day that never happened.
+    """
+    started = float(_CALL.get("answered_at") or 0)
+    if not started:
+        return 0.0
+    return max(0.0, _now() - started)
+
+
+def spoken_duration(seconds: float) -> str:
+    """A duration the way he would say it, not the way a computer would."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m" if not secs else f"{minutes}m {secs}s"
+
+
+def may_speak() -> bool:
+    """Whether Asta is allowed to open its mouth in this call on its own.
+
+    Separate from `can_speak()`, which is about whether the machine has a virtual
+    microphone at all. This is about whether it is his conversation.
+    """
+    return bool(_CALL) and bool(_CALL.get("speaks"))
+
+
+def _note_speaker(speaker: str) -> None:
+    """Notice Arun talking, and shut up for the rest of the call.
+
+    A one-way latch on purpose. He said it plainly: while he is speaking to
+    people, Asta does not talk — it listens and sends him what he needs. Anything
+    that could turn speech back on mid-call is a way for Asta to interrupt him,
+    so there isn't one; the call ending is what clears it.
+    """
+    if not _CALL or not _CALL.get("speaks"):
+        return
+    if speaker_is_arun(speaker):
+        _CALL["speaks"] = False
+        _CALL["muted_because"] = "Arun is on the call"
+
+
+#: Whatever Teams calls him in a caption. His display name varies by tenant, so
+#: this is configurable rather than hard-coded to one spelling.
+HIS_NAMES = tuple(n.strip().lower() for n in
+                  os.environ.get("ASTA_HIS_TEAMS_NAMES", "arun,arun k,arun kumar").split(",")
+                  if n.strip())
+
+
+def speaker_is_arun(speaker: str) -> bool:
+    name = (speaker or "").strip().lower()
+    return bool(name) and any(n and (n == name or n in name) for n in HIS_NAMES)
+
+
+# --- being quick enough to be worth saying -----------------------------------
+#
+# Measured on this machine rather than assumed, because the design changed once
+# the numbers came in:
+#
+#   kokoro (assistant), cold ....... 8.9s for a 3.5s line
+#   kokoro (assistant), warm ....... 1.1s for a 3.5s line
+#   chatterbox (his clone) ......... 9-15s, warm or cold
+#   microphone switch .............. 0.38s, restore 0.27s
+#
+# Two conclusions, both of which are now enforced below. The cold-start penalty is
+# most of the latency and is pure waste — one throwaway synthesis at the start of
+# a call buys back eight seconds on the first real line. And his cloned voice is
+# an order of magnitude too slow to carry a spontaneous sentence, so autonomous
+# speech uses the assistant voice; the clone is for words he composed in advance,
+# where ten seconds costs nothing.
+
+_VOICE_CACHE: dict[str, bytes] = {}
+
+#: Said the moment somebody asks for something Asta cannot answer on the spot.
+#: A fixed set precisely so they can be synthesised once and replayed instantly —
+#: this is the line that keeps dead air off the call while the real answer is
+#: still being worked out, so it has to be the fastest thing in the module.
+HOLDING_LINES = {
+    "review": "Sure, give me a few minutes, I'll check and come back on it.",
+    "checking": "Let me check that and come back to you.",
+    "his": "I'll get that to Arun and come back to you.",
+}
+
+
+def _cache_key(text: str, voice_name: str) -> str:
+    return f"{voice_name}:{hashlib.sha1(text.encode()).hexdigest()[:16]}"
+
+
+async def synth(text: str, voice_name: str = "") -> bytes:
+    """Speech for `text`, from memory when it has been said before.
+
+    The holding lines are said in most calls and never change, so synthesising
+    them more than once is buying the same 1.1 seconds over and over.
+    """
+    from . import voice
+    key = _cache_key(text, voice_name or voice.VOICE_ASSISTANT)
+    cached = _VOICE_CACHE.get(key)
+    if cached:
+        return cached
+    audio = await voice.speak(text, voice=voice_name or voice.VOICE_ASSISTANT)
+    if audio:
+        _VOICE_CACHE[key] = audio
+    return audio
+
+
+def warm_the_voice() -> None:
+    """Pay the cold-start cost now, while the phone is still ringing.
+
+    Fire-and-forget: nothing waits on it, and a failure here must never stop a
+    call from being placed. Worst case the first line is slow, which is exactly
+    what happens today.
+    """
+    async def _warm():
+        from . import voice
+        with contextlib.suppress(Exception):
+            for line in HOLDING_LINES.values():
+                # Warmed through the SAME transformation `say_in_call` applies.
+                # It strips a trailing instruction and its punctuation, so warming
+                # the raw line caches it under text that is never requested — the
+                # cache stays full, every lookup misses, and the eight seconds this
+                # exists to save get paid anyway.
+                await synth(voice.strip_voice_instruction(line))
+    with contextlib.suppress(RuntimeError):        # nothing to warm without a loop
+        task = asyncio.get_running_loop().create_task(_warm())
+        _REACTING.add(task)                        # asyncio holds only a weak ref
+        task.add_done_callback(_REACTING.discard)
 
 
 async def say_in_call(text: str, voice_name: str = "") -> str:
@@ -480,6 +789,24 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
     if not store.kv_get("teams_in_call"):
         raise RuntimeError("not in a call")
 
+    # Talking into a phone that is still ringing. The old code could not tell the
+    # difference — the hangup button appears the instant Teams starts dialling —
+    # so a call placed and spoken into straight away delivered a monologue to
+    # nobody and reported it as said.
+    page = _CALL.get("page")
+    if page is not None:
+        state = await call_state(page)
+        # Checked on EVERY line, not just the first. A call can die under Asta's
+        # feet — the far end hangs up, or the Mac sleeps and takes the browser
+        # with it — and speaking into the corpse would play audio into a virtual
+        # microphone nobody is listening to and report it as said.
+        if state == "ended":
+            raise RuntimeError("the call has ended — said nothing")
+        if not _CALL.get("answered_at"):
+            if state != "connected":
+                raise RuntimeError(f"nobody has picked up yet ({state}) — said nothing")
+            _CALL["answered_at"] = _now()
+
     words = voice.strip_voice_instruction(text)
     if not words:
         raise RuntimeError("nothing left to say once the instruction was removed")
@@ -488,11 +815,10 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
     # Generated BEFORE the mic is borrowed: synthesis is the slow part, and
     # holding his microphone hostage for ten seconds of Chatterbox would mute him
     # mid-conversation for no reason.
-    audio = await voice.speak(words, voice=chosen)
+    audio = await synth(words, chosen)
     if not audio:
         raise RuntimeError("speech generation produced nothing — said nothing")
 
-    page = _CALL.get("page")
     borrowed = False
     if page is not None:
         borrowed = await set_call_mic(page, AUDIO_DEVICE)
@@ -526,12 +852,29 @@ def last_transcript() -> str:
     return _LAST_TRANSCRIPT[0] if _LAST_TRANSCRIPT else ""
 
 
+#: What the call that just ended was. Kept for the same reason the transcript is:
+#: `leave()` clears `_CALL`, and how long he was on the phone is wanted precisely
+#: after the hang-up.
+_LAST_CALL: dict = {}
+
+
+def last_call() -> dict:
+    """Who the last call was with, whether it was answered, and how long it ran."""
+    return dict(_LAST_CALL)
+
+
 async def leave() -> str:
     """Hang up. Closing the browser context IS leaving the call."""
     store.kv_set("teams_in_call", "")
     call = dict(_CALL)
     text = transcript_text(call.get("captions") or [])
     _LAST_TRANSCRIPT[:] = [text] if text else []
+    # Read while `_CALL` is still standing — a moment later there is nothing to
+    # measure, and a call reported without its duration is a call he cannot judge.
+    _LAST_CALL.clear()
+    _LAST_CALL.update(who=call.get("who") or "", seconds=call_duration(),
+                      answered=bool(call.get("answered_at")),
+                      spoke=bool(call.get("speaks")))
     _CALL.clear()
     if not call:
         return "not in a call"
@@ -561,7 +904,7 @@ def overran(now: float | None = None) -> bool:
     if not _CALL:
         return False
     started = float(_CALL.get("joined_at") or 0)
-    elapsed = ((asyncio.get_event_loop().time() if now is None else now) - started) / 60
+    elapsed = ((_now() if now is None else now) - started) / 60
     return elapsed >= MAX_CALL_MINUTES
 
 
@@ -644,10 +987,19 @@ async def poll_captions(page, lines: list[dict]) -> None:
                    return {speaker: ((who && who.innerText) || '').trim(),
                            text: (n.innerText || '').trim()};
                })""", _CAPTION_ROWS)
-    except Exception:
-        return                          # a caption read must never end the call watch
+    except Exception as exc:
+        # A caption read must never end the call watch — but a reader that has
+        # silently failed for the whole call is why a recap comes back empty and
+        # nobody knows why.
+        quiet.note("call.poll_captions", exc)
+        return
     for r in rows:
-        _merge_caption(lines, r.get("speaker") or "someone", r.get("text") or "")
+        speaker = r.get("speaker") or "someone"
+        # Hearing him is what closes Asta's mouth for the rest of the call. Done
+        # here rather than at the classification step because it must happen for
+        # EVERY caption, including the small talk that never gets classified.
+        _note_speaker(speaker)
+        _merge_caption(lines, speaker, r.get("text") or "")
 
 
 def transcript_text(lines: list[dict]) -> str:
@@ -666,73 +1018,23 @@ def transcript_text(lines: list[dict]) -> str:
 # on his behalf would commit him to things he never agreed to. Those are listened
 # to, logged, and handed back afterwards.
 
-#: Questions Asta may offer to look up: they are about the CODE, not about him.
-_ANSWERABLE = re.compile(
-    r"\b(how (does|do|is|are|did)|where (is|are|do|does)|what (does|do|is|are)\b"
-    r"|which (topic|class|service|table|field|repo|method)"
-    r"|why (does|is|are|did)|who (calls|consumes|publishes)"
-    r"|is there (a|any)\b)", re.I)
-
-#: Questions about HIM. Never auto-answered, in any voice.
-_HIS_TO_ANSWER = re.compile(
-    r"\b(can you (review|check|look|merge|approve|deploy|release|join|come)"
-    r"|will you\b|could you\b|shall we\b|should we\b|are you (ok|fine|free|available|done)"
-    r"|when (can|will) you\b|do you (want|mind|agree)|is that (ok|fine)\b"
-    r"|what do you think\b|your (call|view|opinion)\b)", re.I)
-
-#: Asks already put to him this call, so repeated captions do not re-ask.
-_ASKED: set[str] = set()
 
 
-def _ask_key(line: str) -> str:
-    import hashlib
-    words = re.findall(r"[a-z0-9]+", (line or "").lower())
-    return hashlib.sha1(" ".join(words[:14]).encode()).hexdigest()[:16]
 
 
-def classify_line(line: str) -> str:
-    """'answerable' | 'his' | 'chatter' for one caption line.
-
-    Order matters: a line can look like both ("can you check how the ATA
-    fallback works"), and when it does it is HIS — the sentence is a request of
-    him that happens to mention code, and answering it would be answering for
-    him.
-    """
-    text = (line or "").strip()
-    if len(text) < 12:
-        return "chatter"
-    if _HIS_TO_ANSWER.search(text):
-        return "his"
-    if _ANSWERABLE.search(text):
-        return "answerable"
-    return "chatter"
 
 
-def notice_asks(lines: list[str], speaker_is_him: bool = False) -> list[dict]:
-    """New things worth reacting to, deduped for the life of the call.
-
-    His OWN lines are skipped: Asta offering to look up a question Arun himself
-    just asked out loud is noise, and worse, it would offer to answer the person
-    he is talking to on their behalf.
-    """
-    out = []
-    if speaker_is_him:
-        return out
-    for line in lines:
-        kind = classify_line(line)
-        if kind == "chatter":
-            continue
-        key = _ask_key(line)
-        if key in _ASKED:
-            continue
-        _ASKED.add(key)
-        out.append({"line": line.strip(), "kind": kind, "key": key})
-    return out
 
 
-def clear_noticed() -> None:
-    """Forget this call's asks — a new call starts with a clean slate."""
-    _ASKED.clear()
+
+
+
+
+
+
+
+
+
 
 
 async def offer_to_analyse(item: dict) -> None:
@@ -757,9 +1059,103 @@ async def offer_to_analyse(item: dict) -> None:
         "call", urgency="direct")
 
 
-def pending_for_him(lines: list[str]) -> list[str]:
-    """Things aimed at HIM, to hand back when the call ends."""
-    return [l.strip() for l in lines if classify_line(l) == "his"]
+# --- answering, while the call is still running ------------------------------
+#
+# The rule he set: while HE is speaking to people, Asta does not talk — but it
+# still does the work and sends him what he needs. So the thinking happens either
+# way and only the delivery changes. Silence is never idleness.
+
+
+
+
+
+
+
+
+
+
+
+
+
+async def _say_quietly(line: str) -> bool:
+    """Say a line if allowed to, and never let failing to say it break the call."""
+    if not (may_speak() and can_speak()):
+        return False
+    try:
+        await say_in_call(line)
+        return True
+    except Exception:
+        return False
+
+
+
+
+
+
+
+
+async def handle_ask(item: dict) -> str:
+    """React to something asked in the call. Returns what was done, for tests.
+
+    The holding line goes out FIRST and from cache, because it is the only part
+    that can be fast. Thinking takes ten to thirty seconds; a pre-synthesised
+    acknowledgement takes about four tenths of one, and it is the difference
+    between a natural pause and dead air on a call.
+    """
+    from . import notify
+    kind, line = item.get("kind"), item.get("line", "")
+
+    # Things aimed at Arun are still never answered for him. When Asta is on the
+    # call alone it says the thing he asked for — a few minutes, I'll check and
+    # come back — which commits him to nothing and buys the time honestly.
+    if kind == "his":
+        # A holding line commits him to nothing — "give me a few minutes, I'll
+        # check and come back" is true whatever the question turns out to be — so
+        # it does not need the higher bar an actual answer does.
+        said = await _say_quietly(HOLDING_LINES["review"])
+        await notify.notify(f"🎧 In the call, for you — “{line[:200]}”"
+                            + ("\n\nI said you'd come back on it." if said else ""),
+                            "call", urgency="direct")
+        return "held" if said else "sent to him"
+
+    if kind != "answerable":
+        return "ignored"
+
+    # The bar for SPEAKING is higher than the bar for telling him, because the
+    # two mistakes cost different things. Misjudging a line and buzzing his phone
+    # costs a glance. Misjudging it and saying something out loud costs an
+    # incorrect sentence in front of a colleague, in a conversation he cannot
+    # take back. So a regex is enough to notify and not enough to speak.
+    speaking = may_speak() and can_speak() and await confident(line)
+    if speaking:
+        await _say_quietly(HOLDING_LINES["checking"])
+
+    started = _now()
+    answer = await answer_from_knowledge(line)
+    took = _now() - started
+
+    if not answer:
+        await offer_to_analyse(item)          # no brain answered; fall back to asking him
+        return "offered"
+
+    late = took > ANSWER_BUDGET_SECONDS
+    if speaking and not late and may_speak():
+        # `may_speak` is checked AGAIN deliberately: he may have started talking
+        # during the twenty seconds this spent thinking, and the answer to that
+        # is silence, not a sentence over the top of him.
+        with contextlib.suppress(Exception):
+            await say_in_call(spoken_form(answer))
+            await notify.notify(f"🎧 Answered in the call — “{line[:120]}”\n\n{answer[:800]}",
+                                "call", urgency="ambient")
+            return "spoken"
+
+    why = "took too long to say" if late else "you're on the call"
+    await notify.notify(f"🎧 Asked in the call — “{line[:120]}”\n\n{answer[:800]}"
+                        f"\n\n(not said out loud — {why})", "call", urgency="direct")
+    return "sent to him"
+
+
+
 
 
 def captured_transcript() -> str:
@@ -797,8 +1193,34 @@ async def watch(poll_seconds: float = 30) -> str:
                 break
             if page is not None:
                 await poll_captions(page, lines)
+                react_to(lines)
             await asyncio.sleep(CAPTION_POLL_SECONDS)
     return "left the call"
+
+
+#: Handling one ask can take half a minute of thinking. Captions scroll out of
+#: their window in seconds, so reacting must never happen inline with polling —
+#: these run alongside it, and asyncio holds only a WEAK reference to a bare task,
+#: so the set is what stops them being garbage collected mid-thought.
+_REACTING: set = set()
+_ASK_LOCK = asyncio.Lock()
+
+
+def react_to(lines: list[dict]) -> None:
+    """Start handling anything newly asked, without stalling caption polling."""
+    heard = [l["text"] for l in lines
+             if l.get("text") and not speaker_is_arun(l.get("speaker", ""))]
+    for item in notice_asks(heard):
+        task = asyncio.create_task(_handle_one(item))
+        _REACTING.add(task)
+        task.add_done_callback(_REACTING.discard)
+
+
+async def _handle_one(item: dict) -> None:
+    """One ask at a time — two answers spoken over each other is worse than slow."""
+    async with _ASK_LOCK:
+        with contextlib.suppress(Exception):
+            await handle_ask(item)
 
 
 # --- afterwards --------------------------------------------------------------
@@ -817,7 +1239,12 @@ async def watch_and_report(title: str = "") -> None:
     except Exception:
         why = "lost track of the call"
         await leave()
-    label = f" — {title}" if title else ""
+    ended = last_call()
+    label = f" — {title or ended.get('who') or ''}".rstrip(" —")
+    if ended.get("seconds"):
+        why = f"{why} · {spoken_duration(ended['seconds'])}"
+    elif ended.get("who"):
+        why = f"{why} · never answered"
     text = last_transcript()
     if text:
         # There IS a record now, captured while sitting in the call, so the offer
@@ -842,6 +1269,78 @@ async def watch_and_report(title: str = "") -> None:
     offers.propose(subject=f"📞 Call ended{label}", context=context,
                    question=question, action=action)
     await notify.notify(offers.pending().render(), "calls", urgency="ambient")
+
+
+async def drop_call_lost_to_sleep(gap: float) -> str:
+    """End a call the Mac slept through, and say so. '' if there was no call.
+
+    A call cannot survive sleep: the browser, the audio devices and the network
+    all stop, and Teams drops the far end within seconds. What does survive is
+    Asta's belief that it is still on the call — `teams_in_call` set, a dead
+    browser handle in `_CALL` — and the next call is then refused as "already in
+    a call" with no way back but a restart.
+
+    Told to him rather than cleaned up quietly. He was on a call with somebody
+    and it ended without either of them ending it; finding that out from silence
+    is how a colleague gets left talking to nobody.
+    """
+    from . import notify
+    if not (store.kv_get("teams_in_call") or _CALL):
+        return ""
+    who = _CALL.get("who") or ""
+    with contextlib.suppress(Exception):
+        await leave()
+    label = f" with {who}" if who else ""
+    await notify.notify(
+        f"📞 The Mac slept for {int(gap // 60)} min during a call{label} — the call "
+        f"is gone. Nothing was said or heard after it dropped.", "call", urgency="direct")
+    return who or "the call"
+
+
+async def call_watch(title: str = "") -> None:
+    """The whole life of a call Asta placed: ring, answer, sit, hang up, report.
+
+    `call_person` only ever proved a call was DIALLED, and nothing was watching it
+    afterwards — so an unanswered call left `teams_in_call` set, the browser
+    context open and the next call refused as "already in a call", with no way
+    back but a restart. This is the piece that was missing.
+
+    The three endings are deliberately not treated alike. A call still visibly
+    ringing at the deadline is hung up, because nobody is coming. A call whose
+    state cannot be read is LEFT ALONE and reported, because hanging up on a
+    conversation that is actually happening is much worse than staying on one
+    that is not.
+    """
+    from . import notify
+    page = _CALL.get("page")
+    who = title or _CALL.get("who") or "them"
+    state = await wait_for_answer(page)
+
+    if state in ("no answer", "ended"):
+        await leave()
+        gone = "didn't pick up" if state == "no answer" else "ended before it connected"
+        await notify.notify(f"📞 {who} {gone} — hung up after "
+                            f"{int(RING_SECONDS)}s.", "call", urgency="direct")
+        return
+
+    if state == "connected":
+        _CALL["answered_at"] = _now()
+    else:
+        # Staying on a call it cannot read, and saying so. Silence is enforced
+        # because speaking would be talking into a call that may still be ringing.
+        _CALL["speaks"] = False
+        await notify.notify(
+            f"📞 Called {who}, but I can't tell from the page whether they picked "
+            f"up — staying on and listening, not speaking. Worth a look at the "
+            f"call-screen selectors.", "call", urgency="direct")
+
+    if not _CALL.get("captions_on"):
+        await notify.notify(
+            f"🎧 On the call with {who} but live captions wouldn't turn on — I "
+            f"can't hear what's said, so there'll be no notes from this one.",
+            "call", urgency="direct")
+
+    await watch_and_report(title or who)
 
 
 async def recap(transcript: str, title: str = "") -> tuple[str, bool]:

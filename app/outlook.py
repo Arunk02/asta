@@ -678,7 +678,8 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
     # tell "prod is down" from "someone asked a question" at three in the morning.
     ranks = [v.priority for v in verdicts if v.priority is not None]
     await notify.notify(text, "outlook", urgency="direct" if needs else "ambient",
-                        priority=min(ranks) if ranks else None)
+                        priority=min(ranks) if ranks else None,
+                        considered=True)   # attention.consider ran above
 
 
 async def watch_loop() -> None:

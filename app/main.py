@@ -34,7 +34,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, router, quality, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, router, quality, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, workspace, workspace_tools
 
 UI_DIR = ROOT / "ui"
 
@@ -124,6 +124,10 @@ async def startup() -> None:
         daemon.start("teams_session", teams_bridge.session_watch_loop)
         if teams_bridge.ACTIVITY_POLL_SECONDS > 0:
             daemon.start("teams_activity", teams_bridge.activity_watch_loop)
+        # A selector that stopped matching returns nothing, which looks exactly
+        # like "no new messages" — so the break hides until it fails in front of
+        # somebody. Daily, supervised like every other loop.
+        daemon.start("selector_health", selector_health.watch_loop)
         daemon.start("outlook", outlook.watch_loop)
         # Needs the calendar, so it only runs when the Teams/Outlook bridge is up.
         daemon.start("premeeting", briefing.premeeting_loop)
@@ -154,6 +158,27 @@ async def _shutdown() -> None:
     # running. Without this, a restart would orphan the Node child and the next
     # start would find the port taken.
     await wa_bridge.stop()
+    # The Teams browser is now kept alive between operations rather than launched
+    # per call — which means it is Asta's to close. A restart would otherwise
+    # leave an orphaned Chromium holding the profile, and the next start would
+    # find it locked by a process nobody is watching.
+    with contextlib.suppress(Exception):
+        await teams_bridge.close_pool()
+
+
+def _mcp_for_turn(conv_id: str, user_text: str) -> list:
+    """The MCP servers this turn plausibly needs.
+
+    Every server used to be attached to every turn — measured at 32 tools and
+    ~6,205 tokens before Grafana could even be counted, which is more than the
+    entire native tool surface after narrowing. A question about last night's
+    Teams messages does not need twenty-six GitHub tools in its prompt.
+    """
+    wanted = tool_index.mcp_for(conv_id, user_text)
+    if wanted is None:
+        return MCP_TOOLSETS
+    return [ts for ts in MCP_TOOLSETS
+            if getattr(ts, "prefix", "") in wanted] if wanted else []
 
 
 async def _probe_mcp() -> None:
@@ -682,6 +707,48 @@ async def api_pr_review(request: Request):
     return _staged(await agent_mod.pr_review_post(
         str(b["pr"]), b["action"], b.get("body", ""),
         b.get("workspace", ""), b.get("repo", "")), before)
+
+
+@app.post("/api/pr-merge", dependencies=[Depends(require_auth)])
+async def api_pr_merge(request: Request):
+    """Stage a merge for Arun's yes. Never merges.
+
+    This endpoint is named in the `merge_pr` capability, which is how every CLI
+    brain is taught to reach it — and it did not exist, so the instruction was a
+    404 the brain would have had to work around. A capability that names an
+    endpoint must have one.
+    """
+    b = await request.json()
+    if not b.get("pr"):
+        raise HTTPException(400, "pr is required")
+    before = offers.pending()
+    return _staged(await agent_mod.merge_pr(
+        str(b["pr"]), b.get("workspace", ""), b.get("repo", ""),
+        b.get("method", "squash")), before)
+
+
+@app.get("/api/teams/search", dependencies=[Depends(require_auth)])
+async def api_teams_search(q: str = "", limit: int = 12):
+    """Search what Asta has ALREADY read of Teams — its own record, not all of Teams."""
+    if not q.strip():
+        raise HTTPException(400, "q is required")
+    return {"result": agent_mod.teams_search(q, limit)}
+
+
+@app.post("/api/teams/selector-check", dependencies=[Depends(require_auth)])
+async def api_selector_check():
+    """Check the critical Teams selectors against the live DOM. Read-only."""
+    return {"report": await selector_health.check_and_report()}
+
+
+@app.post("/api/evals", dependencies=[Depends(require_auth)])
+async def api_evals(request: Request):
+    """Score answers about a workspace against grounded cases. Costs brain calls."""
+    from . import evals
+    b = await request.json() if await request.body() else {}
+    out = await evals.run(b.get("workspace") or "booking")
+    return {"report": evals.report(out), "rate": out["rate"],
+            "passed": out["passed"], "total": out["total"]}
 
 
 def _staged(message: str, before) -> dict:
@@ -1531,7 +1598,7 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
         message_history=history or None,
         instructions=instructions,
         model_settings=agent_mod.model_settings(model_name),
-        toolsets=MCP_TOOLSETS or None,
+        toolsets=_mcp_for_turn(conv["id"], user_text) or None,
     ) as stream:
         async for event in stream:
             if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
@@ -2369,7 +2436,11 @@ async def _route_to_task(task_id: int, user_text: str, sink, channel: str,
         return True
     if intent == "redirect":
         with contextlib.suppress(Exception):
-            await tasks.cancel(task_id)
+            # His words ARE the correction. He is interrupting a running task to
+            # say it is going the wrong way, which is the clearest statement of
+            # the gap between what he asked for and what Asta understood that
+            # exists anywhere — and it used to be thrown away with the task.
+            await tasks.cancel(task_id, why=user_text)
         store.kv_set(f"task_addenda:{task_id}", "")   # drop anything buffered for it
         await sink.send({"type": "note",
                          "text": f"⏹ stopped task #{task_id} — tell me the new direction and I'll start fresh."})

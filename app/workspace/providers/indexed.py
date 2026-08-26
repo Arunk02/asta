@@ -62,6 +62,12 @@ def context_dirname(root: Path) -> str:
             return name
     return names[0]
 
+#: The resolver is documented as routing to "the ~350 tokens that matter";
+#: the cap was 20,000 characters, about 5,000 tokens, injected before the
+#: model had read the question. 6,000 characters is ~1,500 tokens — room for
+#: a real answer, a quarter of the old ceiling. Override if a workspace
+#: genuinely needs more.
+_RESOLVE_CHARS = int(os.environ.get("ASTA_RESOLVE_CHARS", "6000"))
 _RESOLVE_TIMEOUT = 60
 _GEN_TIMEOUT = 900
 
@@ -180,7 +186,27 @@ class IndexedProvider(ContextProvider):
                     f"(POST /api/workspaces/{{name}}/provision).")
         rc, out = await _run(["node", str(script), str(self.root), task],
                              self.root, _RESOLVE_TIMEOUT, self.ctx.name)
-        return out[:20_000] or "(resolver returned nothing)"
+        body = out[:_RESOLVE_CHARS] or "(resolver returned nothing)"
+        return f"{await self.freshness()}\n\n{body}"
+
+    async def freshness(self) -> str:
+        """One line saying how much this context can be trusted.
+
+        Drift was always detected, and always reported to Arun — never to the
+        thing about to answer from the context. So a model could not tell
+        knowledge verified this morning from knowledge verified never, and
+        answered with the same confidence either way. Telling it lets it hedge
+        where hedging is honest.
+        """
+        try:
+            stale = await self._sha_drift()
+        except Exception:
+            return "[context freshness: unknown — the drift check itself failed]"
+        if not stale:
+            return "[context freshness: verified against current HEAD]"
+        return ("[context freshness: STALE OR UNVERIFIED — treat the facts below as "
+                "possibly out of date and say so if it matters:\n  "
+                + "\n  ".join(stale[:6]) + "]")
 
     def conventions(self) -> str:
         """Lessons and pinned facts. These are FILES FROM THE USER'S WORKSPACE —
@@ -192,6 +218,23 @@ class IndexedProvider(ContextProvider):
                 body = f.read_text(errors="replace").strip()
                 if body:
                     parts.append(f"### {name}\n{body[:4000]}")
+        # PER-REPO lessons and pins, which this used to skip entirely. Measured:
+        # asked why the booking build fails with a FilerException — cause and fix
+        # both written down in that repo's own lessons.md — the answer came back
+        # "I couldn't find any reference to that". The workspace-level file is
+        # 1,163 characters and says nothing about MapStruct or how anything
+        # builds; everything specific lives one directory down. Capturing a
+        # lesson and never consulting it is the same as not capturing it.
+        repos_dir = self.ctx / "repos"
+        if repos_dir.is_dir():
+            for repo in sorted(p for p in repos_dir.iterdir() if p.is_dir()):
+                for name in ("lessons.md", "_pins.yml"):
+                    f = repo / name
+                    if not f.is_file():
+                        continue
+                    body = f.read_text(errors="replace").strip()
+                    if body:
+                        parts.append(f"### {repo.name}/{name}\n{body[:2500]}")
         return "\n\n".join(parts)
 
     def boot_command(self, hint: str = "") -> str | None:
@@ -224,13 +267,24 @@ class IndexedProvider(ContextProvider):
         for repo in self.services():
             idx = self.ctx / "repos" / repo / "_index.json"
             repo_dir = self.root / repo
-            if not idx.is_file() or not (repo_dir / ".git").exists():
+            if not idx.is_file():
+                continue
+            # A repo that cannot be verified is UNKNOWN, never clean. This used
+            # to `continue` past anything without a .git directory, so a
+            # workspace whose repos are not checkouts reported healthy forever
+            # while its context aged without limit — the exact false negative
+            # this function's docstring warns about, found live on a workspace
+            # where six of seven repos were skipped.
+            if not (repo_dir / ".git").exists():
+                stale.append(f"{repo}: cannot verify — no git checkout at {repo_dir}")
                 continue
             try:
                 recorded = json.loads(idx.read_text()).get("verified_against", "")
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                stale.append(f"{repo}: cannot verify — unreadable _index.json ({exc.__class__.__name__})")
                 continue
             if not recorded:
+                stale.append(f"{repo}: cannot verify — _index.json records no verified_against")
                 continue
             rc, head = await _run(["git", "rev-parse", "HEAD"], repo_dir, 30)
             head = head.strip()

@@ -287,3 +287,139 @@ async def post_review(pr: str, workspace: str, repo: str = "",
     verb = {"approve": "Approved", "comment": "Commented on",
             "request_changes": "Requested changes on"}[action]
     return f"{verb} PR #{pr.lstrip('#')}"
+
+
+async def review_own_diff(diff: str, workspace: str = "") -> str:
+    """Reviewer notes on a diff ASTA just wrote. '' when nothing can judge it.
+
+    The same machinery that reviews other people's pull requests, pointed at
+    Asta's own output — which it never was. A diff Asta produced went to a PR
+    unread by Asta, with Arun's own eyes as the only safety net, which is what
+    makes him the bottleneck on the work this is meant to take off him.
+
+    Reviewing your own work is worth less than reviewing someone else's, and the
+    prompt says so: it asks for what is WRONG, not for a summary, because a model
+    asked to describe its own change will describe it approvingly.
+    """
+    from . import memory
+    body = (diff or "").strip()
+    if len(body) < 40:
+        return ""
+    prompt = (
+        "You wrote this change. Review it as if a colleague had written it and you "
+        "were the one who has to maintain it.\n\n"
+        + _project_context(workspace, {}) + "\n\n"
+        "Report ONLY problems, in at most five short bullets: bugs, cases the change "
+        "does not handle, anything that contradicts the project conventions above, "
+        "anything left half-done. No summary of what the change does — Arun can read "
+        "the diff. If you genuinely find nothing wrong, reply with exactly: LOOKS SOUND.\n\n"
+        "DIFF:\n" + untrusted.wrap(_prioritise_diff(body), "diff written by Asta"))
+    notes = (await memory.cheap_complete(prompt, 500, paid_ok=True) or "").strip()
+    if not notes or notes.upper().startswith("LOOKS SOUND"):
+        return ""
+    return notes
+
+
+#: How a merge is performed. These repos squash by default; a merge commit per
+#: ticket makes `develop` unreadable, which is the shape of history Arun keeps.
+MERGE_METHODS = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}
+
+
+async def merge_state(pr: str, workspace: str, repo: str = "") -> dict:
+    """Everything that decides whether this PR may be merged, read from GitHub.
+
+    Read separately from the merge itself so the offer Arun sees carries the real
+    state — "CI green, 2 approvals, no conflicts" — rather than a promise that it
+    was checked. He is approving a fact, not a hope.
+    """
+    cwd = _repo_dir(workspace, repo)
+    rc, out = await _gh(cwd, "gh", "pr", "view", str(pr).lstrip("#"), "--json",
+                        "number,title,state,isDraft,mergeable,mergeStateStatus,"
+                        "reviewDecision,statusCheckRollup,headRefName,baseRefName")
+    if rc != 0:
+        raise RuntimeError(f"could not read PR {pr}: {out.strip()[:200]}")
+    try:
+        data = json.loads(out)
+    except ValueError as exc:
+        raise RuntimeError(f"could not parse PR {pr}: {exc}") from exc
+    checks = data.get("statusCheckRollup") or []
+    failing = [c.get("name") or c.get("context") or "?" for c in checks
+               if (c.get("conclusion") or c.get("state") or "").upper()
+               in ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT")]
+    pending = [c.get("name") or c.get("context") or "?" for c in checks
+               if (c.get("conclusion") or c.get("state") or "").upper()
+               in ("", "PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED")]
+    return {
+        "number": data.get("number"), "title": data.get("title", ""),
+        "state": data.get("state", ""), "draft": bool(data.get("isDraft")),
+        "mergeable": data.get("mergeable", ""),
+        "merge_state": data.get("mergeStateStatus", ""),
+        "review": data.get("reviewDecision", ""),
+        "head": data.get("headRefName", ""), "base": data.get("baseRefName", ""),
+        "failing": failing, "pending": pending, "checks": len(checks),
+    }
+
+
+def merge_blockers(state: dict) -> list[str]:
+    """Why this must not be merged right now. Empty means it may be.
+
+    Every one of these is something Arun would be embarrassed by afterwards, and
+    every one is knowable BEFORE the button is pressed. A merge is the single
+    least reversible thing in the whole system — it puts code on the branch other
+    people build from — so the check is deliberately conservative and says which
+    part failed rather than a bare refusal.
+    """
+    out = []
+    if (state.get("state") or "").upper() != "OPEN":
+        out.append(f"the PR is {(state.get('state') or 'not open').lower()}")
+    if state.get("draft"):
+        out.append("it is still a draft")
+    if (state.get("mergeable") or "").upper() == "CONFLICTING":
+        out.append(f"it conflicts with {state.get('base') or 'the base branch'}")
+    if state.get("failing"):
+        out.append("CI is red: " + ", ".join(state["failing"][:4]))
+    if state.get("pending"):
+        out.append("CI has not finished: " + ", ".join(state["pending"][:4]))
+    if (state.get("review") or "").upper() == "CHANGES_REQUESTED":
+        out.append("a reviewer has requested changes")
+    return out
+
+
+def merge_summary(state: dict) -> str:
+    """The state, as he would want it read out before saying yes."""
+    checks = ("no CI configured" if not state.get("checks")
+              else "CI red" if state.get("failing")
+              else "CI still running" if state.get("pending") else "CI green")
+    review = {"APPROVED": "approved", "CHANGES_REQUESTED": "changes requested",
+              "REVIEW_REQUIRED": "not yet approved", "": "no review decision"}.get(
+                  (state.get("review") or "").upper(), state.get("review", ""))
+    return (f"#{state.get('number')} {state.get('title', '')[:80]}\n"
+            f"{state.get('head', '?')} → {state.get('base', '?')} · {checks} · {review}")
+
+
+async def merge(pr: str, workspace: str, repo: str = "", method: str = "squash",
+                delete_branch: bool = True) -> str:
+    """Merge the PR. Re-checks the blockers immediately before doing it.
+
+    Re-checked rather than trusted: the state was read when the offer was made,
+    and Arun may say yes an hour later — by which time CI can have gone red or
+    somebody can have pushed a conflict. The gap between deciding and doing is
+    exactly where an unreversible action goes wrong.
+    """
+    flag = MERGE_METHODS.get(method)
+    if flag is None:
+        raise RuntimeError(f"unknown merge method '{method}' — one of: "
+                           + ", ".join(sorted(MERGE_METHODS)))
+    state = await merge_state(pr, workspace, repo)
+    blockers = merge_blockers(state)
+    if blockers:
+        raise RuntimeError("did NOT merge — " + "; ".join(blockers))
+    cwd = _repo_dir(workspace, repo)
+    args = ["gh", "pr", "merge", str(pr).lstrip("#"), flag]
+    if delete_branch:
+        args.append("--delete-branch")
+    rc, out = await _gh(cwd, *args, timeout=180)
+    if rc != 0:
+        raise RuntimeError(f"merge failed: {out.strip()[:300]}")
+    return (f"merged #{state['number']} ({method}) into {state['base']}"
+            + (" and deleted the branch" if delete_branch else ""))

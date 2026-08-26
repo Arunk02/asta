@@ -100,6 +100,12 @@ what it learns day by day.
 | "delegate a task to analyze X" | parallel background worker; chat stays free; result pushed to phone |
 | "draft a Teams reply to Vinish saying …" | draft task → held for your approval → "approve task N" sends it |
 | "read my Teams chat with Vinish" | Playwright bridge reads via your web session |
+| "review PR 123 in booking" | reads PR + diff + CI + your context → reviewer notes; posting is staged |
+| "merge PR 123 in booking" | staged — and **refused** if CI is red, still running, conflicted, draft, or changes requested |
+| "call Vinish" | places a Teams call; muted, camera off, hangs up if unanswered in 45s |
+| "say X in the call" | speaks only if a virtual mic is configured, and never once you have spoken in that call |
+| "check teams selectors" | health-checks the 7 critical Teams selectors against live Teams |
+| "run evals" | grounded correctness cases — deterministic tier is free, live tier costs a brain call |
 | "any mentions / anything for me?" | Teams activity feed, read live (pre-fetched in Python — works even when Copilot's shell is blocked) |
 | "any mail needing my attention?" / "what meetings today?" | Outlook web, read live via the same session |
 | "remind me at 15:00 to reply to Vinish" / "…every weekday at 9" | fires on phone + UI |

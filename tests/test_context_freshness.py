@@ -120,7 +120,7 @@ def test_never_enriched_is_treated_as_seriously_as_long_neglect():
 def _report(monkeypatch, workspace="booking", detail=DETAIL):
     sent = []
 
-    async def fake_notify(text, kind, urgency="direct", priority=None):
+    async def fake_notify(text, kind, urgency="direct", priority=None, **kw):
         sent.append((text, priority))
 
     monkeypatch.setattr("app.notify.notify", fake_notify)

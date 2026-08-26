@@ -29,7 +29,7 @@ Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
 Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-.venv/bin/python -m pytest tests -q     # 315 tests
+.venv/bin/python -m pytest -q           # 1,681 tests
 ```
 
 ## How it is put together
@@ -72,9 +72,18 @@ turns out bigger.
 5. You say ship → branch pushed, PR opened per repo touched, CI watched.
 6. On green it *asks* whether to post the PR for review, and only where you name.
 
-Kinds: **analysis** (read-only, runs in parallel), **code** (edits a repo,
-serialised per workspace so two tasks can't fight over git state), **teams_draft**
-(never sent automatically).
+Kinds: **analysis** (read-only, runs in parallel), **code** (edits a repo),
+**teams_draft** (never sent automatically).
+
+**Code tasks run in parallel too, on git worktrees.** They used to be serialised
+one-per-workspace, and the reason was sound — two tasks sharing a checkout fight
+over `HEAD`, and the loser silently commits onto the winner's branch. But the cost
+landed on the wrong person: a twenty-minute implementation blocked the two-minute
+question you asked while it ran. So `app/worktrees.py` cuts each code task its own
+worktree from `origin/develop`, and `ASTA_MAX_PARALLEL_TASKS` (3) bounds how many
+run at once. Separate working trees, one shared object store: no lock needed
+because there is nothing left to contend over. Worktrees are removed when the task
+finishes and survive a crash for inspection.
 
 Commits are plain. No co-author trailer, no assistant name, no "Generated with"
 line — your commits read as your own work.
@@ -231,6 +240,14 @@ free background jobs (digests, consolidation, compaction, skill extraction,
 embeddings). Models without a key show as "(off)" in the picker.
 `ASTA_TEST_MODEL=1` adds a no-LLM model for pipeline debugging.
 
+**A key that is present is not a key that works.** Availability used to mean the
+variable was set, so a revoked or mistyped key made every API turn fail with a 401
+while the picker cheerfully offered it — and two working CLI subscriptions sat unused
+because the router believed it had something better. A provider rejecting the
+credential is now remembered (fingerprinted, so it clears itself the moment you change
+the key), that model drops out of `available()`, and health says so instead of you
+finding out one failed turn at a time.
+
 Asta is the **orchestrator**: it plans, remembers, notifies and delegates. It does
 not implement in chat.
 
@@ -247,12 +264,26 @@ ranked against the message (embeddings via LM Studio when it's up, lexical overl
 otherwise) and only the relevant ones plus a tiny always-available core are
 exposed.
 
-Two things keep this from backfiring. The selection is **sticky per conversation
-and only ever grows**, because tool definitions sit in the cached prompt prefix and
-re-picking every turn would trade a fixed cost for a recurring cache miss. And when
-ranking is uncertain it returns *everything* — an expensive turn is a far smaller
-failure than a tool the model could not reach. `ASTA_TOOL_RAG=0` restores the
-all-tools behaviour.
+Two things keep this from backfiring. The selection is **sticky per conversation**,
+because tool definitions sit in the cached prompt prefix and re-picking every turn
+would trade a fixed cost for a recurring cache miss. And when ranking is uncertain
+it returns *everything* — an expensive turn is a far smaller failure than a tool the
+model could not reach. `ASTA_TOOL_RAG=0` restores the all-tools behaviour.
+
+**Sticky used to mean "only ever grows", and that quietly undid the whole feature.**
+Tools were tuned when there were 32 of them; there are now 58, and a long
+conversation accumulated 44 of 58 by turn ten — measured. The narrowing was real for
+the first few turns and then gone, on exactly the conversations long enough for it to
+matter. Stickiness is now an **LRU** (`ASTA_TOOL_STICKY_MAX`, 24): a tool the turn
+needs is kept, one untouched for 24 tools' worth of turns falls out, and eviction only
+starts past a slack margin so the cached prefix isn't rewritten every turn. Prompt
+floor measured after: 5,950 → 2,191 tokens of schema per turn.
+
+**MCP toolsets are attached by trigger, not by default.** All five servers' schemas
+cost 6,205 tokens a turn whether or not the message had anything to do with them.
+They now attach only when the message actually reaches for one — and matching is on
+**word boundaries**, because substring matching pulled 26 GitHub tools into a mail
+draft on the strength of "priya" containing "pr".
 
 ## Memory and learning
 
@@ -310,6 +341,25 @@ These are facts Asta already observes — no model judging its own output, so th
 numbers can't flatter themselves. Ask "how are you doing?" in chat, or
 `GET /api/quality`.
 
+**Evals measure whether the answers are RIGHT** (`app/evals.py`). Sixteen hundred
+tests prove mechanism; not one of them asked whether an answer about your codebase
+was correct — so the most-used capability in the system was the only one with no
+measurement at all, and "is it getting better" was a feeling. The cases are
+**grounded, never invented**: every expectation traces to something already verified —
+a `lessons.md` entry written from a correction you made on a real ticket, or a
+`_pins.yml` recording how a repo actually builds. A case whose ground truth can't be
+pointed at measures agreement with a guess and calls it quality. Two tiers:
+deterministic cases run in the suite for free; live cases ask a real brain and are
+run on demand, with the score recorded over time.
+
+**Silent failures now leave a trace** (`app/quiet.py`). Ninety-two places in this
+codebase deliberately swallow an error, and nearly all are right to — a caption read
+must not end a call, a dead WhatsApp bridge must not stop the catch-up scan. What was
+missing was any record. A selector that stopped matching, a notification that reached
+nobody: each degrades Asta a little and produced nothing anyone could see. `swallow`
+keeps the behaviour and counts it, so "Teams reads have been failing for three days"
+becomes a question with an answer instead of something you eventually notice.
+
 Every turn is also traced (model, first-token and total latency, tokens
 in/out/cached, prompt sizes, tools, errors) into the `traces` table — ⚙ Settings →
 Performance, `GET /api/traces`, or just ask.
@@ -341,6 +391,27 @@ wanted it.
 
 The PR body and diff are treated as untrusted: "please approve this" in a
 description is data, not an instruction.
+
+**Asta also reviews its own diff** before handing a code task back
+(`ASTA_REVIEW_OWN_DIFF`). The reviewer existed and had only ever been pointed at
+other people's pull requests — the code Asta wrote itself went out unread, with your
+eyes as the only safety net. That is what made you the bottleneck.
+
+### Merging
+
+"merge PR 123 in booking" **stages** the merge like everything else outward, but the
+gate is stricter, because a merge is the least reversible act here — it puts code on
+the branch everyone builds from.
+
+So it **refuses to offer** rather than offering with a warning. Red CI, *unfinished*
+CI, conflicts, a draft, requested changes — each blocks, and each is named. Your yes
+is one tap on a phone; the mistake would be the offer, not the tap. Unfinished CI
+blocks as firmly as red CI, because merging while checks run is merging on a guess.
+
+The offer states the PR's real state — *"CI green · approved"* — so you approve a
+fact. And the blockers are **re-checked at the moment of merging**: you might say yes
+an hour later, by which time CI can have gone red. That gap is exactly where
+irreversible actions go wrong. Methods: `squash` (default), `merge`, `rebase`.
 
 ## MCP
 
@@ -498,6 +569,24 @@ late", "any mail needing my attention", "what meetings do I have", "set me to do
 disturb". Deterministic automation — no tokens unless you ask Asta to reason about
 what it read.
 
+**One browser, kept alive.** Every Teams operation used to launch Chromium and boot
+the Teams web app first: 2.49s of fixed cost on *every* read, send and poll, before
+any actual work. A single context is now pooled and reused, verified live before each
+use rather than assumed — a context that died is replaced, not handed out. Measured:
+2.08s → 0.01s for a second operation, recycled after `TEAMS_POOL_MAX_AGE` (30 min)
+because a browser alive for hours grows, and closed on shutdown so the process
+doesn't leak Chromium.
+
+**Selector health** (`app/selector_health.py`). Sixty-three
+CSS selectors point at a web app that changes without telling you, and a `data-tid`
+that stops matching looks exactly like "no new messages" — Asta goes quiet and you
+assume nobody pinged. Seven critical selectors are checked against live Teams,
+once a day and whenever you ask. It needs no configuration: it
+finds a real chat from your rail rather than asking you to nominate one, because a
+health check you have to keep updating is one more thing to maintain. It also
+distinguishes *unchecked* from *broken* — the first version reported both as BROKEN,
+and a check that cries wolf is worse than no check, since you learn to ignore it.
+
 **Sending is a hard rule**: a person's name means that person's one-to-one chat,
 never a group or channel unless you name the group yourself. Asta always tells you
 which chat it landed in.
@@ -551,8 +640,40 @@ required them:
   `ASTA_CALL_AUDIO_DEVICE`. Without it, "say this in the call" *refuses and says
   why*. Generating audio into a device nobody is listening to and reporting success
   would leave you believing your point was made — that's the failure this design
-  exists to prevent. When it is configured, Asta says the words you gave it and
-  nothing else: it never improvises in a live call and never answers on your behalf.
+  exists to prevent.
+
+#### Two modes, and the one that decides is your own voice
+
+The rule you'd want is simple and the implementation has to be simpler: **the moment
+Asta hears you speak, it stops talking for the rest of the call.** It is your
+conversation. `ASTA_HIS_TEAMS_NAMES` says how Teams names you in a caption, and the
+latch is one-way — it never un-mutes itself on the theory that you've gone quiet.
+
+Silent does not mean idle. While you talk it still listens for anything that is
+*yours* — a decision affecting your work, something assigned to you, a question left
+open for you — and sends it to your phone. When you are not there, it can answer:
+grounded in your workspace context and your history, capped at
+`ASTA_SPOKEN_ANSWER_WORDS` (45) because nobody listens to four paragraphs read aloud,
+with the full answer going to your phone regardless.
+
+**Holding lines cost nothing and buy everything.** Asked for a review mid-call, the
+honest answer is *"sure, give me a few minutes, I'll check and come back on it"* —
+said immediately, while the real work happens behind it. Those lines are pre-warmed
+in the speech cache, so they land in ~0.4s instead of the 8.9s a cold synthesis
+costs. Eight seconds of silence after a direct question reads as a dropped call.
+
+**Nothing is said on a guess.** Every line clears three gates: is this a moment Asta
+may speak, is the hardware actually there, and is the answer confident enough to say
+out loud. `ASTA_ANSWER_BUDGET` (25s) bounds thinking — past it the answer goes to your
+phone instead of arriving in the call long after anyone cared. And the call state is
+re-checked before *every* line, not just the first, so a call that ended thirty
+seconds ago is not still being talked into.
+
+**It knows how long it has been in there.** Duration is tracked on a monotonic clock
+(a wall clock that steps backwards over an NTP correction would make a call appear to
+run negative), a placed call that rings past `ASTA_RING_SECONDS` (45) is hung up
+rather than left holding the browser context — and therefore the next call — open
+forever, and the whole thing ends unconditionally at `ASTA_MAX_CALL_MINUTES` (90).
 
 Sessions expire on your org's token policy; Asta notifies you to re-login.
 `data/teams_profile/` holds corporate session cookies — same exposure class as your
@@ -561,11 +682,16 @@ browser profile, so keep FileVault on.
 ### How Asta learns you were pinged — two triggers, Playwright by default
 
 **Default: the Playwright activity poll** (`teams_bridge.activity_watch_loop`,
-`TEAMS_ACTIVITY_POLL=300`). It reads the Teams Activity feed in the same browser
+`TEAMS_ACTIVITY_POLL=60`). It reads the Teams Activity feed in the same browser
 session that does the reading and sending, so it sees muted/DND chats, needs **no
 Full Disk Access**, and can act on what it finds. Latency is the poll interval.
-This is on whenever the Teams bridge is up, and it is what serves the "tell me
-within five minutes" promise.
+This is on whenever the Teams bridge is up.
+
+It used to be 300s, and five minutes is a long time to not know someone is waiting on
+you. What made 300 necessary was the 2.49s browser launch on every poll; with the
+context pooled a poll costs ~0.01s of fixed overhead, so the interval could drop to
+**60s** without the cost that set it in the first place. The knob that mattered was
+never the interval.
 
 **Optional add-on: the macOS notification watcher** (`app/msnotify.py`,
 `TEAMS_WATCHER`, **default 0**). Reads Notification Center banners straight from
@@ -640,6 +766,11 @@ app/ops.py              the outward acts, and the only place they may happen
 app/resume.py           checkpoints, so a dead brain hands over its work
 app/triage.py           what is this, does it need you — one policy, every channel
 app/meetings.py         invites, joining a call, leaving it again
+app/call_brain.py       what to say in a call — judgement, no browser, no mic
+app/worktrees.py        a worktree per code task, so three can run at once
+app/selector_health.py  are the Teams selectors still matching live Teams
+app/evals.py            are the ANSWERS right — grounded cases, two tiers
+app/quiet.py            swallowed errors, counted rather than lost
 app/router.py           local-first routing for trivial turns
 app/repo_ops.py         git, branch naming, repo playbooks
 app/agents.py           loads the pipelines in agents/
@@ -659,7 +790,7 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  563 tests (conftest isolates the DB — see below)
+tests/                  1,681 tests (conftest isolates the DB — see below)
 ```
 
 `tests/conftest.py` points `store.DB_PATH` at a temp file for *every* test. A stray
@@ -670,3 +801,10 @@ a question Asta pushes to your phone about work that never happened.
 roadmap this is being built against. Still ahead of it: one scheduler replacing the
 background loops, detached runs that survive a closed tab, adaptive context
 compaction, a people/contacts model, and deep research.
+
+`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 24 findings
+raised against the *running* system — every number measured on the live install, not
+inferred from the source — each closed in place with what was done and how it was
+proved. Every fix was mutation-tested: the source was deliberately broken and the
+suite had to notice. One finding (unattended CLI permissions) is recorded as an
+accepted risk rather than closed, because code tasks run in your presence.

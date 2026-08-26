@@ -25,13 +25,15 @@ several fallbacks and fail with a clear error instead of guessing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import time
 import re
 import sys
 from pathlib import Path
 
-from . import store, wake
+from . import quiet, store, wake
 
 PROFILE_DIR = Path(__file__).resolve().parent.parent / "data" / "teams_profile"
 TEAMS_URL = "https://teams.microsoft.com/v2/"
@@ -68,9 +70,110 @@ async def _launch(headless: bool = True):
         str(PROFILE_DIR),
         headless=headless,
         viewport={"width": 1440, "height": 900},
-        args=["--disable-blink-features=AutomationControlled"],
+        # Teams cannot start a call without getUserMedia, and a fresh Playwright
+        # context denies microphone access SILENTLY — the call button clicks
+        # fine, Teams asks the browser for a mic, is refused, and simply never
+        # starts a call. From the outside that looks exactly like a bad
+        # selector, which is where two hours went.
+        permissions=["microphone", "camera"],
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            # Belt and braces: suppress the media picker Chromium would
+            # otherwise raise, which nothing is there to click.
+            "--use-fake-ui-for-media-stream",
+        ],
     )
     return pw, ctx
+
+
+# --- one browser, kept alive --------------------------------------------------
+#
+# Every Teams operation used to launch Chromium, boot the Teams SPA, do its work
+# and throw the whole thing away: 2.49 seconds measured — 0.74s launch, 1.75s app
+# boot — paid before any actual work, on every read, every send, every poll of the
+# activity feed. With a five-minute poll that overhead is invisible; the moment
+# Arun asks for something it is most of the wait.
+#
+# The context is now kept and reused. What makes that safe rather than clever is
+# that it is VERIFIED live before every hand-out and discarded on any doubt: a
+# stale context costs one relaunch, while a stale context believed healthy costs
+# a silent failure in front of somebody.
+#
+# Headed contexts (calls) are deliberately never pooled — a call owns its window
+# for as long as the call lasts, and closing it is what hanging up means.
+
+_POOL: dict = {}
+#: Recycled on this cadence regardless of health. A browser alive for hours grows,
+#: and Teams' own session handling is happier with a fresh app boot now and then.
+POOL_MAX_AGE = float(os.environ.get("TEAMS_POOL_MAX_AGE", "1800"))
+
+
+async def _pool_alive() -> bool:
+    """Whether the pooled page can still be used. Cheap, and never optimistic."""
+    page = _POOL.get("page")
+    if page is None:
+        return False
+    if time.time() - _POOL.get("born", 0) > POOL_MAX_AGE:
+        return False
+    try:
+        # A real round-trip to the page. `page.is_closed()` alone lies: the tab can
+        # be open while the renderer behind it is gone.
+        return bool(await page.evaluate("() => !!document.querySelector('body')"))
+    except Exception:
+        return False
+
+
+async def _discard_pool() -> None:
+    ctx, pw = _POOL.get("ctx"), _POOL.get("pw")
+    _POOL.clear()
+    for closer in (ctx, pw):
+        if closer is None:
+            continue
+        with contextlib.suppress(Exception):
+            await (closer.close() if hasattr(closer, "close") else closer.stop())
+
+
+async def _pooled_page():
+    """A live, authenticated Teams page — reused when possible, rebuilt when not."""
+    if await _pool_alive():
+        return _POOL["page"]
+    await _discard_pool()
+    pw, ctx = await _launch(headless=True)
+    try:
+        page = await _open_teams(ctx)
+    except Exception:
+        with contextlib.suppress(Exception):
+            await ctx.close()
+        with contextlib.suppress(Exception):
+            await pw.stop()
+        raise
+    _POOL.update(pw=pw, ctx=ctx, page=page, born=time.time())
+    return page
+
+
+@contextlib.asynccontextmanager
+async def teams_page():
+    """The one way a headless operation gets at Teams.
+
+    Serialised by the same lock as before — a Chromium profile is single-writer —
+    but the expensive part now happens once rather than per operation.
+    """
+    async with _lock:
+        page = await _pooled_page()
+        try:
+            yield page
+        except Exception:
+            # The operation failed with the page in an unknown state: half-typed
+            # into a composer, a dialog open, a navigation in flight. Reusing that
+            # is how one failure becomes several, so it is thrown away.
+            await _discard_pool()
+            raise
+
+
+async def close_pool() -> None:
+    """Drop the pooled browser — on shutdown, or when the session is re-logged."""
+    async with _lock:
+        await _discard_pool()
 
 
 # Markers that only exist in the authenticated Teams app (NOT its pre-redirect shell
@@ -543,39 +646,33 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
     next question about the same thread can often be answered without opening a
     browser at all.
     """
-    async with _lock:
-        pw, ctx = await _launch()
-        try:
-            page = await _open_teams(ctx)
-            await _find_chat(page, chat, allow_group=True)  # reading a group is harmless
-            title = await _chat_title(page) or chat
+    async with teams_page() as page:
+        await _find_chat(page, chat, allow_group=True)  # reading a group is harmless
+        title = await _chat_title(page) or chat
 
-            raw = await page.evaluate(_MESSAGE_JS, 0)
-            # Only a time-windowed question justifies scrolling. "The last 15
-            # messages" is already on screen, and paying seconds to fetch older
-            # ones nobody asked for is how a read turns into half a minute.
-            for _ in range(max(0, max_scrolls) if since is not None else 0):
-                # Stop as soon as the thread reaches back past what was asked
-                # for — scrolling further would cost seconds and buy nothing.
-                if raw:
-                    oldest = _to_epoch(raw[0].get("iso", ""))
-                    if oldest is not None and oldest <= since:
-                        break
-                if not await page.evaluate(_SCROLL_JS):
+        raw = await page.evaluate(_MESSAGE_JS, 0)
+        # Only a time-windowed question justifies scrolling. "The last 15
+        # messages" is already on screen, and paying seconds to fetch older
+        # ones nobody asked for is how a read turns into half a minute.
+        for _ in range(max(0, max_scrolls) if since is not None else 0):
+            # Stop as soon as the thread reaches back past what was asked
+            # for — scrolling further would cost seconds and buy nothing.
+            if raw:
+                oldest = _to_epoch(raw[0].get("iso", ""))
+                if oldest is not None and oldest <= since:
                     break
-                await asyncio.sleep(SCROLL_SETTLE_SECONDS)
-                grown = await page.evaluate(_MESSAGE_JS, 0)
-                # No new messages loaded means we are at the top of the thread;
-                # continuing would spin against an unmoving pane.
-                if len(grown) <= len(raw):
-                    raw = grown
-                    break
+            if not await page.evaluate(_SCROLL_JS):
+                break
+            await asyncio.sleep(SCROLL_SETTLE_SECONDS)
+            grown = await page.evaluate(_MESSAGE_JS, 0)
+            # No new messages loaded means we are at the top of the thread;
+            # continuing would spin against an unmoving pane.
+            if len(grown) <= len(raw):
                 raw = grown
+                break
+            raw = grown
 
-            store.kv_set("teams_session_ok", "1")
-        finally:
-            await ctx.close()
-            await pw.stop()
+        store.kv_set("teams_session_ok", "1")
 
     rows = _capture(title, raw)
     if since is not None:
@@ -589,81 +686,75 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
     Groups/channels require allow_group=True — Arun's standing rule is that a
     "ping X" means X's personal chat, never a team channel.
     """
-    async with _lock:
-        pw, ctx = await _launch()
-        try:
-            page = await _open_teams(ctx)
-            title = await _find_chat(page, chat, allow_group=allow_group)
-            box = None
-            for sel in ('[data-tid="ckeditor"] [contenteditable="true"]',
-                        'div[contenteditable="true"][role="textbox"]',
-                        '[data-tid="message-input"]'):
-                try:
-                    box = await page.wait_for_selector(sel, timeout=6000)
+    async with teams_page() as page:
+        title = await _find_chat(page, chat, allow_group=allow_group)
+        box = None
+        for sel in ('[data-tid="ckeditor"] [contenteditable="true"]',
+                    'div[contenteditable="true"][role="textbox"]',
+                    '[data-tid="message-input"]'):
+            try:
+                box = await page.wait_for_selector(sel, timeout=6000)
+                break
+            except Exception:
+                continue
+        if not box:
+            raise RuntimeError("message box not found — Teams UI changed")
+        await box.click()
+        await box.focus()
+        # Teams' ckeditor sends the message on a bare Enter — it does NOT
+        # insert a newline. box.type() presses a real Enter for every "\n"
+        # in the string, so a multi-line message used to go out as one
+        # fragmented, garbled send per line. Shift+Enter inserts a soft
+        # line break instead.
+        #
+        # insert_text (not type) puts each line in as ONE atomic input event.
+        # type() streams per-character keystrokes, and the first few were
+        # landing before the editor had finished focusing — the "iff got
+        # truncated" instead of "1) Diff got truncated" that reached Vinish.
+        # As a bonus, insert_text doesn't fire the keypress that turns a
+        # leading "- " into an auto-list, so bullet lines stay literal.
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if line:
+                await page.keyboard.insert_text(line)
+            if i < len(lines) - 1:
+                await page.keyboard.press("Shift+Enter")
+        # A line starting with "- " or "* " auto-converts to a bullet list
+        # in ckeditor; once that happens, a bare Enter just adds another
+        # list item instead of submitting, so the message never sends.
+        # The Send button always submits regardless of list state — prefer
+        # it, and only fall back to Enter if the UI doesn't expose one.
+        sent_via_button = False
+        for sel in ('button[data-tid="sendMessageCommand"]',
+                    'button[aria-label="Send"]',
+                    'button[aria-label*="Send message"]'):
+            try:
+                send_btn = await page.wait_for_selector(sel, timeout=2000)
+                if send_btn:
+                    await send_btn.click()
+                    sent_via_button = True
                     break
-                except Exception:
-                    continue
-            if not box:
-                raise RuntimeError("message box not found — Teams UI changed")
-            await box.click()
-            await box.focus()
-            # Teams' ckeditor sends the message on a bare Enter — it does NOT
-            # insert a newline. box.type() presses a real Enter for every "\n"
-            # in the string, so a multi-line message used to go out as one
-            # fragmented, garbled send per line. Shift+Enter inserts a soft
-            # line break instead.
-            #
-            # insert_text (not type) puts each line in as ONE atomic input event.
-            # type() streams per-character keystrokes, and the first few were
-            # landing before the editor had finished focusing — the "iff got
-            # truncated" instead of "1) Diff got truncated" that reached Vinish.
-            # As a bonus, insert_text doesn't fire the keypress that turns a
-            # leading "- " into an auto-list, so bullet lines stay literal.
-            lines = text.split("\n")
-            for i, line in enumerate(lines):
-                if line:
-                    await page.keyboard.insert_text(line)
-                if i < len(lines) - 1:
-                    await page.keyboard.press("Shift+Enter")
-            # A line starting with "- " or "* " auto-converts to a bullet list
-            # in ckeditor; once that happens, a bare Enter just adds another
-            # list item instead of submitting, so the message never sends.
-            # The Send button always submits regardless of list state — prefer
-            # it, and only fall back to Enter if the UI doesn't expose one.
-            sent_via_button = False
-            for sel in ('button[data-tid="sendMessageCommand"]',
-                        'button[aria-label="Send"]',
-                        'button[aria-label*="Send message"]'):
-                try:
-                    send_btn = await page.wait_for_selector(sel, timeout=2000)
-                    if send_btn:
-                        await send_btn.click()
-                        sent_via_button = True
-                        break
-                except Exception:
-                    continue
-            if not sent_via_button:
-                await page.keyboard.press("Enter")
-            await asyncio.sleep(2.5)  # let the send complete before verifying
-            # Verify rather than assume: read the thread back and confirm the
-            # text is really the last thing in it. "Sent ✅" must mean sent.
-            landed = await page.evaluate(
-                """(txt) => {
-                    const nodes = document.querySelectorAll(
-                      '[data-tid="chat-pane-message"], [data-tid="messageBodyContent"]');
-                    const tail = Array.from(nodes).slice(-4)
-                        .map(n => (n.innerText || '').replace(/\\s+/g, ' ').trim());
-                    const want = txt.replace(/\\s+/g, ' ').trim();
-                    return tail.some(t => t.includes(want));
-                }""", text)
-            if not landed:
-                raise RuntimeError(
-                    f"message does not appear in '{title}' after sending — treat as NOT sent")
-            store.kv_set("teams_session_ok", "1")
-            return title
-        finally:
-            await ctx.close()
-            await pw.stop()
+            except Exception:
+                continue
+        if not sent_via_button:
+            await page.keyboard.press("Enter")
+        await asyncio.sleep(2.5)  # let the send complete before verifying
+        # Verify rather than assume: read the thread back and confirm the
+        # text is really the last thing in it. "Sent ✅" must mean sent.
+        landed = await page.evaluate(
+            """(txt) => {
+                const nodes = document.querySelectorAll(
+                  '[data-tid="chat-pane-message"], [data-tid="messageBodyContent"]');
+                const tail = Array.from(nodes).slice(-4)
+                    .map(n => (n.innerText || '').replace(/\\s+/g, ' ').trim());
+                const want = txt.replace(/\\s+/g, ' ').trim();
+                return tail.some(t => t.includes(want));
+            }""", text)
+        if not landed:
+            raise RuntimeError(
+                f"message does not appear in '{title}' after sending — treat as NOT sent")
+        store.kv_set("teams_session_ok", "1")
+        return title
 
 
 async def resolve_target(chat: str, allow_group: bool = False) -> dict:
@@ -675,16 +766,10 @@ async def resolve_target(chat: str, allow_group: bool = False) -> dict:
     this actually reach" before committing to it — and the only way to exercise
     group targeting without putting a test message in front of fourteen people.
     """
-    async with _lock:
-        pw, ctx = await _launch()
-        try:
-            page = await _open_teams(ctx)
-            title = await _find_chat(page, chat, allow_group=allow_group)
-            store.kv_set("teams_session_ok", "1")
-            return {"asked": chat, "opened": title, "allow_group": allow_group}
-        finally:
-            await ctx.close()
-            await pw.stop()
+    async with teams_page() as page:
+        title = await _find_chat(page, chat, allow_group=allow_group)
+        store.kv_set("teams_session_ok", "1")
+        return {"asked": chat, "opened": title, "allow_group": allow_group}
 
 
 # --- presence ----------------------------------------------------------------
@@ -748,22 +833,16 @@ def presence_label(wanted: str) -> str:
 
 async def read_presence() -> str:
     """His current Teams status, as Teams reports it ("" when undetermined)."""
-    async with _lock:
-        pw, ctx = await _launch()
-        try:
-            page = await _open_teams(ctx)
-            return await page.evaluate(
-                """() => {
-                    const el = document.querySelector(
-                        '[data-tid="me-control-avatar"], #idna-me-control, [data-tid="me-control"]');
-                    const label = (el && el.getAttribute('aria-label')) || '';
-                    const m = label.match(
-                        /(Available|Busy|Do not disturb|Be right back|Away|Offline)/i);
-                    return m ? m[1] : '';
-                }""")
-        finally:
-            await ctx.close()
-            await pw.stop()
+    async with teams_page() as page:
+        return await page.evaluate(
+            """() => {
+                const el = document.querySelector(
+                    '[data-tid="me-control-avatar"], #idna-me-control, [data-tid="me-control"]');
+                const label = (el && el.getAttribute('aria-label')) || '';
+                const m = label.match(
+                    /(Available|Busy|Do not disturb|Be right back|Away|Offline)/i);
+                return m ? m[1] : '';
+            }""")
 
 
 async def set_presence(wanted: str) -> str:
@@ -774,48 +853,42 @@ async def set_presence(wanted: str) -> str:
     Not Disturb and takes the call he was avoiding.
     """
     label = presence_label(wanted)
-    async with _lock:
-        pw, ctx = await _launch()
-        try:
-            page = await _open_teams(ctx)
-            opened = False
-            for sel in _ME_CONTROL.split(", "):
-                try:
-                    await (await page.wait_for_selector(sel, timeout=4000)).click()
-                    opened = True
+    async with teams_page() as page:
+        opened = False
+        for sel in _ME_CONTROL.split(", "):
+            try:
+                await (await page.wait_for_selector(sel, timeout=4000)).click()
+                opened = True
+                break
+            except Exception:
+                continue
+        if not opened:
+            raise RuntimeError("couldn't open the Teams profile menu — UI changed")
+        await asyncio.sleep(1.2)
+        # The menu shows the CURRENT status as the submenu trigger, so the
+        # target label may need one hop through whatever it currently says.
+        if not await page.evaluate(_CLICK_BY_TEXT, label):
+            for trigger in ("Available", "Busy", "Do not disturb", "Be right back",
+                            "Away", "Offline", "Set status"):
+                if await page.evaluate(_CLICK_BY_TEXT, trigger):
+                    await asyncio.sleep(1.0)
                     break
-                except Exception:
-                    continue
-            if not opened:
-                raise RuntimeError("couldn't open the Teams profile menu — UI changed")
-            await asyncio.sleep(1.2)
-            # The menu shows the CURRENT status as the submenu trigger, so the
-            # target label may need one hop through whatever it currently says.
             if not await page.evaluate(_CLICK_BY_TEXT, label):
-                for trigger in ("Available", "Busy", "Do not disturb", "Be right back",
-                                "Away", "Offline", "Set status"):
-                    if await page.evaluate(_CLICK_BY_TEXT, trigger):
-                        await asyncio.sleep(1.0)
-                        break
-                if not await page.evaluate(_CLICK_BY_TEXT, label):
-                    raise RuntimeError(f"couldn't find '{label}' in the status menu")
-            await asyncio.sleep(2.0)
-            now = await page.evaluate(
-                """() => {
-                    const el = document.querySelector(
-                        '[data-tid="me-control-avatar"], #idna-me-control, [data-tid="me-control"]');
-                    const m = ((el && el.getAttribute('aria-label')) || '').match(
-                        /(Available|Busy|Do not disturb|Be right back|Away|Offline)/i);
-                    return m ? m[1] : '';
-                }""")
-            store.kv_set("teams_session_ok", "1")
-            if now and now.lower() not in label.lower():
-                raise RuntimeError(
-                    f"asked for {label} but Teams still reads {now} — treat as NOT set")
-            return now or label
-        finally:
-            await ctx.close()
-            await pw.stop()
+                raise RuntimeError(f"couldn't find '{label}' in the status menu")
+        await asyncio.sleep(2.0)
+        now = await page.evaluate(
+            """() => {
+                const el = document.querySelector(
+                    '[data-tid="me-control-avatar"], #idna-me-control, [data-tid="me-control"]');
+                const m = ((el && el.getAttribute('aria-label')) || '').match(
+                    /(Available|Busy|Do not disturb|Be right back|Away|Offline)/i);
+                return m ? m[1] : '';
+            }""")
+        store.kv_set("teams_session_ok", "1")
+        if now and now.lower() not in label.lower():
+            raise RuntimeError(
+                f"asked for {label} but Teams still reads {now} — treat as NOT set")
+        return now or label
 
 
 #: How many times to re-try opening the Activity tab before giving up on a poll.
@@ -859,48 +932,42 @@ async def read_activity_rows(limit: int = 25) -> list[dict]:
     already opened must stop being pushed. `unread` is None when the page gave no
     usable signal — the caller must then suppress nothing.
     """
-    async with _lock:
-        pw, ctx = await _launch()
-        try:
-            page = await _open_teams(ctx)
-            await _open_activity(page)
-            await asyncio.sleep(3)  # virtualized feed renders after the header
-            rows = await page.evaluate(
-                """() => {
-                    const boxes = Array.from(document.querySelectorAll('[role="listbox"]'))
-                      .filter(b => !b.closest('[data-tid="ms-searchux-popup"]')
-                                   && b.innerText.trim().length > 20);
-                    if (!boxes.length) return [];
-                    const box = boxes.sort((a, b) => b.innerText.length - a.innerText.length)[0];
-                    let nodes = box.querySelectorAll('[role="option"]');
-                    if (!nodes.length) nodes = box.querySelectorAll(':scope > div > div');
-                    const out = [];
-                    for (const n of nodes) {
-                      const lines = n.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
-                      if (lines.length < 2) continue;
-                      // Teams marks an unread row several ways depending on build:
-                      // the accessible name, an explicit unread test-id, or the
-                      // little dot. Any of them counts; none of them => unknown.
-                      const label = (n.getAttribute('aria-label') || '') + ' ' +
-                                    (n.getAttribute('aria-describedby') || '');
-                      const marked = /unread/i.test(label)
-                        || !!n.querySelector('[data-tid*="unread" i], [class*="unread" i]');
-                      out.push({text: lines.slice(0, 4).join(' — '), unread: marked});
-                    }
-                    return out;
-                }""")
-            store.kv_set("teams_session_ok", "1")
-            rows = rows[:limit]
-            # If NOTHING is marked unread the selectors probably just missed on this
-            # build — that is unknown, not "he has read everything". Saying unknown
-            # keeps the old behaviour (push it) instead of going silent on him.
-            if rows and not any(r.get("unread") for r in rows):
-                for r in rows:
-                    r["unread"] = None
-            return rows
-        finally:
-            await ctx.close()
-            await pw.stop()
+    async with teams_page() as page:
+        await _open_activity(page)
+        await asyncio.sleep(3)  # virtualized feed renders after the header
+        rows = await page.evaluate(
+            """() => {
+                const boxes = Array.from(document.querySelectorAll('[role="listbox"]'))
+                  .filter(b => !b.closest('[data-tid="ms-searchux-popup"]')
+                               && b.innerText.trim().length > 20);
+                if (!boxes.length) return [];
+                const box = boxes.sort((a, b) => b.innerText.length - a.innerText.length)[0];
+                let nodes = box.querySelectorAll('[role="option"]');
+                if (!nodes.length) nodes = box.querySelectorAll(':scope > div > div');
+                const out = [];
+                for (const n of nodes) {
+                  const lines = n.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+                  if (lines.length < 2) continue;
+                  // Teams marks an unread row several ways depending on build:
+                  // the accessible name, an explicit unread test-id, or the
+                  // little dot. Any of them counts; none of them => unknown.
+                  const label = (n.getAttribute('aria-label') || '') + ' ' +
+                                (n.getAttribute('aria-describedby') || '');
+                  const marked = /unread/i.test(label)
+                    || !!n.querySelector('[data-tid*="unread" i], [class*="unread" i]');
+                  out.push({text: lines.slice(0, 4).join(' — '), unread: marked});
+                }
+                return out;
+            }""")
+        store.kv_set("teams_session_ok", "1")
+        rows = rows[:limit]
+        # If NOTHING is marked unread the selectors probably just missed on this
+        # build — that is unknown, not "he has read everything". Saying unknown
+        # keeps the old behaviour (push it) instead of going silent on him.
+        if rows and not any(r.get("unread") for r in rows):
+            for r in rows:
+                r["unread"] = None
+        return rows
 
 
 async def read_activity(limit: int = 25) -> list[str]:
@@ -915,7 +982,12 @@ async def read_activity(limit: int = 25) -> list[str]:
 # Someone pinging Arun on Teams is the most time-sensitive thing Asta watches, and
 # it was the slowest: half an hour meant a colleague could ask, wait, and give up
 # before he was told. Five minutes is the promise; the poll has to match it.
-ACTIVITY_POLL_SECONDS = int(os.environ.get("TEAMS_ACTIVITY_POLL", "300"))
+# Sixty seconds, not five minutes. The old interval was chosen when every poll
+# cost a browser launch — 2.49s of pure overhead — so polling often was expensive.
+# With the context pooled a poll costs 0.01s plus the read, and Arun's actual
+# complaint was that a ping does not reach him immediately. Five minutes was the
+# thing standing between someone asking him a question and him knowing about it.
+ACTIVITY_POLL_SECONDS = int(os.environ.get("TEAMS_ACTIVITY_POLL", "60"))
 ACTIVITY_SEEN_KEY = "teams_activity_seen"
 # feed entries worth pinging about; reactions are deliberately excluded as noise
 _ACTIVITY_INTERESTING = ("mentioned you", "missed call", "invited you", "replied to")
@@ -974,7 +1046,8 @@ async def _push_activity(notify, wanted: list[str]) -> None:
     if text:
         ranks = [v.priority for v in verdicts if v.priority is not None]
         await notify.notify(text, "teams", urgency="direct" if needs else "ambient",
-                            priority=min(ranks) if ranks else None)
+                            priority=min(ranks) if ranks else None,
+                            considered=True)   # attention.consider ran above
 
 
 async def activity_watch_loop() -> None:
@@ -1041,9 +1114,6 @@ async def check_session() -> bool:
                 store.kv_set("teams_session_ok", "0")
                 return False
             raise
-        finally:
-            await ctx.close()
-            await pw.stop()
 
 
 async def session_watch_loop() -> None:
@@ -1119,6 +1189,11 @@ if __name__ == "__main__":
         except RuntimeError as exc:
             print(f"ERROR: {'session expired — rerun login' if 'SESSION_EXPIRED' in str(exc) else exc}")
             sys.exit(1)
+    elif cmd == "search" and len(sys.argv) > 2:
+        # Searches what has already been READ — Asta's own record, not all of
+        # Teams — so it opens no browser and answers in milliseconds.
+        from . import agent as _agent
+        print(_agent.teams_search(" ".join(sys.argv[2:])))
     elif cmd == "resolve" and len(sys.argv) > 2:
         # Read-only counterpart to `send`: says who it WOULD reach and stops.
         try:

@@ -77,13 +77,41 @@ def test_snake_case_names_answer_to_their_parts():
     assert "ci" in tool_index._tokens("ci_status")
 
 
-def test_sticky_selection_only_grows():
+def test_sticky_selection_is_stable_while_the_subject_is():
     """Tool definitions sit in the cached prefix, so a toolset that changes every
-    turn trades a fixed cost for a recurring one."""
+    turn trades a fixed cost for a recurring one. That argument is real and is why
+    stickiness exists — but it justified a set that ONLY grew, and the measurement
+    settled it: across six ordinary turns the set went 23 -> 26 -> 31 -> 36 -> 37
+    -> 44 of 58, then latched to everything for the rest of the conversation. The
+    stable prefix was bought at ~5,950 tokens a turn, forever, plus fifty-eight
+    schemas for the model to choose wrongly among.
+
+    The invariant that replaced it keeps the caching benefit where it matters:
+    asking the same thing twice returns the identical toolset, so the prefix is
+    stable exactly where a cache would have been hit. A bounded set cannot also be
+    monotonic — that is the trade — but eviction is hysteretic (see STICKY_SLACK)
+    so it happens roughly once every eight new tools rather than on every turn,
+    which is what sitting exactly at the cap would have caused.
+    """
     first = tool_index.select_sticky("conv1", "any messages from Vinish?")
-    second = tool_index.select_sticky("conv1", "comment on ABC-123")
-    assert first is not None and second is not None
-    assert set(first) <= set(second), "a conversation's toolset must never shrink"
+    again = tool_index.select_sticky("conv1", "any messages from Vinish?")
+    assert first is not None and again is not None
+    assert set(first) == set(again), \
+        "the same question twice produced a different tool block, so a turn that " \
+        "should have hit the prompt cache missed it"
+
+
+def test_a_conversation_never_grows_to_the_whole_registry():
+    """The half the old invariant could not express."""
+    from app import capabilities
+    tool_index.forget("growth")
+    sizes = []
+    for q in ["messages from Vinish", "comment on ABC-123", "check the CI",
+              "draft a mail", "trace a booking", "what is on my calendar"]:
+        sel = tool_index.select_sticky("growth", q)
+        sizes.append(len(capabilities.registry()) if sel is None else len(sel))
+    ceiling = tool_index.STICKY_MAX_TOOLS + tool_index.STICKY_SLACK
+    assert max(sizes) <= ceiling, f"grew to {max(sizes)} of {len(capabilities.registry())}: {sizes}"
 
 
 def test_sticky_is_per_conversation():

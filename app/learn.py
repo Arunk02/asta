@@ -79,12 +79,24 @@ Rules:
 _JSON = re.compile(r"\{.*\}", re.DOTALL)
 
 
+#: He stopped it. Not a failure of the machinery — a correction.
+STOPPED_BY_HIM = ("cancelled", "rejected")
+
+
 def should_extract(rounds: int = 0, escalated: bool = False, status: str = "done") -> bool:
     """Was there enough work here to be worth distilling?
 
     A one-shot answer teaches nothing; a run that needed several rounds, or that
     a weaker tier could not finish, is exactly where the lesson lives.
     """
+    if status in STOPPED_BY_HIM:
+        # The richest signal there is, and it used to be thrown away. When Arun
+        # cancels or rejects a task he is saying "you misread what I wanted", and
+        # he is saying it within minutes of Asta getting it wrong. 39% of code
+        # tasks ended this way, so the largest category after success taught
+        # nothing at all — while a run that succeeded on the second attempt
+        # taught something. That is exactly backwards.
+        return True
     if status not in ("done", "sent"):
         return False
     return escalated or rounds >= 2
@@ -261,9 +273,25 @@ async def extract(title: str, transcript: str, *, outcome: str = "done",
     must not fail the work.
     """
     try:
-        note = ("This run ESCALATED: a cheaper tier could not finish it and a stronger one "
-                "did. Write the skill so the cheaper tier succeeds alone next time — that is "
-                "the entire point of this extraction.\n" if escalated else "")
+        if outcome in STOPPED_BY_HIM:
+            # A correction, not a success. Asking "what worked here" of a run he
+            # stopped would distil the very thing he rejected into a procedure.
+            note = ("ARUN STOPPED THIS RUN. It was not finished and it was not right — he "
+                    "cancelled or rejected it, which means Asta misread what he wanted, and "
+                    "he knew within minutes.\n\n"
+                    "Do NOT write down what this run did as though it were a procedure. "
+                    "Write down WHAT WAS MISREAD, so the same misreading does not happen "
+                    "again: what he asked for, what Asta started doing instead, and the one "
+                    "check that would have caught the gap before any work began. If his own "
+                    "words about why appear below, they are the most important thing here — "
+                    "prefer them over your reading of the transcript.\n\n"
+                    "If the run was stopped for a reason that teaches nothing — he changed "
+                    "his mind, or something outside Asta broke — reply with NOTHING rather "
+                    "than inventing a lesson.\n")
+        else:
+            note = ("This run ESCALATED: a cheaper tier could not finish it and a stronger one "
+                    "did. Write the skill so the cheaper tier succeeds alone next time — that is "
+                    "the entire point of this extraction.\n" if escalated else "")
         prompt = EXTRACT_PROMPT.format(
             title=title, outcome=outcome, escalation_note=note,
             transcript=(transcript or "")[-MAX_TRANSCRIPT:])
@@ -271,7 +299,8 @@ async def extract(title: str, transcript: str, *, outcome: str = "done",
         data = _parse(raw or "")
         if not data:
             return None
-        path = write_skill(data, source="teacher" if escalated else source)
+        path = write_skill(data, source=("correction" if outcome in STOPPED_BY_HIM
+                                 else "teacher" if escalated else source))
         if path:
             store.record_outcome("skill", "written", subject=path.stem,
                                  detail=f"confidence={data.get('confidence')} escalated={escalated}")

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import hashlib
+import json
+import re
 import os
 import re as _re
 import time
@@ -393,7 +396,9 @@ def available(name: str) -> bool:
         return runner(name).available()
     if name == "local":
         return bool(_lmstudio_model_id())
-    return bool(os.environ.get(s["env"], ""))
+    # A key being PRESENT is not a key being VALID, and treating them as the same
+    # is how every API path failed silently while working brains sat idle.
+    return bool(os.environ.get(s["env"], "")) and not key_rejected(name)
 
 
 # Stage effort, per model. The cascade lets one dial cover everything and a
@@ -435,6 +440,62 @@ def effort_for(model: str, stage: str) -> str:
 # One table, consulted by every caller — a per-brain constant somewhere else is
 # how two parts of this file end up disagreeing about who is up.
 QUOTA_COOLDOWN = {"copilot": 6 * 3600, "claude_cli": 5 * 3600}
+
+
+def credential_kv(name: str) -> str:
+    return f"{name}_key_rejected"
+
+
+def mark_key_rejected(name: str, why: str = "") -> None:
+    """Remember that this brain's credential was REFUSED, not merely rate-limited.
+
+    Measured, and the reason this exists: `ANTHROPIC_API_KEY` was set in .env,
+    `available("claude")` returned True because a key was PRESENT, and every call
+    came back 401. `best_model_name()` kept choosing it, so the in-call brain, PR
+    review summaries and meeting recaps all failed silently — while two working
+    CLI subscriptions Arun already pays for sat unused.
+
+    A rejected key is not a transient quota and must not expire back into
+    availability on a timer: nothing about waiting makes an invalid key valid. It
+    clears when the key changes, which is the only thing that can fix it.
+    """
+    store.kv_set(credential_kv(name), json.dumps(
+        {"at": time.time(), "why": why[:200], "key_fingerprint": _key_fingerprint(name)}))
+
+
+def key_rejected(name: str) -> bool:
+    """True while this brain's credential is known bad AND unchanged since."""
+    raw = store.kv_get(credential_kv(name))
+    if not raw:
+        return False
+    try:
+        rec = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    # A new key deserves a fresh chance — that is the whole recovery path.
+    if rec.get("key_fingerprint") != _key_fingerprint(name):
+        store.kv_del(credential_kv(name))
+        return False
+    return True
+
+
+def _key_fingerprint(name: str) -> str:
+    """Enough to tell one key from another, never enough to be one."""
+    s = spec(name) or {}
+    raw = os.environ.get(s.get("env", ""), "")
+    return hashlib.sha1(raw.encode()).hexdigest()[:12] if raw else ""
+
+
+#: What an API says when the credential itself is the problem, as opposed to the
+#: request or the rate limit. Deliberately narrow: wrongly marking a working brain
+#: as rejected takes it out of service until the key is changed.
+_REJECTED = re.compile(
+    r"authentication_error|api key is invalid|invalid api key|invalid_api_key|"
+    r"incorrect api key|status_code: 401|unauthorized", re.I)
+
+
+def credential_failure(msg: str) -> bool:
+    return bool(_REJECTED.search(msg or ""))
 
 
 def quota_kv(name: str) -> str:
@@ -825,6 +886,41 @@ async def pr_review_post(pr: str, action: str, body: str = "",
     return f"Staged the {action.replace('_', ' ')} on PR #{str(pr).lstrip('#')} — waiting for Arun's yes."
 
 
+async def merge_pr(pr: str, workspace: str, repo: str = "", method: str = "squash") -> str:
+    """Propose merging a pull request. ONLY when Arun asked for it in those words.
+
+    This does NOT merge. A merge is the least reversible thing Asta can do — it
+    puts code on the branch everybody else builds from — so it stages with the PR's
+    REAL state attached: CI, review decision, conflicts. He approves a fact, not a hope.
+
+    Refuses outright when something blocks it, and says which: red CI, unfinished CI,
+    conflicts, a draft, or changes requested. Never offer to merge past a blocker; tell
+    him what is in the way. The blockers are re-checked at the moment he says yes,
+    because CI can go red between the asking and the answering.
+
+    method: squash (default — these repos squash), merge, or rebase."""
+    from . import offers, review
+    if method not in review.MERGE_METHODS:
+        return f"method must be one of: {', '.join(sorted(review.MERGE_METHODS))}"
+    try:
+        state = await review.merge_state(pr, workspace, repo)
+    except RuntimeError as exc:
+        return f"Could not read PR {pr} — {exc}"
+    blockers = review.merge_blockers(state)
+    if blockers:
+        return (f"Not offering to merge #{state.get('number') or pr} — "
+                + "; ".join(blockers) + ".\n\n" + review.merge_summary(state))
+    offers.staged_write(
+        "pr_merge", {"pr": pr, "workspace": workspace, "repo": repo,
+                     "method": method, "delete_branch": True},
+        f"🔀 Merge PR #{str(pr).lstrip('#')} ({method})",
+        review.merge_summary(state),
+        f"Merge #{state.get('number')} into {state.get('base')} as you?", kind="pr_write")
+    return (f"Staged the merge of #{state.get('number')} into {state.get('base')} "
+            f"— waiting for Arun's yes. Nothing is merged yet.\n\n"
+            + review.merge_summary(state))
+
+
 async def teams_status(status: str = "") -> str:
     """Read or set Arun's Teams presence.
 
@@ -1156,6 +1252,33 @@ async def health_check() -> str:
     return health.report_text(problems)
 
 
+async def check_teams_selectors() -> str:
+    """Check that the CSS selectors Asta relies on still match live Teams.
+
+    Teams is a web app that changes without warning, and a selector that stopped
+    matching does not raise — it returns nothing, which is indistinguishable from
+    "no new messages". So Asta goes quiet and Arun assumes nobody pinged him.
+
+    Read-only: it opens chats and reads the DOM, sends nothing, clicks nothing that
+    acts. Runs daily on its own; this is the on-demand version."""
+    from . import selector_health
+    return await selector_health.check_and_report()
+
+
+async def answer_quality(workspace: str = "booking") -> str:
+    """Score Asta's ANSWERS about the codebase against grounded cases.
+
+    The test suite proves the plumbing works; this asks whether the answers are
+    right. Every case traces to something already verified — a lesson written from
+    a correction Arun made, or a pin recording how a repo actually builds — so it
+    measures against fact, not against a guess.
+
+    Costs a brain call per case, so run it when something changed, not routinely."""
+    from . import evals
+    out = await evals.run(workspace)
+    return evals.report(out)
+
+
 async def ci_status() -> str:
     """Recent GitHub Actions runs across all workspace repos (needs `gh auth login` once).
     Failures are also pushed to Arun automatically every 10 min."""
@@ -1357,11 +1480,15 @@ async def ship_task(task_id: int) -> str:
         return f"Ship failed: {exc}"
 
 
-async def reject_task(task_id: int) -> str:
-    """Reject a task: stops a running worker (and its spend), discards a draft."""
+async def reject_task(task_id: int, why: str = "") -> str:
+    """Reject a task: stops a running worker (and its spend), discards a draft.
+
+    Pass `why` whenever Arun said what was wrong with it — "that is not what I meant",
+    "wrong repo", "I wanted the plan first". That sentence is what Asta learns from;
+    without it the correction is recorded but the lesson has to be guessed at."""
     from . import tasks
     try:
-        return await tasks.reject(task_id)
+        return await tasks.reject(task_id, why=why)
     except ValueError as exc:
         return str(exc)
 
@@ -1383,6 +1510,32 @@ async def teams_read_chat(chat: str, limit: int = 15) -> str:
         return f"Teams read failed: {exc}"
 
 
+def teams_search(query: str, limit: int = 12) -> str:
+    """Search everything Asta has ever read from Teams, by TOPIC rather than by chat or time.
+
+    Use for "what did we decide about the ATA fallback", "who mentioned the vessel ETA
+    problem", "was there anything about the deployment" — questions where he knows the
+    subject but not who said it or when. teams_history needs a person and a window;
+    this needs neither, and searches only what has already been read, so it opens no
+    browser and takes milliseconds."""
+    from . import store
+    hits = store.teams_search(query, limit)
+    if not hits:
+        return ("Nothing already-read matches that. It may simply never have been read — "
+                "this searches Asta's own record, not all of Teams. Try teams_history "
+                "with the person and a time window to go and fetch it.")
+    import datetime as _dt
+    lines = []
+    for h in hits:
+        when = ""
+        if h.get("sent_at"):
+            with contextlib.suppress(Exception):
+                when = _dt.datetime.fromtimestamp(h["sent_at"]).strftime("%d %b %H:%M")
+        lines.append(f"[{h.get('chat','?')}{' · ' + when if when else ''}] "
+                     f"{h.get('sender','?')}: {(h.get('text') or '')[:220]}")
+    return untrusted.wrap("\n".join(lines), "Teams messages already read")
+
+
 async def teams_history(chat: str, when: str = "last night", limit: int = 60) -> str:
     """Read a Teams chat for a TIME WINDOW — 'what did Vinish say last night',
     'anything from Suraj yesterday', 'messages from the triage group this morning'.
@@ -1399,10 +1552,15 @@ async def teams_history(chat: str, when: str = "last night", limit: int = 60) ->
     since, until, label = when_mod.parse(when)
     window = when_mod.describe(since, until)
 
-    # Stored history first. Anything already read is answerable without opening
-    # a browser, which turns a 20-second scrape into an instant answer for the
-    # common case of asking twice about the same evening.
-    rows = store.teams_messages(chat, since=since, until=until, limit=limit)
+    # Stored history first, but ONLY when it demonstrably covers the whole
+    # window. This used to accept any stored row as history: one message already
+    # seen from last night short-circuited the scrollback, and a partial thread
+    # came back labelled "from stored history" as though it were complete. That
+    # is the single worst kind of answer this system can give — confidently
+    # wrong about his own messages — so coverage is now proved, not assumed.
+    covered = store.teams_history_covers(chat, since, until)
+    rows = store.teams_messages(chat, since=since, until=until,
+                                limit=limit) if covered else []
     source = "stored history"
     if not rows:
         try:

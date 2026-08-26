@@ -116,8 +116,13 @@ async def cheap_complete(prompt: str, max_tokens: int = 400,
             result = await _Agent(model=agent_mod.get_model(name)).run(prompt)
             if (result.output or "").strip():
                 return result.output.strip()
-        except Exception:
-            pass
+        except Exception as exc:                       # noqa: BLE001
+            # Same durable marking as the in-call path: a 401 means this brain is
+            # out of service until the key changes, and every caller after this
+            # one should go straight to a CLI subscription instead of paying for
+            # the same refusal again.
+            if agent_mod.credential_failure(str(exc)):
+                agent_mod.mark_key_rejected(name, str(exc))
     # Last resort: a CLI subscription Arun already pays for. Bounded to one short
     # turn — this is a paragraph of prep, not a task.
     for cli_name in agent_mod.EXECUTORS:

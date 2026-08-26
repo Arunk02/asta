@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import agents, claude_cli, copilot_cli, repo_ops, store, workspace_tools
+from . import agents, claude_cli, clip, copilot_cli, repo_ops, store, workspace_tools
 
 
 class _LimitPaused(Exception):
@@ -159,6 +159,21 @@ CODE_OVERRIDES = """
   The plan he approves is the definition of done — implement THAT, not a better
   idea you have afterwards. If implementing reveals the plan was wrong, stop
   and say so; do not quietly build something else.
+- THE PLAN MUST BE READABLE IN THIRTY SECONDS, ON A PHONE. He approves these
+  from WhatsApp, standing up. Open it with a `STRUCTURE` block — the classes and
+  files that change and how they relate, as an indented tree, one line each,
+  saying what happens to that thing:
+
+      STRUCTURE
+        EtaValidator                     NEW  · rejects an import ETA at/after gate-in
+          └─ called by BookingService.applyVesselEta()   ~10 lines changed
+               └─ reads ServicePlanLeg.portGateIn (LATEST)
+        BookingServiceTest               +3 cases (before / at / after gate-in)
+
+  Then the numbered steps, then a one-line RISK. No prose paragraph before the
+  tree: the tree is the part he actually reads, and a plan built on a misread
+  shows up there in seconds where three paragraphs hide it. Keep it under about
+  twelve lines — this is a shape, not a specification.
 - Skip Stage 1.5 and never run Stage 6: no push, no PR, and no Jira writes of
   any kind (no subtasks, no comments, no transitions). Stage 5 Evolution SHOULD
   still run — lessons and skill patches are wanted. After the Stage 4 (and 4b)
@@ -564,6 +579,34 @@ def learn_from_stop(task_id: int, t: dict, status: str, why: str = "") -> None:
                           outcome=status, escalated=_escalated(task_id)))
 
 
+#: The heading that opens a plan's shape-at-a-glance block. Matched loosely
+#: because the brain writes the heading, not this code — "STRUCTURE",
+#: "## Structure", "Class diagram:" all mean the same thing to Arun.
+_STRUCTURE_HEAD = re.compile(r"^[#*\s]*(structure|class diagram|shape)\b\s*:?[#*\s]*$", re.I)
+
+
+def _structure_span(lines: list[str]) -> tuple[int, int]:
+    """(start, end) of the structure block in `lines`, or (-1, -1).
+
+    Ends at the first blank line followed by something that is not part of the
+    tree — a heading, a numbered step — so the block keeps its internal blank
+    lines without swallowing the rest of the plan.
+    """
+    start = next((i for i, ln in enumerate(lines) if _STRUCTURE_HEAD.match(ln)), -1)
+    if start < 0:
+        return -1, -1
+    end = start + 1
+    for i in range(start + 1, len(lines)):
+        nxt = lines[i]
+        if not nxt.strip():
+            following = next((x for x in lines[i + 1:] if x.strip()), "")
+            if following and not following.startswith((" ", "\t")):
+                break
+            continue
+        end = i + 1
+    return start, end
+
+
 def _phone_text(result: str, limit: int = 1100) -> str:
     """A gate's output, made readable on a phone.
 
@@ -571,16 +614,27 @@ def _phone_text(result: str, limit: int = 1100) -> str:
     tool noise and table pipes, and ran past the notification cap. This keeps the
     structure that matters (headings, bullets, numbered steps), drops the noise,
     and cuts on a LINE boundary so it never ends mid-word.
+
+    The STRUCTURE block is PINNED. Everything else prefers the tail, which is
+    right for a gate's question — but the shape of the change is what Arun reads
+    first to decide whether the plan is built on a misread, and it opens the
+    plan, so a pure tail cut is exactly what would drop it.
     """
     lines = (result or "").splitlines()
     keep: list[str] = []
     in_fence = False
+    fenced_structure = False
     for raw in lines:
         line = raw.rstrip()
         if line.strip().startswith("```"):
+            # A fence right after the STRUCTURE heading holds the tree itself, so
+            # its CONTENTS are kept (without the fence markers). Every other fence
+            # is code or build output and stays dropped.
+            fenced_structure = (not in_fence
+                                and bool(keep) and _STRUCTURE_HEAD.match(keep[-1]))
             in_fence = not in_fence
             continue
-        if in_fence:
+        if in_fence and not fenced_structure:
             continue
         s = line.strip()
         if not s:
@@ -590,11 +644,15 @@ def _phone_text(result: str, limit: int = 1100) -> str:
         if s.startswith("|") or set(s) <= set("-=_|+ "):   # table rows / rules
             continue
         keep.append(line)
+    start, end = _structure_span(keep)
+    shape = keep[start:end] if start >= 0 else []
+    rest = keep[:start] + keep[end:] if start >= 0 else keep
+    budget = limit - sum(len(ln) + 1 for ln in shape)
     # Prefer the tail (the plan + the ask), but start on a real heading/bullet.
     out: list[str] = []
     total = 0
-    for line in reversed(keep):
-        if total + len(line) + 1 > limit:
+    for line in reversed(rest):
+        if total + len(line) + 1 > budget:
             break
         out.append(line)
         total += len(line) + 1
@@ -604,7 +662,8 @@ def _phone_text(result: str, limit: int = 1100) -> str:
         out.pop(0)
         if len(out) <= 3:
             break
-    return "\n".join(out).strip() or (result or "").strip()[-limit:]
+    body = "\n".join((shape + [""] + out) if shape and out else (shape or out)).strip()
+    return body or (result or "").strip()[-limit:]
 
 
 def _audit_note(task_id: int) -> str:
@@ -1177,7 +1236,7 @@ async def _self_review(task_id: int, t: dict, result: str) -> str:
     if not notes:
         return ""
     stat = " · ".join(f"{name}: {s.splitlines()[-1].strip()}" for name, s, _ in diffs)
-    return f"\n\n🔍 I read my own diff ({stat}):\n{notes[:900]}"
+    return f"\n\n🔍 I read my own diff ({stat}):\n{clip.clip(notes, 900)}"
 
 
 async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
@@ -1400,7 +1459,7 @@ async def _worker(task_id: int) -> None:
                               finished_at=time.time())
             await notify.notify(
                 f"📝 Task #{task_id} ({t['title']}) — draft for Teams chat "
-                f"'{t['teams_chat']}':\n\n{result[:600]}\n\n"
+                f"'{t['teams_chat']}':\n\n{clip.clip(result, 600)}\n\n"
                 f"Reply 'approve task {task_id}' to send it, or 'reject task {task_id}'.",
                 "task")
         elif t["kind"] == "code" and agent:

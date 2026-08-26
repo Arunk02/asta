@@ -29,7 +29,7 @@ Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
 Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-.venv/bin/python -m pytest -q           # 1,738 tests
+.venv/bin/python -m pytest -q           # 1,746 tests
 ```
 
 ## How it is put together
@@ -81,7 +81,11 @@ over `HEAD`, and the loser silently commits onto the winner's branch. But the co
 landed on the wrong person: a twenty-minute implementation blocked the two-minute
 question you asked while it ran. So `app/worktrees.py` cuts each code task its own
 worktree from `origin/develop`, and `ASTA_MAX_PARALLEL_TASKS` (3) bounds how many
-run at once. Separate working trees, one shared object store: no lock needed
+run at once — a limit on the machine, not on git: with separate worktrees two
+tasks never conflict, so the only real constraint is that each is a checkout plus
+a CLI process plus, at the gate, a Maven build, while you are working on the same
+laptop. A task prepares only the repos it names, falling back to all of them when
+it names none: over-preparing costs a fetch, under-preparing costs the run. Separate working trees, one shared object store: no lock needed
 because there is nothing left to contend over. Worktrees are removed when the task
 finishes and survive a crash for inspection.
 
@@ -851,7 +855,7 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  1,738 tests (conftest isolates the DB — see below)
+tests/                  1,746 tests (conftest isolates the DB — see below)
 ```
 
 `tests/conftest.py` points `store.DB_PATH` at a temp file for *every* test. A stray
@@ -863,7 +867,7 @@ roadmap this is being built against. Still ahead of it: one scheduler replacing 
 background loops, detached runs that survive a closed tab, adaptive context
 compaction, a people/contacts model, and deep research.
 
-`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 37 findings
+`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 40 findings
 raised against the *running* system — every number measured on the live install, not
 inferred from the source — each closed in place with what was done and how it was
 proved. Every fix was mutation-tested: the source was deliberately broken and the

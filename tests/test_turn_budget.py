@@ -285,3 +285,81 @@ def test_an_unknown_workspace_gets_a_sane_budget():
     from app import tasks
     assert 32 * 60 < tasks.code_timeout(None) <= tasks.CODE_MAX_SECONDS
     assert 32 * 60 < tasks.code_timeout("does-not-exist") <= tasks.CODE_MAX_SECONDS
+
+
+# --- a task prepares the repos it needs, not every repo ----------------------
+
+def test_a_task_prepares_only_the_repo_it_names(tmp_path):
+    """Two tasks on different services do not conflict, so neither should pay
+    for the other's repos.
+
+    Once the workspace stopped mis-reporting itself as one repo, preparing
+    everything became three `git fetch`es and three checkouts for a one-line
+    change in one service.
+    """
+    from app import worktrees
+
+    root = tmp_path / "ws"
+    _make_repo(root)
+    for n in ("telikos-booking-service", "telikos-email-service",
+              "telikos-activityplanworkflow-service"):
+        _make_repo(root / n)
+
+    picked = [p.name for p in worktrees.repos_for(
+        root, "BEPTELIKOS-10159 validate vessel ETA in the booking service")]
+    assert picked == ["telikos-booking-service"]
+
+    other = [p.name for p in worktrees.repos_for(root, "fix the email template")]
+    assert other == ["telikos-email-service"]
+
+
+def test_an_unrecognised_task_prepares_everything(tmp_path):
+    """The fallback direction is deliberate.
+
+    Preparing a repo that turns out unnecessary costs a fetch. Failing to prepare
+    one the task then needs costs the task. A wrong guess must fail towards more
+    work, never towards a broken run.
+    """
+    from app import worktrees
+
+    root = tmp_path / "ws"
+    _make_repo(root)
+    for n in ("svc-alpha", "svc-beta"):
+        _make_repo(root / n)
+
+    assert len(worktrees.repos_for(root, "fix the bug")) == 2
+    assert len(worktrees.repos_for(root, "")) == 2
+    assert len(worktrees.repos_for(root)) == 2
+
+
+def test_a_generic_word_does_not_select_every_repo(tmp_path):
+    """Repos in one workspace share a prefix and a suffix.
+
+    Matching on "service" or "telikos" would select all of them and quietly turn
+    the scoping off while looking like it worked.
+    """
+    from app import worktrees
+
+    root = tmp_path / "ws"
+    _make_repo(root)
+    for n in ("telikos-booking-service", "telikos-email-service"):
+        _make_repo(root / n)
+
+    picked = [p.name for p in worktrees.repos_for(root, "update the telikos service")]
+    assert len(picked) == 2, "a generic word must fall back, not pretend to match"
+
+    exact = [p.name for p in worktrees.repos_for(root, "update booking")]
+    assert exact == ["telikos-booking-service"]
+
+
+def test_repo_discovery_has_exactly_one_definition():
+    """Three inline copies of this rule existed and all three had the same bug.
+
+    One of them decided where PRs get raised: with the old shortcut, shipping
+    looked for the task's branch in the generated-context repo and would have
+    raised no PR for the services the work was actually in.
+    """
+    from pathlib import Path as _P
+    src = _P("app/tasks.py").read_text()
+    assert 'iterdir() if (p / ".git")' not in src, \
+        "tasks.py restated the repo-discovery rule instead of delegating to worktrees"

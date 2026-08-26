@@ -150,15 +150,50 @@ def offer(kind: str, subject: str, context: str, prompt: str,
     o = Offer(id=uuid.uuid4().hex[:12], kind=kind, subject=subject, context=context,
               prompt=prompt, created=time.time(), payload=payload or {},
               action=action, op=op or {})
-    if pending() is None:
+    head = pending()
+    if head is None:
         store.kv_set(KEY, json.dumps(asdict(o)))
         return o
+    # Re-proposing the question already on screen is a no-op, not a queue entry.
+    # This is the exact loop from the transcript: the brain staged the call to
+    # Vinish, Arun's yes did not reach it, and every following turn staged it
+    # again. Without this the queue fills with copies of the very thing he is
+    # being asked, and the id he was shown keeps changing underneath him.
+    if _same_question(asdict(head), o):
+        return head
     queued = _queue()
+    # The same proposal twice is one proposal. Watchers re-detect the same state
+    # on every pass — a stale context is still stale five minutes later — and
+    # without this the queue fills with restatements of one thing and evicts the
+    # offers that actually differ. Which is the failure mode a bounded queue is
+    # supposed to prevent, arriving by another route.
+    #
+    # Replace rather than skip: the newer one carries fresher context ("21 days"
+    # rather than "14"), and it is the same question either way.
+    queued = [row for row in queued if not _same_question(row, o)]
     queued.append(asdict(o))
     # Newest wins when full. An offer he has not reached in five proposals is
     # stale anyway, and dropping the newest would hide what is happening NOW.
     store.kv_set(QUEUE_KEY, json.dumps(queued[-QUEUE_MAX:]))
     return o
+
+
+def _same_question(row: dict, o: Offer) -> bool:
+    """Two offers that would ask Arun the same thing.
+
+    Compared on what the offer WOULD DO, not on its wording. Two staged calls to
+    the same person are the same question however the sentence around them is
+    phrased; two proposals about the same workspace's context are one piece of
+    news. An id cannot answer this — every stage mints a new one.
+    """
+    if row.get("kind") != o.kind:
+        return False
+    row_op, new_op = row.get("op") or {}, o.op or {}
+    if row_op.get("name") or new_op.get("name"):
+        # A recorded call: identical name and arguments is the same act.
+        return (row_op.get("name") == new_op.get("name")
+                and row_op.get("args") == new_op.get("args"))
+    return row.get("subject") == o.subject
 
 
 def _queue() -> list[dict]:

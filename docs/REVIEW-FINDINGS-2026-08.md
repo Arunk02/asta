@@ -74,6 +74,9 @@ first thing to revisit.
 | 35 | High | A read-only question waited behind a running code task | `main._dispatch`, `activity` | **closed** |
 | 36 | **Critical** | A workspace that is itself a repo reported ONE repo — the generated-context one — so worktrees, rollback and budget all targeted the wrong tree | `worktrees.repos_in` | **closed** |
 | 37 | Medium | A code budget flat across every task, regardless of how many repos it can touch | `tasks.code_timeout` | **closed** |
+| 38 | High | Every code task prepared every repo in the workspace, so a one-line change cost three fetches and three checkouts | `worktrees.create` | **closed** |
+| 39 | High | A watcher repeating itself filled the bounded offer queue and evicted real offers | `offers.offer` | **closed** |
+| 40 | **Critical** | Two MORE inline copies of the repo-discovery rule, one of them deciding where PRs get raised | `tasks.py` | **closed** |
 
 ## Closed
 
@@ -636,10 +639,73 @@ to double as a liveness check.
 
 ---
 
+### 38 — every task prepared every repo — CLOSED 2026-08-26
+Arun's point: *"if u working on two parallel tasks that doesn't conflict, u may
+work on two diff stuffs so dont have to worry right?"* Correct, and the code did
+not reflect it.
+
+`worktrees.create` prepared every repo in the workspace. That was nearly free
+while the workspace mis-reported itself as one repo (finding 36) — and the moment
+that was fixed it became **three `git fetch`es and three checkouts for a one-line
+change in one service**. A regression introduced by a fix, an hour after the fix.
+
+`repos_for` scopes preparation to the repos the task actually names, matching on
+the distinctive part of a repo name — `telikos-booking-service` is "booking" far
+more often than its full name — while ignoring the generic halves (`service`,
+`telikos`) that every repo in the workspace shares and that would therefore match
+all of them while looking like it worked.
+
+**It falls back to preparing everything, and that direction is the design.**
+Preparing a repo that turns out unnecessary costs a fetch; failing to prepare one
+the task then needs costs the task. A wrong guess must fail towards more work.
+
+### 39 — a watcher repeating itself evicted real offers — CLOSED 2026-08-26
+The other half of Arun's point: *"even if u context refresh once u first big task
+done, second one that doesn't required."* A proposal already made does not need
+making again.
+
+The queue added in finding 34 was bounded but had no dedup. Watchers re-detect
+the same state every pass — a stale context is still stale five minutes later —
+so the queue would fill with restatements of one thing and evict the offers that
+genuinely differ. Which is precisely the failure a bounded queue exists to
+prevent, arriving by another route.
+
+Two rules now, both comparing what an offer would DO rather than how it is worded:
+
+- **Re-proposing the question already on screen is a no-op.** This is the loop
+  from the transcript directly: his yes was not reaching the staged call, so the
+  brain staged it again every turn. Each of those would have become a queue entry
+  and changed the id he was shown underneath him.
+- **A duplicate already waiting is replaced, not stacked** — replaced rather than
+  skipped, because the newer one carries fresher context ("21 days" rather than
+  "14") and it is the same question either way.
+
+A staged call is compared on the recorded op name and arguments, so two calls to
+the same person are one question and a call to someone else is not.
+
+### 40 — two more copies of the repo rule, and the worst one shipped — CLOSED 2026-08-26
+Finding 36 fixed `worktrees.repos_in` and `tasks._repos_under`. There were **three
+more inline copies** in `tasks.py`, all carrying the identical bug.
+
+One of them decides where PRs are raised. With the old shortcut, shipping a
+finished code task looked for the task's branch in the generated-context repo and
+would have **raised no PR at all** for the services the work was actually in — a
+task reporting success having delivered nothing.
+
+All of them now delegate, and a test asserts the rule appears exactly once:
+`iterdir() if (p / ".git")` must not appear in `tasks.py`. Five copies of one rule
+is not a coincidence, it is what happens when a rule is easy to restate — so the
+test forbids restating it rather than trusting the next reader to notice.
+
+Five mutations caught across findings 38-40, including restoring the buggy rule in
+the PR path.
+
+---
+
 ## Where this leaves the review
 
-**37 findings raised, 36 closed**, plus finding 4 recorded as Arun's accepted
-risk. 1,738 tests pass. Every fix was mutation-tested — the source was
+**40 findings raised, 39 closed**, plus finding 4 recorded as Arun's accepted
+risk. 1,746 tests pass. Every fix was mutation-tested — the source was
 deliberately broken and the suite had to notice.
 
 Still needing Arun rather than code:

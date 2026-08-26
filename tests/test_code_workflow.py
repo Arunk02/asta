@@ -215,7 +215,8 @@ async def test_every_repo_in_a_workspace_gets_the_same_branch(monkeypatch, tmp_p
     # checkout, so two tasks can run at once and Arun's editor never has a branch
     # changed underneath it. The behaviour asserted here is unchanged: every repo
     # in the workspace lands on the same branch.
-    async def spy(ws_root, task_id, branch):
+    # *hints: the task's own words, used to prepare only the repos it names.
+    async def spy(ws_root, task_id, branch, *hints):
         return [{"repo": r.name, "branch": branch, "ok": True, "note": "",
                  "dirty": False, "path": str(ws_root / r.name)}
                 for r in sorted((tmp_path).iterdir()) if (r / ".git").exists()
@@ -238,7 +239,8 @@ async def test_one_broken_repo_does_not_stop_the_others(monkeypatch, tmp_path):
     for name in ("good", "broken"):
         (tmp_path / name / ".git").mkdir(parents=True)
 
-    async def flaky(ws_root, task_id, branch):
+    # *hints: the task's own words, used to prepare only the repos it names.
+    async def flaky(ws_root, task_id, branch, *hints):
         return [{"repo": "good", "branch": branch, "ok": True, "note": "", "dirty": False},
                 {"repo": "broken", "branch": branch, "ok": False, "dirty": False,
                  "note": "could not create a worktree: index.lock exists"}]
@@ -269,7 +271,8 @@ async def test_a_clean_preparation_is_silent(monkeypatch, tmp_path):
     async def fine(repo, branch):
         return {"repo": repo.name, "branch": branch, "ok": True, "note": "", "dirty": False}
 
-    async def fine_worktrees(ws_root, task_id, branch):
+    # *hints: the task's own words, used to prepare only the repos it names.
+    async def fine_worktrees(ws_root, task_id, branch, *hints):
         return [{"repo": "solo", "branch": branch, "ok": True, "note": "", "dirty": False}]
 
     from app import worktrees

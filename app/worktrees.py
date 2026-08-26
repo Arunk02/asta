@@ -25,6 +25,7 @@ Two consequences worth knowing:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -113,7 +114,52 @@ async def _base_branch(repo: Path) -> str:
     return ""
 
 
-async def create(workspace_root: Path, task_id: int, branch: str) -> list[dict]:
+def repos_for(workspace_root: Path, *hints: str) -> list[Path]:
+    """The repos a task plausibly needs, from what it says it is doing.
+
+    Preparing every repo in the workspace is what a task used to do, and once the
+    workspace stopped mis-reporting itself as one repo that became three `git
+    fetch`es and three checkouts for a one-line change in one service.
+
+    Arun's point: two tasks working on different things do not conflict, so
+    neither should be paying for the other's repos. Scope the preparation to what
+    the task actually names.
+
+    Falls back to EVERYTHING when nothing matches, and that direction is
+    deliberate. Preparing a repo that turns out unnecessary costs a fetch; failing
+    to prepare one the task then needs costs the task. A guess that is wrong must
+    fail towards doing more work, not towards a broken run.
+    """
+    repos = repos_in(workspace_root)
+    if len(repos) <= 1:
+        return repos
+    text = " ".join(h or "" for h in hints).lower()
+    if not text.strip():
+        return repos
+    named = [r for r in repos if _names(r.name) & _tokens(text)]
+    return named or repos
+
+
+def _tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _names(repo_name: str) -> set[str]:
+    """What a person might call this repo.
+
+    `telikos-booking-service` is "booking" far more often than its full name, so
+    matching only the exact directory name would make this fall back to
+    everything on nearly every real task.
+    """
+    parts = set(re.findall(r"[a-z0-9]+", repo_name.lower()))
+    # The generic halves say nothing about WHICH repo — matching on them would
+    # select every repo in a workspace whose repos share a prefix, which is the
+    # normal shape.
+    return parts - {"service", "telikos", "svc", "app", "api"}
+
+
+async def create(workspace_root: Path, task_id: int, branch: str,
+                 *hints: str) -> list[dict]:
     """A private checkout of every repo in the workspace, on `branch`.
 
     Reported, never raised: one repo that cannot be prepared must not kill a
@@ -123,7 +169,7 @@ async def create(workspace_root: Path, task_id: int, branch: str) -> list[dict]:
     root = root_for(workspace_root, task_id)
     root.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
-    for repo in repos_in(workspace_root):
+    for repo in repos_for(workspace_root, *hints):
         out: dict = {"repo": repo.name, "branch": branch, "base": "", "ok": False,
                      "note": "", "path": str(root / repo.name)}
         # Fetch so the branch is cut from what origin has now, not from whatever

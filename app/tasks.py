@@ -1051,15 +1051,6 @@ def _repos_under(root: Path) -> list[Path]:
     return worktrees.all_repos_in(root)
 
 
-def _repos_under_unused(root: Path) -> list[Path]:
-    if (root / ".git").is_dir():
-        return [root]
-    try:
-        return sorted(p for p in root.iterdir() if (p / ".git").is_dir())
-    except OSError:
-        return []
-
-
 async def mark_rollback_point(task_id: int, workspace: str | None) -> dict:
     """Record where every repo stood before the task touched it.
 
@@ -1314,9 +1305,12 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     root = Path(_cwd(t.get("workspace")))
     if not root.exists() or root.resolve() == ROOT.resolve():
         return []
-    repos = [root] if (root / ".git").is_dir() else \
-        sorted(p for p in root.iterdir() if (p / ".git").is_dir())
-    repos = [r for r in repos if r.resolve() != ROOT.resolve()]
+    # One definition, in worktrees. This was the third inline copy of the rule and
+    # carried the same bug as the other two: `[root]` whenever the workspace root
+    # is itself a repo, which for the booking workspace is the generated-context
+    # repo and none of the three services.
+    from . import worktrees as _wt
+    repos = [r for r in _wt.repos_in(root) if r.resolve() != ROOT.resolve()]
     if not repos:
         return []
     branch = task_branch(t, task_id)
@@ -1327,7 +1321,15 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     # anything that genuinely needs the shared tree.
     from . import worktrees
     try:
-        results = await worktrees.create(root, task_id, branch)
+        # The task's own words decide which repos are prepared. A one-line change
+        # in the booking service should not cost three fetches and three
+        # checkouts — and two tasks on different services do not conflict, so
+        # neither should be paying for the other's repos. Falls back to all when
+        # nothing is named, because under-preparing breaks a run and
+        # over-preparing only costs a fetch.
+        results = await worktrees.create(root, task_id, branch,
+                                         t.get("title") or "", t.get("goal") or "",
+                                         t.get("prompt") or "")
     except Exception as exc:                          # noqa: BLE001
         results = [{"repo": r.name, "branch": branch, "ok": False, "dirty": False,
                     "note": f"{type(exc).__name__}: {exc}"} for r in repos]
@@ -1676,8 +1678,11 @@ async def ship(task_id: int) -> str:
         raise ValueError(f"task #{task_id} is not a finished code task "
                          f"(kind={t['kind']}, status={t['status']})")
     root = Path(_cwd(t["workspace"]))
-    repos = [root] if (root / ".git").is_dir() else \
-        sorted(p for p in root.iterdir() if (p / ".git").is_dir())
+    # Same rule, same place. This copy mattered most: with the old shortcut,
+    # shipping looked for the task's branch in the generated-context repo and
+    # would have raised no PR at all for the services the work was actually in.
+    from . import worktrees as _wt
+    repos = _wt.repos_in(root)
     urls: list[str] = []
     for repo in repos:
         rc, cur = await repo_ops.git(repo, "git", "rev-parse", "--abbrev-ref", "HEAD")

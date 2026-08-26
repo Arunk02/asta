@@ -140,3 +140,60 @@ def test_double_yes_cannot_run_the_same_work_twice():
     second = offers.accept()
     assert first is not None and first.id == call.id
     assert second is None or second.id != call.id
+
+
+# --- the same question is one question ---------------------------------------
+
+def test_restaging_the_open_question_is_a_no_op():
+    """The loop from the transcript.
+
+    His yes was not reaching the staged call, so the brain staged it again every
+    turn. Each re-stage must not become another queue entry — that fills the queue
+    with copies of the very thing he is being asked, and changes the id he was
+    shown underneath him.
+    """
+    first = _call()
+    for _ in range(5):
+        _call()
+    assert offers.pending().id == first.id, "the head changed under him"
+    assert offers.waiting() == [], "re-proposals piled up behind the same question"
+
+
+def test_a_different_target_is_a_different_question():
+    """Dedup must not swallow a genuinely new act."""
+    _call()
+    offers.staged_write("teams_call", {"who": "Priya"}, "📞 Call Priya",
+                        "Teams call to Priya.", "Ring Priya?", kind="teams_write")
+    assert [o.subject for o in offers.waiting()] == ["📞 Call Priya"]
+
+
+def test_a_watcher_repeating_itself_does_not_evict_real_offers():
+    """Arun's point: one refresh already proposed does not need proposing again.
+
+    Watchers re-detect the same state every pass. Without collapsing them the
+    bounded queue fills with restatements of one thing and drops the offers that
+    actually differ — the exact failure a bounded queue exists to prevent,
+    arriving by another route.
+    """
+    _call()
+    for days in (14, 18, 21, 25, 30, 34):
+        offers.propose("🗂 booking context is stale", f"{days} days since last enrichment",
+                       "Want me to bring the context up to date?", action="refresh")
+    ci = offers.offer("analyse", "🔴 CI failed: booking", "", "Analyse it?")
+
+    waiting = offers.waiting()
+    subjects = [o.subject for o in waiting]
+    assert subjects.count("🗂 booking context is stale") == 1, \
+        f"the same news queued more than once: {subjects}"
+    assert ci.subject in subjects, "a real offer was evicted by repeats of one thing"
+
+
+def test_the_surviving_duplicate_carries_the_freshest_context():
+    """Replace rather than skip — "21 days" is more useful than "14"."""
+    _call()
+    for days in (14, 21):
+        offers.propose("🗂 booking context is stale", f"{days} days since last enrichment",
+                       "Refresh it?", action="refresh")
+    stale = [o for o in offers.waiting() if "stale" in o.subject]
+    assert len(stale) == 1
+    assert "21 days" in stale[0].context, "kept the older, staler description"

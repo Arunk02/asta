@@ -2605,3 +2605,35 @@ def test_no_eval_cases_does_not_read_as_a_failing_score(monkeypatch, tmp_path):
     assert "0%" not in text and "0/0" not in text, "an unrun eval reported as a score"
     assert "gitignored" in text and "data/evals/booking.json" in text, \
         "it must say where the cases go, or the next person just sees nothing"
+
+
+# --- 25. a healed fault must stop being reported -----------------------------
+
+def test_a_successful_scrape_clears_the_last_error():
+    """The reason a watcher failed must not outlive the failure.
+
+    Found live, right after the restart that put this review's code into service:
+    `attention_scrape_error:teams` held "Teams app did not load within 75s" while
+    the watcher was in fact reading successfully every 60 seconds. Nothing ever
+    cleared it, so the next unrelated stall would have been explained with the
+    wrong cause — which is worse than no cause, because it is followed.
+    """
+    from app import attention
+
+    attention.note_scrape_error("teams", RuntimeError("Teams app did not load within 75s"))
+    assert "did not load" in attention.last_error("teams")
+
+    attention.note_scrape("teams")
+    assert attention.last_error("teams") == "", \
+        "a successful read left the previous failure's reason in place"
+
+
+def test_clearing_one_source_does_not_clear_another():
+    """Outlook and Teams fail independently; healing one must not hide the other."""
+    from app import attention
+
+    attention.note_scrape_error("teams", RuntimeError("teams broke"))
+    attention.note_scrape_error("outlook", RuntimeError("outlook broke"))
+    attention.note_scrape("teams")
+    assert attention.last_error("teams") == ""
+    assert "outlook broke" in attention.last_error("outlook")

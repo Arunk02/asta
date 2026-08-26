@@ -61,6 +61,7 @@ first thing to revisit.
 | 22 | High | Nothing is learned from a task he cancelled or rejected — 39% of code tasks — which is the richest signal there is | `learn.should_extract` | **closed** |
 | 23 | Medium | A pooled browser must be closed on shutdown or the process leaks Chromium | `main.py` lifespan | **closed** |
 | 24 | High | Three capabilities were unreachable: two modules called by nothing in `app/`, and a capability naming a route that did not exist | `selector_health.py`, `evals.py`, `main.py` | **closed** |
+| 25 | Medium | A watcher's failure reason outlives the failure — a healed fault keeps being reported as the cause | `attention.note_scrape` | **closed** |
 
 ## Closed
 
@@ -327,10 +328,35 @@ check's exception escape the loop, and reintroducing the env knob.
 
 ---
 
+### 25 — a healed fault kept reporting its old cause — CLOSED 2026-08-26
+Found live, in the minutes after the restart that put this review's code into
+service. `attention_scrape_error:teams` held
+
+    RuntimeError: Teams app did not load within 75s
+
+while the Teams watcher was, at that moment, reading successfully every 60
+seconds — proved three ways: `last_scrape` resetting on a ~60s cycle, health not
+flagging `teams_watcher` at all, and a live selector check reporting all three
+reachable selectors still matching.
+
+`note_scrape_error` wrote the reason; nothing ever cleared it. `health.checks`
+quotes that reason whenever a source goes stale, so the next unrelated stall
+would have been explained with a cause that had healed hours earlier. A wrong
+cause is worse than no cause, because it gets followed.
+
+`note_scrape` now clears the error for that source — and only that source, so
+Teams recovering cannot hide Outlook still being broken. Two mutations caught:
+dropping the clear, and clearing every source at once.
+
+The same rule as the rest of this register: report the current state, not the
+last state anyone happened to write down.
+
+---
+
 ## Where this leaves the review
 
-**24 findings raised, 23 closed**, plus finding 4 recorded as Arun's accepted
-risk. 1,681 tests pass. Every fix was mutation-tested — the source was
+**25 findings raised, 24 closed**, plus finding 4 recorded as Arun's accepted
+risk. 1,683 tests pass. Every fix was mutation-tested — the source was
 deliberately broken and the suite had to notice.
 
 Still needing Arun rather than code:

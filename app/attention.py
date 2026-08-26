@@ -448,9 +448,20 @@ _WATCH_KEY = "attention_watch_started:"
 
 
 def note_scrape(source: str, now: float | None = None) -> None:
-    """Record that `source` successfully read its surface just now."""
+    """Record that `source` successfully read its surface just now.
+
+    A success also CLEARS the last error. Without that the reason string outlives
+    the fault it described: the Teams watcher failed once with "Teams app did not
+    load within 75s", recovered on the next poll, and kept that sentence forever —
+    so the next time it went stale for an unrelated reason, health would have
+    quoted the old cause and sent Arun to look in the wrong place.
+
+    Same rule as everywhere else here: report the current state, not the last
+    state anyone happened to write down.
+    """
     if source:
         store.kv_set(_SCRAPE_KEY + source, str(time.time() if now is None else now))
+        store.kv_set(_ERROR_KEY + source, "")
 
 
 def note_watching(source: str, now: float | None = None) -> None:

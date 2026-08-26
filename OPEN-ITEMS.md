@@ -7,6 +7,20 @@ verified; what remains is at the bottom.
 > findings register live in [docs/REVIEW-FINDINGS-2026-08.md](docs/REVIEW-FINDINGS-2026-08.md).
 > Read that first — this file is the July record.
 >
+> **Needs a decision (26 Aug):** a finished task never releases its git worktree.
+> `worktrees.remove` is called from exactly one place — `rollback()`, i.e. only when
+> Arun explicitly says "undo". So every completed code task leaves its checkout
+> behind holding its branch. Live evidence: task #69 was *rejected* and still held
+> `feature/TELIKOS-123`, so tasks #70 and #71 could not create a worktree and both
+> **silently fell back to the shared checkout** — the exact hazard worktrees exist
+> to prevent, and the whole of "parallel tasks don't work". `task_cwd` documents
+> that fallback as intentional for repos where a worktree could not be made; it
+> should not apply when the reason is a finished task squatting on the branch.
+> Proposed: release the worktree when a task reaches a final state, keeping it only
+> when it holds uncommitted work; and when a branch is held by a *finished* task,
+> take the worktree over rather than fall back. Not done — it changes what happens
+> to a checkout that may hold work, so it wants his word first.
+>
 > Three things still need Arun rather than code:
 >
 > - **`ANTHROPIC_API_KEY` is refused by the provider.** Health reports it; the

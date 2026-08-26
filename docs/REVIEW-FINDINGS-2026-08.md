@@ -79,7 +79,7 @@ first thing to revisit.
 | 40 | **Critical** | Two MORE inline copies of the repo-discovery rule, one of them deciding where PRs get raised | `tasks.py` | **closed** |
 | 41 | High | A read-only side turn could still spawn a CODE task — the guard that would catch it is behind a flag that is off | `agent.delegate_task` | **closed** |
 | 42 | Medium | Code questions went to a 9B local model before the CLI subscriptions already paid for | `call_brain` | **closed** |
-| 43 | High | The documented cert command truncates its target before fetching, so a failed fetch leaves a 0-byte cert | `deploy/fetch-temporal-cert.sh` | **closed** |
+| 43 | High | The documented cert command truncates its target before fetching, so a failed fetch leaves a 0-byte cert | `health`, `mcp-setup-bundle` | **closed** |
 
 ## Closed
 
@@ -765,17 +765,34 @@ which passes every `os.path.exists` check and surfaces much later from inside TL
 as "failed to find any PEM data". The documented remedy manufactures the exact
 failure state finding 26 had to diagnose.
 
-`deploy/fetch-temporal-cert.sh` writes to a temp file, checks it is non-empty,
-checks it *parses* as the right kind of object, and only then moves it into
-place. A failed fetch leaves whatever was there before untouched, and says which
-of the three usual causes to look at.
+**A correct fetcher already existed and I did not look for it first.**
+`~/mcp-setup-bundle/fetch-temporal-cert.sh` writes to a temp file, verifies the
+decode, and additionally does two checks the replacement I wrote did not: it
+confirms the **key's modulus matches the cert**, and that the cert's **CN is
+scoped to the namespace that env actually targets**. Either check failing means
+an unusable cert that would otherwise be installed and fail later.
 
-It reads the env → cert-name → vault-path mapping **from the proxy** rather than
-restating it, for the same reason the Temporal playbook is generated: a second
-copy is how a newly added env goes missing in one of them.
+It is also the only correct source for the Vault paths. The proxy's generic hint
+is `readable/{env}/common/temporal`, and **that is wrong for `perf`**, which
+really lives at `readable/spt/...`. My script derived its path from that hint, so
+it would have fetched the wrong secret for perf and failed in a way that looks
+like a permissions problem.
 
-Verified refusing cleanly with no `VAULT_ADDR` set, leaving the existing 0-byte
-files exactly as they were rather than making them worse.
+So the duplicate was deleted rather than kept. `health` now names the canonical
+script in the remediation line for a broken cert, alongside the login that
+actually works:
+
+    vault login -method=oidc
+    ~/mcp-setup-bundle/fetch-temporal-cert.sh preprod
+
+No `role=` — the OIDC mount here has no named role, and `-role=` additionally
+fails as an unknown flag because with `-method` extra parameters are `key=value`
+pairs. Both wrong forms were tried live before the working one was found in
+Arun's own shell history from July.
+
+The lesson recorded is the one about looking: a weaker second implementation of
+something that already exists is worse than no implementation, because it gets
+maintained.
 
 ---
 

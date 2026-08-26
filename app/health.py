@@ -145,7 +145,9 @@ async def checks() -> dict[str, str]:
     for cert in diagnostics.broken_certs():
         problems[f"temporal-{cert['env']}"] = (
             f"cert is present but unusable — {cert['why']}. Debugging on this env "
-            f"will fail inside TLS with an error that does not mention the file.")
+            f"will fail inside TLS with an error that does not mention the file. "
+            f"Fix: vault login -method=oidc, then "
+            f"{diagnostics.FETCH_SCRIPT} {cert['env']}")
     for bad in quiet.loud():
         problems[f"repeated:{bad['where']}"] = (
             f"failed {bad['count']}x and was ignored each time — {bad['error'][:70]}")

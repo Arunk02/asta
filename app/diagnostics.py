@@ -53,6 +53,17 @@ TEMPORAL_PROXY = Path(
 #: Monday by someone who needed it, which is the worst possible moment.
 EXPIRY_WARN_DAYS = 14
 
+#: The canonical fetcher. It lives outside this repo because it encodes internal
+#: Vault mounts and paths, and it is the ONLY correct source for them: the proxy's
+#: generic hint (`readable/{env}/...`) is wrong for perf, which really lives at
+#: `readable/spt/...`. Anything deriving a path from that hint gets perf wrong.
+#:
+#: Named here rather than reimplemented. A second fetcher was written before this
+#: one was found, and it was worse in two ways that matter — no check that the key
+#: matches the cert, and no check that the CN is scoped to the namespace the env
+#: targets. Pointing at the good one beats maintaining a weaker copy.
+FETCH_SCRIPT = "~/mcp-setup-bundle/fetch-temporal-cert.sh"
+
 
 def _proxy_module():
     """Load the temporal proxy as a module so its ENV_MAP is the only ENV_MAP."""

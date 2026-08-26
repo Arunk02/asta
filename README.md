@@ -29,7 +29,7 @@ Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
 Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-.venv/bin/python -m pytest -q           # 1,705 tests
+.venv/bin/python -m pytest -q           # 1,714 tests
 ```
 
 ## How it is put together
@@ -104,6 +104,21 @@ of two signals instead:
   PR body). It is **staged, never sent**: Asta shows you the draft and asks "can I
   send this?" A bare "yes" sends it through the real channel tool; anything else is
   a revision. This is the one hard gate, and it holds for every channel.
+
+**A stopped turn says which of three things happened.** "Timed out after 300s" is
+true and answers none of the questions you actually have: did it finish, is it
+still going, is it stuck. `app/turn_budget.py` separates them — **done**, **idle**
+(silent for `ASTA_TURN_IDLE`, 120s: wedged, and more time will not help), and
+**ceiling** (still producing output when the budget ran out: a long job, where
+resuming continues it and retrying starts from nothing). Whatever the brain got
+through travels with the report, because the old path accumulated every step it
+narrated and then discarded all of it to raise one sentence.
+
+That split is also what let the code-task ceiling go up. It was 30 minutes against
+a measured p90 of 32 (n=46), so the slowest tenth of code tasks were killed by
+their own budget and re-run from scratch. It is 45 now, and a wedged brain is
+caught by silence rather than by the ceiling — which is the job the ceiling was
+doing badly.
 
 **Bounded by the clock, not just by steps.** A step count cannot bound latency when
 each step is a whole CLI turn of unknown length — four auto-steps of a ten-minute
@@ -811,6 +826,7 @@ app/selector_health.py  are the Teams selectors still matching live Teams
 app/evals.py            are the ANSWERS right — grounded cases, two tiers
 app/quiet.py            swallowed errors, counted rather than lost
 app/diagnostics.py      are the debugging tools usable — certs, reachability
+app/turn_budget.py      why a turn stopped: finished, wedged, or out of budget
 app/router.py           local-first routing for trivial turns
 app/repo_ops.py         git, branch naming, repo playbooks
 app/agents.py           loads the pipelines in agents/
@@ -830,7 +846,7 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  1,705 tests (conftest isolates the DB — see below)
+tests/                  1,714 tests (conftest isolates the DB — see below)
 ```
 
 `tests/conftest.py` points `store.DB_PATH` at a temp file for *every* test. A stray
@@ -842,7 +858,7 @@ roadmap this is being built against. Still ahead of it: one scheduler replacing 
 background loops, detached runs that survive a closed tab, adaptive context
 compaction, a people/contacts model, and deep research.
 
-`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 31 findings
+`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 33 findings
 raised against the *running* system — every number measured on the live install, not
 inferred from the source — each closed in place with what was done and how it was
 proved. Every fix was mutation-tested: the source was deliberately broken and the

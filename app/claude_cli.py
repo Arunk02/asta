@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import store
+from . import store, turn_budget
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -261,6 +261,7 @@ async def run_turn(conv: dict, user_text: str,
             block = await proc.stdout.read(4096)
             if not block:
                 break
+            beat.beat()          # still alive — see turn_budget.guard
             buf += block
             # stream-json is newline-delimited; a 4k read can split a line.
             *lines, buf = buf.split(b"\n")
@@ -312,6 +313,8 @@ async def run_turn(conv: dict, user_text: str,
                     else:
                         final = (e.get("result") or "").strip()
 
+    beat = turn_budget.Heartbeat()
+
     def _report() -> None:
         """Hand back whatever was spent — including on the paths that failed.
 
@@ -323,15 +326,25 @@ async def run_turn(conv: dict, user_text: str,
                 on_usage(usage)
 
     limit = turn_timeout()
+    stop = await turn_budget.guard(_pump(), beat, total=limit)
     try:
-        await asyncio.wait_for(_pump(), timeout=limit)
+        if not stop.ok:
+            proc.kill()
+            _report()          # a killed turn already burned its tokens
+            # Whatever it produced travels with the error. A turn that wrote three
+            # files and then ran out of budget is not the same event as one that
+            # wedged having done nothing, and reporting both as "timed out" is
+            # what made it impossible to tell finished from stuck.
+            stop.chunks[:] = [final or ""]
+            raise turn_budget.TurnStopped(stop)
         # Same reason as copilot_cli: end-of-output is not end-of-process, and an
         # unbounded wait here holds a finished turn open indefinitely.
         rc = await asyncio.wait_for(proc.wait(), timeout=30)
     except asyncio.TimeoutError:
         proc.kill()
         _report()
-        raise RuntimeError(f"CLI turn timed out after {limit}s")
+        raise turn_budget.TurnStopped(
+            turn_budget.Stop("ceiling", limit, 0.0, [final or ""]))
     except asyncio.CancelledError:
         # Arun redirected mid-answer. Killing the process is the point: it stops
         # the wrong line of work from consuming any more of the session quota.

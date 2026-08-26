@@ -68,6 +68,8 @@ first thing to revisit.
 | 29 | High | The debugging eval cases were vacuous — parroting the playbook scored 6/8 | `data/evals/debugging.json` | **closed** |
 | 30 | High | No Temporal knowledge source existed — the env/namespace/cert map lived only in the proxy, unreadable by any brain | `skills/` | **closed** |
 | 31 | Medium | A blank setting in `.env` silently disabled a whole module | `diagnostics.TEMPORAL_PROXY` | **closed** |
+| 32 | **Critical** | A stopped turn could not say whether the work finished, was still running, or was wedged — and threw away everything it had done | `copilot_cli`, `claude_cli` | **closed** |
+| 33 | High | The code-task ceiling (30 min) sat BELOW the measured p90 (32 min), killing work that was going to succeed | `tasks.TASK_TIMEOUT` | **closed** |
 
 ## Closed
 
@@ -484,10 +486,67 @@ is: documenting a setting is supposed to be the safe act.
 
 ---
 
+### 32 — "timed out after 300s" answered none of the questions — CLOSED 2026-08-26
+Raised by Arun from a Teams screenshot: Asta implementing a VTS ETA validation,
+narrating a dozen real steps, then
+
+    RuntimeError: Copilot CLI turn timed out after 300s
+
+His objection is the right one: *"now it not making sense whether it actually
+completed does it doing or struck."* True, and useless.
+
+Two defects, compounding.
+
+**The work was thrown away.** Both drivers accumulate every chunk the brain
+streams — every file it opened, every edit it narrated — and the timeout branch
+discarded all of it to raise one sentence. The evidence existed, in memory, and
+the error path deleted it. There was no way to answer "did it do anything?"
+except to go and read the repo.
+
+**The budget was total elapsed time, never silence.** A brain streaming progress
+every few seconds and a brain wedged since second three were killed at the same
+moment with the same words. Those are opposite situations: one needs more time,
+the other needs stopping. Nothing ever looked at *when output last arrived*, so
+the system could not tell them apart even in principle.
+
+`app/turn_budget.py` names three outcomes instead of one:
+
+    done     the brain finished
+    idle     silent for ASTA_TURN_IDLE (120s) — wedged; more time will not help
+    ceiling  still producing output when the budget ran out — a long job, and
+             resuming continues it where retrying starts from nothing
+
+The partial output travels with the error, so the report says what it got
+through. One module for both brains rather than a copy each: the two pump loops
+were byte-identical and had drifted anyway, and `claude_cli` parses NDJSON so it
+reports liveness through a `Heartbeat` while the policy stays in one place.
+
+The abandoned pump is cancelled, because a brain still editing files behind an
+answer Arun has already read is how the next turn finds a repo that moved.
+
+Four mutations caught: reporting idle as ceiling, discarding the chunks, leaving
+the pump running, and lowering the ceiling back under p90. The cancellation test
+was itself vacuous first time — `asyncio.run` tore the loop down and killed the
+stray task regardless, so it passed either way. Rewritten to wait inside the same
+loop.
+
+### 33 — the code ceiling sat below the measured p90 — CLOSED 2026-08-26
+`TASK_TIMEOUT["code"]` was 1800s. The baseline measured at the top of this
+register: **median 7.7 min, p90 32 min (n=46)**. Thirty minutes is *below* the
+p90, so roughly the slowest tenth of code tasks were killed by their own budget —
+work that was going to succeed, re-run from nothing, paying the whole cost twice.
+
+Raised to 2700s (45 min), which clears the measured p90 with room. Safe to raise
+precisely because finding 32 landed first: a wedged brain is now caught after two
+minutes of silence regardless of how much ceiling remains, so the ceiling no
+longer has to double as a liveness check. That was the job it was doing badly.
+
+---
+
 ## Where this leaves the review
 
-**31 findings raised, 30 closed**, plus finding 4 recorded as Arun's accepted
-risk. 1,705 tests pass. Every fix was mutation-tested — the source was
+**33 findings raised, 32 closed**, plus finding 4 recorded as Arun's accepted
+risk. 1,714 tests pass. Every fix was mutation-tested — the source was
 deliberately broken and the suite had to notice.
 
 Still needing Arun rather than code:

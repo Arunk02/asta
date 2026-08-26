@@ -53,7 +53,18 @@ ROOT = Path(__file__).resolve().parent.parent
 REVIEW_OWN_DIFF = os.environ.get("ASTA_REVIEW_OWN_DIFF", "1").strip().lower() \
     not in ("0", "false", "no", "off")
 
-TASK_TIMEOUT = {"analysis": 900, "code": 1800, "teams_draft": 300}
+#: Per-kind ceilings. `code` was 1800s — and the measured baseline for real code
+#: tasks is median 7.7 min with a **p90 of 32 min** (n=46), so the ceiling sat
+#: BELOW the p90 and killed roughly the slowest tenth of tasks with their own
+#: budget. A limit that fires on work which was going to succeed is not a safety
+#: net, it is a source of repeated work: the task is re-run from nothing and pays
+#: the whole cost again.
+#:
+#: 45 min clears the measured p90 with room, and the idle watchdog
+#: (`turn_budget`) is what actually catches a wedged brain now — which is the job
+#: this number was doing badly. A stuck turn is stopped after two minutes of
+#: silence regardless of how much ceiling is left.
+TASK_TIMEOUT = {"analysis": 900, "code": 2700, "teams_draft": 300}
 
 # Pipelines are Asta's own (agents/), not the workspace's. One definition for
 # both executors and every workspace, so improving it improves every run — which

@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from . import memory, store, untrusted, workspace_tools
+from . import memory, store, turn_budget, untrusted, workspace_tools
 
 COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
 
@@ -374,29 +374,25 @@ async def run_turn(conv: dict, user_text: str,
         stderr=asyncio.subprocess.PIPE,
         env={**os.environ, "CI": "1"},
     )
-    chunks: list[str] = []
-
-    async def _pump() -> None:
-        assert proc.stdout
-        while True:
-            chunk = await proc.stdout.read(512)
-            if not chunk:
-                break
-            text = chunk.decode(errors="replace")
-            chunks.append(text)
-            if on_delta:
-                await on_delta(text)
-
     limit = turn_timeout()
+    assert proc.stdout
+    stop = await turn_budget.drain(proc.stdout, on_delta, total=limit)
+    chunks = stop.chunks
     try:
-        await asyncio.wait_for(_pump(), timeout=limit)
+        if not stop.ok:
+            # Everything it streamed is kept and travels with the error. The old
+            # branch discarded it for a one-line message, which is why "did it do
+            # anything?" had no answer but to go and look at the repo.
+            proc.kill()
+            raise turn_budget.TurnStopped(stop)
         # Closing stdout is not the same as exiting. A copilot that streamed its
         # answer and then hung on shutdown held this await forever, outside the
         # ceiling above — the turn was finished and Arun still heard nothing.
         rc = await asyncio.wait_for(proc.wait(), timeout=30)
     except asyncio.TimeoutError:
         proc.kill()
-        raise RuntimeError(f"Copilot CLI turn timed out after {limit}s")
+        raise turn_budget.TurnStopped(
+            turn_budget.Stop("ceiling", limit, 0.0, chunks))
     except asyncio.CancelledError:
         # Arun corrected course mid-answer. Killing the process is the point:
         # it stops the wrong line of investigation from billing any further.

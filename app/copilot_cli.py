@@ -31,7 +31,23 @@ def mcp_cli_enabled() -> bool:
     return os.environ.get("ASTA_CLI_MCP", "0").lower() in ("1", "true", "yes", "on")
 
 ROOT = Path(__file__).resolve().parent.parent
-TURN_TIMEOUT = 10 * 60
+
+
+def turn_timeout() -> int:
+    """How long ONE CLI turn may run before it is abandoned.
+
+    Was a hard 10 minutes, which is most of why a reply could take twenty: a wedged
+    brain held the conversation for the full window before anyone found out. Five
+    minutes is longer than any turn that was ever going to succeed, so the only
+    thing the shorter ceiling costs is the waiting.
+    """
+    try:
+        return max(30, int(os.environ.get("ASTA_TURN_TIMEOUT", "300")))
+    except ValueError:
+        return 300
+
+
+TURN_TIMEOUT = 10 * 60          # legacy constant; live callers use turn_timeout()
 
 
 def available() -> bool:
@@ -291,8 +307,12 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     # orientation swap, so the flag never tells copilot to use tools it lacks.
     if mcp_cli_enabled():
         import json as _json
-        from . import mcp_server
-        cmd += ["--additional-mcp-config", _json.dumps(mcp_server.config_entry())]
+        from . import mcp_server, tool_index
+        # Same context-aware narrowing as the Claude path (one selector, both
+        # brains): the ~handful the message needs, or the full set when ambiguous.
+        selected = tool_index.select_sticky(conv["id"], ranking_text)
+        cmd += ["--additional-mcp-config",
+                _json.dumps(mcp_server.config_entry(tools=selected))]
     model = os.environ.get("COPILOT_CLI_MODEL")
     if model:
         cmd += ["--model", model]
@@ -318,15 +338,37 @@ def _budget_flags(effort: str, credits: str) -> list[str]:
     return flags
 
 
+# Reading Teams/Outlook drives a real browser, so it can wedge on a dead session
+# or a stuck page. It used to be awaited with no ceiling at all, and — because it
+# happens BEFORE the brain is even spawned — a wedge there looked exactly like a
+# thinking model: no output, no error, no end. Context is a nice-to-have; the
+# answer is not. Past the ceiling we go without it.
+PREFETCH_TIMEOUT = float(os.environ.get("ASTA_PREFETCH_TIMEOUT", "25"))
+
+
+async def _prefetch(user_text: str) -> str:
+    """Teams + Outlook context for this message, or "" if it can't be had in time."""
+    async def _both() -> str:
+        return "\n\n".join(b for b in (await _teams_activity_context(user_text),
+                                       await _outlook_context(user_text)) if b)
+    try:
+        return await asyncio.wait_for(_both(), timeout=PREFETCH_TIMEOUT)
+    except (asyncio.TimeoutError, TimeoutError, Exception):
+        return ""
+
+
 async def run_turn(conv: dict, user_text: str,
-                   on_delta: Callable[[str], Awaitable[None]] | None = None) -> str:
+                   on_delta: Callable[[str], Awaitable[None]] | None = None,
+                   _retried: bool = False) -> str:
     """One chat turn through Copilot CLI, streaming stdout chunks to on_delta."""
     if not available():
         raise RuntimeError("Copilot CLI is not installed/authenticated (run: copilot login)")
+    # Under MCP the brain reads Teams/Outlook via native tools on demand, so the
+    # ~25s pre-read that blocks every turn is redundant. Kept for the MCP-off
+    # fallback, where the brain can't reliably reach those itself.
+    prefetched = "" if mcp_cli_enabled() else await _prefetch(user_text)
     proc = await asyncio.create_subprocess_exec(
-        *_build_cmd(conv, user_text, "\n\n".join(
-            b for b in (await _teams_activity_context(user_text),
-                        await _outlook_context(user_text)) if b)),
+        *_build_cmd(conv, user_text, prefetched),
         cwd=_cwd(conv),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -345,12 +387,16 @@ async def run_turn(conv: dict, user_text: str,
             if on_delta:
                 await on_delta(text)
 
+    limit = turn_timeout()
     try:
-        await asyncio.wait_for(_pump(), timeout=TURN_TIMEOUT)
-        rc = await proc.wait()
+        await asyncio.wait_for(_pump(), timeout=limit)
+        # Closing stdout is not the same as exiting. A copilot that streamed its
+        # answer and then hung on shutdown held this await forever, outside the
+        # ceiling above — the turn was finished and Arun still heard nothing.
+        rc = await asyncio.wait_for(proc.wait(), timeout=30)
     except asyncio.TimeoutError:
         proc.kill()
-        raise RuntimeError(f"Copilot CLI turn timed out after {TURN_TIMEOUT}s")
+        raise RuntimeError(f"Copilot CLI turn timed out after {limit}s")
     except asyncio.CancelledError:
         # Arun corrected course mid-answer. Killing the process is the point:
         # it stops the wrong line of investigation from billing any further.
@@ -362,9 +408,18 @@ async def run_turn(conv: dict, user_text: str,
     if rc != 0:
         err = (await proc.stderr.read()).decode(errors="replace")[-500:] if proc.stderr else ""
         # A dead --resume session (e.g. cleaned store) gets one fresh retry.
-        if not out and store.kv_get(f"copilot_session:{conv['id']}"):
+        #
+        # "One" has to be enforced by a flag, not by the session key: _session_id
+        # WRITES a new key whenever it finds none, so deleting it here guaranteed
+        # the very same condition was true again on the next failure. Anything
+        # that fails for a reason a new session cannot fix — an exhausted monthly
+        # quota, most of all — retried forever, roughly every 20 seconds, each
+        # attempt leaving a fresh session directory behind. That is what left
+        # 7,851 of them on disk, and why a WhatsApp message could be answered
+        # with silence for three hours: the turn never returned to report it.
+        if not _retried and not out and store.kv_get(f"copilot_session:{conv['id']}"):
             store.kv_del(f"copilot_session:{conv['id']}")
-            return await run_turn(conv, user_text, on_delta)
+            return await run_turn(conv, user_text, on_delta, _retried=True)
         raise RuntimeError(f"Copilot CLI exited {rc}: {err or out[-300:] or 'no output'}")
     return out or "(Copilot returned no output)"
 
@@ -413,7 +468,7 @@ def last_turn_usage(conv: dict, reply_chars: int = 0):
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
-                   on_progress=None) -> str:
+                   on_progress=None, mcp_config: str = "") -> str:
     """Headless one-off prompt.
 
     agent      — a workspace .github/agents/*.agent.md pipeline (e.g.
@@ -422,6 +477,8 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     session_id — pin the Copilot session so a run that pauses at a human gate
                  (solo agent Stage 1) can be resumed later with resume=True.
     effort     — per-call reasoning effort; falls back to COPILOT_EFFORT_TASK.
+    mcp_config — inline mcpServers JSON to attach for this run (the dev MCP
+                 servers for a code task). Empty leaves the command unchanged.
     """
     if not available():
         raise RuntimeError("Copilot CLI is not installed/authenticated")
@@ -430,6 +487,10 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
         cmd += ["--resume" if resume else "--session-id", session_id]
     cmd += ["-p", prompt, "-s", "--no-color", "--no-ask-user",
             "--allow-all-tools", "--allow-all-paths", "--log-level", "none"]
+    if mcp_config:
+        # --additional-mcp-config ADDS to Copilot's own config (parity with the
+        # chat path's flag); --allow-all-tools already clears the new tools.
+        cmd += ["--additional-mcp-config", mcp_config]
     if agent:
         cmd += ["--agent", agent]
     # Headless workers are where the money goes — one ran 22 minutes

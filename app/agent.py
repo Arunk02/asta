@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as _dt
+import hashlib
+import json
+import re
 import os
+import re as _re
+import time
 
 import httpx
 from pydantic_ai import Agent
@@ -11,7 +17,7 @@ from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from . import memory, skills, untrusted, workspace_tools
+from . import memory, skills, store, untrusted, workspace_tools
 
 def assistant_name() -> str:
     return os.environ.get("ASSISTANT_NAME", "Asta")
@@ -91,6 +97,14 @@ def build_instructions(conversation_summary: str, recall_block: str, workspace: 
     notes = capabilities.notes_block(selected)
     if notes:
         parts.append(notes)
+    # How he actually writes, measured from his own sent messages. Carried on
+    # every turn because prepare_to_send is in the ALWAYS set — a draft can
+    # happen at any point, and a message that reads like a bot has already been
+    # written by the time anything could decide to load this.
+    from . import writing
+    voice = writing.guidance()
+    if voice:
+        parts.append(voice)
     if channel in CHANNEL_NOTES:
         parts.append(CHANNEL_NOTES[channel])
     idx = memory.index_text()
@@ -110,13 +124,43 @@ def build_instructions(conversation_summary: str, recall_block: str, workspace: 
 
 # --- model registry ----------------------------------------------------------
 
+#: Substrings that mark a model as NOT a chat model. An embedding model answers a
+#: /chat/completions call with an error or with nothing, and "nothing" is
+#: indistinguishable here from "the brain had no answer" — so it would be reported
+#: as Asta not knowing, rather than as the wrong model being asked.
+_NOT_CHAT = ("embed", "embedding", "rerank", "whisper", "clip")
+
+
 def _lmstudio_model_id() -> str | None:
+    """A model that can actually hold a conversation, not just the first one listed.
+
+    This used to return `data[0]["id"]` — whatever LM Studio happened to list
+    first. On Arun's machine that list ends with `text-embedding-nomic-embed-
+    text-v1.5`, and the day it sorted first every local completion would have
+    returned empty while looking exactly like a model with nothing to say.
+
+    Same shape as the API key that was present and refused: something was
+    available, so it was used, and nobody checked it was the right thing.
+
+    `ASTA_LOCAL_MODEL` pins a specific one — worth setting, because the pick
+    otherwise depends on load order and the models differ by more than 2x in
+    latency (measured on this machine: gemma-4-e4b 15.9s, qwen3.5-9b 38.9s for
+    the same question, the difference being reasoning tokens).
+    """
     base = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1").rstrip("/")
     try:
         data = httpx.get(f"{base}/models", timeout=2).json().get("data", [])
-        return data[0]["id"] if data else None
     except Exception:
         return None
+    ids = [m.get("id", "") for m in data if m.get("id")]
+    chat = [i for i in ids if not any(bad in i.lower() for bad in _NOT_CHAT)]
+    pinned = (os.environ.get("ASTA_LOCAL_MODEL") or "").strip()
+    if pinned:
+        # Only if it is actually loaded — a pin naming an unloaded model must fall
+        # through to something that works, not fail every local call silently.
+        if pinned in chat:
+            return pinned
+    return chat[0] if chat else None
 
 
 _INTENT_SYSTEM = (
@@ -267,10 +311,25 @@ async def _intent_local(text: str) -> str | None:
 #             project context pipeline needs a tool-using agent that edits the repo and
 #             runs builds, which a plain chat completion cannot do.
 #   effort    honours the low|medium|high|xhigh|max ladder.
+# Per-brain TRAITS live here, in one table, so a brain's differences are DECLARED
+# DATA rather than scattered `if model == …` branches — the whole point of the
+# consistency work. Adding a model is a row here plus its runner, nothing else.
+#   identity  how its operating prompt is delivered: "system" (a real system
+#             prompt — CLI --append-system-prompt, or PydanticAI instructions) or
+#             "prefix" (folded into the user message; Copilot has no system flag).
+#   tools     how it reaches Asta's capabilities: "mcp" (CLI brains, native
+#             mcp__asta__* forwarding to /api/_invoke) or "in_process" (the agent
+#             calls the Python functions directly).
+#   context   approximate usable context window — the budget the token/local work
+#             reads to decide how many tool schemas to expose. Local is the small
+#             one, and therefore the forcing function for leanness.
+#   rank      failover order, lowest tried first: subscription CLIs (no marginal
+#             $, strong) → free local → metered API keys last.
 _SPECS: dict[str, dict] = {
     # Office-paid workhorse, default for day-to-day chat.
     "copilot":    {"kind": "cli", "runner": "copilot_cli", "executes": True,  "effort": True,
                    "exec_name": "copilot",
+                   "identity": "prefix", "tools": "mcp", "context": 128000, "rank": 10,
                    "label": "Copilot CLI (office)", "hint": "install/auth: copilot login"},
     # Runs on the Claude subscription Arun already pays for — listed above the
     # API-key "claude" entry, which bills a second prepaid account for the same model.
@@ -279,12 +338,16 @@ _SPECS: dict[str, dict] = {
     # table carries both names rather than migrating live data.
     "claude_cli": {"kind": "cli", "runner": "claude_cli", "executes": True,  "effort": True,
                    "exec_name": "claude",
+                   "identity": "system", "tools": "mcp", "context": 200000, "rank": 20,
                    "label": "Claude CLI (subscription)", "hint": "install/auth: claude login"},
     "claude":     {"kind": "api", "env": "ANTHROPIC_API_KEY", "executes": False, "effort": False,
+                   "identity": "system", "tools": "in_process", "context": 200000, "rank": 40,
                    "model_env": ("ASTA_CLAUDE_MODEL", "claude-sonnet-5"), "label": "Claude"},
     "openai":     {"kind": "api", "env": "OPENAI_API_KEY", "executes": False, "effort": True,
+                   "identity": "system", "tools": "in_process", "context": 128000, "rank": 50,
                    "model_env": ("ASTA_OPENAI_MODEL", "gpt-4o"), "label": "OpenAI"},
     "local":      {"kind": "api", "env": "", "executes": False, "effort": False,
+                   "identity": "system", "tools": "in_process", "context": 8192, "rank": 30,
                    "model_env": ("", ""), "label": "Local"},
 }
 
@@ -322,6 +385,26 @@ def spec(name: str) -> dict:
     return _SPECS.get(name, {})
 
 
+#: Trait defaults for a brain the table hasn't fully described yet — safe,
+#: conservative values so a half-declared model still behaves.
+_TRAIT_DEFAULTS = {"identity": "prefix", "tools": "in_process", "context": 8192, "rank": 999}
+
+
+def brain_traits(name: str) -> dict:
+    """The declared traits of a brain (identity/tools/context/rank), one lookup
+    for every caller that needs to know how a model differs — so those
+    differences stay DATA in the spec table, never re-hardcoded at the call site."""
+    s = spec(normalize_model(name))
+    return {k: s.get(k, d) for k, d in _TRAIT_DEFAULTS.items()}
+
+
+def fallback_order() -> list[str]:
+    """Brains in the order a dried-up turn should try them — lowest rank first
+    (subscription CLIs → free local → metered API keys). Derived from the trait
+    table so adding a model to the chain is a `rank` value, not a code edit."""
+    return [n for _, n in sorted((brain_traits(n)["rank"], n) for n in _SPECS)]
+
+
 def is_cli(name: str) -> bool:
     return spec(name).get("kind") == "cli"
 
@@ -343,7 +426,9 @@ def available(name: str) -> bool:
         return runner(name).available()
     if name == "local":
         return bool(_lmstudio_model_id())
-    return bool(os.environ.get(s["env"], ""))
+    # A key being PRESENT is not a key being VALID, and treating them as the same
+    # is how every API path failed silently while working brains sat idle.
+    return bool(os.environ.get(s["env"], "")) and not key_rejected(name)
 
 
 # Stage effort, per model. The cascade lets one dial cover everything and a
@@ -374,6 +459,155 @@ def effort_for(model: str, stage: str) -> str:
     return _STAGE_DEFAULT.get(stage, "")
 
 
+# A subscription brain that has run out is INSTALLED and USELESS, and `available()`
+# only ever answered the first half. So `default_chat_model()` kept handing every
+# new conversation to Copilot after its monthly quota was gone — the switch had to
+# be made by hand, per conversation, for a brain that could not answer any of them.
+#
+# The cooldown is how it comes back on its own: Copilot's pool is monthly and we
+# are not told the reset date, so it is retried every few hours rather than being
+# written off; Claude's is a rolling five-hour window, so it matches that window.
+# One table, consulted by every caller — a per-brain constant somewhere else is
+# how two parts of this file end up disagreeing about who is up.
+QUOTA_COOLDOWN = {"copilot": 6 * 3600, "claude_cli": 5 * 3600}
+
+
+def credential_kv(name: str) -> str:
+    return f"{name}_key_rejected"
+
+
+def mark_key_rejected(name: str, why: str = "") -> None:
+    """Remember that this brain's credential was REFUSED, not merely rate-limited.
+
+    Measured, and the reason this exists: `ANTHROPIC_API_KEY` was set in .env,
+    `available("claude")` returned True because a key was PRESENT, and every call
+    came back 401. `best_model_name()` kept choosing it, so the in-call brain, PR
+    review summaries and meeting recaps all failed silently — while two working
+    CLI subscriptions Arun already pays for sat unused.
+
+    A rejected key is not a transient quota and must not expire back into
+    availability on a timer: nothing about waiting makes an invalid key valid. It
+    clears when the key changes, which is the only thing that can fix it.
+    """
+    store.kv_set(credential_kv(name), json.dumps(
+        {"at": time.time(), "why": why[:200], "key_fingerprint": _key_fingerprint(name)}))
+
+
+def key_rejected(name: str) -> bool:
+    """True while this brain's credential is known bad AND unchanged since."""
+    raw = store.kv_get(credential_kv(name))
+    if not raw:
+        return False
+    try:
+        rec = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    # A new key deserves a fresh chance — that is the whole recovery path.
+    if rec.get("key_fingerprint") != _key_fingerprint(name):
+        store.kv_del(credential_kv(name))
+        return False
+    return True
+
+
+def _key_fingerprint(name: str) -> str:
+    """Enough to tell one key from another, never enough to be one."""
+    s = spec(name) or {}
+    raw = os.environ.get(s.get("env", ""), "")
+    return hashlib.sha1(raw.encode()).hexdigest()[:12] if raw else ""
+
+
+#: What an API says when the credential itself is the problem, as opposed to the
+#: request or the rate limit. Deliberately narrow: wrongly marking a working brain
+#: as rejected takes it out of service until the key is changed.
+_REJECTED = re.compile(
+    r"authentication_error|api key is invalid|invalid api key|invalid_api_key|"
+    r"incorrect api key|status_code: 401|unauthorized", re.I)
+
+
+def credential_failure(msg: str) -> bool:
+    return bool(_REJECTED.search(msg or ""))
+
+
+def quota_kv(name: str) -> str:
+    return f"{name}_quota_down"
+
+
+def mark_quota_down(name: str) -> None:
+    store.kv_set(quota_kv(name), str(time.time()))
+
+
+def quota_down(name: str) -> bool:
+    """True while `name` is known to be out of quota and not yet worth retrying."""
+    raw = store.kv_get(quota_kv(name))
+    if not raw:
+        return False
+    try:
+        since = float(raw)
+    except (TypeError, ValueError):
+        return False
+    if time.time() - since < QUOTA_COOLDOWN.get(name, 3600):
+        return True
+    store.kv_del(quota_kv(name))     # cooldown served — let it prove itself again
+    return False
+
+
+# A brain stops for one of two reasons that look alike in an error string but
+# want opposite handling. It CRASHED — a bug, a bad prompt, a dead session — and
+# resuming just repeats the failure. Or it hit a usage ceiling that lifts on its
+# own: Copilot's monthly quota, Claude's rolling session window, an API rate
+# limit. The second is a PAUSE, not a failure — keep the work, come back when it
+# clears. One classifier, so every brain is paused and resumed by the same rule
+# rather than each caller inventing its own substring test (which is exactly how
+# "session limit" slipped past a test that only looked for "quota").
+_TRANSIENT_LIMIT_MARKERS = (
+    "quota",
+    "session limit",
+    "usage limit",
+    "rate limit", "rate-limit", "ratelimit",
+    "too many requests",
+    "overloaded",
+    "limit reached", "reached your limit", "hit your limit", "hit your session",
+    "resets ", "resets at", "try again later",
+)
+
+
+def transient_limit(msg: str) -> bool:
+    """True when a brain stopped on a temporary usage/rate/session limit — a
+    'come back later' condition rather than a crash. A drained PREPAID balance
+    ('credit balance is too low') is excluded: that account does not self-heal,
+    so pausing to wait for it would wait forever."""
+    m = (msg or "").lower()
+    if "credit balance" in m:
+        return False
+    return any(k in m for k in _TRANSIENT_LIMIT_MARKERS)
+
+
+_RESET_TIME = _re.compile(
+    r"reset[s]?(?:\s+(?:at|on))?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?", _re.I)
+
+
+def limit_reset_at(msg: str, now: float | None = None) -> float | None:
+    """Best-effort epoch when a limit message says it lifts, else None. Claude
+    prints e.g. 'resets 3:40pm (Asia/Calcutta)'; the server runs on that same
+    machine, so its local clock is the right one to read the time against."""
+    m = _RESET_TIME.search(msg or "")
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2) or 0)
+    ampm = (m.group(3) or "").lower().replace(".", "")
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return None
+    base = _dt.datetime.now() if now is None else _dt.datetime.fromtimestamp(now)
+    target = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= base:                       # the named time is later today, or tomorrow
+        target += _dt.timedelta(days=1)
+    return target.timestamp()
+
+
 def model_registry() -> dict[str, dict]:
     """name -> {label, available, detail}. Availability drives the UI picker."""
     local_id = _lmstudio_model_id()
@@ -389,6 +623,8 @@ def model_registry() -> dict[str, dict]:
             env_var, default = s["model_env"]
             label = f"{s['label']} ({os.environ.get(env_var, default)})"
             hint = f"set {s['env']} in .env"
+        if ok and quota_down(name):
+            ok, hint = False, "quota exhausted — it'll be retried automatically"
         registry[name] = {"label": label, "available": ok, "detail": "" if ok else hint}
     if os.environ.get("ASTA_TEST_MODEL"):
         registry["test"] = {"label": "Test (no LLM)", "available": True, "detail": ""}
@@ -409,10 +645,17 @@ def best_model_name() -> str:
 
 
 def default_chat_model() -> str:
-    """Day-to-day default: Copilot CLI (office-paid) when present, else best API model."""
+    """Day-to-day default: the cheapest CLI subscription that can actually answer.
+
+    Order is by what it costs Arun, not by preference: Copilot is office-paid, so
+    it goes first — but only while it has quota. `model_registry()` folds that in,
+    so a brain that is installed and exhausted no longer counts as available and
+    the next one takes over on its own.
+    """
     reg = model_registry()
-    if reg.get("copilot", {}).get("available"):
-        return "copilot"
+    for name in EXECUTORS:
+        if reg.get(name, {}).get("available"):
+            return name
     return best_model_name()
 
 
@@ -538,35 +781,358 @@ async def jira_my_issues() -> str:
     return await jira_search("assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC")
 
 
-async def jira_issue(key: str) -> str:
-    """Full detail of one Jira issue (summary, status, description)."""
+#: A description shorter than this explains nothing on its own — "see comments",
+#: a bare link, a copied error string. Not a bug to fix in Jira, just how tickets
+#: get written when the reporter is in a hurry.
+_THIN_DESCRIPTION = 80
+
+
+def _reads_thin(text: str) -> bool:
+    return len("".join((text or "").split())) < _THIN_DESCRIPTION
+
+
+async def jira_issue(key: str, comments: int = 10) -> str:
+    """Full detail of one Jira issue: status, description, AND the comment thread.
+
+    The comments are not background colour. On plenty of tickets the description is
+    one line and the real requirement was settled in the Q&A underneath it, so
+    answering from the title and description alone produces confident nonsense.
+    Raise `comments` when the recent thread refers back to something older.
+    """
     from . import jira
-    i = await jira.get_issue(key)
+    i = await jira.get_issue(key, comment_limit=max(1, comments))
+    thread, total = i.get("comments") or [], i.get("comment_total", 0)
     head = (f"{i['key']} [{i['type']} / {i['status']} / {i['priority']}] {i['summary']}\n"
             f"Labels: {', '.join(i['labels']) or '-'} Components: {', '.join(i['components']) or '-'}")
-    # Anyone with tracker access can write the summary, description and comments.
-    return head + "\n\n" + untrusted.wrap(
-        i["description"] or "(no description)", f"Jira {i['key']}")
+
+    # Say when the ticket does not explain itself. Without this the model reads a
+    # one-line description, finds nothing contradicting its first guess, and
+    # answers with confidence it has not earned. Naming the gap is what turns
+    # that into a question for Arun.
+    if _reads_thin(i["description"]):
+        head += ("\nNOTE: this ticket's description does not stand on its own — "
+                 + ("read the comments below for what is actually being asked."
+                    if thread else
+                    "and there are no comments either. Do not infer the requirement "
+                    "from the title; ask Arun what it means."))
+
+    body = [f"--- description ---\n{i['description'].strip() or '(empty)'}"]
+    if thread:
+        shown = (f"showing the {len(thread)} most recent of {total}"
+                 if total > len(thread) else f"all {len(thread)}")
+        lines = [f"[{c['created'][:10]}] {c['author']}: {c['text']}".rstrip()
+                 for c in thread]
+        body.append(f"--- comments ({shown}, oldest first) ---\n" + "\n\n".join(lines))
+        if total > len(thread):
+            body.append(f"({total - len(thread)} older comment(s) not shown — call "
+                        f"jira_issue('{i['key']}', comments={total}) if the thread "
+                        f"refers back to something missing.)")
+    else:
+        body.append("--- comments ---\n(none)")
+
+    # Anyone with tracker access can write the summary, description and comments,
+    # so the whole lot is untrusted — one fence around all of it.
+    return head + "\n\n" + untrusted.wrap("\n\n".join(body), f"Jira {i['key']}")
+
+
+async def jira_sprint() -> str:
+    """What Arun has committed to in the CURRENT sprint — the board, not the backlog.
+
+    Different from jira_my_issues, which is everything assigned and not done and happily
+    includes work from three sprints ago. Use for 'what's on me this sprint', standup, and
+    before offering to pick something up."""
+    from . import jira
+    try:
+        issues = await jira.current_sprint()
+    except RuntimeError as exc:
+        return str(exc)
+    if not issues:
+        return "Nothing assigned to you in the open sprint."
+    return "\n".join(f"{i['key']} [{i['status']}] {i['summary']}" for i in issues)
 
 
 async def jira_comment(key: str, text: str) -> str:
-    """Post a comment on a Jira issue. Confirm the wording with Arun first unless he
-    dictated the exact text."""
-    from . import jira
-    r = await jira.add_comment(key, text)
-    return f"Comment posted on {r['key']} (id {r['comment_id']})."
+    """Propose a comment on a Jira issue. Write the exact wording you mean to post.
+
+    This does NOT post. It stages the comment and asks Arun; his yes posts the exact text
+    you wrote here, unchanged. So write it as the finished comment, not as a description of
+    one, and tell him in your reply that it is waiting for his go-ahead."""
+    from . import jira, offers
+    if not jira.configured():
+        return "Jira is not configured — set JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN in .env"
+    offers.staged_write(
+        "jira_comment", {"key": key, "text": text},
+        f"💬 Comment on {key}", text.strip()[:900],
+        f"Post this comment on {key}?", kind="jira_write")
+    return f"Staged the comment on {key} — waiting for Arun's yes. Nothing posted yet."
 
 
 async def jira_transition(key: str, to_status: str) -> str:
-    """Move a Jira issue to another status by name (e.g. 'In Progress', 'Ready for Retest').
-    Confirm with Arun first unless he stated the exact target status. If the status isn't
-    reachable, the error lists the valid targets — offer those to Arun."""
-    from . import jira
+    """Propose moving a Jira issue to another status (e.g. 'In Progress', 'Ready for Retest').
+
+    This does NOT move it. The valid targets are checked now, so an impossible status fails
+    here rather than after he has approved it; then the move is staged for his yes."""
+    from . import jira, offers
+    if not jira.configured():
+        return "Jira is not configured — set JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN in .env"
     try:
-        r = await jira.transition_issue(key, to_status)
-    except RuntimeError as e:
-        return str(e)
-    return f"{r['key']} moved to {r['status']}."
+        valid = await jira.list_transitions(key)
+    except Exception as exc:
+        return f"Could not read {key}'s workflow: {exc}"
+    if not any(v.lower() == to_status.strip().lower() for v in valid):
+        return (f"{key} cannot move to '{to_status}' — valid targets: "
+                f"{', '.join(valid) or 'none'}. Offer those to Arun.")
+    offers.staged_write(
+        "jira_transition", {"key": key, "to_status": to_status},
+        f"✏️ Move {key} → {to_status}", f"Status change on {key}.",
+        f"Move {key} to {to_status}?", kind="jira_write")
+    return f"Staged the move of {key} to {to_status} — waiting for Arun's yes."
+
+
+async def pr_review_post(pr: str, action: str, body: str = "",
+                         workspace: str = "", repo: str = "") -> str:
+    """Propose posting a review on a pull request. Only when Arun asked you to.
+
+    action: 'approve', 'comment', or 'request_changes'. body: the review text, written as
+    the finished comment — his yes posts exactly these words under his name, so write them
+    for the PR author to read, not for Arun.
+
+    This does NOT post. Approving someone's change is visible to the whole team the moment
+    it lands, so it always waits for his explicit yes. Use review_pr first to form the
+    opinion; use this only when he says to post it."""
+    from . import offers, review
+    if action not in review.ACTIONS:
+        return f"action must be one of: {', '.join(sorted(review.ACTIONS))}"
+    if action != "approve" and not (body or "").strip():
+        return f"a '{action}' review needs a body — write the comment first"
+    verb = {"approve": "Approve", "comment": "Comment on",
+            "request_changes": "Request changes on"}[action]
+    offers.staged_write(
+        "pr_review", {"pr": pr, "workspace": workspace, "repo": repo,
+                      "action": action, "body": body},
+        f"🔎 {verb} PR #{str(pr).lstrip('#')}",
+        (body or "(no comment body — approval only)").strip()[:900],
+        f"{verb} PR #{str(pr).lstrip('#')} as you?", kind="pr_write")
+    return f"Staged the {action.replace('_', ' ')} on PR #{str(pr).lstrip('#')} — waiting for Arun's yes."
+
+
+async def merge_pr(pr: str, workspace: str, repo: str = "", method: str = "squash") -> str:
+    """Propose merging a pull request. ONLY when Arun asked for it in those words.
+
+    This does NOT merge. A merge is the least reversible thing Asta can do — it
+    puts code on the branch everybody else builds from — so it stages with the PR's
+    REAL state attached: CI, review decision, conflicts. He approves a fact, not a hope.
+
+    Refuses outright when something blocks it, and says which: red CI, unfinished CI,
+    conflicts, a draft, or changes requested. Never offer to merge past a blocker; tell
+    him what is in the way. The blockers are re-checked at the moment he says yes,
+    because CI can go red between the asking and the answering.
+
+    method: squash (default — these repos squash), merge, or rebase."""
+    from . import offers, review
+    if method not in review.MERGE_METHODS:
+        return f"method must be one of: {', '.join(sorted(review.MERGE_METHODS))}"
+    try:
+        state = await review.merge_state(pr, workspace, repo)
+    except RuntimeError as exc:
+        return f"Could not read PR {pr} — {exc}"
+    blockers = review.merge_blockers(state)
+    if blockers:
+        return (f"Not offering to merge #{state.get('number') or pr} — "
+                + "; ".join(blockers) + ".\n\n" + review.merge_summary(state))
+    offers.staged_write(
+        "pr_merge", {"pr": pr, "workspace": workspace, "repo": repo,
+                     "method": method, "delete_branch": True},
+        f"🔀 Merge PR #{str(pr).lstrip('#')} ({method})",
+        review.merge_summary(state),
+        f"Merge #{state.get('number')} into {state.get('base')} as you?", kind="pr_write")
+    return (f"Staged the merge of #{state.get('number')} into {state.get('base')} "
+            f"— waiting for Arun's yes. Nothing is merged yet.\n\n"
+            + review.merge_summary(state))
+
+
+async def teams_status(status: str = "") -> str:
+    """Read or set Arun's Teams presence.
+
+    status: leave empty to read it; or one of available / busy / do not disturb / be right
+    back / away / offline (he also says 'dnd', 'brb', 'free'). Do it when he asks — this is
+    his own status, not a message to anyone — but say what it reads afterwards, because a
+    status he thinks is DND and isn't will cost him the next hour."""
+    from . import teams_bridge
+    if not teams_bridge.enabled():
+        return "Teams bridge is off — " + teams_bridge.status()["hint"]
+    try:
+        if not (status or "").strip():
+            now = await teams_bridge.read_presence()
+            return f"Teams status: {now}" if now else "Couldn't read your Teams status."
+        return f"Teams status is now {await teams_bridge.set_presence(status)}."
+    except RuntimeError as exc:
+        return f"Didn't change it — {exc}"
+
+
+async def create_meeting(subject: str, when: str, minutes: int = 30,
+                         attendees: str = "", agenda: str = "") -> str:
+    """Propose a meeting invite. Does NOT send it.
+
+    when: 'YYYY-MM-DD HH:MM' in his local time — resolve 'Thursday at 3' to an actual date
+    yourself before calling, and if you are not sure which day he means, ask. attendees:
+    comma-separated email addresses.
+
+    The invite is built and staged; his yes sends it. An invite books time in other
+    people's calendars, so it never goes out on your judgement alone."""
+    from . import meetings, offers
+    try:
+        invite = meetings.meeting_invite(
+            subject, when, minutes,
+            [a for a in (attendees or "").split(",") if a.strip()], agenda)
+    except RuntimeError as exc:
+        return f"Can't build that invite — {exc}"
+    offers.staged_write(
+        "calendar_send", {"url": invite["url"], "summary": invite["subject"]},
+        "📅 Meeting invite", meetings.describe(invite),
+        "Send this invite?", kind="calendar")
+    return f"Staged the invite — waiting for Arun's yes.\n{meetings.describe(invite)}"
+
+
+async def request_leave(start_date: str, end_date: str = "", reason: str = "",
+                        to: str = "") -> str:
+    """Propose an all-day leave / out-of-office invite. Does NOT send it.
+
+    start_date and end_date: 'YYYY-MM-DD', both inclusive — one day off means passing the
+    same date twice or leaving end_date empty. to: comma-separated addresses (his manager,
+    his team). Staged for his yes, because this one goes to the people who approve it."""
+    from . import meetings, offers
+    try:
+        invite = meetings.leave_invite(
+            start_date, end_date, reason,
+            [a for a in (to or "").split(",") if a.strip()])
+    except RuntimeError as exc:
+        return f"Can't build that leave request — {exc}"
+    offers.staged_write(
+        "calendar_send", {"url": invite["url"], "summary": invite["subject"]},
+        "🌴 Leave request", meetings.describe(invite),
+        "Send this leave invite?", kind="calendar")
+    return f"Staged the leave request — waiting for Arun's yes.\n{meetings.describe(invite)}"
+
+
+async def join_meeting_by_name(which: str) -> str:
+    """Join a meeting Arun names rather than links — "join my 3pm", "join the standup".
+
+    Use this whenever he refers to a meeting by time or by name; only fall back to
+    join_meeting when he actually pastes a link. If the phrase does not pick out
+    exactly one meeting this refuses and lists the day — pass that back to him and
+    ask which he meant. Never guess: joining the wrong call puts him in a room in
+    front of people who watch him arrive."""
+    import asyncio as _asyncio
+
+    from . import meetings
+    try:
+        result = await meetings.join_by_phrase(which)
+    except RuntimeError as exc:
+        return f"Didn't join — {exc}"
+    _asyncio.create_task(meetings.watch_and_report(which))
+    return result
+
+
+async def join_meeting(join_url: str, title: str = "") -> str:
+    """Join a Teams meeting from its join link, muted with the camera off.
+
+    Use when Arun says to sit in on a call he cannot attend. Joining is listening only —
+    to actually say something you need say_in_call, which is separate and usually not
+    available. Tell him he is joined and that you are only listening.
+
+    Asta stays in the call and hangs up by itself when it ends, then offers to pull out
+    anything that concerned him. Don't wait for that: reply to him now."""
+    import asyncio as _asyncio
+
+    from . import meetings
+    try:
+        result = await meetings.join(join_url)
+    except RuntimeError as exc:
+        return f"Didn't join — {exc}"
+    # The watcher outlives this turn on purpose — a meeting lasts far longer than
+    # any reasonable turn, and holding the conversation open for it would make the
+    # whole assistant unresponsive for an hour.
+    _asyncio.create_task(meetings.watch_and_report(title))
+    return (f"{result}. I'll stay on and hang up when it ends, then offer you "
+            f"anything from it that's yours. I'm only listening — I won't speak.")
+
+
+async def leave_meeting() -> str:
+    """Hang up on the call Asta is sitting in. Use when Arun says to drop off."""
+    from . import meetings
+    return await meetings.leave()
+
+
+async def meeting_notes() -> str:
+    """The transcript Asta captured from the last call it sat in on.
+
+    Use for "what did I miss", "notes from that call", "what was said". This is live
+    captions read out of Teams while the call ran — real speech recognition of a real
+    meeting, so it is imperfect and it only covers the part Asta was present for.
+    Summarise from it; do not fill in gaps it does not contain."""
+    from . import meetings
+    text = meetings.captured_transcript() or meetings.last_transcript()
+    if not text:
+        return ("No captions were captured — either Asta wasn't in the call, or live "
+                "captions could not be turned on. Nothing to summarise; if the meeting "
+                "was recorded, Teams' own transcript is the place to look.")
+    live = " (call still running — this is what has been said so far)" \
+        if meetings.captured_transcript() else ""
+    return f"Captured transcript{live}:\n\n" + untrusted.wrap(text, "Teams live captions")
+
+
+async def say_in_call(text: str) -> str:
+    """Say something out loud in the call, in Arun's voice. ONLY when he gave you the words.
+
+    Never improvise in a live call and never answer a question on his behalf: say what he
+    told you to say, nothing else. Usually unavailable — it needs a virtual microphone
+    configured on the machine — and when it is, this returns the reason rather than
+    pretending something was said."""
+    from . import meetings
+    try:
+        return await meetings.say_in_call(text)
+    except RuntimeError as exc:
+        return f"Said nothing — {exc}"
+
+
+def watch_ci(what: str, repo: str = "") -> str:
+    """Also watch a build that isn't Arun's own work — a release branch, a workflow, a repo.
+
+    By default the CI watcher only reports runs he triggered and pipelines on PRs he
+    authored, which is what keeps it quiet enough to be worth reading. Use this when he
+    says 'keep an eye on the release build' or names a specific pipeline. Prefix with
+    'stop ' to unsubscribe."""
+    from . import ci_watch
+    what = (what or "").strip()
+    if what.lower().startswith("stop "):
+        return ci_watch.unwatch(what[5:])
+    return ci_watch.watch(what, repo)
+
+
+def propose_next(next_step: str, why: str = "") -> str:
+    """Offer Arun a next step and stop, instead of doing it or ending the conversation.
+
+    This is how any flow continues: you have finished a piece of work, there is an obvious
+    next move, and it is his call whether you take it. Say what you would do, concretely
+    enough that 'yes' is unambiguous — 'implement PROJ-412 on a branch and run the tests',
+    not 'continue'. He can answer from his phone hours later and it will still run.
+
+    next_step: what you would do, as an instruction to yourself.
+    why: one line on why it is the right next move.
+
+    Use it for: after analysing a bug, after reading a ticket, after a follow-up lands,
+    after a review — anywhere you would otherwise ask 'shall I?' in prose and lose it when
+    the turn ends. Do NOT use it for something you can just do, or for a message leaving
+    this chat (that is prepare_to_send)."""
+    from . import offers
+    step = (next_step or "").strip()
+    if not step:
+        return "propose_next needs a concrete next step."
+    offers.propose(subject="▶ Next step", context=(why or "").strip(),
+                   question=step, action=step)
+    return ("Offered it to Arun — his yes runs it, from any channel. "
+            "Now finish your reply; do not do the step yourself.")
 
 
 async def refresh_context(workspace: str) -> str:
@@ -716,6 +1282,48 @@ async def health_check() -> str:
     return health.report_text(problems)
 
 
+async def debug_stack_health() -> str:
+    """Check the tools Arun debugs WITH — Temporal certs and reachability.
+
+    Jira says what was reported, Grafana what the logs say, Temporal what the
+    workflow did. Each fails in a way that reads as "nothing wrong": an empty cert
+    that passes an existence check and dies inside TLS, a cert that expired last
+    week, a VPN that is down.
+
+    Run it before trusting a debugging session that is coming back empty — an
+    empty answer from a broken tool looks exactly like an empty answer from a
+    healthy system."""
+    from . import diagnostics
+    return diagnostics.report(await diagnostics.run())
+
+
+async def check_teams_selectors() -> str:
+    """Check that the CSS selectors Asta relies on still match live Teams.
+
+    Teams is a web app that changes without warning, and a selector that stopped
+    matching does not raise — it returns nothing, which is indistinguishable from
+    "no new messages". So Asta goes quiet and Arun assumes nobody pinged him.
+
+    Read-only: it opens chats and reads the DOM, sends nothing, clicks nothing that
+    acts. Runs daily on its own; this is the on-demand version."""
+    from . import selector_health
+    return await selector_health.check_and_report()
+
+
+async def answer_quality(workspace: str = "booking") -> str:
+    """Score Asta's ANSWERS about the codebase against grounded cases.
+
+    The test suite proves the plumbing works; this asks whether the answers are
+    right. Every case traces to something already verified — a lesson written from
+    a correction Arun made, or a pin recording how a repo actually builds — so it
+    measures against fact, not against a guess.
+
+    Costs a brain call per case, so run it when something changed, not routinely."""
+    from . import evals
+    out = await evals.run(workspace)
+    return evals.report(out)
+
+
 async def ci_status() -> str:
     """Recent GitHub Actions runs across all workspace repos (needs `gh auth login` once).
     Failures are also pushed to Arun automatically every 10 min."""
@@ -752,7 +1360,8 @@ def continue_working(next_step: str) -> str:
     return f"Continuing automatically: {next_step or 'next step'}"
 
 
-def prepare_to_send(what: str, to: str = "", channel: str = "chat") -> str:
+def prepare_to_send(what: str, to: str = "", channel: str = "chat",
+                    to_group: bool = False) -> str:
     """Stage an outward-facing message for Arun to approve BEFORE it is sent.
 
     Use this whenever you've drafted something to send outside this chat — a Teams
@@ -760,13 +1369,29 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat") -> str:
     the full draft, `to` the recipient/target, `channel` one of teams|email|jira|pr|chat.
     Asta shows Arun the draft and asks "can I send this?" — it is NEVER sent until he
     confirms. This is the ONLY approved way to send on his behalf; never send outward
-    through any other tool without staging it here first."""
-    from . import tasks, loop
+    through any other tool without staging it here first.
+
+    `to` on Teams means a PERSON's 1:1 chat. Set to_group=True ONLY when Arun named a
+    group or channel himself ("post it in the prod issue group") — never because a
+    group happens to share a word with the name he used."""
+    from . import tasks, loop, writing
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
-    loop.set_pending_send(cid, what, to, channel)
-    tgt = f" to {to}" if to else ""
+    # Links are repaired here rather than asked for in a prompt. A full stop
+    # welded to the end of a URL is what turned a PR link Vinish was meant to
+    # click into either a 404 or plain text, and "remember not to do that" is
+    # not a fix — every future draft would be one slip away from it again.
+    # Applied BEFORE staging, so what Arun approves is exactly what goes out.
+    what = writing.tidy_links(what)
+    # And the same argument for how the recipient is addressed. "bro" is all
+    # over his history and every instance is in ONE chat; carried to anyone
+    # else it calls a colleague something he never has. Only chat channels —
+    # a Jira comment or PR body has no term of address to get wrong.
+    if channel in ("teams", "chat", "whatsapp"):
+        what = writing.fit_address(what, to)
+    loop.set_pending_send(cid, what, to, channel, to_group=to_group)
+    tgt = f" to {'group ' if to_group else ''}{to}" if to else ""
     return f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
 
 
@@ -777,10 +1402,79 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     chat context). kind: analysis (read-only, parallel) | code (edits code — set
     the workspace) | teams_draft (drafts a Teams reply — set teams_chat; the
     draft waits for Arun's approval, it is never sent automatically)."""
-    from . import tasks
+    from . import relevance, tasks
+    # A question is not a request to go do work. If this turn was opened by a
+    # passive question and the model is now trying to spawn work off it, hold and
+    # ask first rather than silently running (and touching a repo) unasked.
+    held = relevance.guard_spawn(kind, title, workspace)
+    if held:
+        return held
+    # Feedback on work that just finished is not a new task, however much it
+    # reads like one. Spawning here is what made Arun's corrections start from
+    # nothing: a fresh session, none of the context of the change being
+    # criticised, and a second implementation of the same thing.
+    same = tasks.refinable_match(title, prompt, workspace)
+    if same:
+        return (f"This looks like feedback on task #{same['id']} "
+                f"(“{same['title'][:60]}”, {same['status']}), not a new piece of "
+                f"work. Call refine_task({same['id']}, \"<what should change>\") "
+                f"so it continues in that task's own session with everything it "
+                f"already knows. If it really IS unrelated new work, say so and "
+                f"spawn it with a title that does not restate the old one.")
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
     return (f"Task #{t['id']} ({kind}) spawned — running in the background. "
             f"Arun will be notified when it finishes.")
+
+
+def draft_voice(person: str) -> str:
+    """How Arun writes TO THIS PERSON specifically — call before drafting a Teams
+    or WhatsApp message to someone, so the draft uses the words he actually uses
+    with them. Terms of address belong to a relationship, not to him: he says
+    "bro" to one colleague and nothing at all to others, and using the wrong one
+    is a message he would have to apologise for."""
+    from . import writing
+    g = writing.guidance(person)
+    if not g:
+        return (f"Not enough of Arun's own messages stored to describe his voice yet. "
+                f"Write plainly and use NO term of address for {person}.")
+    return g
+
+
+async def refine_task(task_id: int, feedback: str) -> str:
+    """Continue a FINISHED code task with Arun's feedback, in its own session.
+
+    Use this — never delegate_task — whenever he comments on work a task already
+    delivered: a correction, an addition, "also handle X", a review comment, or
+    a CI failure on its PR. The task keeps everything it learned; a new task
+    would start from nothing and re-implement what is already there.
+    Works on tasks that are done, shipped, failed, or blocked on their PR."""
+    from . import tasks
+    try:
+        return await tasks.refine(task_id, feedback)
+    except ValueError as exc:
+        return str(exc)
+
+
+def task_pr_status(task_id: int = 0) -> str:
+    """Where the PRs for shipped tasks stand — CI, review, merged or not.
+    Call with 0 for every task whose PR is still open."""
+    from . import store, tasks
+    ids = [task_id] if task_id else tasks.open_prs()
+    if not ids:
+        return "No task has an open PR right now."
+    lines = []
+    for tid in ids:
+        t = store.get_task(tid)
+        if not t:
+            continue
+        checked = t.get("pr_checked_at")
+        when = (f", checked {int((time.time() - checked) / 60)}m ago"
+                if checked else ", not checked yet")
+        lines.append(f"#{tid} {t['title'][:50]} — {t['status']} "
+                     f"[{t.get('pr_state') or 'unknown'}{when}]")
+        for url in (t.get("pr_urls") or "").splitlines():
+            lines.append(f"    {url}")
+    return "\n".join(lines)
 
 
 def list_background_tasks() -> str:
@@ -831,11 +1525,15 @@ async def ship_task(task_id: int) -> str:
         return f"Ship failed: {exc}"
 
 
-async def reject_task(task_id: int) -> str:
-    """Reject a task: stops a running worker (and its spend), discards a draft."""
+async def reject_task(task_id: int, why: str = "") -> str:
+    """Reject a task: stops a running worker (and its spend), discards a draft.
+
+    Pass `why` whenever Arun said what was wrong with it — "that is not what I meant",
+    "wrong repo", "I wanted the plan first". That sentence is what Asta learns from;
+    without it the correction is recorded but the lesson has to be guessed at."""
     from . import tasks
     try:
-        return await tasks.reject(task_id)
+        return await tasks.reject(task_id, why=why)
     except ValueError as exc:
         return str(exc)
 
@@ -855,6 +1553,78 @@ async def teams_read_chat(chat: str, limit: int = 15) -> str:
         if "SESSION_EXPIRED" in str(exc):
             return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
         return f"Teams read failed: {exc}"
+
+
+def teams_search(query: str, limit: int = 12) -> str:
+    """Search everything Asta has ever read from Teams, by TOPIC rather than by chat or time.
+
+    Use for "what did we decide about the ATA fallback", "who mentioned the vessel ETA
+    problem", "was there anything about the deployment" — questions where he knows the
+    subject but not who said it or when. teams_history needs a person and a window;
+    this needs neither, and searches only what has already been read, so it opens no
+    browser and takes milliseconds."""
+    from . import store
+    hits = store.teams_search(query, limit)
+    if not hits:
+        return ("Nothing already-read matches that. It may simply never have been read — "
+                "this searches Asta's own record, not all of Teams. Try teams_history "
+                "with the person and a time window to go and fetch it.")
+    import datetime as _dt
+    lines = []
+    for h in hits:
+        when = ""
+        if h.get("sent_at"):
+            with contextlib.suppress(Exception):
+                when = _dt.datetime.fromtimestamp(h["sent_at"]).strftime("%d %b %H:%M")
+        lines.append(f"[{h.get('chat','?')}{' · ' + when if when else ''}] "
+                     f"{h.get('sender','?')}: {(h.get('text') or '')[:220]}")
+    return untrusted.wrap("\n".join(lines), "Teams messages already read")
+
+
+async def teams_history(chat: str, when: str = "last night", limit: int = 60) -> str:
+    """Read a Teams chat for a TIME WINDOW — 'what did Vinish say last night',
+    'anything from Suraj yesterday', 'messages from the triage group this morning'.
+    `when` is plain English: last night, yesterday, this morning, today, last week,
+    'last 3 hours', or 'while I was away'. Use this instead of teams_read_chat
+    whenever the question has a WHEN in it; teams_read_chat only sees what is
+    currently on screen and cannot reach last night's messages."""
+    from . import teams_bridge, when as when_mod
+    if not teams_bridge.enabled():
+        return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
+    if not teams_bridge.logged_in_once():
+        return "Not logged in — Arun must run: .venv/bin/python -m app.teams_bridge login"
+
+    since, until, label = when_mod.parse(when)
+    window = when_mod.describe(since, until)
+
+    # Stored history first, but ONLY when it demonstrably covers the whole
+    # window. This used to accept any stored row as history: one message already
+    # seen from last night short-circuited the scrollback, and a partial thread
+    # came back labelled "from stored history" as though it were complete. That
+    # is the single worst kind of answer this system can give — confidently
+    # wrong about his own messages — so coverage is now proved, not assumed.
+    covered = store.teams_history_covers(chat, since, until)
+    rows = store.teams_messages(chat, since=since, until=until,
+                                limit=limit) if covered else []
+    source = "stored history"
+    if not rows:
+        try:
+            fetched = await teams_bridge.read_history(chat, since=since, limit=limit)
+        except RuntimeError as exc:
+            if "SESSION_EXPIRED" in str(exc):
+                return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
+            return f"Teams read failed: {exc}"
+        rows = [r for r in fetched if r.get("sent_at") and r["sent_at"] <= until]
+        source = "Teams (scrolled back)"
+
+    if not rows:
+        return (f"Nothing found in '{chat}' for {label} ({window}). Asta scrolled the "
+                f"thread back and read no message in that window — either none was sent, "
+                f"or it is older than Teams will load.")
+
+    lines = [teams_bridge.fmt_message(r) for r in rows]
+    body = untrusted.wrap_lines(lines, f"Teams chat: {chat} — {label}")
+    return f"{body}\n\n(window: {window}, from {source}; {len(rows)} message(s))"
 
 
 async def teams_activity(limit: int = 25) -> str:
@@ -935,9 +1705,12 @@ def _prep_prompt(ev: dict, open_items: str) -> str:
             f"**Questions to ask**, **Watch-outs**. No preamble. {focus}")
 
 
-def _prep_skeleton(ev: dict) -> str:
-    return ("_(local model offline — blank checklist)_\n"
-            "**Talking points**\n- \n\n**Questions to ask**\n- \n\n**Watch-outs**\n- ")
+#: What "no prep" looks like. Deliberately a sentinel and not a template: the old
+#: skeleton pushed three empty bullets under "(local model offline)" half an hour
+#: before a meeting, which cost Arun a read and told him nothing he could use. A
+#: form he has to fill in himself is not prep — it is the assistant handing the
+#: work back with extra steps.
+NO_PREP = ""
 
 
 async def meeting_prep(title: str = "") -> str:
@@ -945,7 +1718,6 @@ async def meeting_prep(title: str = "") -> str:
     points, questions to ask, and watch-outs. `title` matches a meeting by name; empty =
     the next meeting you have to speak in. Best-effort, local-model-first (cheap). This
     only DRAFTS — stage it with prepare_to_send if you want it sent to anyone."""
-    import asyncio as _aio
     from . import briefing
     try:
         meetings = await briefing._cached_meetings()
@@ -962,8 +1734,12 @@ async def meeting_prep(title: str = "") -> str:
         open_items = await jira_my_issues()
     except Exception:
         pass
-    body = await _aio.to_thread(memory.local_llm_complete, _prep_prompt(ev, open_items), 400)
-    body = (body or "").strip() or _prep_skeleton(ev)
+    # paid_ok: he walks into this meeting in half an hour. A short turn on a brain
+    # he already pays for is worth it; an empty checklist is worth nothing.
+    body = (await memory.cheap_complete(_prep_prompt(ev, open_items), 400,
+                                        paid_ok=True) or "").strip()
+    if not body:
+        return NO_PREP
     org = f" (with {ev['organizer']})" if ev.get("organizer") else ""
     return f"📝 Prep — {ev.get('title', 'meeting')} at {ev.get('start', '')}{org}:\n\n{body}"
 
@@ -978,7 +1754,6 @@ async def meeting_recap(transcript: str, title: str = "") -> str:
     action items (flagging any that need HIM), and open questions. Pass the transcript
     text — e.g. from Teams' own recording/recap. Use after a call he missed or wants
     summarized. Local-model-first (cheap). If an item needs Arun, he's pinged."""
-    import asyncio as _aio
     from . import notify
     t = (transcript or "").strip()
     if len(t) < 40:
@@ -988,9 +1763,11 @@ async def meeting_recap(transcript: str, title: str = "") -> str:
               "sections: **TL;DR** (≤2 lines), **Decisions**, **Action items** (prefix any "
               "that are Arun's with 'ARUN:'), **Open questions**. Be concise, no preamble.\n\n"
               "TRANSCRIPT:\n" + t[:12000])
-    body = (await _aio.to_thread(memory.local_llm_complete, prompt, 700) or "").strip()
+    # He asked for this and is waiting on it, so it may cost a paid turn — the
+    # alternative was telling him to go and start LM Studio, which is not an answer.
+    body = (await memory.cheap_complete(prompt, 700, paid_ok=True) or "").strip()
     if not body:
-        return "Local model offline — start LM Studio (or set a hosted key) and retry the recap."
+        return "No brain is available to summarize it — start LM Studio, or add a key in .env."
     head = f" — {title}" if title else ""
     recap = f"📋 Recap{head}:\n\n{body}"
     if _recap_needs_arun(body):
@@ -1005,7 +1782,6 @@ async def draft_teams_reply(chat: str, question: str = "") -> str:
     for HIM to review. Reads the recent thread with `chat` for context. DRAFT ONLY — stage
     it with prepare_to_send (channel 'teams') so nothing goes out in his name without his yes.
     Use when someone pings Arun on Teams with a question and he wants a head start."""
-    import asyncio as _aio
     from . import teams_bridge
     thread: list[str] = []
     try:
@@ -1023,9 +1799,9 @@ async def draft_teams_reply(chat: str, question: str = "") -> str:
               + (f"Relevant context Arun has:\n{ground}\n\n" if ground else "")
               + "Draft Arun's reply in his voice — direct, brief, helpful. If you genuinely "
                 "lack the information, say what you'd need instead of guessing. No greeting fluff.")
-    draft = (await _aio.to_thread(memory.local_llm_complete, prompt, 400) or "").strip()
+    draft = (await memory.cheap_complete(prompt, 400, paid_ok=True) or "").strip()
     if not draft:
-        return "Couldn't draft (local model offline). Start LM Studio, or answer manually."
+        return f"No brain is available to draft it — answer {chat} manually for now."
     return f"✍️ Draft reply to {chat} (review, then say 'send' to post it):\n\n{draft}"
 
 
@@ -1048,6 +1824,43 @@ async def teams_send_message(chat: str, text: str, to_group: bool = False) -> st
         if "SESSION_EXPIRED" in str(exc):
             return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
         return f"Teams send failed: {exc}"
+
+
+async def teams_resolve(chat: str, to_group: bool = False) -> str:
+    """Check WHO a Teams message would actually reach, without sending anything.
+
+    Use before sending when the name is short, common, or a surname ("Kumar", "Priya"),
+    and whenever Arun names a group. It opens the same chat the send would open and
+    reports its real title, so an ambiguous name is caught before a message lands on
+    the wrong person rather than after."""
+    from . import teams_bridge
+    if not teams_bridge.enabled():
+        return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
+    try:
+        r = await teams_bridge.resolve_target(chat, allow_group=to_group)
+        kind = "group/channel" if to_group else "1:1 chat"
+        return f"'{chat}' resolves to the {kind}: {r['opened']!r} — nothing was sent."
+    except RuntimeError as exc:
+        if "SESSION_EXPIRED" in str(exc):
+            return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
+        return f"Would NOT send: {exc}"
+
+
+async def teams_call(who: str, video: bool = False) -> str:
+    """Propose ringing someone on Teams. Only when Arun asked for a call.
+
+    This does NOT dial. A call interrupts a person immediately and cannot be taken
+    back, so it stages like any other outward act and waits for his yes. Reading a
+    chat or sending a message is almost always the lighter thing to offer first."""
+    from . import offers, teams_bridge
+    if not teams_bridge.enabled():
+        return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
+    kind = "video call" if video else "call"
+    offers.staged_write(
+        "teams_call", {"who": who, "video": video},
+        f"📞 {kind.title()} {who}", f"Teams {kind} to {who}.",
+        f"Ring {who} on Teams?", kind="teams_write")
+    return f"Staged the {kind} to {who} — waiting for Arun's yes. Nothing is ringing yet."
 
 
 def build_agent(selected: list[str] | tuple[str, ...] | None = None) -> Agent:

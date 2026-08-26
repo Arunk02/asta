@@ -81,23 +81,127 @@ def test_a_missing_pr_surfaces_ghs_own_error(_gh, monkeypatch):
         asyncio.run(review.gather("999", "ws"))
 
 
-def test_a_huge_diff_is_trimmed_and_says_so():
-    out = review._trim_diff("x" * (review.MAX_DIFF_CHARS + 5000))
-    assert len(out) < review.MAX_DIFF_CHARS + 400
-    assert "could not see" in out
+def _difffile(path: str, lines: int) -> str:
+    body = "\n".join(f"+    line {i} of {path}" for i in range(lines))
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -0,0 +1,{lines} @@\n{body}\n"
+
+
+def test_an_overflowing_diff_keeps_logic_and_drops_generated():
+    """THE bug behind PR #1333: a naive head-cut dropped whatever came last, which
+    was every business-logic file. Priority order must keep the code and shed the
+    lockfile instead."""
+    lock = _difffile("package-lock.json", 4000)         # big and worthless to review
+    logic = _difffile("src/main/java/RentalChassisMismatchEvaluator.java", 40)
+    diff = lock + logic                                 # lockfile FIRST, as gh often emits
+    out = review._prioritise_diff(diff, budget=len(logic) + 500)
+    assert "RentalChassisMismatchEvaluator.java" in out   # the code survived
+    assert "package-lock.json" in out.split("NOT shown")[1]  # named as omitted, not silently gone
+    assert "line 39 of src/main" in out                  # the actual logic lines are present
+
+
+def test_a_diff_within_budget_is_returned_whole():
+    d = _difffile("src/A.java", 5) + _difffile("src/B.java", 5)
+    assert review._prioritise_diff(d, budget=100000) == d
+
+
+def test_a_lone_logic_file_too_big_is_truncated_not_dropped():
+    big = _difffile("src/main/java/Huge.java", 10000)
+    out = review._prioritise_diff(big, budget=5000)
+    assert "Huge.java" in out
+    assert "truncated" in out.lower()
 
 
 def test_review_never_writes_to_the_pr():
+    """review_pr reads and reports. Posting is a different capability, and the
+    rule travelling with this one has to point at it — otherwise a brain told
+    'read-only' invents its own way to post."""
     cap = capabilities.get("review_pr")
     assert cap is not None
     assert not cap.write
     assert "never comment" in cap.description.lower()
-    assert "his to give" in cap.note
+    assert "pr_review_post" in cap.note
 
 
 def test_a_workspace_without_context_still_reviews(_gh, monkeypatch):
-    async def boom(ws, q):
+    """No conventions built → the review still runs from the diff, and SAYS the
+    context is missing rather than pretending it understood the project."""
+    def no_conv(ws):
         raise RuntimeError("no provider")
-    monkeypatch.setattr("app.workspace.resolve_context", boom)
+    monkeypatch.setattr("app.workspace.conventions", no_conv)
     text, _ = asyncio.run(review.brief("123", "ws"))
     assert "VERDICT" in text
+    assert "none is built" in text or "diff alone" in text
+
+
+def test_project_conventions_are_fed_into_the_review(_gh, monkeypatch):
+    """The whole complaint: it wasn't taking project context. Conventions are the
+    'how this codebase does things' the rules judge against — they must reach the
+    brief, not just a routing JSON of file pointers."""
+    monkeypatch.setattr("app.workspace.conventions",
+                        lambda ws: "### lessons\nVessel ETA is a two-store sync, keep both in step.")
+    text, _ = asyncio.run(review.brief("123", "ws"))
+    assert "two-store sync" in text
+    assert "PROJECT CONTEXT" in text
+
+
+# --- posting it (outward, and therefore staged) -------------------------------
+#
+# Reading a PR costs nothing. Approving one puts Arun's name on somebody else's
+# change, visible to the whole team the moment it lands, and there is no quiet
+# way to take it back. So the two halves are separated and only one of them can
+# happen without him saying so.
+
+def test_posting_a_review_stages_it_and_posts_nothing():
+    from app import agent, offers
+    out = asyncio.run(agent.pr_review_post("31", "approve", "LGTM", "iom", "api"))
+    o = offers.pending()
+    assert "waiting for Arun" in out
+    assert o and o.mechanical() and o.op["name"] == "pr_review"
+    assert o.op["args"]["action"] == "approve"
+
+
+def test_the_staged_review_carries_the_exact_words():
+    from app import agent, offers
+    body = "Blocking: the retry loop has no ceiling — see client.py:88."
+    asyncio.run(agent.pr_review_post("31", "request_changes", body))
+    assert offers.pending().op["args"]["body"] == body
+
+
+def test_he_sees_the_review_body_before_approving_it():
+    from app import agent, offers
+    asyncio.run(agent.pr_review_post("31", "comment", "One nit on naming."))
+    assert "One nit on naming" in offers.pending().context
+
+
+def test_an_unknown_verb_never_becomes_a_staged_review():
+    """A malformed action must not be passed through — 'merge' quietly becoming
+    an approval is the whole class of bug this table prevents."""
+    from app import agent, offers
+    out = asyncio.run(agent.pr_review_post("31", "merge", "ship it"))
+    assert "must be one of" in out
+    assert offers.pending() is None
+
+
+def test_a_comment_with_no_body_is_refused_before_he_is_asked():
+    from app import agent, offers
+    assert "needs a body" in asyncio.run(agent.pr_review_post("31", "comment", ""))
+    assert offers.pending() is None
+
+
+def test_an_approval_may_carry_no_body():
+    from app import agent, offers
+    asyncio.run(agent.pr_review_post("31", "approve"))
+    assert offers.pending() is not None
+
+
+def test_post_review_refuses_a_verb_outside_the_table():
+    with pytest.raises(RuntimeError, match="unknown review action"):
+        asyncio.run(review.post_review("31", "iom", "", "merge", "x"))
+
+
+def test_post_review_maps_each_verb_to_its_own_gh_flag():
+    """One flag per verb, checked here rather than discovered in production when
+    a 'comment' turns out to have approved something."""
+    assert review.ACTIONS["approve"] == "--approve"
+    assert review.ACTIONS["comment"] == "--comment"
+    assert review.ACTIONS["request_changes"] == "--request-changes"

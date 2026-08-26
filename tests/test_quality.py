@@ -37,6 +37,41 @@ def test_report_reads_as_evidence():
     assert "Shipping" in text
 
 
+def test_verify_rate_measures_passing_its_own_check():
+    """The un-fakeable signal: 'good' is a passing check, and a stuck run that
+    parked unresolved counts against the rate — not per-round fix telemetry."""
+    for outcome in ("passed", "passed", "passed", "unresolved"):
+        store.record_outcome("verify", outcome)
+    data = quality.summary()
+    assert data["kinds"]["verify"]["rate"] == 0.75
+    assert "75% passed their own check" in quality.report()
+
+
+def test_verify_convergence_measures_how_hard_green_was():
+    """The learning number: avg fix-rounds to green, and how many passed first try."""
+    store.record_outcome("verify", "passed", detail="fix_rounds=0 cmd=pytest")
+    store.record_outcome("verify", "passed", detail="fix_rounds=0 cmd=pytest")
+    store.record_outcome("verify", "passed", detail="fix_rounds=2 cmd=pytest")
+    conv = quality.verify_convergence()
+    assert conv == {"passed": 3, "avg_fix_rounds": round(2 / 3, 2), "first_try": 2}
+    assert "fix-round(s) to green, 2/3 first-try" in quality.report()
+
+
+def test_verify_convergence_empty_when_nothing_passed():
+    store.record_outcome("verify", "unresolved", detail="stuck")
+    assert quality.verify_convergence() == {}
+
+
+def test_relevance_holds_are_counted_so_intent_drift_is_a_number():
+    """The gate's catches surface in the brief — off-topic drift you can watch fall,
+    not an anecdote you happen to notice."""
+    store.record_outcome("relevance", "held", detail="analysis: No recent one..?")
+    store.record_outcome("relevance", "held", detail="code: did that get fixed?")
+    text = quality.report()
+    assert "Relevance guard" in text
+    assert "held 2" in text
+
+
 def test_old_outcomes_fall_outside_the_window():
     store.record_outcome("task", "done")
     with store._connect() as conn:

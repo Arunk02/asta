@@ -79,12 +79,24 @@ Rules:
 _JSON = re.compile(r"\{.*\}", re.DOTALL)
 
 
+#: He stopped it. Not a failure of the machinery — a correction.
+STOPPED_BY_HIM = ("cancelled", "rejected")
+
+
 def should_extract(rounds: int = 0, escalated: bool = False, status: str = "done") -> bool:
     """Was there enough work here to be worth distilling?
 
     A one-shot answer teaches nothing; a run that needed several rounds, or that
     a weaker tier could not finish, is exactly where the lesson lives.
     """
+    if status in STOPPED_BY_HIM:
+        # The richest signal there is, and it used to be thrown away. When Arun
+        # cancels or rejects a task he is saying "you misread what I wanted", and
+        # he is saying it within minutes of Asta getting it wrong. 39% of code
+        # tasks ended this way, so the largest category after success taught
+        # nothing at all — while a run that succeeded on the second attempt
+        # taught something. That is exactly backwards.
+        return True
     if status not in ("done", "sent"):
         return False
     return escalated or rounds >= 2
@@ -106,12 +118,58 @@ def _save_usage(data: dict) -> None:
 
 
 def record_use(name: str) -> None:
-    """Called when a skill is actually loaded — the only evidence it earns its place."""
+    """Called when a skill is actually loaded."""
     data = _usage()
     entry = data.setdefault(name, {"uses": 0, "confidence": 1.0, "created": time.time()})
     entry["uses"] = int(entry.get("uses", 0)) + 1
     entry["last_used"] = time.time()
     _save_usage(data)
+
+
+#: A skill loaded within this window of a run finishing is treated as having been
+#: in play for it. Wide enough for a long task, narrow enough that yesterday's
+#: reading does not get the credit for today's result.
+CREDIT_WINDOW = 3 * 3600
+
+
+def credit(status: str, since: float, window: float = CREDIT_WINDOW) -> list[str]:
+    """Record whether the skills in play actually helped. Returns the ones judged.
+
+    `uses` alone was never evidence of worth — it counts being LOADED, which a
+    skill earns by having a matching title, not by being right. A wrong procedure
+    followed confidently is loaded just as often as a correct one, and scored
+    identically, so the archive could only ever grow.
+
+    This is the missing signal: a run that finished credits what it read, a run
+    that failed debits it. Nothing is deleted on one bad result — a skill can be
+    loaded for a task that was doomed for unrelated reasons — but a procedure that
+    keeps being present when things go wrong stops being protected from pruning.
+    """
+    good = status in ("done", "sent", "shipped")
+    cutoff = max(0.0, since - 60)      # a skill read just before the clock started counts
+    data, judged = _usage(), []
+    for name, entry in data.items():
+        last = float(entry.get("last_used") or 0)
+        if last < cutoff or time.time() - last > window:
+            continue
+        key = "helped" if good else "missed"
+        entry[key] = int(entry.get(key, 0)) + 1
+        judged.append(name)
+    if judged:
+        _save_usage(data)
+    return judged
+
+
+def scoreboard() -> list[dict]:
+    """Every skill with its evidence, worst first — what to read before trusting one."""
+    rows = []
+    for name, e in _usage().items():
+        helped, missed = int(e.get("helped", 0)), int(e.get("missed", 0))
+        rows.append({"name": name, "uses": int(e.get("uses", 0)),
+                     "helped": helped, "missed": missed,
+                     "confidence": float(e.get("confidence", 1.0)),
+                     "net": helped - missed})
+    return sorted(rows, key=lambda r: (r["net"], -r["missed"]))
 
 
 def stats() -> dict:
@@ -195,22 +253,16 @@ def _parse(raw: str) -> dict | None:
 
 
 async def _distil(prompt: str) -> str | None:
-    """Cheapest brain that can do the job. Local first — this fires after every
-    substantial task, and paying an API call each time would make the learning
-    loop something you'd want to switch off."""
-    import asyncio
+    """Cheapest brain that can do the job.
 
-    local = await asyncio.to_thread(memory.local_llm_complete, prompt, 900)
-    if local and local.strip():
-        return local
-    from . import agent as agent_mod
-    try:
-        from pydantic_ai import Agent
-        model = agent_mod.get_model(agent_mod.best_model_name())
-        result = await Agent(model=model).run(prompt)
-        return result.output
-    except Exception:
-        return None
+    Local first — this fires after every substantial task, and paying an API call
+    each time would make the learning loop something you'd want to switch off. But
+    it does not stop at local: `should_extract` has already decided this run taught
+    something (two rounds, or an escalation), and refusing to spend anything on the
+    one lesson worth keeping is how an archive that "learns day by day" ends up
+    learning on the few days LM Studio happened to be running.
+    """
+    return await memory.cheap_complete(prompt, 900, paid_ok=True)
 
 
 async def extract(title: str, transcript: str, *, outcome: str = "done",
@@ -221,9 +273,25 @@ async def extract(title: str, transcript: str, *, outcome: str = "done",
     must not fail the work.
     """
     try:
-        note = ("This run ESCALATED: a cheaper tier could not finish it and a stronger one "
-                "did. Write the skill so the cheaper tier succeeds alone next time — that is "
-                "the entire point of this extraction.\n" if escalated else "")
+        if outcome in STOPPED_BY_HIM:
+            # A correction, not a success. Asking "what worked here" of a run he
+            # stopped would distil the very thing he rejected into a procedure.
+            note = ("ARUN STOPPED THIS RUN. It was not finished and it was not right — he "
+                    "cancelled or rejected it, which means Asta misread what he wanted, and "
+                    "he knew within minutes.\n\n"
+                    "Do NOT write down what this run did as though it were a procedure. "
+                    "Write down WHAT WAS MISREAD, so the same misreading does not happen "
+                    "again: what he asked for, what Asta started doing instead, and the one "
+                    "check that would have caught the gap before any work began. If his own "
+                    "words about why appear below, they are the most important thing here — "
+                    "prefer them over your reading of the transcript.\n\n"
+                    "If the run was stopped for a reason that teaches nothing — he changed "
+                    "his mind, or something outside Asta broke — reply with NOTHING rather "
+                    "than inventing a lesson.\n")
+        else:
+            note = ("This run ESCALATED: a cheaper tier could not finish it and a stronger one "
+                    "did. Write the skill so the cheaper tier succeeds alone next time — that is "
+                    "the entire point of this extraction.\n" if escalated else "")
         prompt = EXTRACT_PROMPT.format(
             title=title, outcome=outcome, escalation_note=note,
             transcript=(transcript or "")[-MAX_TRANSCRIPT:])
@@ -231,7 +299,8 @@ async def extract(title: str, transcript: str, *, outcome: str = "done",
         data = _parse(raw or "")
         if not data:
             return None
-        path = write_skill(data, source="teacher" if escalated else source)
+        path = write_skill(data, source=("correction" if outcome in STOPPED_BY_HIM
+                                 else "teacher" if escalated else source))
         if path:
             store.record_outcome("skill", "written", subject=path.stem,
                                  detail=f"confidence={data.get('confidence')} escalated={escalated}")
@@ -240,17 +309,32 @@ async def extract(title: str, transcript: str, *, outcome: str = "done",
         return None
 
 
+#: Loaded this many more times on runs that failed than on runs that worked, and
+#: the skill is actively misleading rather than merely unused.
+HARMFUL_NET = -2
+
+
 def prune() -> list[str]:
-    """Drop skills that never earned their place. Returns what was removed."""
+    """Drop skills that never earned their place, or that earned the wrong one.
+
+    Two grounds, and the second is the one that makes this a learning loop rather
+    than a garbage collector: unused-and-unconfident after a month, OR present for
+    materially more failures than successes. Without the second, the only skill
+    that could ever leave was one nobody read — so a confidently wrong procedure,
+    which is read constantly, was the single thing pruning could not touch.
+    """
     usage, removed = _usage(), []
     cutoff = time.time() - PRUNE_AFTER_DAYS * 86400
     for name, entry in list(usage.items()):
-        if entry.get("uses", 0) > 0:
-            continue
-        if float(entry.get("confidence", 1.0)) >= PRUNE_CONFIDENCE:
-            continue
-        if float(entry.get("created", time.time())) > cutoff:
-            continue
+        helped, missed = int(entry.get("helped", 0)), int(entry.get("missed", 0))
+        harmful = (helped - missed) <= HARMFUL_NET
+        if not harmful:
+            if entry.get("uses", 0) > 0:
+                continue
+            if float(entry.get("confidence", 1.0)) >= PRUNE_CONFIDENCE:
+                continue
+            if float(entry.get("created", time.time())) > cutoff:
+                continue
         path = skills.SKILLS_DIR / f"{name}.md"
         if path.exists():
             path.unlink()
@@ -259,3 +343,37 @@ def prune() -> list[str]:
     if removed:
         _save_usage(usage)
     return removed
+
+
+async def daily_pass() -> str:
+    """The once-a-day learning pass. Returns one line, or "" when nothing changed.
+
+    It exists because every learning path was previously hung off the end of a
+    BACKGROUND TASK — so a week of chat, corrections, and CI investigations taught
+    nothing at all, and the archive only moved on days he happened to delegate
+    something. Waste patterns recur across everything, not just delegated work, so
+    this runs on the whole recent history regardless of what produced it.
+
+    Never raises: this is housekeeping, and housekeeping that can break the
+    morning brief is worse than housekeeping that quietly skips a day.
+    """
+    from . import skill_evolution
+    parts = []
+    try:
+        evolved = skill_evolution.evolve()
+        if evolved:
+            parts.append("learned " + ", ".join(e["skill"] for e in evolved))
+    except Exception:
+        pass
+    try:
+        dropped = prune()
+        if dropped:
+            parts.append(f"dropped {len(dropped)} that weren't earning it "
+                         f"({', '.join(dropped[:3])})")
+    except Exception:
+        pass
+    if not parts:
+        return ""
+    line = "🧬 " + "; ".join(parts) + "."
+    store.record_outcome("learning", "daily_pass", detail=line[:200])
+    return line

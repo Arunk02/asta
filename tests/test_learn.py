@@ -36,7 +36,15 @@ GOOD = {
     (2, False, "done", True),     # needed several rounds
     (1, True, "done", True),      # escalated — the lesson is exactly here
     (5, False, "failed", False),  # a failure has no verified procedure to record
-    (3, False, "rejected", False),
+    # A task ARUN stopped is the richest signal there is, and this used to say
+    # False. Changed deliberately on 2026-08-19: 39% of code tasks ended
+    # cancelled or rejected — the largest category after success — and taught
+    # nothing, while a run that merely needed two attempts taught something.
+    # He kills a task when Asta misread what he wanted, and he does it within
+    # minutes. The extraction prompt asks what was MISREAD rather than what
+    # worked, so a stopped run cannot be distilled into a procedure.
+    (3, False, "rejected", True),
+    (0, False, "cancelled", True),   # rounds are irrelevant — he stopped it
 ])
 def test_should_extract(rounds, escalated, status, expected):
     assert learn.should_extract(rounds, escalated, status) is expected

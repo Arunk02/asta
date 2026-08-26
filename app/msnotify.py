@@ -1,21 +1,31 @@
-"""Teams/Outlook mention watcher — no M365 API needed.
+"""Teams/Outlook mention watcher — the OPTIONAL low-latency ping trigger.
 
-Reads the macOS Notification Center database (the same notifications that pop up
-in the corner of your screen) and raises a Asta notification when a Teams or
-Outlook banner mentions you. Everything runs in pure Python — notification text
-never reaches an LLM, so the token cost is zero.
+Reads the macOS Notification Center database (the same banners that pop up in the
+corner of your screen) and raises an Asta notification when a Teams or Outlook
+banner mentions you. Pure Python — notification text never reaches an LLM, so the
+token cost is zero — and near-instant, since a new row appears the moment a banner
+fires.
 
-DISABLED BY DEFAULT. To enable:
-  1. Grant Full Disk Access to the process running Asta (System Settings →
-     Privacy & Security → Full Disk Access → add your terminal / Python).
+NOT the primary path, and DISABLED BY DEFAULT. The default ping trigger is
+`teams_bridge.activity_watch_loop()`, which reads the Teams Activity feed in
+Playwright — the same browser session that does the reading, replying and
+sending. That one needs no special OS permission and sees muted/DND chats too, so
+it covers the same mentions this does. This watcher only buys you *latency*:
+sub-poll-interval alerts, at the cost of Full Disk Access.
+
+Turn it on only if you want that:
+  1. Grant Full Disk Access to the Python that launchd runs (deploy/install.sh —
+     a shell-launched server is attributed to Terminal.app instead, so the grant
+     silently does nothing; System Settings → Privacy & Security → Full Disk
+     Access).
   2. Set TEAMS_WATCHER=1 in .env (and optionally TEAMS_WATCH_KEYWORDS).
   3. Make sure Teams/Outlook banners are ON in System Settings → Notifications.
 
-Limitations (by design — this is the zero-approval fallback until an org
-Graph API app registration is possible):
+Limitations that are exactly why it is not the default:
   - only sees what macOS shows as a banner (muted chats / DND = invisible);
   - notification text is short (title + preview), not the full message;
-  - read-only: it alerts you and can seed a mission, it can't reply in Teams.
+  - read-only: it alerts you and can seed a mission, it can't reply in Teams —
+    the Playwright path is the one that can.
 """
 
 from __future__ import annotations

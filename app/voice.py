@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import httpx
 
@@ -29,6 +30,134 @@ HINDI_PROFILE = os.environ.get("VOICEBOX_PROFILE_HI", "Asta (Hindi)")
 # Kokoro on an M1 Pro is a couple of seconds for a sentence; cloning engines are
 # slower, and the first call of the day also pays for loading the model.
 GENERATE_TIMEOUT = float(os.environ.get("VOICEBOX_TIMEOUT", "120"))
+
+# --- the two voices ----------------------------------------------------------
+#
+# Arun asks for one or the other in words — "talk like me", "talk like
+# assistant" — so the choice has to survive being typed, spoken, or shouted
+# mid-call, and it must never be GUESSED. Defaulting to his clone because the
+# request was ambiguous would put his voice in front of someone on the strength
+# of a parse failure, so anything unrecognised falls back to the assistant.
+#
+# Measured on this machine (M1 Pro), which is why they are not interchangeable:
+#   assistant  kokoro      ~1.3s a line, faster than real time
+#   mine       chatterbox  ~3.4x real time on the GPU, ~6.5x on CPU
+VOICE_MINE = "mine"
+VOICE_ASSISTANT = "assistant"
+
+#: profile + engine per voice. The clone's profile name is whatever `voice clone`
+#: created; the assistant keeps whatever the .env default is.
+CLONE_PROFILE = os.environ.get("VOICEBOX_CLONE_PROFILE", "Arun")
+CLONE_ENGINE = os.environ.get("VOICEBOX_CLONE_ENGINE", "chatterbox")
+
+_SAY_AS_MINE = re.compile(
+    r"\b(?:talk|speak|say\s+it|reply|answer)?\s*(?:like|as|in)\s+"
+    r"(?:me|my\s+voice|myself|arun)\b|\bmy\s+voice\b|\bas\s+me\b", re.I)
+_SAY_AS_ASSISTANT = re.compile(
+    r"\b(?:talk|speak|say\s+it|reply|answer)?\s*(?:like|as|in)\s+"
+    r"(?:the\s+)?(?:assistant|asta|bot|yourself)\b|\bassistant\s+voice\b", re.I)
+
+
+def pick_voice(text: str, current: str = VOICE_ASSISTANT) -> str:
+    """Which voice he just asked for, or `current` if he did not say.
+
+    Assistant wins a tie. Two competing instructions in one sentence is not a
+    coin toss — it is an unclear instruction, and the safe reading of an unclear
+    instruction about whose voice to use is "not his".
+    """
+    said_assistant = bool(_SAY_AS_ASSISTANT.search(text or ""))
+    said_mine = bool(_SAY_AS_MINE.search(text or ""))
+    if said_assistant:
+        return VOICE_ASSISTANT
+    if said_mine:
+        return VOICE_MINE
+    return current if current in (VOICE_MINE, VOICE_ASSISTANT) else VOICE_ASSISTANT
+
+
+def voice_settings(voice: str) -> tuple[str, str]:
+    """(profile, engine) for a voice name."""
+    if voice == VOICE_MINE:
+        return CLONE_PROFILE, CLONE_ENGINE
+    return DEFAULT_PROFILE, DEFAULT_ENGINE
+
+
+def strip_voice_instruction(text: str) -> str:
+    """The words to SAY, with the 'talk like me' instruction removed.
+
+    Without this the instruction is spoken aloud — Vinish hears "talk like me,
+    tell him the build passed", which is both wrong and revealing.
+    """
+    out = _SAY_AS_ASSISTANT.sub(" ", _SAY_AS_MINE.sub(" ", text or ""))
+    return re.sub(r"\s{2,}", " ", out).strip(" ,.:;-—")
+
+
+# --- playing audio into a call ----------------------------------------------
+
+#: The virtual microphone Teams is pointed at. Empty = Asta cannot be heard.
+CALL_DEVICE = os.environ.get("ASTA_CALL_AUDIO_DEVICE", "").strip()
+
+
+def output_devices() -> list[str]:
+    """Output devices this machine can play to. [] if the audio stack is absent."""
+    try:
+        import sounddevice as sd
+        return [d["name"] for d in sd.query_devices() if d["max_output_channels"] > 0]
+    except Exception:
+        return []
+
+
+def find_device(name: str) -> int | None:
+    """Index of an output device by name, or None. Substring, case-insensitive —
+    "BlackHole 2ch" is listed slightly differently across macOS versions."""
+    if not name:
+        return None
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+    except Exception:
+        return None
+    wanted = name.strip().lower()
+    for i, d in enumerate(devices):
+        if d["max_output_channels"] > 0 and wanted in d["name"].strip().lower():
+            return i
+    return None
+
+
+def play_to_device(wav: bytes, device: str = "") -> float:
+    """Play WAV bytes to a named output device. Returns seconds played.
+
+    Raises rather than returning quietly on every failure path. The whole reason
+    this function exists is that `say_in_call` used to generate audio, drop it,
+    and report success — so Arun believed a point had been made in a call when
+    nothing had been said at all. A silent failure here is the same bug wearing
+    a different hat.
+    """
+    import io
+    import wave as _wave
+
+    name = device or CALL_DEVICE
+    if not name:
+        raise RuntimeError("no output device configured (ASTA_CALL_AUDIO_DEVICE)")
+    idx = find_device(name)
+    if idx is None:
+        have = ", ".join(output_devices()) or "none"
+        raise RuntimeError(f"audio device {name!r} not found — available: {have}")
+
+    with _wave.open(io.BytesIO(wav)) as w:
+        rate, channels = w.getframerate(), w.getnchannels()
+        frames = w.readframes(w.getnframes())
+    if not frames:
+        raise RuntimeError("audio had no frames — nothing to play")
+
+    import numpy as np
+    import sounddevice as sd
+    samples = np.frombuffer(frames, dtype=np.int16)
+    if channels > 1:
+        samples = samples.reshape(-1, channels)
+    # blocking on purpose: the caller needs to know it FINISHED speaking before
+    # it reports that it spoke, and before anything else is said over the top.
+    sd.play(samples, samplerate=rate, device=idx, blocking=True)
+    return len(samples) / rate / max(1, channels if samples.ndim == 1 else 1)
 
 
 async def available() -> bool:
@@ -74,6 +203,23 @@ async def _wait_for_generation(client: httpx.AsyncClient, gen_id: str) -> None:
     raise RuntimeError("status stream ended before the audio was ready")
 
 
+async def profile_id(name: str) -> str:
+    """UUID for a profile name — what /generate actually wants.
+
+    Voicebox identifies voices by id; a name means nothing to it. Passing the
+    name is silently ignored rather than rejected, so this lookup is the only
+    thing standing between "speak as Arun" and "speak as whoever the default
+    happens to be".
+    """
+    if not name:
+        return ""
+    wanted = name.strip().lower()
+    for p in await profiles():
+        if (p.get("name") or "").strip().lower() == wanted:
+            return p.get("id") or ""
+    return ""
+
+
 def pick_profile(text: str, requested: str = "") -> str:
     """Match the voice to the script the reply is written in.
 
@@ -90,16 +236,28 @@ def pick_profile(text: str, requested: str = "") -> str:
     return DEFAULT_PROFILE
 
 
-async def speak(text: str, profile: str = "", engine: str = "") -> bytes:
+async def speak(text: str, profile: str = "", engine: str = "",
+                voice: str = "") -> bytes:
     """Render text to speech; returns audio bytes (wav/mp3 as Voicebox produced).
+
+    `voice` is the high-level choice — "mine" (his clone) or "assistant" — and
+    fills in profile+engine when they were not named explicitly. An explicit
+    profile/engine still wins, so existing callers behave exactly as before.
 
     Raises rather than returning empty audio so callers can fall back to the
     browser's built-in voice instead of playing silence.
     """
+    if voice and not (profile or engine):
+        profile, engine = voice_settings(voice)
     body: dict = {"text": text[:10000], "engine": engine or DEFAULT_ENGINE}
     chosen = pick_profile(text, profile)
     if chosen:
-        body["profile"] = chosen
+        # /speak takes `profile` as a name OR an id. The id is sent when it can
+        # be resolved: a name that has drifted (renamed, re-cloned, deleted)
+        # otherwise falls through to Voicebox's default voice, and the failure
+        # is silent — audio comes back sounding like a stranger with nothing in
+        # any response to say why. Resolving first turns that into an error.
+        body["profile"] = await profile_id(chosen) or chosen
     async with httpx.AsyncClient(timeout=GENERATE_TIMEOUT) as c:
         r = await c.post(f"{BASE}/speak", json=body)
         if r.status_code != 200:
@@ -148,34 +306,63 @@ async def transcribe(data: bytes, filename: str = "speech.webm",
 # statements makes a voice that cannot ask a question. Around 60-90s total
 # across these five is the sweet spot; past a couple of minutes there is
 # nothing left to learn and generation just gets slower.
+# WRITTEN IN ARUN'S OWN IDIOM, not in correct English.
+#
+# The first version of these was fluent, full-sentence prose — "Here is where
+# things stand this morning", "I have been working through the vessel ETA
+# ticket". He read it and said: follow how I speak, not how you write. He is
+# right, and the reason is technical rather than cosmetic. Chatterbox clones
+# PROSODY: the rhythm, the stress, where a sentence lifts and where it drops.
+# Somebody reading a sentence they would never say produces read-aloud rhythm,
+# and the clone then sounds like that for ever — a stranger with his timbre.
+#
+# So every line below is built from phrases he actually sent, taken out of his
+# own Teams history: "bro", "na" as a tag question, "u" and "ur", "once",
+# "post that" for afterwards, "couldn't able to". Reading them should feel like
+# talking, because they are already his words. That is the whole point.
 CLONE_SCRIPTS: dict[str, str] = {
     "1-status": (
-        "Here is where things stand this morning. The booking service build "
-        "finished at nine forty, all sixty-two tests passed, and the vessel "
-        "schedule sync is running normally. Nothing needs your attention yet."
+        "bro, build finished around nine forty, all sixty two tests passed. "
+        "vessel schedule sync is running fine, no issues from our side. "
+        "i pushed one change last night, post that CI is green. "
+        "nothing pending for u now."
     ),
     "2-one-to-one": (
-        "Hi, good to catch up. I have been working through the vessel ETA "
-        "ticket for most of the week, and I think we are close. There is one "
-        "part I want your view on before I raise the pull request, because it "
-        "touches the service plan logic that everyone depends on."
+        "hi bro, good to catch up. i was on that vessel ETA ticket most of "
+        "this week, i think we are close now. one part i want ur view once "
+        "before i raise the PR, because it is touching the service plan "
+        "logic, everyone is depending on that one. tell me when u free, "
+        "we can discuss and then merge."
     ),
     "3-quick": (
-        "Yes. No, not that one. Go ahead. On it. Give me a minute. "
-        "That is done. Approved. Hold on, let me check. Perfect, thanks."
+        "yes. no, not that one. go ahead. on it. give me a minute. "
+        "done bro. approved. hold on, let me check. then fine. "
+        "call me bro. all merged."
     ),
     "4-question": (
-        "Did the deployment to preprod actually pass? Who picked up the "
-        "incident overnight? Are we sure this is the right branch? "
-        "Excellent, that is exactly what I wanted to hear! Careful there, "
-        "that change would break the amend flow."
+        "did the preprod deployment actually pass? who picked up the "
+        "incident last night? just ur bug fix is fine na? are we sure this "
+        "is the right branch? prod fix? CT u marked as skipped bro? "
+        "then what is that change?"
     ),
     "5-technical": (
-        "The ticket is PROJ dash nine three nine seven, on the orders "
-        "service repository. It fails in ShipmentDomainService "
-        "with a null pointer when getServiceTypeModes returns null. "
-        "Grafana shows the error rate at zero point four percent in preprod."
+        "the ticket is BEPTELIKOS dash one zero one five nine, on the "
+        "booking service repo. it is failing in TmsServiceImpl, null "
+        "pointer when getServicePlanLegs returns null. i shared the PR link "
+        "in the group, one three seven one. grafana is showing error rate "
+        "around zero point four percent in preprod."
     ),
+}
+
+#: When he would rather just TALK than read — which produces a better clone,
+#: because nobody reads with their own rhythm. One prompt per delivery; he
+#: answers each out loud for fifteen or twenty seconds, in whatever words come.
+CLONE_PROMPTS: dict[str, str] = {
+    "1-status": "Give this morning's update out loud — build, tests, what is pending.",
+    "2-one-to-one": "Tell Vinish where you got to on the ETA ticket and what you want his view on.",
+    "3-quick": "Answer ten things quickly — yes, no, go ahead, on it, done, hold on.",
+    "4-question": "Ask six things you genuinely need answers to today.",
+    "5-technical": "Say the ticket id, the class it fails in, the PR number and the error rate.",
 }
 
 # Kept for callers that just want one paragraph.

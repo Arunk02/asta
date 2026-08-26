@@ -79,6 +79,12 @@ _TABLE: tuple[Capability, ...] = (
                note="Call as your LAST action when the task isn't done and you know the "
                     "next step — Asta runs it without waiting for Arun. Not for sending "
                     "anything outward; stop instead when the work is actually finished."),
+    Capability("propose_next", "loop",
+               http='POST /api/propose-next {"next_step":"…","why":"…"}',
+               note="How ANY flow continues past one turn: name the next move concretely "
+                    "and stop. His yes runs it, from any channel, hours later if need be. "
+                    "Use it instead of asking 'shall I?' in prose — prose is lost when the "
+                    "turn ends. Not for anything leaving the chat: that is prepare_to_send."),
     Capability("prepare_to_send", "loop",
                http='POST /api/loop/prepare-send {"what":"…","to":"…","channel":"teams|email|jira|pr|chat"}',
                note="The ONLY approved way to send on Arun's behalf: it STAGES the draft "
@@ -101,16 +107,25 @@ _TABLE: tuple[Capability, ...] = (
     Capability("jira_my_issues", "jira",
                http="GET /api/jira/search?jql=assignee = currentUser() AND "
                     "statusCategory != Done ORDER BY updated DESC"),
-    Capability("jira_issue", "jira", http="GET /api/jira/issue/{key}"),
+    Capability("jira_issue", "jira", http="GET /api/jira/issue/{key}[?comments=N]",
+               note="Returns the description AND the comment thread. Read the comments "
+                    "before answering: on many tickets the description is one line and "
+                    "the real requirement was settled in the Q&A under it. If the ticket "
+                    "still doesn't explain itself, ask Arun — do not infer it from the title."),
+    Capability("jira_sprint", "jira", http="GET /api/jira/sprint",
+               note="The CURRENT sprint, not everything assigned — use this for 'what's on "
+                    "me this sprint', standup, and before offering to pick work up."),
     Capability("jira_comment", "jira", http='POST /api/jira/issue/{key}/comment {"text":"…"}',
                write=True,
-               note="WRITE: show Arun the exact text and get his confirmation first, "
-                    "unless he dictated it in the same message."),
+               note="STAGES, does not post. Write the EXACT finished comment — Arun's yes "
+                    "posts those words unchanged, so it must read as the comment itself, "
+                    "not a description of one. Tell him it's waiting."),
     Capability("jira_transition", "jira",
                http='GET /api/jira/issue/{key}/transitions to list, then '
                     'POST /api/jira/issue/{key}/transition {"status":"<name>"}',
                write=True,
-               note="WRITE: confirm the target status with Arun first."),
+               note="STAGES, does not move it. An unreachable status fails immediately "
+                    "with the valid targets — offer those to Arun rather than guessing."),
     # --- teams / outlook (browser automation, no endpoint) -------------------
     Capability("teams_activity", "teams",
                shell="python -m app.teams_bridge activity [limit]",
@@ -118,6 +133,35 @@ _TABLE: tuple[Capability, ...] = (
                     "miss', 'any mentions' — it reads Teams itself, so muted chats count."),
     Capability("teams_read_chat", "teams",
                shell='python -m app.teams_bridge read "<chat name>" [limit]'),
+    Capability("draft_voice", "teams", http="GET /api/voice?person={person}",
+               note="Call BEFORE drafting any Teams/WhatsApp message to a person. "
+                    "Returns how Arun writes to THAT person. Terms of address belong "
+                    "to a relationship, not to him — 'bro' is attested with one "
+                    "colleague only, and it is stripped automatically for anyone "
+                    "else, so never assume one fits."),
+    Capability("teams_search", "teams",
+               http="GET /api/teams/search?q={query}",
+               shell='python -m app.teams_bridge search "<topic>"',
+               note="Searches only what Asta has ALREADY read — its own record, not all "
+                    "of Teams. Say so when nothing matches: 'I have no record of that' is "
+                    "true, 'nobody said that' is not. For something that may never have "
+                    "been read, teams_history goes and fetches it."),
+    Capability("teams_history", "teams",
+               shell='python -m app.teams_bridge history "<chat name>" "<when>"',
+               note="USE THIS, not teams_read_chat, whenever the question has a WHEN in "
+                    "it — 'last night', 'yesterday', 'this morning', 'while I was away'. "
+                    "teams_read_chat only sees what is on screen now; Teams drops older "
+                    "messages out of the DOM, so it CANNOT answer about last night and "
+                    "will quietly return today's messages instead."),
+    Capability("teams_resolve", "teams",
+               shell='python -m app.teams_bridge resolve "<name>" [--group]',
+               note="Checks WHO a message would reach without sending. Use it before "
+                    "sending to a short or common name, and for any group. An ambiguous "
+                    "name is refused here rather than delivered to the wrong person."),
+    Capability("teams_call", "teams", write=True,
+               shell='python -m app.teams_bridge call "<person>" [--video]',
+               note="STAGES, does not dial. A call interrupts someone the instant it "
+                    "connects — offer reading or messaging first unless Arun asked to call."),
     Capability("teams_send_message", "teams",
                shell='python -m app.teams_bridge send "<chat name>" "<text>"',
                write=True,
@@ -131,12 +175,54 @@ _TABLE: tuple[Capability, ...] = (
                note="DRAFT only — read + draft an answer to a person's Teams question. To "
                     "actually reply, stage it with prepare_to_send (channel teams); never "
                     "sends in Arun's name unprompted."),
+    Capability("teams_status", "teams", http="GET /api/teams/presence to read, "
+                                            'POST /api/teams/presence {"status":"dnd"} to set',
+               write=True,
+               note="His OWN status, so just do it when he asks — but report what it reads "
+                    "back afterwards. A DND he thinks is set and isn't costs him the hour."),
+    Capability("join_meeting", "teams",
+               http='POST /api/meetings/join {"join_url":"…","title":""}',
+               write=True,
+               note="Joins MUTED with the camera off, always. Joining is listening only; "
+                    "say so, and never imply anything was said on his behalf. It hangs up "
+                    "by itself when the call ends — reply to Arun immediately, don't wait."),
+    Capability("join_meeting_by_name", "teams",
+               http='POST /api/meetings/join {"which":"my 3pm"}',
+               write=True,
+               note="The one to reach for when he NAMES a meeting rather than pasting a "
+                    "link — 'join my 3pm', 'join the standup'. Refuses and lists the day "
+                    "when the phrase fits more than one; hand that back and ask which. "
+                    "Joining the wrong call cannot be quietly undone."),
+    Capability("leave_meeting", "teams", http="POST /api/meetings/leave", write=True,
+               note="Hangs up. Safe to call when not in a call — it says so."),
+    Capability("meeting_notes", "teams", http="GET /api/meetings/notes",
+               note="Live captions Asta captured while in a call — the answer to 'what "
+                    "did I miss'. Speech recognition, and only the part Asta attended: "
+                    "summarise what is there, never fill in what is not."),
+    Capability("say_in_call", "teams", http='POST /api/meetings/say {"text":"…"}',
+               write=True,
+               note="ONLY the words Arun gave you, never improvised and never an answer on "
+                    "his behalf. Usually unavailable (needs a virtual mic); when it is, it "
+                    "tells you nothing was said rather than pretending."),
     Capability("outlook_mail", "outlook",
                shell="python -m app.outlook mail [limit]  ·  python -m app.outlook attention"),
     Capability("outlook_meetings", "outlook", shell="python -m app.outlook meetings"),
     Capability("meeting_prep", "outlook", http="GET /api/meeting-prep?title={title}",
                note="Drafts prep for a meeting/1:1 (talking points, questions, watch-outs). "
                     "Draft only — stage with prepare_to_send to actually send it to anyone."),
+    Capability("create_meeting", "outlook",
+               http='POST /api/meetings {"subject":"…","when":"YYYY-MM-DD HH:MM",'
+                    '"minutes":30,"attendees":"a@b.com,c@d.com","agenda":"…"}',
+               write=True,
+               note="STAGES the invite; his yes sends it. Resolve 'Thursday at 3' to a real "
+                    "date YOURSELF and ask if unsure — a wrong day books other people's time."),
+    Capability("request_leave", "outlook",
+               http='POST /api/leave {"start_date":"YYYY-MM-DD","end_date":"",'
+                    '"reason":"…","to":"manager@company.com"}',
+               write=True,
+               note="STAGES an all-day leave invite. Both dates INCLUSIVE — one day off is "
+                    "the same date twice or no end date. Goes to whoever approves it, so it "
+                    "never sends on your judgement."),
     Capability("meeting_recap", "outlook",
                http='POST /api/meeting-recap {"transcript":"…","title":"…"}',
                note="Summarizes a call/meeting transcript (from Teams' own recording/recap) "
@@ -151,8 +237,37 @@ _TABLE: tuple[Capability, ...] = (
                     'Optional "executor":"claude"|"copilot" — set only when Arun names one. '
                     "Reply to Arun with the task id immediately; do NOT wait for it."),
     Capability("review_pr", "tasks", http='POST /api/review {"pr":"123","workspace":"…","repo":""}',
-               note="Produces notes for ARUN to post. Never comment on or approve a PR "
-                    "yourself — the review is his to give."),
+               note="Produces notes for ARUN. Read-only — to actually post them, use "
+                    "pr_review_post, and only when he asked you to."),
+    Capability("merge_pr", "tasks",
+               http='POST /api/pr-merge {"pr":"123","workspace":"…","repo":"","method":"squash"}',
+               write=True,
+               note="STAGES a merge; his yes performs it. The least reversible thing here — "
+                    "it puts code on the branch everyone builds from — so it refuses "
+                    "outright on red CI, unfinished CI, conflicts, a draft, or requested "
+                    "changes, and says which. Never work around a blocker; tell him what "
+                    "is in the way. Only when he asks to merge in those words."),
+    Capability("debug_stack_health", "workspace", http="POST /api/debug-stack",
+               note="Read-only. Reach for it when a Grafana/Temporal/Jira answer comes "
+                    "back EMPTY — an empty answer from a broken tool and an empty answer "
+                    "from a healthy system look identical, and only this tells them "
+                    "apart. Never report 'nothing found' on an env whose cert is broken."),
+    Capability("check_teams_selectors", "teams", http="POST /api/teams/selector-check",
+               note="Read-only DOM check. Runs daily by itself — call it when Teams "
+                    "reads have gone suspiciously quiet, or right after Microsoft "
+                    "ships a Teams update. It never guesses a replacement selector: "
+                    "one chosen blind is how a message lands in the wrong thread."),
+    Capability("answer_quality", "workspace", http="POST /api/evals {\"workspace\":\"booking\"}",
+               note="Spends a brain call per case, so not routine. Say the score AND "
+                    "which cases failed — a bare percentage tells him nothing about "
+                    "what to fix."),
+    Capability("pr_review_post", "tasks",
+               http='POST /api/pr-review {"pr":"123","action":"approve|comment|'
+                    'request_changes","body":"…","workspace":"…","repo":""}',
+               write=True,
+               note="STAGES a review under Arun's name; his yes posts it verbatim. Only "
+                    "when he explicitly says to post/approve — an approval is visible to "
+                    "the whole team and cannot be taken back quietly."),
     Capability("list_background_tasks", "tasks", http="GET /api/tasks"),
     Capability("task_result", "tasks", http="GET /api/tasks/{id}"),
     Capability("approve_task", "tasks", http="POST /api/tasks/{id}/approve", write=True,
@@ -160,8 +275,22 @@ _TABLE: tuple[Capability, ...] = (
                     'POST /api/tasks/{id}/reply {"text":"…"} and the pipeline re-plans.'),
     Capability("ship_task", "tasks", http="POST /api/tasks/{id}/ship", write=True,
                note="Pushes the branch and opens the PR. The pipeline NEVER does this "
-                    "itself — only when Arun has seen the diff and said ship."),
-    Capability("reject_task", "tasks", http="POST /api/tasks/{id}/reject", write=True),
+                    "itself — only when Arun has seen the diff and said ship. The task "
+                    "stays OPEN afterwards, tracked until the PR merges or closes."),
+    Capability("refine_task", "tasks", http='POST /api/tasks/{id}/refine {"text":"…"}',
+               write=True,
+               note="THE tool for any comment on work a task already delivered — a "
+                    "correction, 'also handle X', a review comment, a red PR build. "
+                    "NEVER spawn a new task for feedback: refine continues the original "
+                    "task in its own session, so it keeps everything it already worked "
+                    "out. A new task would re-derive it all and reimplement the change."),
+    Capability("task_pr_status", "tasks", http="GET /api/tasks/prs",
+               note="Where shipped work stands — CI, review, merged or not. Use it for "
+                    "'what's pending', 'did that merge', 'any PR blocked'."),
+    Capability("reject_task", "tasks", http="POST /api/tasks/{id}/reject", write=True,
+               note="Throws the work away — the branch and its diff go with it. Only when "
+                    "Arun says to drop it; if he is merely unhappy with the result, reply "
+                    "with the feedback instead so the pipeline re-plans."),
     # --- rhythm / ops --------------------------------------------------------
     Capability("set_reminder", "reminders",
                http='POST /api/reminders {"text":"…","due":"<LOCAL ISO>","repeat":""}',
@@ -173,6 +302,9 @@ _TABLE: tuple[Capability, ...] = (
     Capability("standup_draft", "rhythm", http="POST /api/standup/now"),
     Capability("health_check", "ops", http="GET /api/health"),
     Capability("ci_status", "ops", http="GET /api/ci"),
+    Capability("watch_ci", "ops", http='POST /api/ci/watch {"what":"release","repo":""}',
+               note="The watcher is quiet by design — only runs Arun triggered and PRs he "
+                    "authored. Use this when he names a build he wants followed anyway."),
     Capability("trace_report", "ops", http="GET /api/traces"),
     Capability("token_audit", "ops", http="GET /api/token-audit?hours={hours}"),
     Capability("quality_report", "ops", http="GET /api/quality",

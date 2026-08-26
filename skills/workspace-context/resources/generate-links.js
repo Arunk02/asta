@@ -60,11 +60,20 @@ const repoDir = (r) => (r.root === '.' ? ROOT : path.join(ROOT, r.root));
 // host → repo key: first DNS label must equal a repo key (else external to this workspace)
 function repoForHost(host) { const label = host.split('.')[0]; return keySet.has(label) ? label : null; }
 // token → repo via key-parts or domains (singularised): "charge"→charges domain→iom-master-data
+// The word every repo key starts with is the ORG, not a topic — indexing it would
+// point every token at whichever repo was seen first. Derived from the keys rather
+// than hardcoded to one company's name, so it holds for any workspace.
+const ORG_WORD = (() => {
+  const heads = repos.map((r) => String(r.key).toLowerCase().split('-')[0]);
+  return heads.length >= 2 && heads.every((h) => h === heads[0]) ? heads[0] : '';
+})();
+const STOP_WORDS = new Set(['service', 'svc', 'api', 'app', ORG_WORD].filter(Boolean));
+
 const tokenIndex = new Map();
 for (const r of repos) {
   const add = (w) => { const s = w.toLowerCase().replace(/s$/, ''); if (s.length >= 4 && !tokenIndex.has(s)) tokenIndex.set(s, r.key); };
   for (const d of r.domains || []) for (const w of d.split('-')) add(w);
-  for (const w of r.key.split('-')) if (!/^(iom|example|service|svc)$/.test(w)) add(w);
+  for (const w of r.key.split('-')) if (!STOP_WORDS.has(w.toLowerCase())) add(w);
 }
 function repoForToken(tok) { const s = String(tok).toLowerCase().replace(/s$/, ''); return tokenIndex.get(s) || null; }
 

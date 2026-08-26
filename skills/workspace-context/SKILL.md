@@ -104,6 +104,53 @@ Replace `verified_against: HEAD` with `git rev-parse HEAD` (from the repo). Then
 node <plugin>/resources/validate-bootstrap.js <$root> --repo <key>   # exit 1 → re-run prompt 02 with failures
 ```
 
+### Step 2b — Capture the DEVELOPER WORKFLOW, not only the system (REQUIRED, per repo)
+
+The eight forensic categories describe what the code *does*. They have no home for what a person
+needs in order to *change* it, and a bootstrap that stops at Step 2 produces a context that can
+explain a Kafka topology and cannot tell you how to run a test. Measured on a real three-repo
+workspace: repo identification 3/3, business questions 2/5, **coding standards 0/2, testing 0/3**.
+
+So every repo also gets:
+
+- **`stack/build-and-test.md`** — the exact commands for install, unit test, component test, lint,
+  build and local run, plus the module layout that makes the obvious command fail. These differ per
+  repo and the difference is the whole point: in one workspace the three repos wanted
+  `mvn test -pl service`, plain `mvn test`, and `cd service && mvn test`. A repo with no root
+  `pom.xml` must say so — otherwise every agent burns a cycle discovering it.
+- **Invariants in `architecture/cross-cutting.md`** — the rules a change is *rejected* for breaking,
+  not preferences: layering direction, `.block()` bans, "all external HTTP goes through X", "ids come
+  from Y, never hand-built". Phrase each with its consequence; a rule whose cost is invisible gets
+  argued with.
+
+**Look for `AGENTS.md` / `CLAUDE.md` / `CONTRIBUTING.md` at the repo root and in subdirectories
+FIRST.** On a real repo all of this was already written there, curated by the team, and simply never
+made it into the context — quoting it beats re-deriving it from `pom.xml`, and it stays true because
+its authors maintain it.
+
+### Step 2c — Acceptance: the context must ANSWER, not merely exist
+
+Bootstrapping is not done when the files are written. Ask these of the finished context with
+`resolve-task.js` and confirm the routed mini-skills actually contain the answer:
+
+| Dimension | Ask it |
+|---|---|
+| Identify repo | "where is the X consumer", "which service sends Y" |
+| Identify flow | "trace a request from A to B" — `repo_order` must span the real chain |
+| Impact | "if I change schema Z, what else moves" |
+| Business | 3–5 real domain questions a newcomer would ask |
+| Standards | "what are the coding conventions", "can I use `.block()`" |
+| Testing | "how do I run the unit tests / component tests / this locally" |
+
+A miss is nearly always one of two things, and they need opposite fixes: the fact is **absent**
+(write it), or the fact is **present but phrased in system vocabulary while the question is phrased
+in human vocabulary** (add the question's wording to `scenarios:`). Check which before writing —
+the second case is far more common, and answering it by writing a second mini-skill creates a
+duplicate that will disagree with the first one later.
+
+An honest `route: "ask"` is a PASS when the question genuinely names no repo and several could
+answer it. Grading that as a miss teaches the context to answer confidently for the wrong service.
+
 ### Step 3 — Diagram layer (OPTIONAL; ask the user, then generate from the mini-skills)
 
 **Ask:** _"Generate the Mermaid diagram layer (for human review + agent orientation)? (y/N)"_ Default
@@ -191,6 +238,58 @@ and each mini-skill `.md` carries its `sources:`. Nothing to install.
   cross-repo call becomes an edge automatically — links never go stale without a full re-setup.
 - **No git hook, no `_drift.json`.** OPTIONAL: emit a ledger ONLY for a CI gate that fails a PR on drift
   without running an agent — `node check-drift.js <$root> --json > _drift.json`.
+- **Materiality gate.** `unmatched_changed` reports only files that could change what the context SAYS;
+  the count of the rest arrives as `unmatched_immaterial`. Test sources, `.agents/`, `.claude/`,
+  `.github/`, docs and lockfiles are dropped — build manifests, `.avsc`/`.proto`/`.sql` and
+  `openapi.*` are kept wherever they live. On a real three-repo workspace this took the reported gap
+  from 333 files to 87. A claimed file still counts as staleness regardless; the gate only decides
+  what a writer is sent off to READ.
+
+### Step 5b — What counts as a valid capture (the enrichment quality bar)
+
+The point of a mini-skill is to save an agent from rediscovering something. A line that does not do
+that is not neutral — it is a permanent tax, loaded on every future task, pushing the genuinely useful
+line further down the context window. **Adding nothing is better than adding noise.**
+
+A fact earns its place only if an agent, arriving cold, would otherwise get the work WRONG without it.
+
+| Capture | Skip |
+|---|---|
+| A contract: topic, endpoint, schema, queue name, event shape | "added a null check", "added logging", "renamed a variable" |
+| An invariant or rule: *ATA wins over ETA*, *EXPORT skips customs* | A changelog line, or what a PR did |
+| A decision with a reason: *retries capped at 3 because TMS 429s* | Restating what the code plainly says |
+| Where a flow ENTERS and what it touches | Line-by-line narration of a method |
+| A cross-repo edge: who produces, who consumes | A test that was added |
+| A gotcha that has actually bitten: *this listener is not idempotent* | Anything already in a sibling mini-skill |
+
+Four rules, and the last one is the one that gets broken:
+
+1. **Every fact carries `(source: path:line)`.** No line, no fact — an unsourced claim cannot be
+   verified later and is exactly what rots.
+2. **Patch ≤10 lines.** A drifted mini-skill is corrected, not rewritten. Growth is the failure mode.
+3. **Hard cap 150 lines per mini-skill.** At the cap, the fix is to SPLIT by concern or to delete
+   something stale — never to keep appending.
+4. **A patch that only restates the diff is a no-op — make it, and say nothing changed.** The commit
+   that motivated the drift does not have to produce a context change. Most do not.
+
+Stamp `verified_against = HEAD` even when nothing was written: the code WAS reviewed against the
+context and found consistent, and leaving the sha behind means re-reviewing the same commits forever.
+
+**A patch is not finished when the prose is written.** Three front-matter fields decide whether the
+new fact can ever be found again, and `generate-indexes.js` does NOT back-fill them — it writes
+`_global_index.json` from the per-repo `_index.json`, which is the WRITER's to maintain. Miss this
+and the fact is real, correct, sourced, and unreachable:
+
+| Field | What it buys | Miss it and… |
+|---|---|---|
+| `sources:` | the file is watched | the next change to it never marks this skill stale — it rots silently |
+| `entities:` | the symbol lane | `resolve-task.js` answers `route: "ask"` for the exact class you documented |
+| `scenarios:` | the natural-language lane | it is only findable by someone who already knows the symbol |
+
+So: patch the `.md`, add the new source/entity/scenario to its front-matter, mirror those three
+fields into `repos/<repo>/_index.json`, THEN run `generate-indexes.js` → `generate-symbols.js` →
+`reconcile-router.js`. Verify with `resolve-task.js "<the new symbol>"` — a fact that does not route
+was not captured, it was only typed.
 
 ### Step 6 — `workspace.yml` + mode-aware pointer
 

@@ -71,7 +71,84 @@ HELD_KEY = "held_ambient_notifications"
 HELD_MAX = 40
 
 
-async def notify(text: str, level: str = "info", urgency: str = "direct") -> dict:
+def hold_max_minutes() -> int:
+    """How long an ambient item may sit held before it is delivered anyway.
+
+    Presence was the ONLY release condition, and `at_laptop()` is true whenever he
+    is touching the machine — including the afternoons he shuts Teams and Outlook
+    and works on something else entirely. Held items could therefore wait hours
+    for a departure that never came. A hold is a courtesy, not a black hole: past
+    this age it goes out regardless of where he is. 0 disables the age release.
+    """
+    try:
+        return max(0, int(os.environ.get("ASTA_HOLD_MAX_MINUTES", "45")))
+    except ValueError:
+        return 45
+
+
+def _held_items() -> list[dict]:
+    """Held entries as {at, text}. Tolerates the old bare-string format."""
+    try:
+        raw = json.loads(store.kv_get(HELD_KEY) or "[]")
+    except Exception:
+        return []
+    out = []
+    for it in raw:
+        if isinstance(it, dict) and it.get("text"):
+            out.append({"at": float(it.get("at") or 0), "text": it["text"]})
+        elif isinstance(it, str) and it:
+            out.append({"at": 0.0, "text": it})   # legacy: age unknown → overdue
+    return out
+
+
+def _stale(items: list[dict], now: float | None = None) -> bool:
+    """True when the oldest held item has waited longer than the courtesy window."""
+    limit = hold_max_minutes()
+    if limit <= 0 or not items:
+        return False
+    now = time.time() if now is None else now
+    return any(now - it["at"] >= limit * 60 for it in items)
+
+
+def _hold(text: str) -> None:
+    held = _held_items()
+    held.append({"at": time.time(), "text": text})
+    store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))
+
+
+async def deliver(text: str) -> dict:
+    """Actually put it on his phone, and remember that something just went out.
+
+    Split out of `notify` so the coalescing flush can send a merged batch through
+    exactly the same path — and so `note_sent` is stamped in ONE place. Stamping
+    it per call site is how a batching window starts disagreeing with itself.
+    """
+    from . import delivery
+    wa = await wa_send(text)
+    tg = await telegram.send(text)
+    delivery.note_sent()
+    if not (wa or tg):
+        store.kv_set("last_push_failure",
+                     json.dumps({"at": time.time(), "text": text[:120]}))
+    return {"bell": True, "held": False, "whatsapp": wa, "telegram": tg}
+
+
+def _ledger_priority(urgency: str, priority: int | None) -> int:
+    """Translate a push's urgency into the ledger's ranking.
+
+    `notify` has always spoken in urgency ("is this addressed to him?"); the
+    ledger ranks by what it costs to miss. They are close enough to map, and
+    mapping here keeps every caller speaking the vocabulary it already uses.
+    """
+    from . import attention
+    if priority is not None:
+        return int(priority)
+    return attention.P_TODAY if urgency == "direct" else attention.P_FYI
+
+
+async def notify(text: str, level: str = "info", urgency: str = "direct",
+                 priority: int | None = None, *, source: str = "",
+                 key: str = "", considered: bool = False) -> dict:
     """Record for the UI bell and fan out to WhatsApp + Telegram.
 
     urgency="direct"  — someone is actually addressing Arun (1:1 message, @mention,
@@ -87,21 +164,58 @@ async def notify(text: str, level: str = "info", urgency: str = "direct") -> dic
     no one was looking at.
     """
     store.add_notification(text, level)  # the bell always gets everything
+
+    # The ledger decides WHETHER, the same way `delivery` below decides WHEN.
+    # It used to be consulted by three call sites out of fifty-six, so the
+    # cross-source deduplication it exists for — one incident arriving as mail
+    # AND as a Teams mention — covered two sources and nothing else. Asking here
+    # means every source is covered by construction rather than by each caller
+    # remembering to ask, which is how `delivery` was already done correctly.
+    #
+    # `considered=True` is the opt-out for the callers that already asked; a
+    # second upsert of the same key would read as "already notified" and
+    # suppress the very push their own check had just approved.
+    if not considered:
+        from . import attention, triage
+        ledger_key = key or triage.stable_key(text)
+        if not attention.consider(source or "notify", ledger_key, what=text[:200],
+                                  priority=_ledger_priority(urgency, priority)):
+            # Recorded, and deliberately not pushed. The bell above still has it,
+            # so nothing is lost — it simply does not buzz twice for one thing.
+            return {"bell": True, "held": False, "suppressed": True,
+                    "whatsapp": False, "telegram": False}
+
+    from . import delivery
+    # Night first, because it outranks every other reason to speak. Held items
+    # wait for morning rather than for him to walk away — at 2am he has already
+    # walked away, and a departure-released hold would fire instantly.
+    if delivery.hold_for_quiet(urgency, priority):
+        _hold(text)
+        return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
     if urgency == "ambient":
         from . import presence
         if await presence.at_laptop():
-            held = json.loads(store.kv_get(HELD_KEY) or "[]")
-            held.append(text)
-            store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))
+            held = _held_items()
+            held.append({"at": time.time(), "text": text})
+            held = held[-HELD_MAX:]
+            # Holding is a courtesy with an expiry. If something has now waited out
+            # the window, release the whole batch rather than keeping it hostage to
+            # a departure that may not come today.
+            if _stale(held):
+                store.kv_set(HELD_KEY, json.dumps(held))
+                # Report what the flush actually achieved. This used to claim
+                # both channels had taken it without asking either — the one
+                # shape of lie this module was written to end.
+                return {"bell": True, **await flush_held(reason="waited long enough")}
+            store.kv_set(HELD_KEY, json.dumps(held))
             return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
-    wa = await wa_send(text)
-    tg = await telegram.send(text)
-    if not (wa or tg):
-        # Delivered to the bell and nowhere else. Record it so health can surface
-        # a mute assistant instead of it being silently swallowed.
-        store.kv_set("last_push_failure",
-                     json.dumps({"at": time.time(), "text": text[:120]}))
-    return {"bell": True, "held": False, "whatsapp": wa, "telegram": tg}
+    # Something went out moments ago and this is not breakage: let it ride along
+    # with the next flush. One buzz carrying four items beats four buzzes.
+    if delivery.should_batch(priority):
+        delivery.buffer(text)
+        return {"bell": True, "held": True, "batched": True,
+                "whatsapp": False, "telegram": False}
+    return await deliver(text)
 
 
 async def live_push_channels() -> list[str]:
@@ -120,22 +234,49 @@ async def live_push_channels() -> list[str]:
     return out
 
 
-async def flush_held() -> None:
-    """Deliver notifications that were held while he was at the laptop."""
-    held = json.loads(store.kv_get(HELD_KEY) or "[]")
-    if not held:
-        return
+async def flush_held(reason: str = "while you were at the laptop") -> dict:
+    """Deliver notifications that were held. Says WHY they are arriving now.
+
+    Returns what actually happened, and puts the batch BACK when nothing reached
+    him. The queue used to be cleared before the send and both results thrown
+    away, so a flush with WhatsApp unpaired and Telegram unbound deleted the
+    whole batch and reported success to a caller that then told him it was
+    delivered. Held items are the ones deliberately kept back — losing those is
+    losing the only copy of something Asta chose not to say at the time.
+
+    The batch is capped, so putting it back cannot grow without bound.
+    """
+    from . import delivery
+    held = _held_items()
+    # Never in the small hours. This is the other half of the quiet-hours hold:
+    # releasing on departure would fire the moment he goes to bed, which is the
+    # exact opposite of what holding it was for.
+    if not held or delivery.quiet_now():
+        return {"held": bool(held), "whatsapp": False, "telegram": False}
     store.kv_set(HELD_KEY, "[]")
-    head = f"🔕 While you were at the laptop ({len(held)} held):\n\n"
-    body = "\n\n".join(held[-10:])
-    if len(held) > 10:
-        body += f"\n\n(+{len(held) - 10} more in the app)"
-    await wa_send(head + body)
-    await telegram.send(head + body)
+    texts = [it["text"] for it in held]
+    head = f"🔕 Held ({len(texts)}) — {reason}:\n\n"
+    body = "\n\n".join(texts[-10:])
+    if len(texts) > 10:
+        body += f"\n\n(+{len(texts) - 10} more in the app)"
+    wa = await wa_send(head + body)
+    tg = await telegram.send(head + body)
+    if not (wa or tg):
+        store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))   # nothing landed — keep it
+        store.kv_set("last_push_failure",
+                     json.dumps({"at": time.time(), "text": head[:120]}))
+        return {"held": True, "whatsapp": False, "telegram": False}
+    delivery.note_sent()
+    return {"held": False, "whatsapp": wa, "telegram": tg}
 
 
 async def held_watch_loop() -> None:
-    """Release held ambient notifications once Arun steps away from the laptop."""
+    """Release held ambient notifications — on departure OR on age.
+
+    Two release conditions, because presence alone strands things: he can sit at
+    the laptop all afternoon with Teams and Outlook closed, and a departure-only
+    rule would keep every held item until evening.
+    """
     from . import presence
     was_present = True
     while True:
@@ -144,6 +285,8 @@ async def held_watch_loop() -> None:
             present = await presence.at_laptop()
             if was_present and not present:
                 await flush_held()
+            elif _stale(_held_items()):
+                await flush_held(reason="waited long enough")
             was_present = present
         except Exception:
             pass

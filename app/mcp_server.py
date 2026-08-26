@@ -23,7 +23,6 @@ The config is printed rather than installed. Writing into ~/.copilot or a repo's
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import inspect
 import json
@@ -76,13 +75,31 @@ def _proxy(cap):
     return call
 
 
+def _allowed_tools() -> set[str] | None:
+    """Which capabilities to expose this run, from ASTA_MCP_TOOLS (comma-list), or
+    None for the full set. Context-aware tool selection sets this per turn so a
+    strong-but-token-heavy 50-tool schema shrinks to the ~handful the message
+    actually needs. The ALWAYS floor is folded in unconditionally, so a narrow
+    (or mis-ranked) selection can never drop remember / ask_user / delegate_task /
+    prepare_to_send and strand the model."""
+    raw = os.environ.get("ASTA_MCP_TOOLS", "").strip()
+    if not raw:
+        return None
+    names = {t.strip() for t in raw.split(",") if t.strip()}
+    return names | set(capabilities.ALWAYS)
+
+
 def build_server():
     """One MCP tool per capability, each forwarding to the running Asta server so
-    the function executes where its in-process state lives (see _proxy)."""
+    the function executes where its in-process state lives (see _proxy). When
+    ASTA_MCP_TOOLS is set, only that subset (plus the ALWAYS floor) is exposed."""
     from mcp.server.fastmcp import FastMCP
 
     server = FastMCP(SERVER_NAME)
+    allow = _allowed_tools()
     for cap in capabilities.registry().values():
+        if allow is not None and cap.name not in allow:
+            continue
         server.add_tool(_proxy(cap), name=cap.name, description=_describe(cap))
     return server
 
@@ -102,38 +119,43 @@ def _describe(cap) -> str:
     return text
 
 
-def config_entry() -> dict:
+def config_entry(tools: list[str] | None = None) -> dict:
     """The mcpServers entry a CLI needs to spawn this server.
 
     The env is carried explicitly rather than left to inheritance: the spawned
     server has to reach the RUNNING Asta to forward calls, so it needs the token
-    and port even if the CLI launches it with a scrubbed environment.
+    and port even if the CLI launches it with a scrubbed environment. `tools`, when
+    given, narrows the exposed set for this turn (see _allowed_tools).
     """
+    env = {
+        "ASTA_TOKEN": os.environ.get("ASTA_TOKEN", ""),
+        "ASTA_PORT": os.environ.get("ASTA_PORT", "8321"),
+        "ASTA_URL": _asta_url(),
+    }
+    if tools:
+        env["ASTA_MCP_TOOLS"] = ",".join(tools)
     return {
         "mcpServers": {
             SERVER_NAME: {
                 "command": str(ROOT / ".venv" / "bin" / "python"),
                 "args": ["-m", "app.mcp_server"],
                 "cwd": str(ROOT),
-                "env": {
-                    "ASTA_TOKEN": os.environ.get("ASTA_TOKEN", ""),
-                    "ASTA_PORT": os.environ.get("ASTA_PORT", "8321"),
-                    "ASTA_URL": _asta_url(),
-                },
+                "env": env,
             }
         }
     }
 
 
-def write_config(dest: Path | None = None) -> Path:
+def write_config(dest: Path | None = None, tools: list[str] | None = None) -> Path:
     """Write the mcpServers config to a file a CLI can point --mcp-config at.
 
     Lives under data/ (gitignored) at 0600 — it carries the bearer token, so it
-    must never be world-readable or committed.
+    must never be world-readable or committed. Callers pass a per-conversation
+    `dest` so concurrent turns never clobber one shared file.
     """
     dest = dest or (ROOT / "data" / "asta-mcp.json")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(config_entry(), indent=2))
+    dest.write_text(json.dumps(config_entry(tools), indent=2))
     with contextlib.suppress(OSError):
         dest.chmod(0o600)
     return dest

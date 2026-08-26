@@ -5,12 +5,15 @@
     <key>Label</key>
     <string>com.asta.server</string>
 
-    <!-- caffeinate -si keeps the Mac awake (on AC power) while Asta runs;
-         if Asta crashes, launchd restarts the whole thing. -->
+    <!-- Python is launched DIRECTLY, not wrapped in caffeinate, because macOS
+         attributes privacy permissions to the process that did the launching.
+         Wrapped, the Teams notification database was attributed to
+         /usr/bin/caffeinate — an Apple binary nobody can grant Full Disk Access
+         to — so the grant on Python could never take effect and the Teams
+         watcher stayed silently blind. Staying awake is now com.asta.caffeinate,
+         which does that one job and nothing else. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/caffeinate</string>
-        <string>-si</string>
         <string>/Users/arun.k.k/help/asta/.venv/bin/python</string>
         <string>-m</string>
         <string>uvicorn</string>
@@ -23,6 +26,20 @@
 
     <key>WorkingDirectory</key>
     <string>/Users/arun.k.k/help/asta</string>
+
+    <!-- launchd hands a process a default soft limit of 256 open files; a login
+         shell gives ~1048576, which is why this only bit once Asta moved off
+         nohup. Asta holds well over 256 at rest (MCP subprocesses, the Playwright
+         browser, the supervised bridge, and a fresh SQLite connection per call
+         over WAL — .db + -wal + -shm each). Past the limit, opening the database
+         fails with SQLITE_CANTOPEN and new HTTP connections can't get a socket —
+         which is exactly the "unable to open database file" 500s and the bridge's
+         "fetch failed". 65536 is generous headroom. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
 
     <key>RunAtLoad</key>
     <true/>

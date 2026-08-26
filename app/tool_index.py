@@ -203,19 +203,72 @@ _sticky: dict[str, set[str]] = {}
 _STICKY_MAX = 64
 
 
+# --- intent tier -------------------------------------------------------------
+# The biggest token lever isn't narrowing the toolset — it's not sending tools at
+# all on turns that don't need them. A large share of chat is pure reasoning ABOUT
+# the conversation ("explain that", "why", "elaborate", "summarise the above"):
+# it needs the model but no capability, yet it ranks no tool and so used to fall
+# into the "expose everything" default and pay the full schema. These get the
+# ALWAYS floor only.
+#
+# The gate is deliberately TIGHT and doubled — the opener must be unmistakably
+# conversational AND the ranker must have found nothing — because a false positive
+# strands a real request (the floor has no teams/jira/file tools), which is a far
+# worse failure than a few wasted tokens.
+_CONVERSATIONAL = re.compile(
+    r"^\s*(?:"
+    r"explain|elaborate|clarify|rephrase|reword|summari[sz]e|recap|expand|"
+    r"describe|define|compare|contrast|"
+    r"why\b|why'?s\b|how\s+come|what\s+do\s+you\s+mean|what\s+did\s+you\s+mean|"
+    r"what\s+does\s+(?:that|this|it)\s+mean|what'?s\s+the\s+difference|"
+    r"tell\s+me\s+more|tell\s+me\s+about|go\s+on|"
+    r"walk\s+me\s+through|break\s+(?:that|this|it)\s+down|"
+    r"help\s+me\s+understand|i\s+don'?t\s+(?:get|understand)|"
+    r"(?:can|could)\s+you\s+explain|give\s+me\s+more\s+detail|more\s+detail|"
+    r"in\s+short|tl;?dr|what\s+do\s+you\s+think|your\s+(?:opinion|take|thoughts)"
+    r")\b", re.I)
+
+
+def is_conversational(text: str) -> bool:
+    """A pure reasoning/explanation turn about the conversation itself — needs the
+    model, no external capability. Kept tight on purpose (see the note above)."""
+    return bool(_CONVERSATIONAL.match((text or "").strip()))
+
+
+def _floor() -> list[str]:
+    """Just the ALWAYS core — the Tier-0 toolset."""
+    reg = capabilities.registry()
+    return sorted(n for n in capabilities.ALWAYS if n in reg)
+
+
 def select_sticky(conv_id: str, query: str, k: int = TOP_K) -> list[str] | None:
     picked = select(query, k)
+    # Tier 0: nothing ranked AND clearly conversational -> the floor only, not all
+    # 50 schemas. Transient — it does not grow the conversation's sticky set, so a
+    # later real request re-picks cleanly.
+    if picked is None and is_conversational(query):
+        return _floor()
     if not conv_id:
         return picked
     prev = _sticky.get(conv_id)
     if picked is None:
         # This turn wants everything; so does the rest of the conversation.
         _sticky.pop(conv_id, None)
-        _sticky[conv_id] = set(capabilities.registry())
+        _sticky[conv_id] = dict.fromkeys(capabilities.registry())
         return None
-    merged = (prev or set()) | set(picked)
+    # Bounded by RECENCY, not accumulated forever. Stickiness exists so a
+    # follow-up with no keywords in it ("do that again", "and the other repo")
+    # still has the right tools — but the old set was monotonic: it only ever
+    # grew. Measured on six ordinary turns it went 23 -> 26 -> 31 -> 36 -> 37 ->
+    # 44 of 58, and on reaching 56 it latched to "everything" for the rest of the
+    # conversation. So the longer Arun talked to Asta, the more every turn cost,
+    # and it never recovered — with ~6,000 tokens of schemas as the ceiling.
+    #
+    # Keeping the most recently useful tools bounds that permanently. A tool that
+    # drops out is not lost: naming its subject re-selects it immediately.
+    merged = _recent(prev, picked)
     if len(merged) >= len(capabilities.registry()) - 2:
-        _sticky[conv_id] = set(capabilities.registry())
+        _sticky[conv_id] = dict.fromkeys(capabilities.registry())
         return None
     if len(_sticky) >= _STICKY_MAX and conv_id not in _sticky:
         _sticky.clear()
@@ -223,6 +276,116 @@ def select_sticky(conv_id: str, query: str, k: int = TOP_K) -> list[str] | None:
     return sorted(merged)
 
 
+#: How many tools a conversation may carry between turns. Eight are picked per
+#: turn, so this is roughly three turns of memory plus the floor — enough for a
+#: follow-up, far short of the whole registry.
+STICKY_MAX_TOOLS = int(os.environ.get("ASTA_TOOL_STICKY_MAX", "24"))
+
+
+#: Eviction only starts above this, and then trims back to STICKY_MAX_TOOLS.
+#: Without the gap the set sits exactly at the cap and every turn evicts
+#: something to make room — measured as one tool in and one out on two
+#: consecutive turns about the SAME subject, which changes the tool block and
+#: therefore misses the prompt cache on a turn that should have hit it. With the
+#: gap, trimming happens about once every eight new tools instead of every turn.
+STICKY_SLACK = int(os.environ.get("ASTA_TOOL_STICKY_SLACK", "8"))
+
+
+def _recent(prev, picked: list[str]) -> dict:
+    """This turn's tools and the floor, then whatever else still fits.
+
+    Two sets are NOT negotiable, and saying so in a comment was not enough. The
+    floor used to be appended last and the trim kept the first N — so the one
+    group documented as "never evicted" was the first group evicted. It stayed
+    invisible while the registry was small enough that nothing ever trimmed;
+    adding three capabilities crossed the threshold and a test caught it.
+
+    What that bug actually costs: the floor is `capabilities.ALWAYS` — ask_user,
+    continue_working, load_skill, remember, and **prepare_to_send**. A long
+    conversation would quietly lose the staged-send gate, so the one hard rule in
+    the system — nothing goes out without being staged first — would have been
+    enforced by a tool the model could no longer reach.
+
+    So: this turn's picks and the floor are kept whatever the cap says, and only
+    the carried-over tools compete for what room is left.
+    """
+    # Order matters for the next turn's recency, so build it deliberately:
+    # what this turn asked for, then the always-core, then history.
+    protected: dict = dict.fromkeys(list(picked) + _floor())
+    order: dict = dict(protected)
+    for name in (prev or {}):
+        order.setdefault(name, None)
+    if len(order) <= STICKY_MAX_TOOLS + STICKY_SLACK:
+        return order
+    room = max(0, STICKY_MAX_TOOLS - len(protected))
+    carried = [n for n in order if n not in protected]
+    return dict.fromkeys(list(protected) + carried[:room])
+
+
 def forget(conv_id: str) -> None:
     """Drop a conversation's toolset — used when its session is rotated."""
     _sticky.pop(conv_id, None)
+    _mcp_sticky.pop(conv_id, None)
+
+
+# --- MCP servers, which were never narrowed at all ---------------------------
+#
+# Native tools have been retrieved per turn for a long time. The MCP toolsets
+# were not: `toolsets=MCP_TOOLSETS or None` attached every server to every turn,
+# whatever the turn was about. Measured on this machine — 32 tools, ~6,205 tokens
+# per turn, and that is WITHOUT Grafana, which failed to enumerate. GitHub alone
+# is 26 tools and ~3,917 tokens, present whether or not GitHub was mentioned.
+#
+# That is more than the entire native tool surface after narrowing, so it is the
+# larger half of the prompt floor and none of it was being retrieved.
+
+#: server -> what a turn looks like when it needs that server. Deliberately
+#: generous: attaching a server that turns out to be unnecessary costs tokens,
+#: while missing one costs a capability, and the sticky set below means one
+#: mention keeps it for the rest of the conversation.
+MCP_TRIGGERS: dict[str, tuple[str, ...]] = {
+    "grafana": ("grafana", "log", "logs", "metric", "latency", "error rate", "dashboard",
+                "loki", "prometheus", "tempo", "trace", "traces", "span", "alert",
+                "5xx", "exception", "stack trace", "throughput", "p99", "outage",
+                "slow", "spike", "crash", "oom", "restart", "why is", "what happened"),
+    "temporal": ("temporal", "workflow", "workflows", "activity", "activities",
+                 "execution", "signal", "task queue", "retry", "saga", "stuck",
+                 "booking id", "servicePlanNumber", "trace the booking"),
+    "github": ("github", "pr", "pull request", "review", "merge", "branch", "commit",
+               "issue", "repo", "repository", "diff", "ci", "workflow run", "checks"),
+    "atlassian": ("jira", "ticket", "sprint", "backlog", "epic", "story", "bug",
+                  "beptelikos", "assigned to me", "board", "confluence"),
+    "context7": ("docs", "documentation", "api reference", "library", "framework",
+                 "how do i use", "spring", "mapstruct", "reactor", "webflux"),
+}
+
+_mcp_sticky: dict[str, set[str]] = {}
+
+
+def mcp_for(conv_id: str, query: str) -> set[str] | None:
+    """Which MCP servers this turn needs. None means "all of them".
+
+    Sticky for the same reason the native selection is: a follow-up like "and the
+    one before that" has no keyword in it, and losing Grafana halfway through a
+    debugging conversation is worse than carrying it.
+    """
+    if not enabled():
+        return None
+    text = (query or "").lower()
+    # Word boundaries, not substrings. "priya" contains "pr", so drafting a mail
+    # to a colleague pulled in twenty-six GitHub tools — the exact waste this is
+    # meant to remove, caused by the mechanism meant to remove it.
+    hit = {name for name, words in MCP_TRIGGERS.items()
+           if any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", text) for w in words)}
+    if not conv_id:
+        return hit or set()
+    prev = _mcp_sticky.get(conv_id, set())
+    merged = prev | hit
+    if len(_mcp_sticky) >= _STICKY_MAX and conv_id not in _mcp_sticky:
+        _mcp_sticky.clear()
+    _mcp_sticky[conv_id] = merged
+    return merged
+
+
+def forget_mcp(conv_id: str) -> None:
+    _mcp_sticky.pop(conv_id, None)

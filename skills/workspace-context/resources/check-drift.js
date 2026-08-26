@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// Context directory name is supplied by the caller — Asta passes the name it
-// detected for this workspace. Defaults to Asta's own layout.
-const CTX_DIR = process.env.ASTA_CONTEXT_DIR || '.asta-context';
 
 /**
  * check-drift.js — on-demand context drift detection. Replaces the post-merge bash hook
@@ -31,6 +28,26 @@ const cp = require('child_process');
 const ROOT = process.argv[2];
 const JSON_OUT = process.argv.includes('--json');
 if (!ROOT) { console.error('usage: node check-drift.js <root> [--json]'); process.exit(2); }
+
+// Which directory holds the context. A hardcoded name only ever suits one
+// layout, and a hardcoded DEFAULT is worse: this script is copied INTO the
+// context directory at provision time, so `node .contmark/check-drift.js .`
+// would look for a `.asta-context` that isn't there and report "not
+// bootstrapped" about a workspace that is perfectly bootstrapped.
+//   1. an explicit name from the caller (Asta passes the one it detected)
+//   2. self-location — the directory this file sits in, when that holds the
+//      workspace.yml, which is exactly the copied-in case
+//   3. probe the known layouts under root, for a run straight from the plugin
+function contextDirName(root) {
+  const env = (process.env.ASTA_CONTEXT_DIR || '').trim();
+  if (env) return env;
+  if (fs.existsSync(path.join(__dirname, 'workspace.yml'))) return path.basename(__dirname);
+  for (const cand of ['.contmark', '.asta-context']) {
+    if (fs.existsSync(path.join(root, cand, 'workspace.yml'))) return cand;
+  }
+  return '.asta-context';
+}
+const CTX_DIR = contextDirName(ROOT);
 const CM = path.join(ROOT, CTX_DIR);
 const REPOS = path.join(CM, 'repos');
 if (!fs.existsSync(REPOS)) { console.error(JSON.stringify({ error: 'not_bootstrapped', path: REPOS })); process.exit(2); }
@@ -38,6 +55,43 @@ if (!fs.existsSync(REPOS)) { console.error(JSON.stringify({ error: 'not_bootstra
 function git(dir, args) {
   try { return cp.execFileSync('git', ['-C', dir].concat(args), { encoding: 'utf8' }).trim(); }
   catch (e) { return null; }
+}
+
+// Files that CANNOT change what the context says about a service.
+//
+// Without this the gap report is mostly noise: a real run reported 333 unclaimed
+// files across three repos, of which 250 were test sources and agent tooling —
+// `skill-creator/LICENSE.txt` is not business knowledge, and a mini-skill
+// enriched from it is worse than no mini-skill. Noise here is expensive twice:
+// it hides the 83 files that DO matter, and every one it lets through becomes
+// tokens an agent loads on every future task.
+//
+// Deliberately conservative in one direction: build manifests, schemas and
+// deployment values ARE material even though they look inert, because they
+// describe the shape of the service. When unsure, a file is kept — a missed
+// real change costs more than one extra line in a report.
+const IMMATERIAL = [
+  /(^|\/)\.(agents|claude|github|vscode|idea|contmark|asta-context)\//,
+  /(^|\/)(src\/)?test(s)?\//i,
+  /(^|\/)(spec|specs|__tests__|fixtures|testdata|test-data|e2e)\//i,
+  /(^|\/)(docs?|examples?|samples?)\//i,
+  /\.(md|txt|rst|png|jpe?g|gif|svg|ico|csv|log)$/i,
+  /(^|\/)(readme|changelog|license|notice|\.gitignore|\.gitattributes|\.editorconfig)/i,
+  /(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Gemfile\.lock|Cargo\.lock)$/i,
+];
+// …except these, which describe the SHAPE of the service and are material even
+// though the rules above would otherwise drop them.
+const MATERIAL_ANYWAY = [
+  /(^|\/)(pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|package\.json)$/,
+  /(^|\/)(requirements[^/]*\.txt|pyproject\.toml|go\.mod|Cargo\.toml)$/,
+  /(^|\/)(Dockerfile|docker-compose\.ya?ml)$/i,
+  /\.(avsc|proto|sql)$/i,
+  /openapi[^/]*\.(ya?ml|json)$/i,
+];
+
+function isMaterial(f) {
+  if (MATERIAL_ANYWAY.some((re) => re.test(f))) return true;
+  return !IMMATERIAL.some((re) => re.test(f));
 }
 
 // path -> category (ported from the old post-merge hook; coarse fallback only)
@@ -113,11 +167,20 @@ for (const key of repoKeys) {
     }
   }
   // coarse fallback: changed files no mini-skill claims => category flags (possible new code/gap)
+  //
+  // Gated on materiality. A mini-skill claims a file through its `sources:`, so
+  // an already-claimed file is still counted as staleness above regardless —
+  // this filter only decides what is reported as a possible NEW gap, which is
+  // the list a writer would go and read. Feeding it agent config and test
+  // fixtures is how mini-skills get bloated with facts no agent can use.
+  const unclaimed = changed.filter((c) => !matchedFiles.has(c));
+  const material = unclaimed.filter(isMaterial);
   const cats = new Set();
-  for (const c of changed) if (!matchedFiles.has(c)) classify(c).forEach(x => cats.add(x));
+  for (const c of material) classify(c).forEach(x => cats.add(x));
 
   entry.stale_mini_skills = [...stale].sort();
-  entry.unmatched_changed = changed.filter(c => !matchedFiles.has(c));
+  entry.unmatched_changed = material;
+  entry.unmatched_immaterial = unclaimed.length - material.length;
   entry.impacted_categories = [...cats].sort();
   if (entry.stale_mini_skills.length || entry.impacted_categories.length) { entry.drift = true; report.drift = true; }
   report.repos.push(entry);
@@ -130,7 +193,9 @@ if (JSON_OUT) {
   else for (const r of report.repos.filter(r => r.drift)) {
     console.log(`DRIFT ${r.repo}: ${r.verified_against ? r.verified_against.slice(0, 7) : '?'}..${r.head ? r.head.slice(0, 7) : '?'}`);
     if (r.stale_mini_skills.length) console.log('  stale mini-skills: ' + r.stale_mini_skills.join(', '));
-    if (r.impacted_categories.length) console.log('  new/unclaimed code → categories: ' + r.impacted_categories.join(', ') + ` (${r.unmatched_changed.length} files)`);
+    if (r.impacted_categories.length) console.log('  new/unclaimed code → categories: ' + r.impacted_categories.join(', ')
+      + ` (${r.unmatched_changed.length} files`
+      + (r.unmatched_immaterial ? `, ${r.unmatched_immaterial} immaterial skipped)` : ')'));
   }
 }
 process.exit(report.drift ? 1 : 0);

@@ -36,7 +36,7 @@ flowchart LR
 | *"implement BEPTELIKOS-10330 in booking"* | Reads the ticket and the code, plans, **stops for your approval**, implements on a fresh branch off `develop`, runs the scoped tests, hands back a reviewed diff |
 | *"why is the vessel ETA not updating in preprod?"* | Queries Temporal and Grafana with your certs, reads the service's own generated context, answers with the workflow id and the failing activity |
 | *"anything waiting on me?"* | One ranked list from mail, Teams, Jira and CI — not four inboxes |
-| *"ping Vinish about the CT failure"* | Drafts it, shows you the exact text, sends only on your "yes", and only to his 1:1 |
+| *"ping X about the CT failure"* | Drafts it, shows you the exact text, sends only on your "yes", and only to his 1:1 |
 | *"review PR 1409"* | Reads the diff, comments where it matters, watches CI to green |
 | *"use opus"* | Switches which model answers — chat and delegated tasks alike |
 | nothing at all | Watches CI *you* triggered, notices a Teams @mention, spots a stale cert, and reaches your phone — once, ranked, never at 2am |

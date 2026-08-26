@@ -198,7 +198,11 @@ async def create(workspace_root: Path, task_id: int, branch: str,
             rc, msg = await repo_ops.git(repo, "git", "worktree", "add",
                                          str(target), branch, timeout=300)
         if rc != 0:
-            out["note"] = f"could not create a worktree: {msg.strip()[:160]}"
+            # The REASON, not the first 160 characters: git narrates
+            # "Preparing worktree…" and fails afterwards, so a leading slice kept
+            # the narration and cut the reason off the end.
+            from . import clip as clip_mod
+            out["note"] = f"could not create a worktree: {clip_mod.problem(msg)}"
         else:
             out["ok"] = True
         results.append(out)

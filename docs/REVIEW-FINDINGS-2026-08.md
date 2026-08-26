@@ -77,6 +77,7 @@ first thing to revisit.
 | 38 | High | Every code task prepared every repo in the workspace, so a one-line change cost three fetches and three checkouts | `worktrees.create` | **closed** |
 | 39 | High | A watcher repeating itself filled the bounded offer queue and evicted real offers | `offers.offer` | **closed** |
 | 40 | **Critical** | Two MORE inline copies of the repo-discovery rule, one of them deciding where PRs get raised | `tasks.py` | **closed** |
+| 41 | High | A read-only side turn could still spawn a CODE task — the guard that would catch it is behind a flag that is off | `agent.delegate_task` | **closed** |
 
 ## Closed
 
@@ -702,10 +703,38 @@ the PR path.
 
 ---
 
+### 41 — the read-only guarantee had a hole — CLOSED 2026-08-26
+Found by validating finding 35 rather than trusting it.
+
+The claim was: a side turn cannot write, so a misclassified question can at worst
+read something and answer. The enforcement was `write=True` on the capability
+table — and `delegate_task` is `write=False`, correctly, because it sends nothing
+outward. It also spawns a worker that edits repos.
+
+So a question answered alongside running work could have started a code task.
+
+`relevance.guard_spawn` exists for exactly this shape — "a question is not a
+request to go do work" — and it is behind `ASTA_RELEVANCE`, which is **off**, so
+today it returns None for every spawn. A safety property must not depend on an
+opt-in flag being set; that is a property that is true on the machine where the
+flag happens to be on.
+
+`delegate_task` now refuses `kind="code"` when `READ_ONLY_TURN` is set, and says
+why. Analysis is still allowed: it is read-only, and a question that wants a
+deeper look is a reasonable thing to answer with one.
+
+**Two of the tests written for this validation pass were themselves vacuous**, and
+mutation testing is what said so — one asserted a shortcut that the fallback
+already covered, the other checked that protected tools survived a tight cap
+without ever checking the cap still bound. Both rewritten to state what they
+actually verify. That is the same failure as finding 29, caught the same way.
+
+---
+
 ## Where this leaves the review
 
-**40 findings raised, 39 closed**, plus finding 4 recorded as Arun's accepted
-risk. 1,746 tests pass. Every fix was mutation-tested — the source was
+**41 findings raised, 40 closed**, plus finding 4 recorded as Arun's accepted
+risk. 1,763 tests pass. Every fix was mutation-tested — the source was
 deliberately broken and the suite had to notice.
 
 Still needing Arun rather than code:

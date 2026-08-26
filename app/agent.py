@@ -1402,7 +1402,24 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     chat context). kind: analysis (read-only, parallel) | code (edits code — set
     the workspace) | teams_draft (drafts a Teams reply — set teams_chat; the
     draft waits for Arun's approval, it is never sent automatically)."""
-    from . import relevance, tasks
+    from . import capabilities, relevance, tasks
+    # A turn running ALONGSIDE other work is answering a read-only question, and
+    # must not start work that edits code.
+    #
+    # `delegate_task` is marked write=False because it sends nothing outward —
+    # true, and not the point: it spawns a worker that changes repos. Without this
+    # a misclassified interjection could kick off a code task, and the guarantee
+    # that makes concurrent answering safe ("the worst it can do is read something
+    # and answer") would simply not hold.
+    #
+    # Not relying on relevance.guard_spawn for it: that guard is behind
+    # ASTA_RELEVANCE, which is OFF, so today it returns None for every spawn. A
+    # safety property must not depend on an opt-in flag being set.
+    if kind == "code" and capabilities.READ_ONLY_TURN.get():
+        return ("I'm answering this alongside other work that's already running, so "
+                "I won't start a code task from here — that would edit a repo off "
+                "the back of a question. Ask me directly when the current work is "
+                "done, or say so and I'll propose it properly.")
     # A question is not a request to go do work. If this turn was opened by a
     # passive question and the model is now trying to spawn work off it, hold and
     # ask first rather than silently running (and touching a repo) unasked.

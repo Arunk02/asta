@@ -29,7 +29,7 @@ Open http://localhost:8321 and log in with `ASTA_TOKEN` from `.env`.
 Copy `.env.example` to `.env` first — every setting is documented there.
 
 ```bash
-.venv/bin/python -m pytest -q           # 1,746 tests
+.venv/bin/python -m pytest -q           # 1,763 tests
 ```
 
 ## How it is put together
@@ -855,7 +855,7 @@ agents/                 solo, micro, explore, bootstrap pipelines
 skills/                 generic playbooks + skills learned from your runs
 ui/                     single-page chat UI + PWA
 memory/                 MEMORY.md, facts/, episodes/
-tests/                  1,746 tests (conftest isolates the DB — see below)
+tests/                  1,763 tests (conftest isolates the DB — see below)
 ```
 
 `tests/conftest.py` points `store.DB_PATH` at a temp file for *every* test. A stray
@@ -867,7 +867,7 @@ roadmap this is being built against. Still ahead of it: one scheduler replacing 
 background loops, detached runs that survive a closed tab, adaptive context
 compaction, a people/contacts model, and deep research.
 
-`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 40 findings
+`docs/REVIEW-FINDINGS-2026-08.md` is the August architecture review: 41 findings
 raised against the *running* system — every number measured on the live install, not
 inferred from the source — each closed in place with what was done and how it was
 proved. Every fix was mutation-tested: the source was deliberately broken and the

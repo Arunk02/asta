@@ -109,9 +109,26 @@ def test_an_unknown_name_still_lists_the_real_ones(_conv):
     assert "don't have a brain called" in reply and "claude_cli" in reply
 
 
-def test_switching_brains_still_works(_conv):
-    """The tier must not have eaten the older, more common command."""
+def test_switching_brains_still_works(_conv, monkeypatch):
+    """The tier must not have eaten the older, more common command.
+
+    Availability is forced rather than inherited. The first version asserted the
+    "Now using" wording, which only appears when the CLI is actually installed —
+    so it passed on Arun's laptop and failed on CI, where no `claude` binary
+    exists and the reply is the "not configured yet" branch instead.
+    """
+    monkeypatch.setattr(agent, "available", lambda name: True)
     assert "Now using" in main._switch_model(_conv, "claude_cli")
+    assert _conv["model"] == "claude_cli"
+
+
+def test_switching_to_a_brain_that_is_not_installed_still_switches(_conv, monkeypatch):
+    """The other branch, which is what CI actually sees. Switching anyway is
+    deliberate: he may be about to install it, and refusing a choice he stated is
+    more annoying than a warning he can ignore."""
+    monkeypatch.setattr(agent, "available", lambda name: False)
+    reply = main._switch_model(_conv, "claude_cli")
+    assert "isn't configured yet" in reply
     assert _conv["model"] == "claude_cli"
 
 

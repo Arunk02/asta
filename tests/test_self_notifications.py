@@ -10,7 +10,7 @@ chase was filed and chased in turn. From his live database, verbatim:
 
     '⏳ Still waiting on you (2):  • ⏳ Still waiting on you (3): …'
     '⏳ Still waiting on you (3):  • ⏳ Still waiting on you (13): …'
-    '⏳ Still waiting on you (13): • Vinish Kumar (Jira): …'
+    '⏳ Still waiting on you (13): • <a colleague> (Jira): …'
 
 One real item, wrapped in three generations of Asta talking to itself. These
 tests reproduce that growth and pin it shut, and — just as important — prove the
@@ -20,6 +20,7 @@ fix did not silence the inbound chase this whole subsystem exists for.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import time
 
@@ -58,9 +59,16 @@ def _arrival(key: str, what: str, source: str = "outlook") -> None:
     attention.consider(source, key, what=what, priority=attention.P_TODAY)
 
 
-def _overdue(now: float) -> float:
-    """A clock past end-of-day, when an unanswered thing becomes chaseable."""
-    return now
+#: A fixed evening, past ASTA_EOD_HOUR (18:00 by default), so "is this overdue?"
+#: is answered by an argument rather than by what time the suite happens to run.
+#:
+#: These three tests read `time.time()` at first and passed all evening on Arun's
+#: laptop, then failed on CI at 17:37 UTC — chase_due derives end-of-day from the
+#: clock it is given, and before 18:00 nothing is ever due. Same family as the
+#: quiet-hours lesson in conftest: a suite that is green after six and red before
+#: it teaches people to re-run rather than to read.
+def _evening() -> float:
+    return dt.datetime(2026, 6, 4, 20, 0).timestamp()
 
 
 # --- the recursion ------------------------------------------------------------
@@ -68,8 +76,8 @@ def _overdue(now: float) -> float:
 def test_a_chase_is_never_itself_chased(_no_phone):
     """The exact growth from his screenshots: run the loop twice, and the second
     pass must not find the first pass's own message."""
-    _arrival("INC4471", "Priya: booking service is down")
-    late = time.time()
+    _arrival("INC4471", "someone: booking service is down")
+    late = _evening()
     due = delivery.chase_due(now=late)
     assert [r["key"] for r in due] == ["INC4471"], "the real item must be chased"
     delivery.mark_chased(due, now=late)
@@ -84,19 +92,22 @@ def test_a_chase_is_never_itself_chased(_no_phone):
 def test_three_hours_of_chasing_never_nests(_no_phone):
     """Left running, the old code grew one layer an hour. Three passes is enough
     to show growth; this asserts flat."""
-    _arrival("BEPTELIKOS-10330", "Rajendra: revenue line item should be non-editable")
-    now = time.time()
+    _arrival("ACME-1234", "someone: revenue line item should be non-editable")
+    now = _evening()
+    chased_at_least_once = False
     for hour in range(3):
         due = delivery.chase_due(now=now + hour * 3600)
         if not due:
             continue
+        chased_at_least_once = True
         delivery.mark_chased(due, now=now + hour * 3600)
         text = delivery.render_chase(due)
         assert "Still waiting on you" not in text.split(":", 1)[1], \
             "a chase quoting a chase is the nesting bug"
         asyncio.run(notify.notify(text, "attention", urgency="direct",
                                   priority=attention.P_TODAY))
-    rows = [r for r in store.attention_open(limit=50, max_priority=attention.P_FYI)]
+    assert chased_at_least_once, "the loop never chased, so it asserted nothing"
+    rows = store.attention_open(limit=50, max_priority=attention.P_FYI)
     chases = [r for r in rows if "Still waiting" in (r.get("what") or "")]
     assert all(attention.self_originated(r) for r in chases)
 
@@ -110,7 +121,7 @@ def test_asta_own_pushes_are_filed_as_its_own(_no_phone):
     rows = store.attention_open(limit=50, max_priority=attention.P_FYI)
     assert rows, "they are still recorded — the audit trail is worth keeping"
     assert all(attention.self_originated(r) for r in rows)
-    assert delivery.chase_due(now=time.time()) == []
+    assert delivery.chase_due(now=_evening()) == []
 
 
 # --- the half that must NOT be silenced ---------------------------------------
@@ -118,7 +129,7 @@ def test_asta_own_pushes_are_filed_as_its_own(_no_phone):
 def test_a_real_arrival_is_still_chased(_no_phone):
     """The fix removes Asta's own voice, not the feature."""
     _arrival("INC9001", "ServiceNow: L2 queue assignment")
-    due = delivery.chase_due(now=time.time())
+    due = delivery.chase_due(now=_evening())
     assert [r["key"] for r in due] == ["INC9001"]
 
 
@@ -129,12 +140,12 @@ def test_a_real_source_joining_makes_it_owed_again():
     attention.consider(attention.SELF_SOURCE, key, what="Asta said something",
                        priority=attention.P_TODAY)
     assert attention.self_originated(store.attention_get(key))
-    attention.consider("teams", key, what="Priya asked about it",
+    attention.consider("teams", key, what="a colleague asked about it",
                        priority=attention.P_TODAY)
     row = store.attention_get(key)
     assert not attention.self_originated(row)
     assert row["state"] == "notified"
-    assert [r["key"] for r in delivery.chase_due(now=time.time())] == [key]
+    assert [r["key"] for r in delivery.chase_due(now=_evening())] == [key]
 
 
 def test_self_rows_are_not_scored_as_interruptions_he_ignored():
@@ -143,7 +154,7 @@ def test_self_rows_are_not_scored_as_interruptions_he_ignored():
     there would teach the filter that its own voice is noise."""
     attention.consider(attention.SELF_SOURCE, "mine", what="✅ DONE — #70",
                        priority=attention.P_TODAY)
-    _arrival("theirs", "Priya: can you review this")
+    _arrival("theirs", "someone: can you review this")
     old = time.time() - 30 * 86400
     for key in ("mine", "theirs"):
         store.attention_set(key, state="notified", notified_at=old)
@@ -155,7 +166,7 @@ def test_self_rows_are_not_scored_as_interruptions_he_ignored():
 def test_whats_on_my_plate_excludes_asta_talking():
     attention.consider(attention.SELF_SOURCE, "mine", what="📅 In 32 min — standup",
                        priority=attention.P_TODAY)
-    _arrival("theirs", "Vinish: revenue line item")
+    _arrival("theirs", "someone: revenue line item")
     assert [r["key"] for r in attention.open_items()] == ["theirs"]
 
 

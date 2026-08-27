@@ -33,7 +33,7 @@ flowchart LR
 
 | You say | What happens |
 |---|---|
-| *"implement BEPTELIKOS-10330 in booking"* | Reads the ticket and the code, plans, **stops for your approval**, implements on a fresh branch off `develop`, runs the scoped tests, hands back a reviewed diff |
+| *"implement ACME-1234 in booking"* | Reads the ticket and the code, plans, **stops for your approval**, implements on a fresh branch off `develop`, runs the scoped tests, hands back a reviewed diff |
 | *"why is the vessel ETA not updating in preprod?"* | Queries Temporal and Grafana with your certs, reads the service's own generated context, answers with the workflow id and the failing activity |
 | *"anything waiting on me?"* | One ranked list from mail, Teams, Jira and CI — not four inboxes |
 | *"ping X about the CT failure"* | Drafts it, shows you the exact text, sends only on your "yes", and only to his 1:1 |
@@ -717,7 +717,7 @@ them, and since a chase is itself a push, each chase was filed and chased in tur
     ⏳ Still waiting on you (2):
       • ⏳ Still waiting on you (3):
         • ⏳ Still waiting on you (13):
-          • Vinish Kumar (Jira): …
+          • <a colleague> (Jira): …
 
 One real item wrapped in three generations of Asta talking to itself, growing by a
 layer every hour. Announcements are now filed as `attention.SELF_SOURCE`: still

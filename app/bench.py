@@ -67,6 +67,8 @@ CAPABILITIES: dict[str, str] = {
     "jira": "reading a ticket and knowing what it actually asks for",
     "context": "using what the workspace already knows",
     "recover": "healing itself without him",
+    "meetings": "which meeting he meant, and whether he need be there at all",
+    "ask": "not asking him something he has already answered",
 }
 
 #: Weights on the reward. Correctness dominates on purpose: a fast, cheap, wrong

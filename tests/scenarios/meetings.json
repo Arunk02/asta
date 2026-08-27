@@ -1,0 +1,119 @@
+{
+  "_comment": "Which meeting he meant. Every case here guards the same thing: joining the wrong call puts him in a room he did not mean to be in, in front of people who watch him arrive, and that cannot be quietly undone. Refusing is the correct answer far more often than picking.",
+  "capability": "meetings",
+  "cases": [
+    {
+      "id": "an-unambiguous-name-is-picked",
+      "given": {
+        "phrase": "code refactor",
+        "now_minutes": 720,
+        "events": [
+          {"title": "Focus time", "start": "8:00 AM", "minutes": 480},
+          {"title": "Code Refactor", "start": "12:30 PM", "minutes": 750},
+          {"title": "Daily Scrum Meeting", "start": "2:45 PM", "minutes": 885}
+        ]
+      },
+      "must": ["picked=Code Refactor"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "the ordinary case — the real meeting from his real calendar today",
+      "source": "agenda.pick, all words present in exactly one title"
+    },
+    {
+      "id": "a-time-picks-the-meeting-at-that-time",
+      "given": {
+        "phrase": "join my 12:30",
+        "now_minutes": 720,
+        "events": [
+          {"title": "Code Refactor", "start": "12:30 PM", "minutes": 750},
+          {"title": "Daily Scrum Meeting", "start": "2:45 PM", "minutes": 885}
+        ]
+      },
+      "must": ["picked=Code Refactor"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "he names meetings by their time far more often than by their title",
+      "source": "agenda._wanted_minutes"
+    },
+    {
+      "id": "two-meetings-at-one-time-refuses",
+      "given": {
+        "phrase": "join my 12:30",
+        "now_minutes": 720,
+        "events": [
+          {"title": "Code Refactor", "start": "12:30 PM", "minutes": 750},
+          {"title": "Vendor sync", "start": "12:30 PM", "minutes": 750}
+        ]
+      },
+      "must": ["picked=none"],
+      "must_not": ["picked=Code Refactor", "picked=Vendor sync"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "a coin flip here walks him into the wrong room — refusing costs one question",
+      "source": "agenda.pick returns None when len(at_time) != 1"
+    },
+    {
+      "id": "a-word-matching-two-titles-refuses",
+      "given": {
+        "phrase": "join the review",
+        "now_minutes": 600,
+        "events": [
+          {"title": "Design review", "start": "11:00 AM", "minutes": 660},
+          {"title": "Code review", "start": "3:00 PM", "minutes": 900}
+        ]
+      },
+      "must": ["picked=none"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "'the review' is exactly how he talks, and exactly when guessing is worst",
+      "source": "agenda.pick returns None when len(hits) != 1"
+    },
+    {
+      "id": "next-means-the-next-one-not-the-nearest",
+      "given": {
+        "phrase": "join my next meeting",
+        "now_minutes": 800,
+        "events": [
+          {"title": "Code Refactor", "start": "12:30 PM", "minutes": 750},
+          {"title": "Daily Scrum Meeting", "start": "2:45 PM", "minutes": 885}
+        ]
+      },
+      "must": ["picked=Daily Scrum Meeting"],
+      "must_not": ["picked=Code Refactor"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "at 1:20pm the NEAREST meeting is the one that already finished — 'next' must never mean backwards",
+      "source": "agenda.pick — later[0] where minutes >= now"
+    },
+    {
+      "id": "nothing-later-today-refuses-rather-than-wrapping",
+      "given": {
+        "phrase": "join my next meeting",
+        "now_minutes": 1300,
+        "events": [{"title": "Code Refactor", "start": "12:30 PM", "minutes": 750}]
+      },
+      "must": ["picked=none"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "at 9:40pm there is no next meeting — picking this morning's would be absurd and confident",
+      "source": "agenda.pick returns None when nothing is later"
+    },
+    {
+      "id": "an-empty-calendar-picks-nothing",
+      "given": {"phrase": "join the standup", "now_minutes": 600, "events": []},
+      "must": ["picked=none"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "the scrape returning nothing must not become a crash inside a join",
+      "source": "agenda.pick guards on empty events"
+    },
+    {
+      "id": "filler-words-are-not-search-terms",
+      "given": {
+        "phrase": "please join the meeting in a moment",
+        "now_minutes": 600,
+        "events": [
+          {"title": "Code Refactor", "start": "12:30 PM", "minutes": 750},
+          {"title": "Daily Scrum Meeting", "start": "2:45 PM", "minutes": 885}
+        ]
+      },
+      "must": ["picked=none"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "stripping 'join/the/meeting/in' leaves 'please a moment', which names nothing — and naming nothing must refuse, not match everything",
+      "source": "agenda.pick strips filler, then requires all remaining words in one title"
+    }
+  ]
+}

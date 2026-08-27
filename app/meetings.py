@@ -292,6 +292,8 @@ async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
         raise RuntimeError("need the meeting's join link")
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
+    warm_the_voice()                  # cold start lands here, not in the meeting
+    await teams_bridge.close_pool()   # one writer per profile — see call_person
     pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
     joined = False
     try:
@@ -446,6 +448,51 @@ async def _wait_for_chat_list(page) -> bool:
     return False
 
 
+#: How many times to re-search when the headed window opens the wrong chat.
+_FIND_ATTEMPTS = int(os.environ.get("ASTA_CALL_FIND_ATTEMPTS", "4"))
+_FIND_BACKOFF = 1.5
+
+
+async def _find_chat_settled(page, who: str) -> str:
+    """Find the chat, retrying while the headed window is still settling.
+
+    Placing a real call to Vinish is what exposed this. Headless `resolve` finds
+    "Vinish Kumar" every time; the HEADED window opened a chat called 'Author' and
+    aborted — correctly, because opening the wrong conversation and dialling it
+    would ring a stranger on Arun's behalf. But aborting on the FIRST mismatch
+    made calling by name fail every time rather than merely be slow.
+
+    `_wait_for_chat_list` waits for the rail to have entries, which is a proxy: it
+    proves there are items, not that search has settled on the right one. Rather
+    than tune that proxy — the next Teams build would move it again — the real
+    condition is used directly. The title check already knows whether the right
+    chat is open, so a mismatch simply means "too early", and too early is worth
+    retrying.
+
+    The refusal is preserved exactly: after the last attempt the mismatch is
+    raised, and nothing is ever dialled on a chat whose title did not match.
+    """
+    from . import teams_bridge
+    last: Exception | None = None
+    for attempt in range(_FIND_ATTEMPTS):
+        try:
+            return await teams_bridge._find_chat(page, who, allow_group=False)
+        except RuntimeError as exc:
+            last = exc
+            # Only a "wrong chat / not found" is a timing problem. A refusal on
+            # policy — a group, an ambiguous name — must not be retried into
+            # succeeding, because retrying does not make it any more what he meant.
+            if "group" in str(exc).lower() or "ambiguous" in str(exc).lower():
+                raise
+            if attempt == _FIND_ATTEMPTS - 1:
+                break
+            await asyncio.sleep(_FIND_BACKOFF * (attempt + 1))
+            with contextlib.suppress(Exception):
+                await page.keyboard.press("Escape")   # drop a half-open search
+    raise RuntimeError(
+        f"{last} — still wrong after {_FIND_ATTEMPTS} attempts; nothing was dialled")
+
+
 async def call_person(who: str, video: bool = False) -> str:
     """Ring a PERSON on Teams. Returns who it actually rang.
 
@@ -468,6 +515,13 @@ async def call_person(who: str, video: bool = False) -> str:
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
     kind = "video" if video else "audio"
+    # Pay the model's cold start NOW, while the browser is still opening and the
+    # phone has not even rung. Measured: the first utterance after Voicebox starts
+    # takes 11.4 seconds, every later one takes 1.05 — so the cost is a one-time
+    # model load, not synthesis, and the only question is whether it lands in
+    # front of Vinish or in front of nobody. It was wired into join_by_phrase and
+    # nowhere else, so every CALL paid it out loud.
+    warm_the_voice()
     # A headed call cannot share the profile with the pooled headless browser.
     # Chromium tolerates exactly one writer per user-data-dir, and the pool
     # deliberately keeps its browser alive between operations — so by the time a
@@ -476,7 +530,6 @@ async def call_person(who: str, video: bool = False) -> str:
     # Teams unable to boot for fourteen and a half hours on 26 August. Drop ours
     # first; the pool rebuilds itself on the next headless operation.
     await teams_bridge.close_pool()
-    await teams_bridge.close_pool()   # same single-writer rule as call_person
     pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
     placed = False
     try:
@@ -489,7 +542,7 @@ async def call_person(who: str, video: bool = False) -> str:
         # that makes search work, rather than sleeping a guessed number of
         # seconds and hoping.
         await _wait_for_chat_list(page)
-        title = await teams_bridge._find_chat(page, who, allow_group=False)
+        title = await _find_chat_settled(page, who)
         if not await _click_first(page, _CALL_BUTTONS[kind], timeout=5000):
             raise RuntimeError(
                 f"no {kind} call button in the chat with '{title}' — either the Teams "

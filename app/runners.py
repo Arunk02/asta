@@ -208,6 +208,50 @@ async def _jira(case: dict) -> dict:
     return {"text": " ".join(p for p in parts if p) + "\n" + body}
 
 
+# --- meetings: which one he meant, and whether he need be there --------------
+
+async def _meetings(case: dict) -> dict:
+    """`agenda.pick` and friends — pure, and the decisions that precede a join.
+
+    `pick` returning None for AMBIGUOUS is the behaviour under test, not an
+    inconvenience: joining the wrong call puts him in a room he did not mean to
+    be in, in front of people who watch him arrive, and that cannot be undone.
+    """
+    from . import agenda
+    g = _given(case)
+    events = g.get("events", [])
+    ev = agenda.pick(events, g.get("phrase", ""), g.get("now_minutes"))
+    parts = [f"picked={ev['title'] if ev else 'none'}"]
+    if ev is not None and g.get("want_attendance"):
+        needed, why = agenda.attendance(ev)
+        parts.append(f"needed={needed} why={why}")
+    if g.get("want_warnings"):
+        parts.append("warnings=" + ("; ".join(agenda.day_warnings(events)) or "none"))
+    return {"text": " ".join(parts)}
+
+
+# --- ask: not asking him the same thing twice --------------------------------
+
+async def _ask(case: dict) -> dict:
+    """`asking.recent_answer` — the fix for the complaint that stung most.
+
+    He answered a question, Asta coded it, raised the PR, and then asked him the
+    same question again. "this is worst i feel." These cases pin the window and
+    the matching, so it cannot come back.
+    """
+    from . import asking, store
+    g = _given(case)
+    for prior in g.get("answered", []) or []:
+        row = store.create_question(prior["q"], source="bench")
+        store.close_question(row["id"], prior["a"])
+    # `now` is supplied by the case so the REPEAT_WINDOW boundary can be tested
+    # from either side without the result depending on what time the suite ran —
+    # the exact defect that turned main red once already.
+    found = asking.recent_answer(g.get("question", ""),
+                                 now=g.get("now") and float(g["now"]) or None)
+    return {"text": f"reused={bool(found)} answer={found or 'none'}"}
+
+
 # --- context: using what the workspace already knows -------------------------
 
 async def _context(case: dict) -> dict:
@@ -232,6 +276,8 @@ RUNNERS: dict[str, Callable[[dict], Awaitable[dict]]] = {
     "plan": _plan,
     "code": _code,
     "jira": _jira,
+    "meetings": _meetings,
+    "ask": _ask,
     "recover": _recover,
     "context": _context,
 }

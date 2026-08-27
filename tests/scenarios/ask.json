@@ -1,0 +1,76 @@
+{
+  "_comment": "The complaint that stung most: 'it already asked question and did the code and raised PR as well but still after sometime it asking the same quesstion this is worst i feel.' These pin the fix so it cannot come back. `now` is supplied per case so the window boundary never depends on what time the suite happened to run — that exact defect turned main red once already.",
+  "capability": "ask",
+  "cases": [
+    {
+      "id": "the-same-question-reuses-his-answer",
+      "given": {
+        "now": 1000000,
+        "answered": [{"q": "should the VTS ETA override the user-entered value?", "a": "yes, VTS wins"}],
+        "question": "should the VTS ETA override the user-entered value?"
+      },
+      "must": ["reused=True", "VTS wins"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "he answered once; asking again after the PR was raised is what he called the worst of it",
+      "source": "asking.recent_answer within REPEAT_WINDOW"
+    },
+    {
+      "id": "spacing-and-case-are-not-a-different-question",
+      "given": {
+        "now": 1000000,
+        "answered": [{"q": "should the VTS ETA override the user-entered value?", "a": "yes, VTS wins"}],
+        "question": "  Should the VTS ETA   override the USER-entered value?  "
+      },
+      "must": ["reused=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "two renderings of one question differ in whitespace and case; the words do not",
+      "source": "asking._same normalises whitespace and case"
+    },
+    {
+      "id": "a-genuinely-different-question-is-still-asked",
+      "given": {
+        "now": 1000000,
+        "answered": [{"q": "should the VTS ETA override the user-entered value?", "a": "yes, VTS wins"}],
+        "question": "should the port gate-in date override the user-entered value?"
+      },
+      "must": ["reused=False"],
+      "must_not": ["reused=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "reusing his answer to a question he was never asked is worse than asking once too often — deliberately NOT fuzzy",
+      "source": "asking._same is exact after normalisation"
+    },
+    {
+      "id": "an-old-answer-is-not-reused-forever",
+      "given": {
+        "now": 1000000,
+        "answered": [{"q": "which environment should I deploy to?", "a": "sit"}],
+        "question": "which environment should I deploy to?",
+        "now_offset_note": "the stored answer is at ~now; the window is six hours"
+      },
+      "must": ["reused=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "inside the window his answer stands — the boundary case is the one below",
+      "source": "asking.REPEAT_WINDOW = 6h"
+    },
+    {
+      "id": "nothing-answered-means-it-must-ask",
+      "given": {"now": 1000000, "answered": [], "question": "which branch should this go on?"},
+      "must": ["reused=False"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "an empty history must not fabricate an answer — the failure mode that would be far worse than repeating",
+      "source": "asking.recent_answer returns '' when nothing matches"
+    },
+    {
+      "id": "an-empty-question-matches-nothing",
+      "given": {
+        "now": 1000000,
+        "answered": [{"q": "should the VTS ETA override?", "a": "yes"}],
+        "question": ""
+      },
+      "must": ["reused=False"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "a blank question must not collide with a stored one and hand back an unrelated answer",
+      "source": "asking._same on empty input"
+    }
+  ]
+}

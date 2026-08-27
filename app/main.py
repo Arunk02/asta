@@ -128,6 +128,11 @@ async def startup() -> None:
     if telegram.enabled():
         daemon.start("telegram", lambda: telegram.poll_loop(_telegram_turn))
     if teams_bridge.enabled():
+        # The voice model's cold start is 11.4 seconds; every later utterance is
+        # 1.05. Paying it here means the first call of the day does not pay it in
+        # front of whoever picked up. Fire-and-forget — a warm-up that fails must
+        # never stop the server coming up.
+        meetings.warm_the_voice()
         daemon.start("teams_session", teams_bridge.session_watch_loop)
         if teams_bridge.ACTIVITY_POLL_SECONDS > 0:
             daemon.start("teams_activity", teams_bridge.activity_watch_loop)

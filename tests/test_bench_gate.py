@@ -19,7 +19,8 @@ import pytest
 from app import bench
 
 #: Capabilities with no known gaps. Every scenario in these must pass.
-CLEAN = ("triage", "summarise", "analyse", "plan", "code", "recover")
+CLEAN = ("triage", "summarise", "analyse", "plan", "code", "recover",
+         "meetings", "ask")
 
 #: The one standing failure, and why it is allowed to stand. When someone fixes
 #: the length backstop they delete this entry, and the gate holds them to it.
@@ -83,6 +84,6 @@ async def test_running_everything_at_once_changes_nothing():
 async def test_the_suite_is_not_quietly_shrinking():
     """A gate over zero scenarios passes beautifully and means nothing."""
     out = await bench.run()
-    assert out["total"] >= 40, f"only {out['total']} scenarios — did a suite fail to load?"
+    assert out["total"] >= 60, f"only {out['total']} scenarios — did a suite fail to load?"
     covered = set(out["capabilities"])
     assert covered >= set(CLEAN), f"capabilities missing from the run: {set(CLEAN) - covered}"

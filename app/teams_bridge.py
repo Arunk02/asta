@@ -176,6 +176,100 @@ async def close_pool() -> None:
         await _discard_pool()
 
 
+def profile_processes() -> list[int]:
+    """PIDs of the top-level Chromium processes holding OUR Teams profile.
+
+    Renderers and GPU helpers carry the same `--user-data-dir` on their command
+    line, so they are filtered out: killing a parent takes its children with it,
+    and counting them would report eighteen browsers as fifty-four.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-Ao", "pid=,command="],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    marker = str(PROFILE_DIR)
+    pids = []
+    for line in out.splitlines():
+        if marker not in line or "--type=" in line:
+            continue
+        head = line.strip().split(None, 1)
+        if head and head[0].isdigit():
+            pids.append(int(head[0]))
+    return pids
+
+
+def reap_orphans() -> int:
+    """Kill every browser still holding our profile. Returns how many died.
+
+    The invariant that makes this safe rather than reckless: call it only when we
+    hold no pooled browser of our own — at startup, or straight after
+    `_discard_pool`. Anything on OUR profile directory at that moment is a leak
+    from a call that never cleaned up, and every one of them is a writer
+    contending for a store that tolerates exactly one.
+
+    Silent by design. A leak that has already been cleaned up is not news, and
+    this is the rung that should fix things before he ever hears about them.
+    """
+    import os as _os
+    import signal
+    killed = 0
+    for pid in profile_processes():
+        try:
+            _os.kill(pid, signal.SIGTERM)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            continue
+    if killed:
+        store.record_outcome("recovery", "reaped", subject="teams",
+                             detail=f"{killed} orphaned browser(s) on the profile")
+    return killed
+
+
+def _teams_leveldb() -> Path:
+    """Teams' own IndexedDB store — the thing that gets wedged by co-writers."""
+    return (PROFILE_DIR / "Default" / "IndexedDB"
+            / "https_teams.microsoft.com_0.indexeddb.leveldb")
+
+
+def repair_rungs() -> list[tuple[str, object]]:
+    """How the Teams watcher can be repaired, cheapest first.
+
+    Declared here, next to the resource it repairs, and handed to the generic
+    ladder in `recovery`. A Teams-specific recovery loop would leave Outlook, the
+    bridges and everything added next year with the same hole — which is exactly
+    how this became a recurring bug rather than a one-off one.
+    """
+    async def recycle() -> bool:
+        """Seconds. Drop our browser, kill the leaks, prove a fresh one loads."""
+        await close_pool()
+        reap_orphans()
+        return await check_session()
+
+    async def restart() -> bool:
+        """Same, but insist on a genuinely new app boot rather than a reused tab."""
+        await close_pool()
+        reap_orphans()
+        _POOL.clear()
+        return await check_session()
+
+    async def repair_profile() -> bool:
+        """Last resort: clear Teams' wedged local store. The LOGIN SURVIVES —
+        cookies live elsewhere, so this costs a re-sync, not an SSO round."""
+        import shutil
+        await close_pool()
+        reap_orphans()
+        target = _teams_leveldb()
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+            store.record_outcome("recovery", "cleared_indexeddb", subject="teams",
+                                 detail=str(target.name))
+        return await check_session()
+
+    return [("recycle", recycle), ("restart", restart), ("repair_profile", repair_profile)]
+
+
 # Markers that only exist in the authenticated Teams app (NOT its pre-redirect shell
 # or the Microsoft login page — generic ones like #app match those too).
 APP_MARKERS = '[data-tid="app-bar"], [data-tid="chat-list"], [data-tid="app-layout-area--main"]'
@@ -1057,8 +1151,13 @@ async def activity_watch_loop() -> None:
     DND, and with notifications disabled — it reads Teams itself.
     """
     import json as _json
-    from . import attention, notify
+    from . import attention, notify, recovery
     attention.note_watching("teams")     # running, and expected to succeed
+    # A previous run that crashed or was killed leaves its browsers behind, still
+    # holding the profile. Starting up is the one moment we are certain we own
+    # none of them, so it is the safest possible time to clear the ground.
+    reap_orphans()
+    consecutive_failures = 0
     while True:
         # wake.sleep, not asyncio.sleep: when the lid opens after eight hours
         # this returns immediately instead of idling out the remainder of a
@@ -1073,7 +1172,16 @@ async def activity_watch_loop() -> None:
             # But the REASON is kept now. This handler ran silently every five
             # minutes while the watcher was dead, and nothing anywhere said so.
             attention.note_scrape_error("teams", exc)
+            consecutive_failures += 1
+            # …and keeping the reason is still not fixing it. Every previous round
+            # on this bug added a better sensor; on 26 August the store held the
+            # exact cause, the exact age and the exact subsystem, and nothing
+            # happened for fourteen hours because every path ended in "tell Arun"
+            # and Arun was asleep. This is the part that acts.
+            await recovery.ladder("teams", repair_rungs(), consecutive_failures,
+                                  notify=notify.notify)
             continue
+        consecutive_failures = 0
         attention.note_scrape("teams")   # only on success — see attention.stale_sources
         if not rows:
             continue
@@ -1102,23 +1210,47 @@ async def activity_watch_loop() -> None:
 
 
 async def check_session() -> bool:
-    """Headless probe: is the stored Teams session still valid?"""
-    async with _lock:
-        pw, ctx = await _launch()
-        try:
-            await _open_teams(ctx)
+    """Is the stored Teams session still valid?
+
+    This function used to launch its own browser and never close it. No `finally`,
+    on any path — success or failure — while `session_watch_loop` called it every
+    thirty minutes. On the night of 26 August that leaked one Chromium and one
+    Playwright driver per call: eighteen live browsers by lunchtime, 1.2 GB, all
+    of them writing to a single-writer profile directory. Teams' IndexedDB grew to
+    76 files where Outlook's had 11, the SPA could no longer initialise its token
+    store, and every Teams operation failed with "did not load within 75s" for
+    fourteen and a half hours while Outlook — which re-auths from cookies — kept
+    working and made it look like a Teams-specific fault.
+
+    It now goes through the pooled accessor like everything else, which owns the
+    browser's lifetime and discards it on any error.
+    """
+    try:
+        async with teams_page():
             store.kv_set("teams_session_ok", "1")
             return True
-        except RuntimeError as exc:
-            if "SESSION_EXPIRED" in str(exc):
-                store.kv_set("teams_session_ok", "0")
-                return False
-            raise
+    except RuntimeError as exc:
+        if "SESSION_EXPIRED" in str(exc):
+            store.kv_set("teams_session_ok", "0")
+            return False
+        raise
+
+
+#: A read this recent already proves the session — see `session_watch_loop`.
+SESSION_PROVEN_BY_READ = SESSION_CHECK_SECONDS
 
 
 async def session_watch_loop() -> None:
-    """Every 30 min verify the session; notify ONCE when it expires."""
-    from . import notify
+    """Verify the session — but only when the real work has not already proved it.
+
+    The cheapest browser launch is the one that does not happen. `read_activity_rows`
+    sets `teams_session_ok=1` every sixty seconds and Outlook's poll sets it every
+    five minutes; a synthetic probe on top of that is redundant work competing with
+    real work for a resource that only tolerates one writer. So the probe now runs
+    only when nothing has read successfully inside the window — which, on a healthy
+    day, is never.
+    """
+    from . import attention, notify
     while True:
         # A suspended laptop is the most likely moment for the Teams session to
         # have gone stale, so waking is exactly when it is worth re-checking.
@@ -1126,6 +1258,9 @@ async def session_watch_loop() -> None:
         if not logged_in_once():
             continue
         try:
+            proven = time.time() - attention.last_scrape("teams")
+            if proven < SESSION_PROVEN_BY_READ:
+                continue          # a real read already answered this, for free
             was_ok = store.kv_get("teams_session_ok") != "0"
             ok = await check_session()
             if was_ok and not ok:

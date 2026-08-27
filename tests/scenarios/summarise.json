@@ -1,0 +1,59 @@
+{
+  "_comment": "A poll's worth of arrivals, rendered as the one message his phone shows. This is the capability he judges Asta on most often, because it is the only one he sees every day.",
+  "capability": "summarise",
+  "cases": [
+    {
+      "id": "asks-lead-fyi-follows",
+      "given": {
+        "source": "💬 Teams",
+        "items": [
+          {"who": "reviewer", "subject": "can you approve the PR today?", "addressed": true},
+          {"who": "QA", "subject": "we are blocked on your sign-off"},
+          {"who": "release manager", "subject": "FYI - sprint 42 notes, no action needed"},
+          {"who": "deploy bot", "subject": "Automated: deployment succeeded"}
+        ]
+      },
+      "must": ["needs=True", "needs you (2)", "FYI, nothing needed from you (2)"],
+      "budget": {"seconds": 0.1, "tokens": 0},
+      "why": "the two real asks must come first and the count must be right — he decides whether to pick up the phone from the header alone",
+      "source": "triage.summarize — asks first, FYI tail under a header that says nothing is wanted"
+    },
+    {
+      "id": "a-quiet-pile-does-not-buzz",
+      "given": {
+        "source": "💬 Teams",
+        "items": [
+          {"who": "release manager", "subject": "FYI - sprint 42 notes, no action needed"},
+          {"who": "engineering-news", "subject": "Weekly newsletter: platform updates"}
+        ]
+      },
+      "must": ["needs=False", "FYI, nothing needed from you (2)"],
+      "must_not": ["needs you ("],
+      "budget": {"seconds": 0.1, "tokens": 0},
+      "why": "a batch with nothing in it for him must go down the quiet path, or the ambient channel becomes the loud one",
+      "source": "triage.summarize returns needs=False when no tier-0/1 items"
+    },
+    {
+      "id": "a-p0-alone-still-needs-him",
+      "given": {
+        "source": "💬 Teams",
+        "items": [
+          {"who": "monitoring", "subject": "booking service error rate above threshold in production", "priority": 0}
+        ]
+      },
+      "must": ["needs=True", "needs you NOW (1)"],
+      "budget": {"seconds": 0.1, "tokens": 0},
+      "why": "nobody ASKS anything when prod falls over — an outage has action=False and would have gone down the ambient path",
+      "source": "triage.summarize: 'acts alone would report False and send an outage down the quiet ambient path'"
+    },
+    {
+      "id": "an-empty-poll-says-nothing",
+      "given": {"source": "💬 Teams", "items": []},
+      "must": ["needs=False"],
+      "must_not": ["Teams —"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "a poll that found nothing must produce no message at all, not an empty digest",
+      "source": "_push_activity skips when summarize returns empty text"
+    }
+  ]
+}

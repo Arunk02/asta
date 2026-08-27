@@ -1,0 +1,102 @@
+{
+  "_comment": "Day-to-day inbound, as it actually arrives. Names here are ROLES, not colleagues — the committed starter set must not carry real people. Ground the real ones in data/scenarios/, which is gitignored.",
+  "capability": "triage",
+  "cases": [
+    {
+      "id": "direct-ask-in-a-dm",
+      "given": {
+        "who": "reviewer",
+        "subject": "can you approve the PR today?",
+        "addressed": true
+      },
+      "must": ["action=True", "asks you directly"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "someone is blocked until he moves — this is the case that must never be missed",
+      "source": "the ask he gets most: a PR waiting on his approval"
+    },
+    {
+      "id": "explicit-fyi-is-not-an-ask",
+      "given": {
+        "who": "release manager",
+        "subject": "FYI - release notes for sprint 42, no action needed"
+      },
+      "must": ["action=False", "explicitly FYI"],
+      "must_not": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "an FYI that buzzes his phone is the noise he complained about",
+      "source": "triage._FYI — 'no action needed'"
+    },
+    {
+      "id": "an-ask-inside-an-fyi-is-still-an-ask",
+      "given": {
+        "who": "tech lead",
+        "subject": "FYI on the release — but can you approve the hotfix by EOD?"
+      },
+      "must": ["action=True"],
+      "must_not": ["explicitly FYI"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "the FYI prefix is a habit, not a classification — the ask is what he is on the hook for",
+      "source": "triage.classify: _ASK is tested before _FYI, deliberately"
+    },
+    {
+      "id": "mentioned-but-nothing-wanted",
+      "given": {
+        "who": "product owner",
+        "subject": "mentioned you in Daily deployment slot"
+      },
+      "must": ["action=False", "addressed to you, no ask"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "being named is not being asked — worth knowing, not worth stopping for",
+      "source": "triage._ADDRESSED"
+    },
+    {
+      "id": "automated-notices-never-need-him",
+      "given": {
+        "who": "deploy bot",
+        "subject": "Automated: deployment to the sit environment succeeded"
+      },
+      "must": ["action=False", "explicitly FYI"],
+      "must_not": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "a bot cannot be waiting on him; treating it as an ask is pure noise",
+      "source": "triage._FYI — automated/no-reply senders"
+    },
+    {
+      "id": "the-ask-is-quoted-not-the-greeting",
+      "given": {
+        "who": "reviewer",
+        "subject": "Quick one",
+        "preview": "Hi Arun, hope you are doing well. Could you review the vessel ETA validation change before standup?",
+        "addressed": true
+      },
+      "must": ["action=True", "Could you review"],
+      "must_not": ["hope you are doing well"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "quoting the greeting is what made previews feel like padding — he needs the sentence that asks",
+      "source": "triage._ask_sentence / _PLEASANTRY"
+    },
+    {
+      "id": "blocked-on-him-counts-as-an-ask",
+      "given": {
+        "who": "QA",
+        "subject": "we are blocked on your sign-off for the booking fix"
+      },
+      "must": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "'blocked' plus 'your' is the phrasing people actually use when they are waiting",
+      "source": "triage._ASK — blocked/waiting + your"
+    },
+    {
+      "id": "a-newsletter-is-not-a-colleague",
+      "given": {
+        "who": "engineering-news",
+        "subject": "Weekly newsletter: platform updates and announcements"
+      },
+      "must": ["action=False"],
+      "must_not": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "broadcast mail outnumbers real asks; one false positive here trains him to ignore the channel",
+      "source": "triage._FYI — newsletter/announcement"
+    }
+  ]
+}

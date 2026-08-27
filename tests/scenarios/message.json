@@ -1,0 +1,65 @@
+{
+  "_comment": "Drafting to a colleague. NOTHING here sends — the runner exercises the guardrails on a draft, and app/sandbox.py makes an actual send impossible during a bench run.",
+  "capability": "message",
+  "cases": [
+    {
+      "id": "never-calls-someone-bro",
+      "given": {
+        "draft": "bro, PR 1409 is green now — can you review?",
+        "chat": "reviewer",
+        "must_not_address": ["bro"]
+      },
+      "must": ["PR 1409", "review"],
+      "must_not": ["bro,"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "a message calling a colleague something he never has is a thing he must apologise for, not correct",
+      "source": "writing.fit_address — the backstop behind the prompt guidance"
+    },
+    {
+      "id": "strips-a-trailing-term-of-address",
+      "given": {
+        "draft": "the build is green, thanks buddy",
+        "chat": "reviewer",
+        "must_not_address": ["buddy"]
+      },
+      "must": ["build is green"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "terms of address hide at the end as often as the start",
+      "source": "writing.fit_address strips at either end of the line"
+    },
+    {
+      "id": "leaves-real-words-alone",
+      "given": {
+        "draft": "my brother is visiting so I will be offline after 4",
+        "chat": "tech lead"
+      },
+      "must": ["brother is visiting", "offline after 4"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "an over-eager strip rewrites what he actually said, which is worse than the slip it prevents",
+      "source": "writing.fit_address — 'my brother is visiting' must survive"
+    },
+    {
+      "id": "a-draft-is-never-emptied",
+      "given": {
+        "draft": "bro",
+        "chat": "reviewer"
+      },
+      "must": ["bro"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "sending an empty message is a worse failure than sending the wrong word — the original is handed back",
+      "source": "writing.fit_address: 'fitted or text'"
+    },
+    {
+      "id": "stays-the-length-he-would-send",
+      "given": {
+        "draft": "Hi, I wanted to reach out and let you know that following the recent changes to the vessel ETA validation logic, which we discussed at some length during the previous sprint review, the pull request has now successfully passed all of the continuous integration checks including the build, the unit tests and the component tests, and is therefore ready for your kind review at your earliest convenience.",
+        "chat": "reviewer",
+        "max_chars": 220
+      },
+      "must_not": ["too_long=True"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "KNOWN GAP, found by this bench on its first run: writing.profile MEASURES how short he writes and writing.guidance hands it to the model, but unlike fit_address there is no backstop — a model that ignores the guidance produces a paragraph in his name and nothing stops it. This case stands red until a length backstop exists.",
+      "source": "writing.profile has median_chars/p90_chars; no caller enforces them"
+    }
+  ]
+}

@@ -1977,6 +1977,37 @@ async def teams_send_message(chat: str, text: str, to_group: bool = False) -> st
         return f"Teams send failed: {exc}"
 
 
+async def teams_unread(debug: bool = False) -> str:
+    """Messages Arun has NOT dealt with yet — 1:1 and group, tagged or not.
+
+    Use for "anything I missed", "any unread", "what came in". This reads his
+    actual CHATS, not the Activity feed: the feed only ever lists mentions,
+    replies and invites, so an ordinary message — and every untagged follow-up in
+    a conversation — never appears there at all.
+
+    Looking does not mark anything as handled, so asking twice gives the same
+    answer. `debug=True` returns the raw rail signals instead."""
+    from . import chat_watch, teams_bridge
+    if not teams_bridge.enabled():
+        return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
+    try:
+        if debug:
+            rows = await teams_bridge.rail_diagnostic()
+            return "Rail signals:\n" + "\n".join(
+                f"  {r.get('name','?')!r} text={r.get('text','')[:60]!r} "
+                f"aria={r.get('aria','')[:60]!r} tid={r.get('tid','')!r}"
+                for r in rows)
+        items = await chat_watch.pending()
+    except RuntimeError as exc:
+        if "SESSION_EXPIRED" in str(exc):
+            return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
+        return f"Couldn't read the chats: {exc}"
+    if not items:
+        return "Nothing new in your Teams chats."
+    lines = [f"• {i['chat']} — {i['who']}: {i['text'][:120]}" for i in items]
+    return f"{len(items)} message(s) you haven't dealt with:\n" + "\n".join(lines)
+
+
 async def teams_resolve(chat: str, to_group: bool = False) -> str:
     """Check WHO a Teams message would actually reach, without sending anything.
 

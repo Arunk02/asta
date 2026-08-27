@@ -141,6 +141,14 @@ async def startup() -> None:
         daemon.start("teams_session", teams_bridge.session_watch_loop)
         if teams_bridge.ACTIVITY_POLL_SECONDS > 0:
             daemon.start("teams_activity", teams_bridge.activity_watch_loop)
+        # The Activity feed carries mentions, replies and invites — never an
+        # ordinary message. So a 1:1, where every message is addressed to him by
+        # definition, was invisible unless somebody @mentioned him inside his own
+        # DM, and the second message of any conversation was invisible because
+        # nobody tags twice. This reads the chat rail itself.
+        from . import chat_watch as _chat_watch
+        if _chat_watch.enabled():
+            daemon.start("teams_chats", _chat_watch.watch_loop)
         # A selector that stopped matching returns nothing, which looks exactly
         # like "no new messages" — so the break hides until it fails in front of
         # somebody. Daily, supervised like every other loop.
@@ -836,6 +844,11 @@ async def api_propose_next(request: Request):
     before = offers.pending()
     message = agent_mod.propose_next(b["next_step"], b.get("why", ""))
     return {"offered": _staged(message, before)["staged"], "message": message}
+
+
+@app.get("/api/teams/unread", dependencies=[Depends(require_auth)])
+async def api_teams_unread(debug: bool = False):
+    return {"message": await agent_mod.teams_unread(debug=debug)}
 
 
 @app.get("/api/teams/presence", dependencies=[Depends(require_auth)])

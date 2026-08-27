@@ -66,7 +66,8 @@ _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 #: they observed — three failures whose messages were all about the ledger and
 #: none about the responder. A behaviour switched on for one machine is not a
 #: behaviour the suite should be silently exercising.
-_MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND")
+_MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND",
+                       "ASTA_CHATWATCH")
 
 
 #: What this machine's .env said, captured before it is cleared. A handful of

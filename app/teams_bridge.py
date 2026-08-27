@@ -349,6 +349,96 @@ _CHAT_ROWS = """
         .map(n => (n.innerText || '').split('\\n')[0].trim())
         .filter(t => t && t.length < 80)
 """
+
+#: The same rail rows, but keeping what `_CHAT_ROWS` throws away.
+#:
+#: Reading the Activity feed was always the wrong reader, and Arun said why:
+#: "if they didnt tag , still if it one to one chat na , that message is for me
+#: correct , sometimes the first message they tag and second message they wont tag
+#: in both personal one to one chat as well as group chat this is basic thing".
+#:
+#: He is right, and it is basic. Teams' Activity feed lists mentions, replies,
+#: reactions and invites — never an ordinary message. So every untagged follow-up
+#: in a 1:1, which is most of a conversation, was structurally invisible.
+#:
+#: Unread state is not exposed by one dependable attribute across Teams versions,
+#: so this returns every SIGNAL it can see and lets Python decide. A row is unread
+#: if any of them says so; guessing one selector and trusting it is how the call
+#: buttons broke twice.
+_CHAT_ROWS_FULL = """
+    () => Array.from(document.querySelectorAll('[role="treeitem"]'))
+        .filter(n => !n.querySelector('[role="treeitem"]'))
+        .map(n => {
+            const txt = (n.innerText || '').trim();
+            const marks = Array.from(n.querySelectorAll('*'))
+                .map(e => ((e.getAttribute('data-tid') || '') + ' ' +
+                           (e.className && e.className.baseVal !== undefined
+                              ? e.className.baseVal : (e.className || '')))).join(' ');
+            return {
+                name: txt.split('\\n')[0].trim(),
+                text: txt.slice(0, 400),
+                aria: (n.getAttribute('aria-label') || '').slice(0, 300),
+                tid: (n.getAttribute('data-tid') || ''),
+                marks: marks.slice(0, 600),
+                bold: !!n.querySelector('[class*="bold" i], strong, b'),
+            };
+        })
+        .filter(r => r.name && r.name.length < 80)
+"""
+
+# NOTE: there is deliberately no unread-styling reader here.
+#
+# The first attempt at this read the rail for an unread marker. Against his live
+# Teams there is none to read: `role="treeitem"` rows carry an empty aria-label,
+# an empty data-tid, and hashed Fluent class names (`___8rueir0`), and the row
+# text is the contact name alone — no preview, no timestamp, no badge. A detector
+# built on that would have reported "nothing unread" forever while looking like it
+# worked.
+#
+# `chat_watch` uses Asta's own high-water mark instead, which is both robust and
+# the behaviour he asked for: what matters is whether ASTA has handled a message,
+# not whether Teams believes he has seen it.
+
+
+#: The rail is lazy: `_open_teams` returns as soon as the app shell exists, and
+#: the chat list paints seconds later. Reading it immediately finds nothing — the
+#: same trap that made a headed call search report "no person match for 'Vinish'
+#: (saw: nothing)" on a name that resolves fine.
+async def wait_for_rail(page, timeout: float = 20.0) -> int:
+    """Wait until the chat rail has painted. Returns how many rows it ended with."""
+    deadline = time.time() + timeout
+    count = 0
+    while time.time() < deadline:
+        try:
+            count = await page.evaluate(
+                '() => document.querySelectorAll(\'[role="treeitem"]\').length')
+        except Exception:
+            count = 0
+        if count:
+            return count
+        await asyncio.sleep(0.5)
+    return count
+
+
+async def rail_diagnostic(limit: int = 12) -> list[dict]:
+    """What the rail actually exposes, for checking the unread signals are real.
+
+    Exists because the alternative is guessing a selector and believing it. Runs
+    through the pooled page like every other read, so it never competes with the
+    server for the single-writer profile.
+    """
+    async with teams_page() as page:
+        found = await wait_for_rail(page)
+        try:
+            rows = await page.evaluate(_CHAT_ROWS_FULL)
+        except Exception as exc:
+            return [{"error": str(exc)[:200]}]
+        if not rows:
+            return [{"error": f"rail painted {found} treeitem(s) but none parsed",
+                     "url": page.url[:120]}]
+    for r in (rows or []):
+        r["unread_verdict"] = _row_is_unread(r)
+    return (rows or [])[:limit]
 #: Rail entries that are furniture rather than conversations.
 _NOT_A_CHAT = {"copilot", "mentions", "discover", "drafts", "saved", "chats",
                "favorites", "quick views", "new chat", "unread"}

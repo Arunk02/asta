@@ -164,6 +164,10 @@ _TABLE: tuple[Capability, ...] = (
                     "teams_read_chat only sees what is on screen now; Teams drops older "
                     "messages out of the DOM, so it CANNOT answer about last night and "
                     "will quietly return today's messages instead."),
+    Capability("teams_unread", "teams", http="GET /api/teams/unread",
+               note="Unread chats from the RAIL — 1:1 and group, tagged or not. The "
+                    "Activity feed only carries mentions/replies, so ordinary "
+                    "messages and untagged follow-ups never appear there."),
     Capability("teams_resolve", "teams",
                shell='python -m app.teams_bridge resolve "<name>" [--group]',
                note="Checks WHO a message would reach without sending. Use it before "

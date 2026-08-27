@@ -983,13 +983,23 @@ def overran(now: float | None = None) -> bool:
 # when captions are turned on rather than when the meeting did. Every one of those
 # is stated to Arun instead of being smoothed over.
 
+#: Specific first, and the data-tid leads for a second reason beyond ordering:
+#: aria-labels are LOCALISED. "Turn on live captions" matches an English UI and
+#: nothing else, while `closed-caption-button` is the same string in every locale.
 _CAPTION_TOGGLES = [
-    'button[aria-label*="Turn on live captions" i]',
     '[data-tid="closed-caption-button"]',
+    'button[aria-label*="Turn on live captions" i]',
     'div[role="menuitem"][aria-label*="captions" i]',
 ]
-_MORE_MENU = ['button[aria-label="More"]', 'button[aria-label*="More actions" i]',
-              '[data-tid="callingButtons-showMoreBtn"]']
+#: SPECIFIC FIRST — `_click_first` takes the first match, so order is behaviour.
+#: Probed live: the call screen carries a bare `button[aria-label="More"]`
+#: belonging to the APP BAR as well as the call toolbar's own button. Generic was
+#: listed first, so opening the call's More menu clicked the app bar, found no
+#: "Language and speech", and start_captions returned False — Asta could talk in
+#: a call and never hear a word back.
+_MORE_MENU = ['[data-tid="callingButtons-showMoreBtn"]',
+              'button[aria-label*="More actions" i]',
+              'button[aria-label="More"]']
 _LANGUAGE_MENU = ['div[role="menuitem"][aria-label*="Language and speech" i]',
                   'div[role="menuitem"][aria-label*="language" i]']
 #: One rendered caption line: who spoke, and what the recogniser heard.
@@ -1244,17 +1254,11 @@ async def watch(poll_seconds: float = 30) -> str:
     lines = _CALL.setdefault("captions", [])
     ticks = max(1, int(poll_seconds // CAPTION_POLL_SECONDS) or 1)
 
-    # A call nobody picks up is neither "ended" nor "overran". Teams just keeps
-    # showing the ringing screen, so the loop below sat on it until
-    # MAX_CALL_MINUTES — ninety minutes of ringing a colleague's phone because
-    # they were away from their desk. `wait_for_answer` already knew how to spot
-    # this and nothing was asking it: `call_person` sets answered_at=0, so an
-    # unanswered placed call is exactly the case with no answer time yet.
-    #
-    # It stays conservative in the same direction `wait_for_answer` does: only a
-    # call still VISIBLY ringing at the deadline is hung up. An unreadable call
-    # screen is left alone, because dropping a call that is actually connected is
-    # a far worse outcome than staying on one that is not.
+    # A ringing call is neither "ended" nor "overran", so this loop sat on one
+    # until MAX_CALL_MINUTES — ninety minutes of ringing a colleague who was away
+    # from their desk. `wait_for_answer` knew how to spot it; nothing asked.
+    # Conservative in the same direction it already chose: only a call still
+    # VISIBLY ringing is dropped, since hanging up on a live call cannot be undone.
     if page is not None and not _CALL.get("answered_at"):
         state = await wait_for_answer(page)
         if state == "no answer":

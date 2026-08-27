@@ -86,9 +86,36 @@ def stable_key(text: str, limit: int = 160) -> str:
 
 # --- does it actually need him? ---------------------------------------------
 
+# How his colleagues actually write "please": measured against 300 rows of his own
+# Teams activity feed, where "pls" and "kindly" are as common as the full word.
+_PLEASE = r"(?:please|pls|plz|kindly)"
+
 # A real ask: someone is waiting on Arun and is blocked until he moves.
+#
+# The group forms below were missing entirely, and the cost was measurable: of 62
+# real "@everyone" rows in his feed, only 7 were detected as needing him. The rest
+# — "pls do update your mid year performance reflection", "please vote by 2 pm",
+# "can someone confirm", "kindly refrain from deploying to uat" — were filed as
+# FYI, which routes them down the ambient path, which `presence` suppresses while
+# he is at the laptop. So a channel ping asking him to do something reached him
+# only when he next opened the screen.
+#
+# The reason the gap existed is that every pattern here addressed him in the
+# SECOND PERSON: "can you", "your review", "assigned to you". That is how a 1:1
+# message is written. A channel addresses the room — "can someone", "everyone
+# pls" — and asks him just as much.
 _ASK = re.compile(
     r"\b(can|could|would|will)\s+(you|u)\b"
+    # The group forms. "can someone confirm", "could anyone check", "can we connect".
+    r"|\b(can|could|would|shall)\s+(someone|somebody|anyone|anybody|we)\b"
+    # A verb list rather than `please \w+`. The bare form caught "please to inform
+    # that the changes have been promoted" and "please note" — announcements that
+    # open politely and ask for nothing. What makes an ask is the VERB.
+    rf"|\b{_PLEASE}\b.{{0,14}}\b(do|add|fill|vote|book|complete|share|update|join|"
+    r"assemble|find|check|review|help|refrain|keep|connect|suggest|confirm|"
+    r"support|send|raise|reply|respond|attend|use|avoid|ensure|provide)\b"
+    r"|\b(reminder|remember|don'?t forget)\b.{0,20}\b(to|your)\b"
+    r"|\bdo\s+we\s+(have|know|need)\b"
     r"|\bplease\s+(review|check|confirm|approve|share|send|update|look|advise|fix|join)\b"
     r"|\b(need|needs|needed|require[sd]?|waiting|blocked|blocker)\b.{0,24}\b(your|you|from you|arun)\b"
     r"|\byour\s+(input|review|approval|sign[- ]?off|confirmation|thoughts|help|action|attention)\b"

@@ -95,13 +95,23 @@ async def _message(case: dict) -> dict:
         if re.search(rf"\b{re.escape(banned)}\b", fitted, re.I):
             # A genuine violation: this one goes OUT, to a person, in his name.
             violations.append(f"still addresses them as '{banned}'")
+    # The REAL backstop, not a check reimplemented in the harness. A bench that
+    # measures its own copy of the rule passes while the product has no rule at
+    # all — which is exactly what this case did until `writing.too_long` existed.
     cap = int(g.get("max_chars") or 0)
-    too_long = bool(cap and len(fitted) > cap)
+    if cap:
+        # A case may pin an explicit ceiling when it is testing the bound itself
+        # rather than his measured style, which needs history the bench does not
+        # carry in an isolated store.
+        overrun = (f"{len(fitted)} characters, over {cap}"
+                   if len(fitted) > cap else "")
+    else:
+        overrun = writing.too_long(fitted, chat)
     # Length is graded, not a violation. The line is deliberate: a violation is
     # something that would embarrass him if it went out; everything else the
     # cases grade for themselves. Conflating the two caps the reward on cases
     # whose whole purpose is to OBSERVE a bad draft.
-    return {"text": f"too_long={too_long} chars={len(fitted)}\n{fitted}",
+    return {"text": f"too_long={bool(overrun)} chars={len(fitted)} {overrun}\n{fitted}",
             "violations": violations}
 
 

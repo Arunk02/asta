@@ -1486,7 +1486,16 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
         what = writing.fit_address(what, to)
     loop.set_pending_send(cid, what, to, channel, to_group=to_group)
     tgt = f" to {'group ' if to_group else ''}{to}" if to else ""
-    return f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
+    staged = f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
+    # The length backstop. `guidance()` already tells the model how short he
+    # writes; this is what notices when it did not listen. Reported to the BRAIN
+    # here — the draft is staged either way, because it is his to approve, but a
+    # brain told its draft reads like a bot can shorten it before he ever sees it.
+    if channel in ("teams", "chat", "whatsapp", "email"):
+        overrun = writing.too_long(what, to)
+        if overrun:
+            staged += f"\n⚠ Length: {overrun} Consider redrafting shorter before he sees it."
+    return staged
 
 
 def delegate_task(title: str, prompt: str, kind: str = "analysis",

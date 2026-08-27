@@ -27,6 +27,7 @@ writes, this changes with him.
 
 from __future__ import annotations
 
+import os
 import re
 import statistics
 from collections import Counter
@@ -239,6 +240,38 @@ def profile(limit: int = 400, chat: str = "") -> dict:
         # than as a description it has to take on trust.
         "examples": [m for m in msgs[-40:] if 8 <= len(m) <= 70][-8:],
     }
+
+
+#: How far past his own p90 a draft may run before it stops reading as him. Not a
+#: hard cap — 1.5× leaves room for a genuinely longer message that has a reason.
+LENGTH_SLACK = float(os.environ.get("ASTA_DRAFT_LENGTH_SLACK", "1.5"))
+
+
+def too_long(text: str, chat: str = "") -> str:
+    """Why this draft does not read like him, or "" when it is fine.
+
+    The gap the capability bench found on its first run: `profile()` MEASURES how
+    short he writes and `guidance()` hands that to the model — and then nothing
+    checks. Terms of address have `fit_address` as a backstop precisely because a
+    model told the rule still slips; length had the rule and no backstop, so a
+    model that ignored it put a paragraph out in his name and nothing noticed.
+
+    It reports rather than truncates, deliberately. Cutting a message to length
+    can remove the ask, and a polite fragment that no longer says what it wanted
+    is worse than one that runs long. He sees every draft before it goes, so the
+    useful thing is that the overrun is VISIBLE at that moment.
+    """
+    if not (text or "").strip():
+        return ""
+    p = profile(chat=chat)
+    if not p:
+        return ""           # too little history to describe a style, so no claim
+    ceiling = int(p["p90_chars"] * LENGTH_SLACK)
+    if len(text) <= ceiling:
+        return ""
+    return (f"{len(text)} characters — he writes {p['median_chars']} typically and "
+            f"{p['p90_chars']} at his longest ({p['samples']} messages). This reads "
+            f"like a bot wrote it.")
 
 
 def guidance(chat: str = "") -> str:

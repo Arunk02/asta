@@ -20,17 +20,11 @@ from app import bench
 
 #: Capabilities with no known gaps. Every scenario in these must pass.
 CLEAN = ("triage", "summarise", "analyse", "plan", "code", "recover",
-         "meetings", "ask")
+         "meetings", "ask", "message")
 
 #: The one standing failure, and why it is allowed to stand. When someone fixes
 #: the length backstop they delete this entry, and the gate holds them to it.
-KNOWN_GAPS = {
-    "stays-the-length-he-would-send":
-        "writing.profile measures how short he writes and guidance hands it to "
-        "the model, but nothing enforces it — unlike fit_address, there is no "
-        "backstop, so a model that ignores the guidance sends a paragraph in his "
-        "name. Delete this entry when a length backstop exists.",
-}
+KNOWN_GAPS: dict[str, str] = {}
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,21 @@
       "source": "triage.summarize: 'acts alone would report False and send an outage down the quiet ambient path'"
     },
     {
+      "id": "a-channel-ask-must-not-go-down-the-quiet-path",
+      "given": {
+        "source": "💬 Teams",
+        "items": [
+          {"who": "team lead", "subject": "everyone pls do update your mid year performance reflection in workday"},
+          {"who": "teammate", "subject": "hi everyone will be away for the rest of the week"}
+        ]
+      },
+      "must": ["needs=True", "needs you (1)"],
+      "must_not": ["needs=False"],
+      "budget": {"seconds": 0.1, "tokens": 0},
+      "why": "THE case that was missing. `needs` decides urgency='direct' vs 'ambient' in _push_activity, and presence suppresses ambient while he is at the laptop — so a channel ping asking him to do something reached him only when he next opened the screen. No scenario touched the channel surface at all, so the bench was green while this failed in front of him.",
+      "source": "teams_bridge._push_activity — urgency='direct' if needs else 'ambient'; presence.py — 'he does not want ambient pings'"
+    },
+    {
       "id": "an-empty-poll-says-nothing",
       "given": {"source": "💬 Teams", "items": []},
       "must": ["needs=False"],

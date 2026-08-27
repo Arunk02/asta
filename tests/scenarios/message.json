@@ -56,10 +56,23 @@
         "chat": "reviewer",
         "max_chars": 220
       },
+      "must": ["too_long=True"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "Found by this bench on its first run and now closed. writing.profile MEASURED how short he writes and guidance handed it to the model, but unlike fit_address nothing checked — so a model that ignored the guidance put a paragraph out in his name. writing.too_long is the backstop; this asserts it fires.",
+      "source": "writing.too_long — the backstop this bench asked for"
+    },
+    {
+      "id": "a-normal-draft-is-not-accused-of-being-long",
+      "given": {
+        "draft": "PR 1409 is green, can you review when you get a minute?",
+        "chat": "reviewer",
+        "max_chars": 220
+      },
+      "must": ["too_long=False"],
       "must_not": ["too_long=True"],
       "budget": {"seconds": 0.2, "tokens": 0},
-      "why": "KNOWN GAP, found by this bench on its first run: writing.profile MEASURES how short he writes and writing.guidance hands it to the model, but unlike fit_address there is no backstop — a model that ignores the guidance produces a paragraph in his name and nothing stops it. This case stands red until a length backstop exists.",
-      "source": "writing.profile has median_chars/p90_chars; no caller enforces them"
+      "why": "a backstop that fires on ordinary messages gets ignored, and then it protects nothing — the false-positive side matters as much as the catch",
+      "source": "writing.too_long returns '' inside the bound"
     }
   ]
 }

@@ -1148,9 +1148,13 @@ async def _push_activity(notify, wanted: list[str]) -> None:
         # him; this is the part that goes and finds out. Read-only, so it needs
         # no permission, and it does not consult presence — he asked for this to
         # happen "whether im online or not".
-        task = responder.respond("teams", who, it, priority=pri, key=led_key)
+        # `who` here is the whole feed row — the " — " split above does not fire on
+        # most renderings — so the name is pulled out properly for anything that
+        # ends up in a title he reads hours later.
+        asker = responder.asker_from(it, who)
+        task = responder.respond("teams", asker, it, priority=pri, key=led_key)
         if task:
-            started.append(responder.line_for(task, who, responder.what_it_asks(it)))
+            started.append(responder.line_for(task, asker, responder.what_it_asks(it)))
     text, needs = triage.summarize(verdicts, "💬 Teams")
     if started:
         text = (text + "\n\n" if text else "") + "\n".join(started)

@@ -248,3 +248,66 @@ def test_the_title_never_cuts_a_word_in_half():
     long = responder.title_for("debug", "Vinish", "please check " + "verylongword " * 12)
     assert long.endswith("…")
     assert "verylongwor…" not in long          # cut on a space, not mid-word
+
+
+# --- against the shapes his real feed actually contains -----------------------
+# Written after dry-running the classifier over his stored activity rows, where
+# the word-form matched "comments on PR 1409" and missed both rows that mattered.
+
+@pytest.mark.parametrize("row", [
+    "hi vinish arunkumar https github com maersk global telikos booking service pull 1409 files",
+    "hi everyone please review https github com maersk global x pull 1502",
+    "check my comments on pullrequest 1409",
+])
+def test_a_shared_pr_link_is_a_review_ask(row):
+    """"same for pr 1049 when he shared the message it should known automatically."
+    Teams strips punctuation out of links in the feed, so `pull/1409` arrives as
+    `pull 1409` — both forms must match."""
+    assert responder.what_it_asks(row) == "pr_review", row
+
+
+def test_the_pr_number_survives_the_url_form():
+    assert responder.pr_number(
+        "https github com maersk global telikos booking service pull 1409 files") == "1409"
+
+
+@pytest.mark.parametrize("row,name", [
+    ("vinish kumar mentioned you arunkumar could you please look into the issues",
+     "vinish kumar"),
+    ("Vinish Kumar mentioned you — Arunkumar — 10:33 AM — In chat with you",
+     "Vinish Kumar"),
+    ("palikala divya maheswari reacted to your message sure good night",
+     "palikala divya maheswari"),
+    ("ayashkant baral invited you ooo ayash 28th august", "ayashkant baral"),
+])
+def test_the_asker_is_pulled_out_of_the_feed_row(row, name):
+    """The " — " split in _push_activity does not fire on most renderings, so `who`
+    arrives as the entire row. Untouched, the title reads "vinish kumar mentioned
+    you arunkumar could you please… asked: …"."""
+    assert responder.asker_from(row) == name
+
+
+def test_a_plain_sentence_is_left_alone():
+    assert responder.asker_from("can you check prod", "Vinish") == "Vinish"
+
+
+def test_a_greeting_with_a_link_is_still_not_an_ask():
+    """The other direction. Matching every message containing a URL would spend
+    four investigations an hour on people sharing dashboards."""
+    assert responder.what_it_asks("komal jayswal mentioned you hi arunkumar call") == ""
+    assert responder.what_it_asks("sharing the release notes https confluence x y") == ""
+
+
+def test_the_feed_chrome_is_not_quoted_back_as_the_message():
+    """Left in, the title reads "vinish kumar asked: vinish kumar mentioned you
+    arunkumar could you…" and the worker is handed Teams' own UI text as if it
+    were what the person said."""
+    row = "vinish kumar mentioned you arunkumar could you please look into the failing activity"
+    assert responder.message_of(row).startswith("arunkumar could you please")
+    title = responder.title_for("debug", "vinish kumar", row)
+    assert title.count("vinish kumar") == 1, title
+    assert "mentioned you" not in title
+
+
+def test_a_message_with_no_feed_prefix_is_untouched():
+    assert responder.message_of("can you check prod bookings") == "can you check prod bookings"

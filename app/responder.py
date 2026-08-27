@@ -73,12 +73,57 @@ _INCIDENT = re.compile(
     re.I)
 
 #: Feedback on a pull request. He wants the points verified, not accepted.
+#:
+#: The URL form is not an extra — it is the common one. Against his real activity
+#: feed the word-form matched Vinish's "comments on PR 1409" and missed both rows
+#: that actually mattered: "hi vinish arunkumar https github com … /pull/1409" and
+#: "please review https …". Teams strips the punctuation out of links in the feed
+#: rendering, so `pull/1409` arrives as `pull 1409` — matched either way here.
 _PR = re.compile(
     r"\b(?:pr|pull\s*request|mr|merge\s*request)\s*#?\s*(\d{2,6})\b"
+    r"|/?\bpull[/\s]+(\d{2,6})\b"
+    r"|\bpullrequest[/\s]+(\d{2,6})\b"
     r"|\b(?:pr|pull\s*request)\b.{0,30}\b(?:comment|review|feedback|remark|"
     r"raised|blocking|nit)\w*"
     r"|\b(?:comment|review|feedback)\w*\b.{0,30}\b(?:pr|pull\s*request)\s*#?\s*(\d{2,6})?",
     re.I)
+
+#: "please review <link>" with no PR number rendered — still a review ask.
+_REVIEW_ASK = re.compile(
+    r"\b(?:please|pls|kindly|can\s+you|could\s+you)\b.{0,24}\breview\b"
+    r"|\breview\s+(?:this|these|my|the)\b.{0,20}\b(?:pr|change|code|branch)\b",
+    re.I)
+
+#: How an Activity row names the person, so a title reads "Vinish asked: …" and not
+#: "vinish kumar mentioned you arunkumar could you please…". The feed renders two
+#: shapes ("<name> mentioned you <text>" and "<name> mentioned you — <text> — …"),
+#: so the split is on the marker verb rather than on punctuation.
+_ROW_MARKER = re.compile(
+    r"\s+(?:mentioned\s+(?:you|everyone|\w+)|reacted\s+to|replied\s+to|"
+    r"invited\s+you|missed\s+call|sent\s+a\s+message)\b", re.I)
+
+
+def message_of(raw: str) -> str:
+    """Just what was said, with the Activity row's own preamble removed.
+
+    The feed renders "<name> mentioned you <the actual message>". Left in, the
+    title reads "vinish kumar asked: vinish kumar mentioned you arunkumar could
+    you…" and the worker's brief quotes Teams' chrome back at it as if it were
+    the message.
+    """
+    m = _ROW_MARKER.search(raw or "")
+    if not m:
+        return (raw or "").strip()
+    rest = (raw[m.end():] or "").strip(" —-:\t")
+    return rest or (raw or "").strip()
+
+
+def asker_from(raw: str, fallback: str = "") -> str:
+    """The person's name out of an Activity row; `fallback` when it is not one."""
+    m = _ROW_MARKER.search(raw or "")
+    if not m or m.start() == 0:
+        return (fallback or raw or "Someone").strip()[:40] or "Someone"
+    return (raw[:m.start()].strip() or fallback or "Someone")[:40]
 
 #: An explicit request to go and look at something.
 _DEBUG = re.compile(
@@ -103,7 +148,7 @@ def what_it_asks(text: str) -> str:
     blob = text or ""
     if _INCIDENT.search(blob):
         return "incident"
-    if _PR.search(blob):
+    if _PR.search(blob) or _REVIEW_ASK.search(blob):
         return "pr_review"
     if _DEBUG.search(blob):
         return "debug"
@@ -162,7 +207,7 @@ def brief_for(kind: str, who: str, text: str) -> str:
     """The self-contained prompt for one investigation."""
     body = _BRIEFS.get(kind, _BRIEFS["debug"])
     pr = pr_number(text)
-    return (body + _CLOSING).format(who=who or "A colleague", text=(text or "").strip(),
+    return (body + _CLOSING).format(who=who or "A colleague", text=message_of(text),
                                     pr=f"#{pr}" if pr else "(number not stated)")
 
 
@@ -192,7 +237,7 @@ def title_for(kind: str, who: str, text: str) -> str:
     if kind == "pr_review":
         return f"{who}'s review on PR #{pr}: is it right?" if pr \
             else f"{who}'s PR feedback: is it right?"
-    gist = _gist(text)
+    gist = _gist(message_of(text))
     if kind == "incident":
         return f"{who} asked: is that really happening in prod? — {gist}"
     return f"{who} asked: {gist}"

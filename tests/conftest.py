@@ -60,7 +60,13 @@ _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 #: tier is "his stored choice, else the environment", and Arun's .env pins
 #: ASTA_CLAUDE_CLI_MODEL=claude-sonnet-5. A test asserting what an unset tier
 #: does would therefore pass here and fail on any machine that leaves it blank.
-_MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE")
+#:
+#: `ASTA_RESPOND` joined them the day it was added. It is on in Arun's .env, so
+#: with it inherited the responder fired inside attention tests and changed what
+#: they observed — three failures whose messages were all about the ledger and
+#: none about the responder. A behaviour switched on for one machine is not a
+#: behaviour the suite should be silently exercising.
+_MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND")
 
 
 #: What this machine's .env said, captured before it is cleared. A handful of

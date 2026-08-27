@@ -1129,11 +1129,15 @@ async def _push_activity(notify, wanted: list[str]) -> None:
         v = triage.classify(who, rest or it, addressed=addressed)
         v = await triage.refine(v, who, rest or it)
         led_key = attention.key_for(it)
-        pri, why, due = attention.score(v.action, it, addressed=addressed,
-                                        key=led_key, who=who)
-        pri, chased = attention.escalate_for_chase(pri, led_key)
+        # `critical` was never passed here, only from the mail path — so an
+        # outage posted in a channel scored "no ask detected" (nobody ASKS
+        # anything when prod falls over), landed under "FYI, nothing needed from
+        # you", and went out ambient, which presence suppresses while he is at
+        # the laptop. Same detector as mail now, so both sources agree.
+        pri, why, due = attention.rank(v.action, it, addressed=addressed,
+                                       key=led_key, who=who)
         if not attention.consider("teams", led_key, who=who, what=v.one_line,
-                                  why=chased or why, priority=pri, due_at=due):
+                                  why=why, priority=pri, due_at=due):
             continue
         verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)
     text, needs = triage.summarize(verdicts, "💬 Teams")

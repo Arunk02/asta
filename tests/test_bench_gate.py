@@ -20,7 +20,7 @@ from app import bench
 
 #: Capabilities with no known gaps. Every scenario in these must pass.
 CLEAN = ("triage", "summarise", "analyse", "plan", "code", "recover",
-         "meetings", "ask", "message")
+         "meetings", "ask", "message", "burst")
 
 #: The one standing failure, and why it is allowed to stand. When someone fixes
 #: the length backstop they delete this entry, and the gate holds them to it.
@@ -78,7 +78,7 @@ async def test_running_everything_at_once_changes_nothing():
 async def test_the_suite_is_not_quietly_shrinking():
     """A gate over zero scenarios passes beautifully and means nothing."""
     out = await bench.run()
-    assert out["total"] >= 60, f"only {out['total']} scenarios — did a suite fail to load?"
+    assert out["total"] >= 78, f"only {out['total']} scenarios — did a suite fail to load?"
     covered = set(out["capabilities"])
     assert covered >= set(CLEAN), f"capabilities missing from the run: {set(CLEAN) - covered}"
 
@@ -103,6 +103,11 @@ async def test_ci_never_spends_tokens_or_reaches_a_brain():
 def test_live_cases_declare_a_token_budget():
     """An unbudgeted live case reports thrift=1.0 whatever it spends, so a change
     that quietly triples the prompt would look free."""
+    # `"tokens": 0` is a real budget — "this must cost nothing" — so the check is
+    # for the KEY, not for truthiness. Testing the value treats a live read that
+    # correctly spends zero tokens as an undeclared one, which is the same
+    # absent-versus-zero confusion that once scored every unbudgeted case as a
+    # total failure in `_budget_score`.
     unbudgeted = [c["id"] for c in bench.load()
-                  if c.get("live") and not (c.get("budget") or {}).get("tokens")]
+                  if c.get("live") and "tokens" not in (c.get("budget") or {})]
     assert not unbudgeted, f"live cases with no token budget: {unbudgeted}"

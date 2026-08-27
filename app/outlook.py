@@ -176,13 +176,9 @@ _HOLD_KEY = "alert_hold"
 # Breakage that is already real: no window, whatever the rest of the wording says.
 # Deliberately narrow — everything here means "a thing that was serving traffic
 # has stopped", not "a number moved".
-_CRITICAL = re.compile(
-    r"\b(down|outage|unavailable|unreachable|not responding|no longer responding|"
-    r"crash ?loop|crashloopbackoff|oom ?killed|out of memory|"
-    r"pods? (are )?(down|restarting|failing|not ready|unavailable)|"
-    r"service (is )?(down|unavailable|degraded)|"
-    r"cannot connect|connection refused|refusing connections|"
-    r"p1|sev ?1|severity ?1|critical|data loss|all requests failing)\b", re.I)
+# _CRITICAL moved to attention.looks_critical — one detector, both sources.
+# It lived here, mail was its only caller, and the same outage posted in a
+# Teams channel was filed as "FYI, nothing needed from you".
 
 
 def is_critical(m: dict) -> bool:
@@ -191,8 +187,14 @@ def is_critical(m: dict) -> bool:
     Checked against the body as well as the subject, because a monitoring subject
     names the channel and the words that matter — "pods down", "connection
     refused" — are in the mail itself.
+
+    The detection itself now lives in `attention.looks_critical`, shared with the
+    Teams path. It was here, mail was its only caller, and the result was that an
+    outage interrupted him by email and was filed as FYI when it arrived in a
+    channel.
     """
-    return bool(_CRITICAL.search(f"{m.get('subject', '')} {m.get('preview', '')}"))
+    from . import attention
+    return attention.looks_critical(m.get("subject", ""), m.get("preview", ""))
 
 _ALERTY = re.compile(
     r"\b(alert|alarm|incident|error|failed|failure|down|unhealthy|degraded|"

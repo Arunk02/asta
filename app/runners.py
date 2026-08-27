@@ -262,6 +262,111 @@ async def _ask(case: dict) -> dict:
     return {"text": f"reused={bool(found)} answer={found or 'none'}"}
 
 
+# --- burst: ten people at once, and what he actually gets ---------------------
+
+async def _burst(case: dict) -> dict:
+    """Drive a whole poll's worth of arrivals through the REAL ledger and delivery.
+
+    The scenario nobody had written: ten pings land back to back. Every capability
+    up to now judged ONE arrival. What Arun actually experiences is the pile —
+    whether it becomes one message or ten, whether the urgent one leads, whether
+    the same thing said twice counts twice, and whether the ones he never answered
+    come back later without nesting inside each other.
+
+    This is the exact path `_push_activity` takes: classify → score → consider →
+    summarize. Keys are namespaced per case because the bench shares one isolated
+    store across a run, and two cases colliding on a key would dedup each other
+    and pass for the wrong reason.
+    """
+    import os
+
+    from . import attention, delivery, triage
+    g = _given(case)
+    os.environ["ASTA_ATTENTION"] = "1"      # the ledger IS the thing under test
+    now = float(g.get("now", 1_700_000_000.0))
+    tag = case["id"]
+    source = g.get("source", "teams")
+
+    # Things he has already dealt with, marked settled BEFORE the poll — the case
+    # that matters most, because chasing him about a thing he handled is the
+    # single most annoying failure the ledger can have.
+    acted = {f"{tag}:{attention.key_for(a)}" for a in g.get("acted", []) or []}
+
+    verdicts, pushed, keys = [], 0, []
+    for a in g.get("arrivals", []):
+        text = f"{a.get('who','')} — {a.get('subject','')}"
+        addressed = bool(a.get("addressed"))
+        v = triage.classify(a.get("who", ""), a.get("subject", ""),
+                            a.get("preview", ""), addressed=addressed)
+        key = f"{tag}:{attention.key_for(text)}"
+        # attention.rank, not a hand-assembled score+escalate: the bench must not
+        # carry its own copy of the ranking policy. It did, briefly, and passed a
+        # case the product was failing.
+        pri, why, due = attention.rank(v.action, text, addressed=addressed,
+                                       key=key, who=a.get("who", ""), now=now)
+        keys.append(key)
+        if not attention.consider(source, key, who=a.get("who", ""), what=v.one_line,
+                                  why=why, priority=pri, due_at=due, now=now):
+            continue                        # suppressed: a duplicate, or settled
+        pushed += 1
+        verdicts.append(v.ranked(pri, why, due))
+        if f"{tag}:{attention.key_for(a.get('subject', ''))}" in acted:
+            attention.mark_acted(key, now=now)
+
+    text, needs = triage.summarize(verdicts, g.get("label", "💬 Teams"))
+    owed = attention.open_items(limit=50)
+    mine = [r for r in owed if str(r.get("key", "")).startswith(tag + ":")]
+    top = min((r.get("priority", 9) for r in mine), default=9)
+
+    # Follow-up: nothing is owed forever without being raised again. `chase_due`
+    # derives end-of-day from the clock it is GIVEN — never time.time() — which is
+    # what made three chase tests pass all evening and fail on CI at 17:37.
+    chased = []
+    if g.get("chase_at"):
+        chased = [r for r in delivery.chase_due(now=float(g["chase_at"]))
+                  if str(r.get("key", "")).startswith(tag + ":")]
+
+    return {"text": (
+        f"arrivals={len(g.get('arrivals', []))} pushed={pushed} messages={1 if text else 0} "
+        f"needs={needs} owed={len(mine)} top_priority={top} chased={len(chased)}\n{text}")}
+
+
+# --- readpath: the live plumbing, end to end ---------------------------------
+
+async def _readpath(case: dict) -> dict:
+    """Drive a REAL read against Teams or Outlook and report what came back.
+
+    Everything else on this bench measures judgement. This measures plumbing —
+    the half that stayed green through a fourteen-hour Teams outage, a call path
+    that refused every time, and a server that would not boot.
+
+    Two constraints that are properties of the system, not of the test:
+
+    EXCLUSIVE BROWSER. One Chromium per profile, and the running server owns it.
+    These cases contend with it and will be slow or fail while it is up, which is
+    honest rather than inconvenient: it is the same single-writer limit that
+    serialises Teams and Outlook in production. Stop the server to run them.
+
+    READS ONLY, AND ONLY WHAT HE HAS SEEN. Opening a conversation marks it read
+    in Teams. Burning his own unread markers to run a test would be a worse
+    failure than any this could catch, so a case naming a chat must name one he
+    has already read.
+    """
+    from . import outlook, teams_bridge
+    g = _given(case)
+    what = g.get("read", "")
+    if what == "activity":
+        rows = await teams_bridge.read_activity_rows(limit=int(g.get("limit", 15)))
+        return {"text": f"rows={len(rows)} first={rows[0]['text'][:70] if rows else ''}"}
+    if what == "chat":
+        msgs = await teams_bridge.read_chat(g["chat"], limit=int(g.get("limit", 8)))
+        return {"text": f"messages={len(msgs)} oldest={str(msgs[0])[:70] if msgs else ''}"}
+    if what == "mail":
+        mails = await outlook.read_mail(limit=int(g.get("limit", 8)))
+        return {"text": f"mails={len(mails)} top={mails[0].get('subject','')[:60] if mails else ''}"}
+    raise RuntimeError(f"unknown read '{what}' — expected activity|chat|mail")
+
+
 # --- investigate: production failures, through a real brain ------------------
 
 #: Rough tokens-per-character. Only for reporting cost on the live tier, where
@@ -330,6 +435,8 @@ RUNNERS: dict[str, Callable[[dict], Awaitable[dict]]] = {
     "jira": _jira,
     "meetings": _meetings,
     "ask": _ask,
+    "burst": _burst,
+    "readpath": _readpath,
     "investigate": _investigate,
     "recover": _recover,
     "context": _context,

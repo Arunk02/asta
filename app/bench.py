@@ -80,6 +80,8 @@ CAPABILITIES: dict[str, str] = {
     "meetings": "which meeting he meant, and whether he need be there at all",
     "ask": "not asking him something he has already answered",
     "investigate": "reading a production failure and knowing where to look",
+    "burst": "ten people at once — what he gets, and what comes back later",
+    "readpath": "the live plumbing: can it actually read Teams and Outlook",
 }
 
 #: Weights on the reward. Correctness dominates on purpose: a fast, cheap, wrong

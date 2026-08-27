@@ -183,6 +183,33 @@ def chase_at() -> int:
         return 3
 
 
+#: Already breakage, rather than something that might settle. Lives HERE, next to
+#: `score`, because it is a ranking decision and ranking has exactly one home.
+#:
+#: It used to live in `outlook` and `outlook` was its only caller, so an outage
+#: that arrived by mail interrupted him and the SAME outage posted in a Teams
+#: channel scored "no ask detected" — nobody asks anything when prod falls over —
+#: and went down the ambient path, which presence suppresses while he is at the
+#: laptop. Per-source drift, the same shape as every other per-source constant
+#: that has bitten this codebase.
+_CRITICAL = re.compile(
+    r"\b(down|outage|unavailable|unreachable|not responding|no longer responding|"
+    r"crash ?loop|crashloopbackoff|oom ?killed|out of memory|"
+    r"pods? (are )?(down|restarting|failing|not ready|unavailable)|"
+    r"service (is )?(down|unavailable|degraded)|"
+    r"cannot connect|connection refused|refusing connections|"
+    r"p1|sev ?1|severity ?1|critical|data loss|all requests failing)\b", re.I)
+
+
+def looks_critical(*parts: str) -> bool:
+    """Whether this text describes something already broken.
+
+    Takes loose parts so a caller can pass subject and body, or one rendered feed
+    row, without either of them having to know the other's shape.
+    """
+    return bool(_CRITICAL.search(" ".join(p for p in parts if p)))
+
+
 def score(action: bool, text: str, *, addressed: bool = False, critical: bool = False,
           key: str = "", who: str = "", now: float | None = None
           ) -> tuple[int, str, float | None]:
@@ -217,6 +244,26 @@ def score(action: bool, text: str, *, addressed: bool = False, critical: bool = 
     from . import contacts
     adjusted, note = contacts.adjust(base, who)
     return adjusted, (f"{why} · {note}" if note else why), due
+
+
+def rank(action: bool, text: str, *, addressed: bool = False, key: str = "",
+         who: str = "", now: float | None = None) -> tuple[int, str, float | None]:
+    """The WHOLE per-arrival ranking: criticality, score, chase escalation.
+
+    One function because there is one policy. Every caller that assembled these
+    three steps by hand assembled them slightly differently — the mail path passed
+    `critical`, the Teams path did not, and an outage in a channel was filed under
+    "FYI, nothing needed from you" as a result. The bench then reimplemented the
+    same three steps a third time and measured its own copy, which passed while
+    the product was wrong.
+
+    So: callers rank, they do not compose. Adding a signal here reaches every
+    source at once, which is the only version of this that stays true.
+    """
+    pri, why, due = score(action, text, addressed=addressed,
+                          critical=looks_critical(text), key=key, who=who, now=now)
+    pri, chased = escalate_for_chase(pri, key, now=now)
+    return pri, (chased or why), due
 
 
 def escalate_for_chase(priority: int, key: str, now: float | None = None) -> tuple[int, str]:

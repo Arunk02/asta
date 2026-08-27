@@ -415,6 +415,15 @@ async def api_invoke(body: dict):
         raise HTTPException(404, f"no capability '{name}'")
     if not isinstance(args, dict):
         raise HTTPException(400, "args must be an object")
+    # The turn's conversation, carried across the MCP hop. Without it every
+    # capability that reads `tasks.current_conversation()` — prepare_to_send,
+    # continue_working — fails here and only here, because a fresh HTTP request
+    # has none of the chat path's ContextVars. Bound rather than defaulted: a
+    # guessed conversation would stage a draft into the wrong chat, which is
+    # worse than refusing.
+    conv_id = (body or {}).get("conv_id") or ""
+    if conv_id:
+        tasks.bind_conversation(conv_id)
     try:
         result = cap.fn(**args)
         if inspect.isawaitable(result):

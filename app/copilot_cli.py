@@ -348,7 +348,7 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
         # brains): the ~handful the message needs, or the full set when ambiguous.
         selected = tool_index.select_sticky(conv["id"], ranking_text)
         cmd += ["--additional-mcp-config",
-                _json.dumps(mcp_server.config_entry(tools=selected))]
+                _json.dumps(mcp_server.config_entry(tools=selected, conv_id=conv["id"]))]
     model = os.environ.get("COPILOT_CLI_MODEL")
     if model:
         cmd += ["--model", model]

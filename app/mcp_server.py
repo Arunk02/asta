@@ -63,7 +63,8 @@ def _proxy(cap):
         async with httpx.AsyncClient(timeout=600) as c:
             r = await c.post(
                 f"{_asta_url()}/api/_invoke",
-                json={"tool": cap.name, "args": kwargs},
+                json={"tool": cap.name, "args": kwargs,
+                      "conv_id": os.environ.get("ASTA_MCP_CONV", "")},
                 headers={"Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")},
             )
             if r.status_code >= 400:
@@ -119,13 +120,21 @@ def _describe(cap) -> str:
     return text
 
 
-def config_entry(tools: list[str] | None = None) -> dict:
+def config_entry(tools: list[str] | None = None, conv_id: str = "") -> dict:
     """The mcpServers entry a CLI needs to spawn this server.
 
     The env is carried explicitly rather than left to inheritance: the spawned
     server has to reach the RUNNING Asta to forward calls, so it needs the token
     and port even if the CLI launches it with a scrubbed environment. `tools`, when
     given, narrows the exposed set for this turn (see _allowed_tools).
+
+    `conv_id` is the conversation this brain is answering in, and it is not
+    optional in practice. `prepare_to_send` and `continue_working` read the
+    conversation from a ContextVar that only the in-process chat path sets, so
+    over the MCP hop — a fresh HTTP request into the server — both returned "No
+    active conversation" every single time. They are in the ALWAYS floor, so the
+    model was offered them on every turn and neither one worked: it could draft a
+    reply to a colleague and had no way to stage it.
     """
     env = {
         "ASTA_TOKEN": os.environ.get("ASTA_TOKEN", ""),
@@ -134,6 +143,8 @@ def config_entry(tools: list[str] | None = None) -> dict:
     }
     if tools:
         env["ASTA_MCP_TOOLS"] = ",".join(tools)
+    if conv_id:
+        env["ASTA_MCP_CONV"] = conv_id
     return {
         "mcpServers": {
             SERVER_NAME: {

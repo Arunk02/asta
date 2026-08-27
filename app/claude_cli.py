@@ -224,7 +224,7 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         # per-conversation file on disk (each held a copy of the token and leaked
         # when a chat was deleted) and matches the Copilot path exactly.
         selected = tool_index.select_sticky(conv["id"], ranking_text)
-        cmd += ["--mcp-config", _json.dumps(mcp_server.config_entry(tools=selected)),
+        cmd += ["--mcp-config", _json.dumps(mcp_server.config_entry(tools=selected, conv_id=conv["id"])),
                 "--strict-mcp-config"]
     from . import agent as agent_mod
     model = agent_mod.tier_of("claude_cli")

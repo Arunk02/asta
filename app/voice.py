@@ -482,3 +482,136 @@ if __name__ == "__main__":
         print(f"wrote {out_path} ({len(audio)} bytes) — open it to hear the clone")
     else:
         print("usage: python -m app.voice [script [N] | clone <name> <audio...> | profiles | say <text>]")
+
+
+#: Measure what a browser's microphone actually delivers. Level only — nothing is
+#: recorded, kept, or sent anywhere.
+_LEVEL_JS = """
+async (ms) => {
+  let s;
+  try { s = await navigator.mediaDevices.getUserMedia({audio: true}); }
+  catch (e) { return {error: e.message}; }
+  const t = s.getAudioTracks()[0];
+  const ctx = new AudioContext();
+  const an = ctx.createAnalyser(); an.fftSize = 2048;
+  ctx.createMediaStreamSource(s).connect(an);
+  const buf = new Float32Array(an.fftSize);
+  let peak = 0;
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    an.getFloatTimeDomainData(buf);
+    for (let i = 0; i < buf.length; i++) if (Math.abs(buf[i]) > peak) peak = Math.abs(buf[i]);
+    await new Promise(r => setTimeout(r, 40));
+  }
+  const label = t ? t.label : '';
+  s.getTracks().forEach(x => x.stop());
+  await ctx.close();
+  return {label, peak};
+}"""
+
+
+async def browser_mic_delivers(page, ms: int = 900) -> dict:
+    """Does this browser receive ANY audio? {'peak': float, 'label': str}.
+
+    macOS denies microphone access to an app by handing it a perfectly valid,
+    correctly-labelled track that produces digital silence. No exception, no
+    warning — `getUserMedia` succeeds and every sample is zero.
+
+    Playwright's browser is "Google Chrome for Testing", which never shows a
+    permission prompt because nobody is there to click it. Measured on this
+    machine: peak 0.00000 from BlackHole AND from the built-in microphone, with
+    Chrome's audio processing both on and off. Five calls were placed to a
+    colleague across which Asta reported speaking every time and transmitted
+    silence, because `say_in_call` measured audio PLAYED and never audio SENT.
+    """
+    try:
+        return await page.evaluate(_LEVEL_JS, ms) or {}
+    except Exception as exc:                                    # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+#: The mute button's aria-label states the ACTION, not the state: "Mute" means the
+#: mic is currently live, "Unmute" means it is currently muted. Reading it the
+#: wrong way round mutes a working call, so the two are matched explicitly.
+_MUTE_STATE_JS = """
+() => {
+  for (const b of document.querySelectorAll('button,[role="button"]')) {
+    const a = (b.getAttribute('aria-label') || '');
+    const t = (b.getAttribute('data-tid') || '');
+    if (!/mute/i.test(a) && !/mute/i.test(t)) continue;
+    if (!(b.offsetWidth || b.offsetHeight)) continue;
+    return {aria: a, tid: t, muted: /unmute/i.test(a),
+            pressed: b.getAttribute('aria-pressed')};
+  }
+  return null;
+}"""
+
+
+async def mic_is_live(page) -> dict:
+    """What Teams thinks of its own microphone: {} when it cannot be read."""
+    try:
+        return await page.evaluate(_MUTE_STATE_JS) or {}
+    except Exception:
+        return {}
+
+
+async def ensure_unmuted(page) -> bool:
+    """False ONLY when Teams is definitely muted and unmuting it failed.
+
+    Nothing checked this for a PLACED call: `join` mutes deliberately and says so,
+    `call_person` never touched mute, and `say_in_call` checked the audio DEVICE
+    and never whether Teams was transmitting.
+
+    Unreadable is not muted. Refusing on an unreadable toolbar would silence every
+    call whose DOM moved — the same rule `wait_for_answer` follows when it declines
+    to call an unreadable call screen "no answer".
+    """
+    state = await mic_is_live(page)
+    if not state or not state.get("muted"):
+        return True
+    for sel in ('[data-tid="toggle-mute"]', 'button[aria-label*="Unmute" i]'):
+        try:
+            await page.click(sel, timeout=3000)
+            break
+        except Exception:
+            continue
+    await asyncio.sleep(0.6)
+    return not (await mic_is_live(page)).get("muted", True)
+_CAMERA_TOGGLES = ('[data-tid="toggle-video"]', 'button[aria-label*="camera" i]')
+
+
+def can_speak() -> bool:
+    """Whether Asta can actually be heard in a call on this machine."""
+    return bool(AUDIO_DEVICE)
+
+
+def speaking_hint() -> str:
+    return ("Speaking in calls needs a virtual microphone Teams can select "
+            "(BlackHole or Loopback on macOS), then ASTA_CALL_AUDIO_DEVICE set to "
+            "its name in .env. Until then I can join and listen, but I cannot say "
+            "anything.")
+
+
+#: The live call, if there is one. Held in the module rather than only in kv
+#: because a browser context is not serialisable — and without the handle, nothing
+#: can later hang up or notice the call ended. The kv row is the durable "am I in
+#: a call" flag that survives a restart; this is what can act on it.
+_CALL: dict = {}
+
+
+def can_speak() -> bool:
+    """Whether Asta can actually be heard in a call on this machine."""
+    return bool(CALL_DEVICE)
+
+
+def speaking_hint() -> str:
+    return ("Speaking in calls needs a virtual microphone Teams can select "
+            "(BlackHole or Loopback on macOS), then ASTA_CALL_AUDIO_DEVICE set to "
+            "its name in .env. Until then I can join and listen, but I cannot say "
+            "anything.")
+
+
+#: The live call, if there is one. Held in the module rather than only in kv
+#: because a browser context is not serialisable — and without the handle, nothing
+#: can later hang up or notice the call ended. The kv row is the durable "am I in
+#: a call" flag that survives a restart; this is what can act on it.

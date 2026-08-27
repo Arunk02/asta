@@ -246,6 +246,21 @@ def score(action: bool, text: str, *, addressed: bool = False, critical: bool = 
     return adjusted, (f"{why} · {note}" if note else why), due
 
 
+#: Queues and groups Arun is ON. Work assigned to one of these is assigned to
+#: HIM — "assigned to group OH - TELIKOS - L2" is not a broadcast, it is a
+#: ticket landing in his queue. Configured rather than guessed: nothing can infer
+#: which rotas somebody is on, and guessing wrong in the quiet direction is how a
+#: real incident goes unread.
+MY_GROUPS = tuple(g.strip().lower() for g in
+                  os.environ.get("ASTA_MY_GROUPS", "").split(",") if g.strip())
+
+
+def assigned_to_him(text: str) -> bool:
+    """Whether this lands in a queue he is on, however it is worded."""
+    low = (text or "").lower()
+    return bool(MY_GROUPS) and any(g in low for g in MY_GROUPS)
+
+
 def rank(action: bool, text: str, *, addressed: bool = False, key: str = "",
          who: str = "", now: float | None = None) -> tuple[int, str, float | None]:
     """The WHOLE per-arrival ranking: criticality, score, chase escalation.
@@ -260,8 +275,18 @@ def rank(action: bool, text: str, *, addressed: bool = False, key: str = "",
     So: callers rank, they do not compose. Adding a signal here reaches every
     source at once, which is the only version of this that stays true.
     """
-    pri, why, due = score(action, text, addressed=addressed,
+    mine = assigned_to_him(text)
+    pri, why, due = score(action or mine, text, addressed=addressed or mine,
                           critical=looks_critical(text), key=key, who=who, now=now)
+    if mine:
+        # A ticket in his own queue must never be silenced by what the SENDER
+        # usually sends. IT Service Desk sends mostly noise, so its act-rate is
+        # low, so `contacts.adjust` dropped every incident to P_MUTE — recorded,
+        # never pushed. `outlook.needs_attention` already exempts ServiceNow from
+        # the bulk filter; the exemption simply did not survive to the ranking
+        # layer, which is the same shape as every other per-layer drift here.
+        pri = min(pri, P_TODAY)
+        why = f"assigned to your group · {why}"
     pri, chased = escalate_for_chase(pri, key, now=now)
     return pri, (chased or why), due
 

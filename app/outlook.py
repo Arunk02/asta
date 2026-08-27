@@ -663,11 +663,12 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
         # dropped here rather than announced twice in two different words.
         led_key = attention.key_for(m.get("sender", ""), m.get("subject", ""))
         blob = f"{m.get('subject', '')} {m.get('preview', '')}"
-        pri, why, due = attention.score(v.action, blob, critical=is_critical(m),
-                                        key=led_key, who=m.get("sender", ""))
-        pri, chased = attention.escalate_for_chase(pri, led_key)
+        # attention.rank, not score+escalate by hand — the composed form is how
+        # the Teams path lost `critical` and how incidents lost their exemption.
+        pri, why, due = attention.rank(v.action, blob, key=led_key,
+                                       who=m.get("sender", ""))
         if not attention.consider("outlook", led_key, who=m.get("sender", ""),
-                                  what=v.one_line, why=chased or why,
+                                  what=v.one_line, why=why,
                                   priority=pri, due_at=due):
             continue
         verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)

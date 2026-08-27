@@ -37,6 +37,8 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 from . import quiet, store
+from .voice import (  # noqa: F401  (re-exported: callers and tests use these)
+    can_speak, ensure_unmuted, mic_is_live, speaking_hint)
 from .call_brain import (  # noqa: F401  (re-exported: callers and tests use these)
     _ANSWERABLE, _ANSWER_PROMPT, _ASKED, _HIS_TO_ANSWER, _ask_key, _call_tools,
     answer_from_knowledge, classify_line, clear_noticed, confident, notice_asks,
@@ -254,25 +256,10 @@ async def open_and_send(url: str, send: bool = False) -> str:
 _JOIN_BUTTONS = ('button[aria-label*="Join now" i]', 'button:has-text("Join now")',
                  '[data-tid="prejoin-join-button"]', 'button[aria-label*="Join" i]')
 _MUTE_TOGGLES = ('[data-tid="toggle-mute"]', 'button[aria-label*="Mute" i]')
+
 _CAMERA_TOGGLES = ('[data-tid="toggle-video"]', 'button[aria-label*="camera" i]')
 
 
-def can_speak() -> bool:
-    """Whether Asta can actually be heard in a call on this machine."""
-    return bool(AUDIO_DEVICE)
-
-
-def speaking_hint() -> str:
-    return ("Speaking in calls needs a virtual microphone Teams can select "
-            "(BlackHole or Loopback on macOS), then ASTA_CALL_AUDIO_DEVICE set to "
-            "its name in .env. Until then I can join and listen, but I cannot say "
-            "anything.")
-
-
-#: The live call, if there is one. Held in the module rather than only in kv
-#: because a browser context is not serialisable — and without the handle, nothing
-#: can later hang up or notice the call ended. The kv row is the durable "am I in
-#: a call" flag that survives a restart; this is what can act on it.
 _CALL: dict = {}
 
 
@@ -293,6 +280,7 @@ async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
     warm_the_voice()                  # cold start lands here, not in the meeting
+    await set_call_mic(device=AUDIO_DEVICE)   # before Teams binds a track
     await teams_bridge.close_pool()   # one writer per profile — see call_person
     pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
     joined = False
@@ -416,10 +404,20 @@ async def wait_for_answer(page, seconds: float = 0) -> str:
     """
     deadline = _now() + (seconds or RING_SECONDS)
     state = "unknown"
+    saw_ringing = False
     while _now() < deadline:
         state = await call_state(page)
         if state in ("connected", "ended"):
             return state
+        if state == "ringing":
+            saw_ringing = True
+        elif saw_ringing:
+            # Was ringing, is not now, has not ended: that transition IS the
+            # answer, and it is the only evidence Teams cannot rename. _CONNECTED
+            # shipped unverified and does not match; _TIMER_JS caught a clock on
+            # one call and nothing on the next. Vinish picked up, asked questions
+            # and heard silence while this reported "unknown" for forty seconds.
+            return "connected"
         await asyncio.sleep(1.0)
     return "no answer" if state == "ringing" else state
 
@@ -522,13 +520,14 @@ async def call_person(who: str, video: bool = False) -> str:
     # front of Vinish or in front of nobody. It was wired into join_by_phrase and
     # nowhere else, so every CALL paid it out loud.
     warm_the_voice()
-    # A headed call cannot share the profile with the pooled headless browser.
-    # Chromium tolerates exactly one writer per user-data-dir, and the pool
-    # deliberately keeps its browser alive between operations — so by the time a
-    # call is placed there is already one running, and the second launch either
-    # fails or corrupts the store both are writing. That is precisely what left
-    # Teams unable to boot for fourteen and a half hours on 26 August. Drop ours
-    # first; the pool rebuilds itself on the next headless operation.
+    # Claim the mic BEFORE Teams binds its track on connect — switching after, as
+    # say_in_call did, cannot move an open track. Measured: the browser handed
+    # Teams the built-in mic while BlackHole sat unselected, so Vinish heard the
+    # laptop while Asta played into a device nobody listened to.
+    await set_call_mic(device=AUDIO_DEVICE)
+    # One writer per user-data-dir. The pool keeps its browser alive between
+    # operations, so a headed launch on top of it corrupts the store both are
+    # writing — what left Teams unable to boot for 14.5 hours on 26 August.
     await teams_bridge.close_pool()
     pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
     placed = False
@@ -883,6 +882,20 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
 
     borrowed = False
     if page is not None:
+        # Teams must be transmitting AND the browser must actually RECEIVE audio.
+        # macOS denies a mic by handing over a valid track full of zeros, so five
+        # calls reported speech and sent silence.
+        if not await ensure_unmuted(page):
+            raise RuntimeError(
+                "Teams is muted — said nothing rather than reporting speech "
+                "nobody would hear")
+        heard = await voice.browser_mic_delivers(page)
+        if heard and not heard.get("error") and heard.get("peak", 1.0) == 0:
+            raise RuntimeError(
+                f"the browser receives digital silence on {heard.get('label') or 'its mic'} "
+                f"— macOS has not granted microphone access to Google Chrome for "
+                f"Testing. System Settings → Privacy & Security → Microphone. "
+                f"Said nothing rather than reporting speech nobody would hear.")
         borrowed = await set_call_mic(page, AUDIO_DEVICE)
         if not borrowed:
             raise RuntimeError(
@@ -983,20 +996,16 @@ def overran(now: float | None = None) -> bool:
 # when captions are turned on rather than when the meeting did. Every one of those
 # is stated to Arun instead of being smoothed over.
 
-#: Specific first, and the data-tid leads for a second reason beyond ordering:
-#: aria-labels are LOCALISED. "Turn on live captions" matches an English UI and
-#: nothing else, while `closed-caption-button` is the same string in every locale.
+#: Specific first — the data-tid also survives localisation.
 _CAPTION_TOGGLES = [
     '[data-tid="closed-caption-button"]',
     'button[aria-label*="Turn on live captions" i]',
     'div[role="menuitem"][aria-label*="captions" i]',
 ]
 #: SPECIFIC FIRST — `_click_first` takes the first match, so order is behaviour.
-#: Probed live: the call screen carries a bare `button[aria-label="More"]`
-#: belonging to the APP BAR as well as the call toolbar's own button. Generic was
-#: listed first, so opening the call's More menu clicked the app bar, found no
-#: "Language and speech", and start_captions returned False — Asta could talk in
-#: a call and never hear a word back.
+#: A bare aria-label="More" belongs to the APP BAR; listing it first opened that
+#: instead of the call's menu, so start_captions returned False and Asta could
+#: talk in a call but never hear a word back.
 _MORE_MENU = ['[data-tid="callingButtons-showMoreBtn"]',
               'button[aria-label*="More actions" i]',
               'button[aria-label="More"]']
@@ -1254,11 +1263,9 @@ async def watch(poll_seconds: float = 30) -> str:
     lines = _CALL.setdefault("captions", [])
     ticks = max(1, int(poll_seconds // CAPTION_POLL_SECONDS) or 1)
 
-    # A ringing call is neither "ended" nor "overran", so this loop sat on one
-    # until MAX_CALL_MINUTES — ninety minutes of ringing a colleague who was away
-    # from their desk. `wait_for_answer` knew how to spot it; nothing asked.
-    # Conservative in the same direction it already chose: only a call still
-    # VISIBLY ringing is dropped, since hanging up on a live call cannot be undone.
+    # A ringing call is neither "ended" nor "overran", so this loop sat on one for
+    # MAX_CALL_MINUTES — 90 minutes ringing a colleague at their desk. Only a
+    # VISIBLY ringing call is dropped; hanging up on a live one cannot be undone.
     if page is not None and not _CALL.get("answered_at"):
         state = await wait_for_answer(page)
         if state == "no answer":

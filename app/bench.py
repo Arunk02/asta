@@ -232,8 +232,19 @@ def _isolated_store():
 
 
 async def run(capability: str = "", live: bool = False,
-              include_starter: bool = True, isolate: bool = True) -> dict:
-    """Score every scenario. `live=False` skips the ones that cost money."""
+              include_starter: bool = True, isolate: bool = True,
+              concurrency: int = 1) -> dict:
+    """Score every scenario. `live=False` skips the ones that cost money.
+
+    `concurrency` > 1 runs scenarios simultaneously. That is a different
+    experiment, not a faster version of the same one, and the report says so:
+    under contention a case's elapsed time includes waiting for everything it is
+    sharing a process with, so the speed axis stops measuring the code and starts
+    measuring the load. Correctness and safety stay exactly as meaningful — which
+    is the point, because running them together is how a bug that only appears
+    when two tasks touch one resource gets found. That class of bug is precisely
+    what cost fourteen hours of Teams.
+    """
     cases = [c for c in load(capability, include_starter)
              if live or not c.get("live")]
     skipped = len([c for c in load(capability, include_starter) if c.get("live")]) \
@@ -247,7 +258,21 @@ async def run(capability: str = "", live: bool = False,
         stack.enter_context(sandbox.sealed())
         if isolate:
             stack.enter_context(_isolated_store())
-        results = [score(c, await observe(c)) for c in cases]
+        if concurrency <= 1:
+            results = [score(c, await observe(c)) for c in cases]
+        else:
+            import asyncio
+            gate = asyncio.Semaphore(concurrency)
+
+            async def one(case: dict) -> dict:
+                async with gate:
+                    return score(case, await observe(case))
+
+            # return_exceptions is deliberately NOT set: `observe` already turns
+            # every failure into an observation, so an exception escaping here
+            # would be a bug in the harness rather than in a scenario, and it
+            # should be loud instead of quietly becoming one bad row.
+            results = list(await asyncio.gather(*(one(c) for c in cases)))
     by_cap: dict[str, list[dict]] = {}
     for r in results:
         by_cap.setdefault(r["capability"], []).append(r)
@@ -270,6 +295,7 @@ async def run(capability: str = "", live: bool = False,
         "seconds": round(time.monotonic() - started, 2),
         "tokens": sum(r["tokens"] for r in results),
         "skipped_live": skipped,
+        "concurrency": concurrency,
         "capabilities": caps,
         "results": results,
     }
@@ -299,6 +325,9 @@ def report(out: dict) -> str:
                      f"{c['reward']:>7.3f} {c['correctness']:>8.2f} {c['seconds']:>6.2f}")
     if out.get("skipped_live"):
         lines.append(f"\n  ({out['skipped_live']} live case(s) skipped — pass live=True to spend tokens)")
+    if out.get("concurrency", 1) > 1:
+        lines.append(f"\n  ⚠ ran {out['concurrency']}-way parallel — correctness and safety hold, "
+                     f"but the speed column measured contention, not the code.")
     bad = [r for r in out["results"] if not r["ok"]]
     if bad:
         lines.append("")
@@ -341,9 +370,11 @@ if __name__ == "__main__":                                      # pragma: no cov
     import asyncio
     import sys
     store.init()
-    cap = ""
+    cap, jobs = "", 1
     live = "--live" in sys.argv
     for a in sys.argv[1:]:
-        if not a.startswith("-"):
+        if a.startswith("--jobs="):
+            jobs = int(a.split("=", 1)[1])
+        elif not a.startswith("-"):
             cap = a
-    print(report(asyncio.run(run(cap, live=live))))
+    print(report(asyncio.run(run(cap, live=live, concurrency=jobs))))

@@ -166,6 +166,48 @@ async def _recover(case: dict) -> dict:
                     f"told_him={outcome['told_him']} tried={','.join(trace)}"}
 
 
+# --- code: is this work, whose ticket, and is it worth a brain at all --------
+
+async def _code(case: dict) -> dict:
+    """The routing decisions that start every code task — all pure, all free.
+
+    This is where his two most expensive failures begin. Routing a QUESTION to a
+    code task spawns work he never asked for; routing a real assignment to chat
+    means a plan gate that never runs. And `is_trivial` is the token-waste
+    decision in its purest form: "ok" must never reach a paid model.
+    """
+    from . import router, work_intent
+    g = _given(case)
+    text = g.get("text", "")
+    repos = tuple(g.get("repos", []) or [])
+    return {"text": (
+        f"work={work_intent.is_work_assignment(text, repos)} "
+        f"trivial={router.is_trivial(text)} "
+        f"ticket={work_intent.ticket_in(text) or 'none'} "
+        f"title={work_intent.title_for(text)}")}
+
+
+# --- jira: reading a ticket and knowing what it actually asks for ------------
+
+async def _jira(case: dict) -> dict:
+    """Parse a ticket fixture the way the real reader does — no network.
+
+    Ticket bodies here are FIXTURES, not live issues: a bench that hits Jira
+    measures Jira's uptime as much as Asta's, and would put read load on a
+    corporate system every time someone runs the suite.
+    """
+    from . import jira
+    g = _given(case)
+    issue = g.get("issue", {})
+    parts = [f"key={issue.get('key', '')}", f"status={issue.get('status', '')}"]
+    # Acceptance criteria hide in comments — one of the lessons that cost him a
+    # round-trip on a real ticket, and the reason comments are read at all.
+    body = " ".join([issue.get("summary", ""), issue.get("description", "")]
+                    + [c.get("body", "") for c in issue.get("comments", [])])
+    parts.append(f"sprint_jql={jira.sprint_jql()}" if g.get("want_jql") else "")
+    return {"text": " ".join(p for p in parts if p) + "\n" + body}
+
+
 # --- context: using what the workspace already knows -------------------------
 
 async def _context(case: dict) -> dict:
@@ -188,6 +230,8 @@ RUNNERS: dict[str, Callable[[dict], Awaitable[dict]]] = {
     "analyse": _analyse,
     "message": _message,
     "plan": _plan,
+    "code": _code,
+    "jira": _jira,
     "recover": _recover,
     "context": _context,
 }

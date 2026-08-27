@@ -1243,6 +1243,27 @@ async def watch(poll_seconds: float = 30) -> str:
     page = _CALL.get("page")
     lines = _CALL.setdefault("captions", [])
     ticks = max(1, int(poll_seconds // CAPTION_POLL_SECONDS) or 1)
+
+    # A call nobody picks up is neither "ended" nor "overran". Teams just keeps
+    # showing the ringing screen, so the loop below sat on it until
+    # MAX_CALL_MINUTES — ninety minutes of ringing a colleague's phone because
+    # they were away from their desk. `wait_for_answer` already knew how to spot
+    # this and nothing was asking it: `call_person` sets answered_at=0, so an
+    # unanswered placed call is exactly the case with no answer time yet.
+    #
+    # It stays conservative in the same direction `wait_for_answer` does: only a
+    # call still VISIBLY ringing at the deadline is hung up. An unreadable call
+    # screen is left alone, because dropping a call that is actually connected is
+    # a far worse outcome than staying on one that is not.
+    if page is not None and not _CALL.get("answered_at"):
+        state = await wait_for_answer(page)
+        if state == "no answer":
+            await leave()
+            return f"no answer after {int(RING_SECONDS)}s — hung up"
+        if state == "ended":
+            await leave()
+            return "the call ended"
+
     while _CALL:
         if overran():
             await leave()

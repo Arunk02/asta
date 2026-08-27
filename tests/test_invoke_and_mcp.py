@@ -353,3 +353,65 @@ def test_both_cli_brains_pass_it():
     for mod in (claude_cli, copilot_cli):
         src = inspect.getsource(mod)
         assert "config_entry(tools=selected, conv_id=" in src, mod.__name__
+
+
+def test_every_conversation_dependent_capability_is_tested_across_the_hop():
+    """Close the class, not just the two instances.
+
+    `prepare_to_send` and `continue_working` both read the conversation and both
+    failed over MCP, for hours, while this very file stayed green. Nothing would
+    stop a third from being added tomorrow and failing exactly the same way.
+
+    So the rule is mechanical: a capability that reads `current_conversation()`
+    must appear in a test in this file that supplies a `conv_id`. Add one without
+    covering it and this fails by name, before it reaches him.
+    """
+    import inspect
+    from pathlib import Path
+
+    needs_conv = []
+    for name, cap in capabilities.registry().items():
+        if cap.fn is None:
+            continue
+        try:
+            src = inspect.getsource(cap.fn)
+        except (OSError, TypeError):
+            continue
+        if "current_conversation()" in src:
+            needs_conv.append(name)
+
+    assert needs_conv, "the detector broke — it should find at least two"
+    here = Path(__file__).read_text()
+    covered = [n for n in needs_conv
+               if f'"tool": "{n}"' in here and '"conv_id"' in here]
+    missing = sorted(set(needs_conv) - set(covered))
+    assert not missing, (
+        f"these read the conversation but are never invoked with a conv_id here: "
+        f"{missing}. Over the MCP hop they will return 'No active conversation' "
+        f"every time, and nothing else in the suite will notice.")
+
+
+def test_the_binding_does_not_outlive_the_call(client):
+    """The dangerous half of the fix.
+
+    A ContextVar left set in a long-lived server is inherited by the NEXT call
+    that arrives without one — so a draft meant for nobody in particular would be
+    staged into whichever conversation was invoked last, and look like success.
+    Caught as an unrelated call test failing only in a full run, which is exactly
+    what a leaked ContextVar looks like.
+    """
+    from app import tasks
+
+    async def go():
+        async with client as c:
+            await c.post("/api/_invoke", json={
+                "tool": "prepare_to_send",
+                "args": {"what": "x", "to": "Vinish", "channel": "teams"},
+                "conv_id": "conv-leak"})
+            # A second call with no conversation must NOT inherit the first's.
+            r = await c.post("/api/_invoke", json={
+                "tool": "prepare_to_send",
+                "args": {"what": "y", "to": "Someone Else", "channel": "teams"}})
+            assert "No active conversation" in r.json()["result"]
+        assert tasks.current_conversation() is None
+    asyncio.run(go())

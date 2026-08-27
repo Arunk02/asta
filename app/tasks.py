@@ -287,8 +287,22 @@ CLOSED_STATUSES = ("merged", "pr_closed", "rejected", "cancelled")
 _TURN_CONV: contextvars.ContextVar[str | None] = contextvars.ContextVar("turn_conv", default=None)
 
 
-def bind_conversation(conv_id: str | None) -> None:
-    _TURN_CONV.set(conv_id or None)
+def bind_conversation(conv_id: str | None):
+    """Bind the turn's conversation; returns a token that restores the previous one.
+
+    The token matters on the HTTP path. A chat turn owns its whole task and can
+    set-and-forget, but `/api/_invoke` serves one call inside a long-lived server:
+    leaving the binding behind means the next call that arrives WITHOUT a
+    conversation inherits this one, and a staged draft goes to the wrong chat
+    looking exactly like success. Callers that own the whole turn may ignore it.
+    """
+    return _TURN_CONV.set(conv_id or None)
+
+
+def unbind_conversation(token) -> None:
+    """Restore whatever was bound before `bind_conversation` returned this token."""
+    with contextlib.suppress(ValueError):        # a token from another context
+        _TURN_CONV.reset(token)
 
 
 def current_conversation() -> str | None:

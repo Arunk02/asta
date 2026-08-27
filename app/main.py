@@ -421,15 +421,23 @@ async def api_invoke(body: dict):
     # has none of the chat path's ContextVars. Bound rather than defaulted: a
     # guessed conversation would stage a draft into the wrong chat, which is
     # worse than refusing.
+    #
+    # Bound for THIS call only. Letting it persist is worse than not binding at
+    # all: the next invocation that arrives without a conv_id would inherit a
+    # stale conversation and stage a draft into the wrong chat — silently, and
+    # looking exactly like success. The suite caught it as an unrelated call test
+    # failing only in a full run, which is what a leaked ContextVar looks like.
     conv_id = (body or {}).get("conv_id") or ""
-    if conv_id:
-        tasks.bind_conversation(conv_id)
+    token = tasks.bind_conversation(conv_id) if conv_id else None
     try:
         result = cap.fn(**args)
         if inspect.isawaitable(result):
             result = await result
     except TypeError as exc:
         raise HTTPException(400, f"bad arguments for {name}: {exc}")
+    finally:
+        if token is not None:
+            tasks.unbind_conversation(token)
     return {"result": result}
 
 

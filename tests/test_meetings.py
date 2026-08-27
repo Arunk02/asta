@@ -181,7 +181,11 @@ def test_the_refusal_explains_what_would_make_it_work(monkeypatch):
 
 
 def test_speaking_outside_a_call_is_refused(monkeypatch):
-    monkeypatch.setattr(meetings, "AUDIO_DEVICE", "BlackHole 2ch")
+    # `can_speak` moved to voice and reads voice.CALL_DEVICE. Patching
+    # meetings.AUDIO_DEVICE stopped controlling it, so this test only passed on
+    # Arun's laptop — where .env supplies a real device — and failed on CI, which
+    # has none. Patch the name the code actually reads.
+    monkeypatch.setattr(voice, "CALL_DEVICE", "BlackHole 2ch")
     store.kv_set("teams_in_call", "")
     with pytest.raises(RuntimeError, match="not in a call"):
         asyncio.run(meetings.say_in_call("hello"))
@@ -190,13 +194,12 @@ def test_speaking_outside_a_call_is_refused(monkeypatch):
 def test_silent_speech_generation_is_not_reported_as_spoken(monkeypatch):
     """Audio that came back empty means nothing was said, whatever the pipeline
     thought it was doing."""
-    monkeypatch.setattr(meetings, "AUDIO_DEVICE", "BlackHole 2ch")
+    monkeypatch.setattr(voice, "CALL_DEVICE", "BlackHole 2ch")
     store.kv_set("teams_in_call", "https://teams/x")
 
     async def nothing(text, profile="", engine="", voice=""):
         return b""
 
-    from app import voice
     monkeypatch.setattr(voice, "speak", nothing)
     with pytest.raises(RuntimeError, match="said nothing"):
         asyncio.run(meetings.say_in_call("hello"))

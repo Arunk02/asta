@@ -580,17 +580,6 @@ async def ensure_unmuted(page) -> bool:
 _CAMERA_TOGGLES = ('[data-tid="toggle-video"]', 'button[aria-label*="camera" i]')
 
 
-def can_speak() -> bool:
-    """Whether Asta can actually be heard in a call on this machine."""
-    return bool(AUDIO_DEVICE)
-
-
-def speaking_hint() -> str:
-    return ("Speaking in calls needs a virtual microphone Teams can select "
-            "(BlackHole or Loopback on macOS), then ASTA_CALL_AUDIO_DEVICE set to "
-            "its name in .env. Until then I can join and listen, but I cannot say "
-            "anything.")
-
 
 #: The live call, if there is one. Held in the module rather than only in kv
 #: because a browser context is not serialisable — and without the handle, nothing
@@ -611,7 +600,3 @@ def speaking_hint() -> str:
             "anything.")
 
 
-#: The live call, if there is one. Held in the module rather than only in kv
-#: because a browser context is not serialisable — and without the handle, nothing
-#: can later hang up or notice the call ended. The kv row is the durable "am I in
-#: a call" flag that survives a restart; this is what can act on it.

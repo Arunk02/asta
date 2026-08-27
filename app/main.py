@@ -889,6 +889,21 @@ async def api_say_in_call(request: Request):
     return {"message": await agent_mod.say_in_call(b["text"])}
 
 
+@app.post("/api/meetings/discuss", dependencies=[Depends(require_auth)])
+async def api_discuss_in_call(request: Request):
+    """Ring someone and actually talk with them.
+
+    Exposed over HTTP for the same reason every other capability is: a CLI brain
+    reaches Asta this way, and a capability only chat can use is a capability most
+    of his traffic cannot.
+    """
+    b = await request.json()
+    if not b.get("who") or not b.get("topic"):
+        raise HTTPException(400, "who and topic are required")
+    return {"message": await agent_mod.discuss_in_call(
+        b["who"], b["topic"], b.get("workspace", ""))}
+
+
 @app.post("/api/ci/watch", dependencies=[Depends(require_auth)])
 async def api_ci_watch(request: Request):
     b = await request.json()
@@ -1629,6 +1644,9 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     # for why the selection is sticky rather than per-message.
     selected = tool_index.select_sticky(conv["id"], user_text)
     turn_agent = AGENT if selected is None else agent_mod.build_agent(selected)
+    # His actual words, for tools that must check what was asked rather than what
+    # the model decided to do about it — see capabilities.TURN_TEXT.
+    capabilities.TURN_TEXT.set(user_text or "")
     instructions = agent_mod.build_instructions(conv["summary"], "", conv["workspace"],
                                                 channel, selected)
     assistant_text = ""

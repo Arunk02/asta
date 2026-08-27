@@ -41,7 +41,13 @@ BLOCKED: dict[str, tuple[str, ...]] = {
     # The browser itself. Sealing this alone makes calls and Teams sends
     # impossible; everything below is named so a trip reports the INTENT.
     "teams_bridge": ("_launch", "_pooled_page", "send_message", "check_session"),
-    "meetings": ("join", "call_person", "join_by_phrase", "open_and_send"),
+    # `set_call_mic` is here because it reaches his HARDWARE, not a person. A test
+    # that runs it switches his system input to BlackHole and leaves it there, and
+    # the next real Teams call he takes has no working microphone — which is
+    # exactly what happened to him twice on 27 August, both times caused by a test.
+    "meetings": ("join", "call_person", "join_by_phrase", "open_and_send",
+                 "set_call_mic", "say_in_call"),
+    "voice": ("play_to_device",),
     "outlook": ("read_mail",),
     "jira": ("add_comment", "transition_issue"),
     "notify": ("notify", "deliver", "wa_send"),

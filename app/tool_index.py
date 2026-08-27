@@ -167,6 +167,31 @@ def rank(query: str) -> list[tuple[str, float]]:
                   key=lambda kv: kv[1], reverse=True)
 
 
+#: When Arun names an act in plain words, the tools for THAT act are not left to a
+#: similarity score. On 27 August "Call Vinish and discuss the 1409 PR" ranked the
+#: call tools out of the top-8, and the model — which cannot see that a selection
+#: happened — reported the gap as a fact about Asta: "I can't hold a live
+#: conversation with Vinish myself." It then reached for the one write tool the
+#: floor guarantees, `delegate_task`, and spawned code changes he never asked for.
+#:
+#: Ranking may be wrong about what a message is like. It must not be wrong about
+#: what the message literally says to do.
+_REQUIRED = (
+    ("asked_to_talk", ("discuss_in_call", "teams_call", "say_in_call",
+                       "teams_send_message", "teams_resolve", "draft_voice")),
+)
+
+
+def required_for(query: str) -> list[str]:
+    """Capabilities this message names outright, whatever the ranker thinks."""
+    from . import consent
+    out: list[str] = []
+    for test, names in _REQUIRED:
+        if getattr(consent, test)(query or ""):
+            out += list(names)
+    return out
+
+
 def select(query: str, k: int = TOP_K) -> list[str] | None:
     """Capability names for this message, or None meaning 'expose everything'.
 
@@ -183,6 +208,7 @@ def select(query: str, k: int = TOP_K) -> list[str] | None:
     chosen: list[str] = [n for n, _ in ranked[:k]]
     top_group = reg[ranked[0][0]].group
     chosen += [n for n, c in reg.items() if c.group == top_group and n not in chosen]
+    chosen += [n for n in required_for(query) if n in reg and n not in chosen]
     chosen += [n for n in capabilities.ALWAYS if n in reg and n not in chosen]
     # Narrowing to nearly-everything saves nothing and risks dropping the one
     # tool that mattered — hand back None and keep the simple path.

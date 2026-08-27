@@ -30,8 +30,17 @@ from typing import Callable
 #: Capabilities that are ALWAYS in context, regardless of what the message is
 #: about. Deliberately tiny — this is the set that lets the model recover when
 #: retrieval picked wrong: it can remember, look something up, ask, or delegate.
+#: Exposed on every turn no matter what the ranker picked.
+#:
+#: `reject_task` is here for one reason. On 27 August a code task was spawned that
+#: Arun had not asked for, and when he said to stop it the ranker had not selected
+#: the tool that stops it — so he was told "no cancel/stop tool is available to me
+#: … it will push when done unless you intervene directly". That was false;
+#: `tasks.cancel` kills the worker. A capability that can start irreversible work
+#: on every turn must be matched by the one that stops it on every turn, or the
+#: floor guarantees a start it cannot take back.
 ALWAYS = ("remember", "search_memory", "load_skill", "ask_user",
-          "delegate_task", "list_background_tasks",
+          "delegate_task", "list_background_tasks", "reject_task",
           "continue_working", "prepare_to_send")
 
 
@@ -162,8 +171,16 @@ _TABLE: tuple[Capability, ...] = (
                     "name is refused here rather than delivered to the wrong person."),
     Capability("teams_call", "teams", write=True,
                shell='python -m app.teams_bridge call "<person>" [--video]',
-               note="STAGES, does not dial. A call interrupts someone the instant it "
-                    "connects — offer reading or messaging first unless Arun asked to call."),
+               note="DIALS when Arun asked for a call in his own words — asking IS "
+                    "the consent, do not stage it back to him. Stages only when the "
+                    "call is Asta's idea. Never answer 'I can't call' — say which "
+                    "part failed."),
+    Capability("discuss_in_call", "teams", write=True,
+               http='POST /api/meetings/discuss {"who":"…","topic":"…"}',
+               note="Rings them AND holds the conversation — listens, answers, hangs "
+                    "up. This is the tool for 'call X and discuss Y'. Never say Asta "
+                    "cannot hold a live conversation; it can. It commits Arun to "
+                    "nothing — an unknown becomes 'I'll check with Arun'."),
     Capability("teams_send_message", "teams",
                shell='python -m app.teams_bridge send "<chat name>" "<text>"',
                write=True,
@@ -360,6 +377,18 @@ def names() -> tuple[str, ...]:
 #: awaits, with no flag threaded through five signatures — and the parent turn,
 #: created earlier, is unaffected.
 READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=False)
+
+#: What Arun actually typed this turn, so a tool can check whether it is doing the
+#: thing he asked for or something else entirely.
+#:
+#: A tool only ever sees the arguments the model chose, which is precisely the
+#: wrong vantage point for noticing a substitution: `delegate_task("fix the ETA
+#: validation", ...)` looks identical whether he asked for that or asked for a
+#: phone call. The model is not a reliable narrator of its own instructions —
+#: it is the thing being checked — so the original words have to arrive by a
+#: route it does not control. Same ContextVar mechanism as READ_ONLY_TURN: set
+#: once at the turn boundary, copied into everything the turn awaits.
+TURN_TEXT: ContextVar[str] = ContextVar("asta_turn_text", default="")
 
 
 def chat_may_write() -> bool:

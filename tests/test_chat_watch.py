@@ -151,6 +151,9 @@ def test_it_investigates_what_it_finds(wired, monkeypatch):
     """The reader and the actuator have to meet — otherwise this is a better
     sensor bolted to the same dead end."""
     monkeypatch.setenv("ASTA_RESPOND", "1")
+    from app import responder
+    # About the reader meeting the actuator, not about familiar-vs-new.
+    monkeypatch.setattr(responder, "familiar", lambda text: (True, "test: known"))
     spawned = []
     from app import tasks
     monkeypatch.setattr(tasks, "spawn",
@@ -211,3 +214,58 @@ def test_a_real_channel_is_still_watched():
     """Group channels are where untagged follow-ups land too — his second case."""
     assert not chat_watch.is_furniture("Team Booking and Execution")
     assert not chat_watch.is_furniture("OHP Garage")
+
+
+# --- who a message is for -----------------------------------------------------
+# "one to one related messages ... without tag bcoz there no point whether they
+# mention or not the message is for me only , need my attentation for group chats
+# that is valid my name tagged at first, follow up convo with or without tagging
+# as well.. but it should aware and follow up post the first tag message as well"
+
+@pytest.fixture(autouse=True)
+def _fresh_engagement():
+    store.kv_set(chat_watch._engaged_key("Prod Support"), "")
+
+
+def test_a_one_to_one_needs_no_tag():
+    assert chat_watch.addressed_to_him("Vinish Kumar", "Vinish Kumar",
+                                       "can you check prod")
+
+
+def test_a_group_message_to_nobody_is_not_his():
+    """The other direction, and the reason a group is not just a big 1:1: every
+    message in every channel counting would make the ledger meaningless."""
+    assert not chat_watch.addressed_to_him("Prod Support", "Komal", "deploy done")
+
+
+def test_a_tag_makes_the_group_his():
+    assert chat_watch.addressed_to_him("Prod Support", "Komal",
+                                       "arun can you look at this")
+
+
+def test_the_reply_after_the_tag_counts_without_a_second_tag():
+    """The substance of a thread is the replies, and nobody tags twice."""
+    chat_watch.addressed_to_him("Prod Support", "Komal", "arun can you look")
+    assert chat_watch.addressed_to_him("Prod Support", "Komal", "and also the ETA one")
+
+
+def test_the_window_closes():
+    """A tag last week does not make today's standup chatter his."""
+    import time
+    chat_watch.note_tagged("Prod Support", now=time.time())
+    assert not chat_watch.engaged("Prod Support",
+                                  now=time.time() + (chat_watch.ENGAGED_HOURS + 1) * 3600)
+
+
+def test_a_group_he_was_never_tagged_in_stays_quiet():
+    assert not chat_watch.engaged("Some Other Channel")
+
+
+@pytest.mark.parametrize("text", ["Arun can you check", "arunkumar please review",
+                                  "hi Arun Kumar, any update"])
+def test_the_ways_he_is_tagged(text):
+    assert chat_watch.mentions_him(text), text
+
+
+def test_someone_elses_name_is_not_his_tag():
+    assert not chat_watch.mentions_him("komal can you check this")

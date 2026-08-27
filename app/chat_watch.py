@@ -52,6 +52,18 @@ READ_LIMIT = int(os.environ.get("ASTA_CHATWATCH_READ", "12"))
 
 _RAIL_KEY = "chatwatch_rail"
 
+#: How long a group conversation stays "his" after he is tagged in it.
+#:
+#: "need my attentation for group chats that is valid my name tagged at first,
+#: follow up convo with or without tagging as well.. but it should aware and
+#: follow up post the first tag message as well".
+#:
+#: A tag in a group opens a thread that belongs to him; the replies that follow it
+#: do not get tagged again, and they are the substance. So the tag starts a window
+#: rather than marking one message. A 1:1 needs none of this — every message there
+#: is his by construction.
+ENGAGED_HOURS = float(os.environ.get("ASTA_GROUP_FOLLOW_HOURS", "12"))
+
 #: Rail rows that are not somebody talking to him.
 #:
 #: His self-chat renders as "Arunkumar K (You)" and is PINNED to the top, so it
@@ -120,6 +132,55 @@ def remember(chat: str, rows: list[dict]) -> None:
     mark = _mark_of(rows)
     if mark:
         store.kv_set(_seen_key(chat), mark)
+
+
+def _engaged_key(chat: str) -> str:
+    return f"chatwatch_tagged:{chat.strip().lower()[:60]}"
+
+
+def mentions_him(text: str) -> bool:
+    """Is his name in this message? The signal that a group thread became his."""
+    from . import meetings
+    low = (text or "").lower()
+    return any(n and n in low for n in meetings.HIS_NAMES)
+
+
+def note_tagged(chat: str, now: float | None = None) -> None:
+    import time
+    store.kv_set(_engaged_key(chat), str(now if now is not None else time.time()))
+
+
+def engaged(chat: str, now: float | None = None) -> bool:
+    """Is this group still a conversation he was pulled into?"""
+    import time
+    raw = (store.kv_get(_engaged_key(chat)) or "").strip()
+    if not raw:
+        return False
+    try:
+        when = float(raw)
+    except ValueError:
+        return False
+    now = time.time() if now is None else now
+    return (now - when) < ENGAGED_HOURS * 3600
+
+
+def addressed_to_him(chat: str, sender: str, text: str,
+                     now: float | None = None) -> bool:
+    """Does this message want something from Arun?
+
+    Three rules, in his words:
+      * a 1:1 always counts — "there no point whether they mention or not the
+        message is for me only";
+      * a group counts once his name is in it;
+      * and thereafter, for a while, so does the conversation that follows —
+        "follow up convo with or without tagging as well".
+    """
+    if (sender or "").strip().lower() == (chat or "").strip().lower():
+        return True                         # a 1:1: the chat IS the person
+    if mentions_him(text):
+        note_tagged(chat, now)
+        return True
+    return engaged(chat, now)
 
 
 def is_from_him(sender: str) -> bool:
@@ -201,10 +262,9 @@ async def sweep(notify=None) -> list[dict]:
         for m in fresh:
             who = (m.get("sender") or chat).strip()
             text = (m.get("text") or "").strip()
-            # A 1:1 message is addressed to him by the fact of being a 1:1. That
-            # is the whole point: no tag required, and none expected on the
-            # second message of any conversation.
-            direct = who.lower() == chat.strip().lower()
+            # 1:1 always; a group once he is tagged, and for a window after —
+            # the replies that follow a tag are never tagged again.
+            direct = addressed_to_him(chat, who, text)
             key = attention.key_for(f"{chat}:{text}")
             v = triage.classify(who, text, addressed=direct)
             pri, why, due = attention.rank(v.action, text, addressed=direct,

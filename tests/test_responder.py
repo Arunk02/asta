@@ -35,6 +35,19 @@ def _on(monkeypatch):
 
 
 @pytest.fixture
+def known_ground(monkeypatch):
+    """Treat the ask as a continuation of work Asta has already done.
+
+    Most tests here are about something else — the rate limit, the brief, the
+    title — and since `respond` began OFFERING new ground instead of starting it,
+    an isolated store (which has no task history) turns every one of them into an
+    offer. Stating the assumption is better than each test quietly depending on
+    what happens to be in the tasks table.
+    """
+    monkeypatch.setattr(responder, "familiar", lambda text: (True, "test: known"))
+
+
+@pytest.fixture
 def spawned(monkeypatch):
     """Capture what would be delegated, without running a worker."""
     calls = []
@@ -51,7 +64,7 @@ def spawned(monkeypatch):
 
 # --- the three things he named ------------------------------------------------
 
-def test_a_production_question_is_investigated(spawned):
+def test_a_production_question_is_investigated(spawned, known_ground):
     """His example. Vinish asks whether prod bookings are stuck; Asta goes and
     looks instead of forwarding the question to a man who is not at his desk."""
     t = responder.respond("teams", "Vinish", TEMPORAL, priority=attention.P_TODAY)
@@ -60,7 +73,7 @@ def test_a_production_question_is_investigated(spawned):
     assert "Temporal" in spawned[0]["prompt"]
 
 
-def test_pr_feedback_is_verified_rather_than_believed(spawned):
+def test_pr_feedback_is_verified_rather_than_believed(spawned, known_ground):
     """"check right whether it is true or wrong". The reviewer is not assumed
     correct — that assumption is what pushed seven unreviewed edits on 27 August."""
     responder.respond("teams", "Vinish", PR_FEEDBACK, priority=attention.P_TODAY)
@@ -70,7 +83,7 @@ def test_pr_feedback_is_verified_rather_than_believed(spawned):
     assert "do not change any code" in prompt.lower()
 
 
-def test_a_debug_request_is_picked_up(spawned):
+def test_a_debug_request_is_picked_up(spawned, known_ground):
     responder.respond("teams", "Vinish", DEBUG, priority=attention.P_TODAY)
     assert spawned and spawned[0]["kind"] == "analysis"
 
@@ -103,7 +116,7 @@ def test_a_production_incident_outranks_a_pr_mention():
 
 # --- the limits that make an actuator safe ------------------------------------
 
-def test_it_can_only_ever_read(spawned):
+def test_it_can_only_ever_read(spawned, known_ground):
     """The whole design rests on this. A code task edits a repository and pushes;
     an analysis task reads and reports. Nothing here may spawn the former."""
     for text in (TEMPORAL, PR_FEEDBACK, DEBUG):
@@ -114,7 +127,7 @@ def test_it_can_only_ever_read(spawned):
     assert {c["kind"] for c in spawned} == {"analysis"}
 
 
-def test_it_never_sends_anything_itself(spawned):
+def test_it_never_sends_anything_itself(spawned, known_ground):
     """It may draft. Staging is his gate, and the brief must say so every time —
     a worker told only "reply to Vinish" is a worker that replies to Vinish."""
     for text in (TEMPORAL, PR_FEEDBACK, DEBUG):
@@ -146,7 +159,7 @@ def test_presence_is_never_consulted():
     assert "at_laptop" not in attrs
 
 
-def test_the_brief_is_self_contained(spawned):
+def test_the_brief_is_self_contained(spawned, known_ground):
     """The worker has no chat context — `delegate_task` says so. A prompt that
     says "the message above" reaches a worker that cannot see any message."""
     responder.respond("teams", "Vinish", TEMPORAL, priority=attention.P_TODAY)
@@ -156,7 +169,7 @@ def test_the_brief_is_self_contained(spawned):
     assert "Vinish" in prompt
 
 
-def test_ten_people_pinging_is_not_ten_investigations(spawned, monkeypatch):
+def test_ten_people_pinging_is_not_ten_investigations(spawned, known_ground, monkeypatch):
     """His burst scenario, and the reason a rate limit is not optional: each of
     these is a full agentic turn against production systems."""
     monkeypatch.setattr(responder, "MAX_PER_HOUR", 3)
@@ -166,7 +179,7 @@ def test_ten_people_pinging_is_not_ten_investigations(spawned, monkeypatch):
     assert len(spawned) == 3
 
 
-def test_the_same_ask_is_investigated_once(spawned):
+def test_the_same_ask_is_investigated_once(spawned, known_ground):
     """A caption or activity row settling over several polls arrives repeatedly."""
     for _ in range(4):
         responder.respond("teams", "Vinish", TEMPORAL, priority=attention.P_TODAY,
@@ -222,7 +235,7 @@ def test_he_is_told_the_checking_has_started():
     assert "checking" in line.lower()
 
 
-def test_the_answer_arrives_still_attached_to_its_question(spawned):
+def test_the_answer_arrives_still_attached_to_its_question(spawned, known_ground):
     """A finished analysis pushes "✅ Task #N done — <title>", possibly hours later
     and out of any context. A title that omits who asked hands him an answer with
     no question attached."""
@@ -235,7 +248,7 @@ def test_the_answer_arrives_still_attached_to_its_question(spawned):
         assert "Vinish" in call["title"], call["title"]
 
 
-def test_a_pr_title_carries_the_number(spawned):
+def test_a_pr_title_carries_the_number(spawned, known_ground):
     responder.respond("teams", "Vinish", PR_FEEDBACK, priority=attention.P_TODAY)
     assert "#1049" in spawned[0]["title"]
 
@@ -311,3 +324,114 @@ def test_the_feed_chrome_is_not_quoted_back_as_the_message():
 
 def test_a_message_with_no_feed_prefix_is_untouched():
     assert responder.message_of("can you check prod bookings") == "can you check prod bookings"
+
+
+# --- any ask, not only the three named shapes ---------------------------------
+# "not just incident, PR feedback , debug any kind of stuff". Recognising three
+# shapes and shrugging at the rest meant a colleague asking something slightly
+# differently worded got the old behaviour: a notification and nothing more.
+
+@pytest.mark.parametrize("text", [
+    "please share the deployment steps for the booking service",
+    "could you send me the swagger for the new endpoint",
+    "send me the swagger link when you get a minute",
+])
+def test_an_ask_with_no_named_shape_is_still_investigated(text):
+    assert responder.what_it_asks(text) == "ask", text
+
+
+@pytest.mark.parametrize("text", [
+    "good morning all",
+    "thanks, that worked",
+    "I am on leave tomorrow",
+])
+def test_a_statement_is_still_not_an_ask(text):
+    """The catch-all must not become "everything". Four investigations an hour
+    spent on pleasantries is the noise he already complained about."""
+    assert responder.what_it_asks(text) == "", text
+
+
+def test_the_generic_brief_does_not_pretend_to_know_the_shape():
+    """An ask nobody classified is exactly where a confident wrong answer comes
+    from, so the brief says to name the readings instead of picking one."""
+    brief = responder.brief_for("ask", "Vinish", "can you send the config")
+    assert "ambiguous" in brief
+    assert "prepare_to_send" in brief
+
+
+# --- familiar work is continued; new work is offered first --------------------
+
+def test_something_he_has_worked_on_is_familiar(monkeypatch):
+    from app import store as st
+    monkeypatch.setattr(st, "list_tasks",
+                        lambda n=200: [{"title": "Fix BEPTELIKOS-10159 guard",
+                                        "prompt": "", "workspace": "booking"}])
+    known, why = responder.familiar("any update on BEPTELIKOS-10159?")
+    assert known
+    assert "BEPTELIKOS-10159" in why
+
+
+def test_a_workspace_he_works_in_counts(monkeypatch):
+    from app import store as st
+    monkeypatch.setattr(st, "list_tasks",
+                        lambda n=200: [{"title": "x", "prompt": "", "workspace": "booking"}])
+    known, why = responder.familiar("the booking service is throwing 500s")
+    assert known and "booking" in why
+
+
+def test_untouched_ground_is_new(monkeypatch):
+    from app import store as st
+    monkeypatch.setattr(st, "list_tasks", lambda n=200: [])
+    assert responder.familiar("can you check FOO-999")[0] is False
+
+
+def test_new_ground_is_offered_rather_than_started(monkeypatch, spawned):
+    """"if it is new related ask me do you want me to work on , can i analyse once
+    approved". Starting unasked is the substitution failure in another costume."""
+    from app import offers, store as st
+    monkeypatch.setattr(st, "list_tasks", lambda n=200: [])
+    asked = {}
+    monkeypatch.setattr(offers, "propose",
+                        lambda **kw: asked.update(kw) or object())
+    assert responder.respond("teams", "Vinish", TEMPORAL, priority=attention.P_TODAY) is None
+    assert not spawned, "spawned work on new ground without asking"
+    assert "look into it" in asked["question"]
+
+
+def test_the_offer_carries_the_brief_his_yes_will_run(monkeypatch, spawned):
+    """His "yes" must run the SAME investigation this would have started —
+    otherwise approving is approving something he was never shown."""
+    from app import offers, store as st
+    monkeypatch.setattr(st, "list_tasks", lambda n=200: [])
+    asked = {}
+    monkeypatch.setattr(offers, "propose", lambda **kw: asked.update(kw) or object())
+    responder.respond("teams", "Vinish", PR_FEEDBACK, priority=attention.P_TODAY)
+    assert "Do not assume the reviewer is right" in asked["action"]
+
+
+def test_familiar_ground_is_acted_on_without_asking(monkeypatch, spawned):
+    """The other half — "if it related to already he worked he can directly act on
+    and notify me". Asking about work already in flight is the friction he is
+    trying to remove."""
+    from app import offers, store as st
+    monkeypatch.setattr(st, "list_tasks",
+                        lambda n=200: [{"title": "PR 1049 review", "prompt": "",
+                                        "workspace": ""}])
+    monkeypatch.setattr(offers, "propose",
+                        lambda **kw: pytest.fail("asked about work already underway"))
+    assert responder.respond("teams", "Vinish", PR_FEEDBACK, priority=attention.P_TODAY)
+    assert spawned
+
+
+@pytest.mark.parametrize("text,is_ask", [
+    ("send me the swagger link when you get a minute", True),
+    ("let me know once it is deployed", True),
+    # …but aimed at somebody else, it is not his to answer.
+    ("send the release notes to the team", False),
+    ("I will send the notes tomorrow", False),
+])
+def test_a_bare_imperative_aimed_at_him_is_an_ask(text, is_ask):
+    """No "please", no "can you", and unmistakably a request. Anchored on the
+    pronoun, because "send the notes to the team" is somebody else's job."""
+    from app import triage
+    assert triage.classify("Vinish", text).action is is_ask, text

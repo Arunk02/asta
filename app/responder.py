@@ -138,7 +138,13 @@ _DEBUG = re.compile(
 
 
 def what_it_asks(text: str) -> str:
-    """'incident' | 'pr_review' | 'debug' | '' — what a worker could go and check.
+    """'incident' | 'pr_review' | 'debug' | 'ask' | '' — what a worker could check.
+
+    `ask` is the catch-all, and it is the important one. The first version
+    recognised three shapes and shrugged at everything else, which meant a
+    colleague asking anything slightly differently worded got the old behaviour —
+    a notification and nothing more. "not just incident, PR feedback , debug any
+    kind of stuff". If somebody is asking for something, it is worth finding out.
 
     Order matters and is not alphabetical. A production incident mentioned inside
     a PR discussion is still a production incident, and it is the more urgent
@@ -152,6 +158,12 @@ def what_it_asks(text: str) -> str:
         return "pr_review"
     if _DEBUG.search(blob):
         return "debug"
+    # Anything triage reads as a genuine ask. One detector for "is this an ask",
+    # shared with the notification path, rather than a second opinion here that
+    # could disagree with what he was told.
+    from . import triage
+    if triage.classify("", blob).action:
+        return "ask"
     return ""
 
 
@@ -199,6 +211,13 @@ _BRIEFS = {
         "  \"{text}\"\n\n"
         "Go and find the answer using the workspace, the logs, and the running "
         "systems. Answer the question that was actually asked."
+    ),
+    "ask": (
+        "{who} is asking Arun for something on Teams:\n\n"
+        "  \"{text}\"\n\n"
+        "Work out what they actually need and get it, using the workspace, the "
+        "logs, Jira and the running systems. If the ask is ambiguous, say which "
+        "readings are possible rather than picking one and answering confidently."
     ),
 }
 
@@ -307,6 +326,60 @@ def should_respond(kind: str, priority: int | None, key: str,
     return ""
 
 
+# --- has he worked on this before? -------------------------------------------
+#
+# "if it related to already he worked he can directly act on and notify me , if it
+# is new related ask me do you want me to work on , can i analyse once approved".
+#
+# The line is not "how confident am I" — it is whether the thing being asked about
+# is already in Asta's record of his work. That is checkable rather than guessed:
+# a PR number, a Jira key or a repo it has run a task against is territory he has
+# been in, and acting there is continuing something. Anything else is a new thread
+# of work, and starting one unasked is the substitution failure in another costume.
+
+_IDENT = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
+
+
+def _identifiers(text: str) -> set[str]:
+    """Tickets, PR numbers and repo names named in a message."""
+    out = {m.group(0).upper() for m in _IDENT.finditer(text or "")}
+    pr = pr_number(text)
+    if pr:
+        out.add(f"PR#{pr}")
+    return out
+
+
+def _worked_on() -> set[str]:
+    """Identifiers Asta has already run work against, from its own task record."""
+    out: set[str] = set()
+    try:
+        rows = store.list_tasks(200)
+    except Exception:                                          # noqa: BLE001
+        return out
+    for t in rows:
+        blob = f"{t.get('title', '')} {t.get('prompt', '')}"
+        out |= _identifiers(blob)
+        ws = (t.get("workspace") or "").strip().lower()
+        if ws:
+            out.add(f"WS:{ws}")
+    return out
+
+
+def familiar(text: str) -> tuple[bool, str]:
+    """(is this a continuation of his work, why). Empty reason when it is new."""
+    named = _identifiers(text)
+    known = _worked_on()
+    hit = named & known
+    if hit:
+        return True, "already worked on " + ", ".join(sorted(hit)[:3])
+    low = (text or "").lower()
+    for key in (k for k in known if k.startswith("WS:")):
+        name = key[3:]
+        if len(name) > 3 and name in low:
+            return True, f"in the {name} workspace"
+    return False, ""
+
+
 # --- the act ------------------------------------------------------------------
 
 def respond(source: str, who: str, text: str, priority: int | None = None,
@@ -324,14 +397,28 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     why_not = should_respond(kind, priority, key, now=time.time())
     if why_not:
         return None
+    known, why = familiar(text)
     _note_started(time.time())
     _note_handled(key)
+    if not known:
+        # New ground. Ask before spending a turn on it — and ask in the form that
+        # already works everywhere else, so his "yes" runs the analysis with the
+        # same brief this would have used.
+        from . import offers
+        offers.propose(
+            subject=f"🔎 {who or 'Someone'} asked about something new",
+            context=f"{who or 'Someone'}: {message_of(text)[:400]}",
+            question=f"Want me to look into it?",
+            action=brief_for(kind, who, text),
+            kind="investigate",
+            payload={"who": who, "source": source, "responder_kind": kind})
+        return None
     t = tasks.spawn(title_for(kind, who, text),
                     brief_for(kind, who, text),
                     "analysis",                     # read-only. never code.
                     workspace or None)
     store.kv_set(f"responder_task:{t['id']}",
-                 f"{source}|{who}|{kind}")
+                 f"{source}|{who}|{kind}|{why}")
     return t
 
 

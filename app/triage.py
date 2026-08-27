@@ -114,6 +114,12 @@ _ASK = re.compile(
     rf"|\b{_PLEASE}\b.{{0,14}}\b(do|add|fill|vote|book|complete|share|update|join|"
     r"assemble|find|check|review|help|refrain|keep|connect|suggest|confirm|"
     r"support|send|raise|reply|respond|attend|use|avoid|ensure|provide)\b"
+    # A bare imperative aimed AT him. "send me the swagger link", "let me know
+    # once it is deployed" — no "please", no "can you", and unmistakably a request.
+    # Anchored on the pronoun so "send the release notes to the team" (aimed at
+    # somebody else) does not become his to answer.
+    r"|\b(send|share|give|get|forward|pass|show)\s+(me|us)\b"
+    r"|\blet\s+(me|us)\s+know\b"
     r"|\b(reminder|remember|don'?t forget)\b.{0,20}\b(to|your)\b"
     r"|\bdo\s+we\s+(have|know|need)\b"
     r"|\bplease\s+(review|check|confirm|approve|share|send|update|look|advise|fix|join)\b"

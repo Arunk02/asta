@@ -17,6 +17,7 @@ worth it for a cloned voice, painful for real-time chat.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re

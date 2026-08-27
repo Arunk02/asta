@@ -1994,8 +1994,9 @@ async def teams_unread(debug: bool = False) -> str:
         if debug:
             rows = await teams_bridge.rail_diagnostic()
             return "Rail signals:\n" + "\n".join(
-                f"  {r.get('name','?')!r} text={r.get('text','')[:60]!r} "
-                f"aria={r.get('aria','')[:60]!r} tid={r.get('tid','')!r}"
+                (f"  ERROR {r['error']} url={r.get('url','')}" if r.get("error")
+                 else f"  {r.get('name','?')!r} text={r.get('text','')[:60]!r} "
+                      f"aria={r.get('aria','')[:60]!r} tid={r.get('tid','')!r}")
                 for r in rows)
         items = await chat_watch.pending()
     except RuntimeError as exc:

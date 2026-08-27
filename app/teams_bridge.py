@@ -436,8 +436,6 @@ async def rail_diagnostic(limit: int = 12) -> list[dict]:
         if not rows:
             return [{"error": f"rail painted {found} treeitem(s) but none parsed",
                      "url": page.url[:120]}]
-    for r in (rows or []):
-        r["unread_verdict"] = _row_is_unread(r)
     return (rows or [])[:limit]
 #: Rail entries that are furniture rather than conversations.
 _NOT_A_CHAT = {"copilot", "mentions", "discover", "drafts", "saved", "chats",

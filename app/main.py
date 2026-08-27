@@ -131,8 +131,13 @@ async def startup() -> None:
         # The voice model's cold start is 11.4 seconds; every later utterance is
         # 1.05. Paying it here means the first call of the day does not pay it in
         # front of whoever picked up. Fire-and-forget — a warm-up that fails must
-        # never stop the server coming up.
-        meetings.warm_the_voice()
+        # never stop the server coming up, which is exactly what an unguarded
+        # call did: `meetings` is not in main's import list, so this raised
+        # NameError inside the startup handler and the whole server refused to
+        # boot. The full suite was green throughout — nothing exercises startup.
+        with contextlib.suppress(Exception):
+            from . import meetings as _meetings
+            _meetings.warm_the_voice()
         daemon.start("teams_session", teams_bridge.session_watch_loop)
         if teams_bridge.ACTIVITY_POLL_SECONDS > 0:
             daemon.start("teams_activity", teams_bridge.activity_watch_loop)

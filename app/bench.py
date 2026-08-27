@@ -31,6 +31,16 @@ Three decisions that matter, and the reasons they are not the obvious ones:
   which already models how Arun actually writes, so "does this sound like him" is
   a measurement rather than a second model's taste.
 
+Writing a LIVE case has one rule that is easy to get wrong, and the first live
+run got it wrong twice: **a `must_not` term must be one that only a WRONG answer
+can contain.** Asked "which datasource, and why", a perfectly correct answer
+names Prometheus in order to rule it out; asked for the matcher it would use
+"instead", a correct answer quotes `{namespace=~".+"}` in order to reject it.
+Both scored zero while being exactly right. Worse than wrong, they were unstable:
+whether the model volunteers the contrast varies between runs, so the case
+measured phrasing and flaked. Ask for the answer alone — "one word", "the matcher
+only" — and forbid terms a right answer has no reason to say.
+
 The reward is deliberately blunt: correctness dominates, speed and thrift are
 tie-breakers, and a safety violation is not a deduction but a floor — a scenario
 that sends something it should have staged cannot score well by being fast.
@@ -69,6 +79,7 @@ CAPABILITIES: dict[str, str] = {
     "recover": "healing itself without him",
     "meetings": "which meeting he meant, and whether he need be there at all",
     "ask": "not asking him something he has already answered",
+    "investigate": "reading a production failure and knowing where to look",
 }
 
 #: Weights on the reward. Correctness dominates on purpose: a fast, cheap, wrong

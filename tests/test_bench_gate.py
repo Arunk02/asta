@@ -87,3 +87,28 @@ async def test_the_suite_is_not_quietly_shrinking():
     assert out["total"] >= 60, f"only {out['total']} scenarios — did a suite fail to load?"
     covered = set(out["capabilities"])
     assert covered >= set(CLEAN), f"capabilities missing from the run: {set(CLEAN) - covered}"
+
+
+@pytest.mark.asyncio
+async def test_ci_never_spends_tokens_or_reaches_a_brain():
+    """The gate must stay free and deterministic.
+
+    Live cases go through Copilot CLI: they cost money, they need a working
+    login, and their wording varies between runs. Any of those in a CI gate turns
+    a red build into a coin flip, and a coin-flip gate gets ignored — which is
+    exactly how a measurement stops protecting anything.
+    """
+    out = await bench.run()
+    assert out["tokens"] == 0, f"the default run spent {out['tokens']} tokens"
+    assert not [r for r in out["results"] if r["live"]], "a live case ran in CI"
+    assert out["skipped_live"] > 0, (
+        "no live cases were skipped — either they vanished or `live` stopped "
+        "being honoured, and both mean CI is measuring something else")
+
+
+def test_live_cases_declare_a_token_budget():
+    """An unbudgeted live case reports thrift=1.0 whatever it spends, so a change
+    that quietly triples the prompt would look free."""
+    unbudgeted = [c["id"] for c in bench.load()
+                  if c.get("live") and not (c.get("budget") or {}).get("tokens")]
+    assert not unbudgeted, f"live cases with no token budget: {unbudgeted}"

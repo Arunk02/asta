@@ -252,6 +252,48 @@ async def _ask(case: dict) -> dict:
     return {"text": f"reused={bool(found)} answer={found or 'none'}"}
 
 
+# --- investigate: production failures, through a real brain ------------------
+
+#: Rough tokens-per-character. Only for reporting cost on the live tier, where
+#: an order of magnitude is the useful precision — nothing is decided on it.
+_CHARS_PER_TOKEN = 4
+
+
+async def _investigate(case: dict) -> dict:
+    """Ask a REAL brain, holding the real playbook, where it would look.
+
+    Deliberately measures the QUERY, not the data. Letting the brain actually hit
+    Grafana and Temporal would grade whichever incident happens to be in the logs
+    this afternoon: the expected answer changes hourly, so a red run would mean
+    "production is quiet today" as often as it means "Asta got worse". What is
+    stable, and what actually matters, is whether it knows WHERE to look — the
+    namespace, the datasource, the filter shape, the tool order. Those are facts
+    with right answers, and they are the part that goes wrong.
+
+    The playbook is the skill file itself, so these score the same text a real
+    turn loads. A case that passes because the grader was told the answer would
+    be worthless; nothing here reveals a namespace the skill does not already
+    contain.
+    """
+    from . import copilot_cli, skills
+    g = _given(case)
+    parts = []
+    for name in g.get("skills", []) or []:
+        body = skills.load(name)
+        if body:
+            parts.append(f"--- {name} ---\n{body}")
+    playbook = "\n\n".join(parts)
+    prompt = (
+        f"{playbook}\n\n"
+        f"Answer using ONLY the playbook above. Be exact and brief — the query or "
+        f"the name asked for, nothing else. Do not call any tools.\n\n"
+        f"{case.get('ask', '')}")
+    answer = await copilot_cli.one_shot(
+        prompt, timeout=int(g.get("timeout", 180)), effort=g.get("effort", ""))
+    return {"text": answer or "",
+            "tokens": (len(prompt) + len(answer or "")) // _CHARS_PER_TOKEN}
+
+
 # --- context: using what the workspace already knows -------------------------
 
 async def _context(case: dict) -> dict:
@@ -278,6 +320,7 @@ RUNNERS: dict[str, Callable[[dict], Awaitable[dict]]] = {
     "jira": _jira,
     "meetings": _meetings,
     "ask": _ask,
+    "investigate": _investigate,
     "recover": _recover,
     "context": _context,
 }

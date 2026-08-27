@@ -650,8 +650,10 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
     is judged: only real asks are marked as needing him, and the rest are simply
     stated once so he has the context without being asked for anything.
     """
-    from . import attention, triage
+    from . import attention, responder, triage
     verdicts = []
+    #: Investigations this batch started — see the Teams path for why he is told.
+    started: list[str] = []
     for m in fresh[:12]:
         v = triage.classify(m.get("sender", ""), m.get("subject", ""),
                             m.get("preview", ""))
@@ -672,7 +674,17 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
                                   priority=pri, due_at=due):
             continue
         verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)
+        # Same actuator as the Teams path, called the same way. A responder wired
+        # into one source and not the other is the per-source drift that lost
+        # `critical` on Teams and the L2 queue exemption on mail.
+        task = responder.respond("outlook", m.get("sender", ""), blob,
+                                 priority=pri, key=led_key)
+        if task:
+            started.append(responder.line_for(task, m.get("sender", ""),
+                                              responder.what_it_asks(blob)))
     text, needs = triage.summarize(verdicts, "📧 Outlook")
+    if started:
+        text = (text + "\n\n" if text else "") + "\n".join(started)
     if not text:
         return
     # Only a genuine ask earns an immediate interrupt. Pure FYI rides the ambient
@@ -680,7 +692,8 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
     # rank of the most urgent thing in the batch travels with it, so delivery can
     # tell "prod is down" from "someone asked a question" at three in the morning.
     ranks = [v.priority for v in verdicts if v.priority is not None]
-    await notify.notify(text, "outlook", urgency="direct" if needs else "ambient",
+    await notify.notify(text, "outlook",
+                        urgency="direct" if (needs or started) else "ambient",
                         priority=min(ranks) if ranks else None,
                         considered=True)   # attention.consider ran above
 

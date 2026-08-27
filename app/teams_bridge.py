@@ -1121,8 +1121,12 @@ async def _push_activity(notify, wanted: list[str]) -> None:
     now on whether anyone actually wants a move from him — not merely on whether
     his name appeared.
     """
-    from . import attention, triage
+    from . import attention, responder, triage
     verdicts = []
+    #: Investigations this batch started, so he is told the checking is under way
+    #: rather than merely that someone asked. "X is asking about Y" is another
+    #: thing on his list; "X is asking about Y, I'm checking" is one fewer.
+    started: list[str] = []
     for it in wanted[:12]:
         who, _, rest = it.partition(" — ")
         addressed = any(m in it.lower() for m in _DIRECT_MARKERS)
@@ -1140,10 +1144,22 @@ async def _push_activity(notify, wanted: list[str]) -> None:
                                   why=why, priority=pri, due_at=due):
             continue
         verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)
+        # The actuator. Everything above this line decides how loudly to tell
+        # him; this is the part that goes and finds out. Read-only, so it needs
+        # no permission, and it does not consult presence — he asked for this to
+        # happen "whether im online or not".
+        task = responder.respond("teams", who, it, priority=pri, key=led_key)
+        if task:
+            started.append(responder.line_for(task, who, responder.what_it_asks(it)))
     text, needs = triage.summarize(verdicts, "💬 Teams")
+    if started:
+        text = (text + "\n\n" if text else "") + "\n".join(started)
     if text:
         ranks = [v.priority for v in verdicts if v.priority is not None]
-        await notify.notify(text, "teams", urgency="direct" if needs else "ambient",
+        # Work started on his behalf is always worth an interrupt: it is the
+        # difference between a queue he must drain and one that is draining.
+        await notify.notify(text, "teams",
+                            urgency="direct" if (needs or started) else "ambient",
                             priority=min(ranks) if ranks else None,
                             considered=True)   # attention.consider ran above
 

@@ -468,6 +468,15 @@ async def call_person(who: str, video: bool = False) -> str:
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
     kind = "video" if video else "audio"
+    # A headed call cannot share the profile with the pooled headless browser.
+    # Chromium tolerates exactly one writer per user-data-dir, and the pool
+    # deliberately keeps its browser alive between operations — so by the time a
+    # call is placed there is already one running, and the second launch either
+    # fails or corrupts the store both are writing. That is precisely what left
+    # Teams unable to boot for fourteen and a half hours on 26 August. Drop ours
+    # first; the pool rebuilds itself on the next headless operation.
+    await teams_bridge.close_pool()
+    await teams_bridge.close_pool()   # same single-writer rule as call_person
     pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
     placed = False
     try:

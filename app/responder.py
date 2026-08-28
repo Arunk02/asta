@@ -137,6 +137,35 @@ _DEBUG = re.compile(
     re.I)
 
 
+#: Text that is not the sender's words — a URL. Stripped before deciding what an
+#: ask IS, because a link is a reference and not a description of the problem.
+#: "https://github.com/VinishKumar1/incident-copilot" was classified as a
+#: production INCIDENT and queued an approval request, on the strength of the word
+#: "incident" inside a repository name.
+_URL_IN_TEXT = re.compile(r"https?://\S+")
+
+#: Broadcasts. "Everyone please review PR for the fix of …" is addressed to a
+#: channel, and "Action Required: Review Confluence & Jira Space Permissions"
+#: went to the whole company — neither is somebody waiting on Arun, and each one
+#: queues an approval he then has to dismiss. Three of these had stacked up
+#: unanswered, which is how a queue of questions teaches him to ignore the queue.
+_BROADCAST = re.compile(
+    r"\b(everyone|all|team|folks|guys|hi all|dear (colleagues?|all|team))\b"
+    r"\s*(please|,|:|-)|\baction required\b|\bdo not reply\b|\bno[- ]reply\b",
+    re.I)
+
+#: Senders that broadcast by nature. Reuses the list the mail path already keeps,
+#: so a name added there is understood here too.
+def from_bulk_sender(who: str) -> bool:
+    from . import outlook
+    return bool(who) and bool(outlook._BULK_SENDER.search(who))
+
+
+def is_broadcast(who: str, text: str) -> bool:
+    """Addressed to a room rather than to him."""
+    return from_bulk_sender(who) or bool(_BROADCAST.search(text or ""))
+
+
 def what_it_asks(text: str) -> str:
     """'incident' | 'pr_review' | 'debug' | 'ask' | '' — what a worker could check.
 
@@ -151,7 +180,8 @@ def what_it_asks(text: str) -> str:
     reading; being wrong the other way costs him an outage he was told about in
     the wrong words.
     """
-    blob = text or ""
+    # Judged on what they WROTE, not on what a link happens to be called.
+    blob = _URL_IN_TEXT.sub(" ", text or "")
     if _INCIDENT.search(blob):
         return "incident"
     if _PR.search(blob) or _REVIEW_ASK.search(blob):
@@ -304,7 +334,7 @@ def _note_handled(key: str) -> None:
 
 
 def should_respond(kind: str, priority: int | None, key: str,
-                   now: float | None = None) -> str:
+                   now: float | None = None, broadcast: bool = False) -> str:
     """"" when it should run, otherwise the reason it must not.
 
     Returned as a REASON rather than a bool because every one of these is a
@@ -317,6 +347,8 @@ def should_respond(kind: str, priority: int | None, key: str,
         return "responder is off (ASTA_RESPOND)"
     if not kind:
         return "nothing checkable in it"
+    if broadcast:
+        return "addressed to a room, not to him"
     if priority is not None and priority > MAX_PRIORITY:
         return f"ranked p{priority} — below the bar for spending a turn"
     if already_handled(key):
@@ -394,7 +426,8 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     from . import tasks
     kind = what_it_asks(text)
     key = key or attention.key_for(text)
-    why_not = should_respond(kind, priority, key, now=time.time())
+    why_not = should_respond(kind, priority, key, now=time.time(),
+                             broadcast=is_broadcast(who, text))
     if why_not:
         return None
     known, why = familiar(text)

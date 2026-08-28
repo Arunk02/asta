@@ -2009,6 +2009,46 @@ async def _conduct(conv0: dict, first_text: str, sink, channel: str) -> None:
         return
 
 
+def _known_threads() -> list[str]:
+    """Distinct chat names Asta has actually read messages in."""
+    try:
+        rows = store.teams_messages(limit=800)
+    except Exception:                                          # noqa: BLE001
+        return []
+    return sorted({(r.get("chat") or "").strip() for r in rows if (r.get("chat") or "").strip()})
+
+
+def _recipient_warning(intent: dict) -> str:
+    """Say when the name he is approving is not the thread he actually talks in.
+
+    What he approves is the NAME the model typed, and Teams opens whatever that
+    name resolves to. "Divya" resolves to a real, EMPTY 1:1 — while the person he
+    actually talks to is "Palikala Divya Maheswari". The message would have gone
+    to the wrong person and the approval would have looked completely normal.
+
+    Answered from threads Asta has already read, so it costs nothing and cannot
+    fail. His rule from the first week: verify sends, never assume.
+    """
+    to = (intent.get("to") or "").strip()
+    if not to or intent.get("channel") not in ("teams", "chat"):
+        return ""
+    known = _known_threads()
+    if not known:
+        return ""
+    low = to.lower()
+    if any(low == k.lower() for k in known):
+        return ""                                   # exactly the thread he uses
+    near = [k for k in known if low in k.lower()]
+    if len(near) == 1:
+        return (f"⚠️ You talk to **{near[0]}** — “{to}” may open a different "
+                f"chat with a similar name.\n\n")
+    if len(near) > 1:
+        return (f"⚠️ “{to}” matches {len(near)} of your threads "
+                f"({', '.join(near[:3])}) — name the person in full.\n\n")
+    return (f"⚠️ No messages on record with **{to}** — check this is the right "
+            f"person before it goes out.\n\n")
+
+
 async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> None:
     """Show Arun a drafted outward message and ask before it is sent. The draft is
     persisted as an assistant turn so it survives in history, and the loop waits:
@@ -2020,6 +2060,7 @@ async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> No
     to = f" to {where}*{intent['to']}*" if intent.get("to") else ""
     body = (f"📤 Ready to send{to} on **{intent.get('channel', 'chat')}** — can I send this?\n\n"
             f"———\n{intent.get('what', '')}\n———\n\n"
+            + _recipient_warning(intent) +
             "Reply “send” to confirm, or tell me what to change.")
     store.add_ui_message(cid, "assistant", body, {"via": "loop-confirm-send", "channel": channel})
     await sink.send({"type": "delta", "text": body})

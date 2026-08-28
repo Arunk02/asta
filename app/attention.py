@@ -261,6 +261,17 @@ def assigned_to_him(text: str) -> bool:
     return bool(MY_GROUPS) and any(g in low for g in MY_GROUPS)
 
 
+#: An acknowledgement, not a request. "X reacted to your message" carries the
+#: "in chat with you" marker like every other row, so without this every emoji
+#: somebody leaves on his message would become a direct push — the noise that
+#: gets a notifier muted, and a muted notifier loses the real ones too.
+_REACTION = re.compile(r"\b(reacted to|liked|hearted)\b.{0,24}\byour\b", re.I)
+
+
+def is_reaction(text: str) -> bool:
+    return bool(_REACTION.search(text or ""))
+
+
 def rank(action: bool, text: str, *, addressed: bool = False, key: str = "",
          who: str = "", now: float | None = None) -> tuple[int, str, float | None]:
     """The WHOLE per-arrival ranking: criticality, score, chase escalation.
@@ -287,6 +298,15 @@ def rank(action: bool, text: str, *, addressed: bool = False, key: str = "",
         # layer, which is the same shape as every other per-layer drift here.
         pri = min(pri, P_TODAY)
         why = f"assigned to your group · {why}"
+    elif addressed and not is_reaction(text):
+        # Somebody used his name. That IS the ask, whether or not the sentence
+        # parses as one — "hi Arunkumar K" contains no ask verb and is
+        # unmistakably someone wanting him. Ranked P_FYI it went out ambient, and
+        # ambient is held while he is at the laptop, so on 28 August four people
+        # tagged him between 11:58 and 13:04 and not one reached his phone. He had
+        # already said the rule: "if they tag me u have to respond to me".
+        pri = min(pri, P_TODAY)
+        why = f"they tagged you · {why}"
     pri, chased = escalate_for_chase(pri, key, now=now)
     return pri, (chased or why), due
 

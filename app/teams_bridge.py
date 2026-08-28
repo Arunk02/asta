@@ -1248,11 +1248,18 @@ async def _push_activity(notify, wanted: list[str]) -> None:
         text = (text + "\n\n" if text else "") + "\n".join(started)
     if text:
         ranks = [v.priority for v in verdicts if v.priority is not None]
+        top = min(ranks) if ranks else None
         # Work started on his behalf is always worth an interrupt: it is the
         # difference between a queue he must drain and one that is draining.
+        # Urgency from the RANK too, not only from whether triage found an ask
+        # verb. "hi Arunkumar K" parses as no-ask, so `needs` was False and the
+        # push went ambient — which notify holds while he is at the laptop. Being
+        # tagged has already floored this to P_TODAY; the urgency decision has to
+        # read that, or the floor only changes a number nobody acts on.
+        wants_him = needs or started or (top is not None and top <= attention.P_TODAY)
         await notify.notify(text, "teams",
-                            urgency="direct" if (needs or started) else "ambient",
-                            priority=min(ranks) if ranks else None,
+                            urgency="direct" if wants_him else "ambient",
+                            priority=top,
                             considered=True)   # attention.consider ran above
 
 

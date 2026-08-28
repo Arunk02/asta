@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 
 from . import store
 
@@ -219,6 +220,79 @@ def addressed_to_him(chat: str, sender: str, text: str,
     return engaged(chat, now)
 
 
+# --- what he actually reads ---------------------------------------------------
+#
+# "what is this message what i will get know from these ? nothing proper"
+#
+# He was sent this, verbatim:
+#
+#     · Palikala Divya Maheswari — Palikala Divya Maheswari: Arunkumar K
+#     28/08/2026 18:38
+#     lets analyse on some idea and see how it going on weekend sunday and Monday
+#     · Vinish Kumar — Vinish Kumar: https://maersk.service-now.com/now/platform-…
+#
+# Three faults in one line. The 1:1 names the person twice, because the chat and
+# the sender are the same thing and both were printed. The body opens with
+# "Arunkumar K / 28/08/2026 18:38", which is the quoted header Teams renders
+# inside a REPLY — scraped along with the text, so the actual sentence starts on
+# line three. And a bare URL says nothing at all about what it is.
+
+#: The quote block Teams puts at the top of a reply: a name, then a timestamp.
+_REPLY_HEADER = re.compile(
+    r"^\s*[^\n]{1,60}\n\s*\d{1,2}/\d{1,2}/\d{2,4}[ ,]+\d{1,2}:\d{2}\s*\n",
+    re.M)
+
+#: Teams appends these to the scraped body; they are not what anyone said.
+_TRAILING_NOISE = re.compile(
+    r"\n+\s*\d*\s*(like|heart|laugh|surprised|sad|angry)\s+reactions?[^\n]*$", re.I)
+
+_URL = re.compile(r"https?://\S+")
+
+
+def clean_message(text: str) -> str:
+    """The sentence somebody actually typed, without Teams' furniture."""
+    out = _REPLY_HEADER.sub("", (text or "").strip(), count=1)
+    out = _TRAILING_NOISE.sub("", out)
+    return re.sub(r"\n{2,}", "\n", out).strip()
+
+
+def describe_link(url: str) -> str:
+    """What a bare link IS, in the words he would use to decide whether to open it.
+
+    "Vinish Kumar: https://github.com/VinishKumar1/incident-copilot" told him
+    nothing he could act on. The host and the path do.
+    """
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    host = (u.netloc or "").replace("www.", "")
+    tail = [p for p in (u.path or "").split("/") if p][:3]
+    known = {"github.com": "GitHub", "maersk.service-now.com": "ServiceNow",
+             "maersk-tools.atlassian.net": "Jira",
+             "grafana-mcp.westeurope.azure.mop.maersk.io": "Grafana"}
+    label = known.get(host, host)
+    return f"{label}: {'/'.join(tail)}" if tail else label
+
+
+def summarise(text: str, limit: int = 160) -> str:
+    """One readable line for a message — links named rather than pasted raw."""
+    body = clean_message(text)
+    links = _URL.findall(body)
+    without = _URL.sub("", body).strip(" -–—:\n\t")
+    if links and not without:
+        return "shared " + "; ".join(describe_link(u) for u in links[:2])
+    if links:
+        return f"{without[:limit]} · {describe_link(links[0])}"
+    return body[:limit] + ("…" if len(body) > limit else "")
+
+
+def render(chat: str, who: str, text: str, priority: int | None = None) -> str:
+    """The line on his phone. Names the person once."""
+    mark = "🔴" if (priority is not None and priority <= 1) else "·"
+    where = "" if (chat or "").strip().lower() == (who or "").strip().lower() \
+        else f" in {chat}"
+    return f"{mark} {who}{where}: {summarise(text)}"
+
+
 def is_from_him(sender: str) -> bool:
     """His own messages are not things he was asked."""
     from . import meetings
@@ -356,7 +430,7 @@ async def sweep(notify=None) -> list[dict]:
             if not direct:
                 continue
             handled.append({"chat": chat, "who": who, "text": text, "priority": pri})
-            lines.append(f"{'🔴' if v.action else '·'} {chat} — {who}: {text[:120]}")
+            lines.append(render(chat, who, text, pri))
             task = responder.respond("teams-chat", who, text, priority=pri, key=key)
             if task:
                 started.append(responder.line_for(task, who,

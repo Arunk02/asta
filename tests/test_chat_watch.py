@@ -480,3 +480,75 @@ def test_unforwarded_group_traffic_is_still_recorded(monkeypatch):
     _sweep_with(monkeypatch, "BEP_Telikos : Defect Triage", "Rupesh Kumar",
                 "Shall we join here now?")
     assert seen, "dropped it entirely instead of recording it"
+
+
+# --- what he actually reads ---------------------------------------------------
+# "what is this message what i will get know from these ? nothing proper"
+#
+# He was sent this, verbatim:
+#
+#     · Palikala Divya Maheswari — Palikala Divya Maheswari: Arunkumar K
+#     28/08/2026 18:38
+#     lets analyse on some idea and see how it going on weekend sunday and Monday
+#     · Vinish Kumar — Vinish Kumar: https://maersk.service-now.com/now/platform-…
+#
+# Three faults in one notification: the person named twice, the body opening with
+# a quoted reply header so the real sentence starts on line three, and a bare URL
+# that says nothing about what it is.
+
+REPLY = ("Arunkumar K\n28/08/2026 18:38\nlets analyse on some idea and see how it "
+         "going on weekend sunday and Monday, if all goes go")
+
+
+def test_a_one_to_one_names_the_person_once():
+    line = chat_watch.render("Palikala Divya Maheswari", "Palikala Divya Maheswari",
+                             "hello", 1)
+    assert line.count("Palikala Divya Maheswari") == 1
+
+
+def test_a_group_message_says_which_group():
+    """Where it was said is the part he cannot infer from the sender."""
+    line = chat_watch.render("BEP_Telikos : Defect Triage", "Rupesh Kumar", "hi", 1)
+    assert "Rupesh Kumar" in line and "BEP_Telikos" in line
+
+
+def test_the_quoted_reply_header_is_not_the_message():
+    """Teams renders "<name>\\n<dd/mm/yyyy hh:mm>" above a reply, and it was scraped
+    with the body — so the sentence he needed started on the third line."""
+    assert chat_watch.clean_message(REPLY).startswith("lets analyse")
+    assert "28/08/2026" not in chat_watch.clean_message(REPLY)
+
+
+def test_reaction_counts_are_not_part_of_what_was_said():
+    assert chat_watch.clean_message("Can you confirm the fix\n\n4 Like reactions.") \
+        == "Can you confirm the fix"
+
+
+def test_an_ordinary_message_survives_cleaning():
+    """The cleaner must not eat real text — that would be worse than the noise."""
+    assert chat_watch.clean_message("prod is stuck since 3pm") == "prod is stuck since 3pm"
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://github.com/VinishKumar1/incident-copilot", "GitHub: VinishKumar1/incident-copilot"),
+    ("https://maersk.service-now.com/now/platform-analytics-workspace/x", "ServiceNow"),
+    ("https://maersk-tools.atlassian.net/browse/BEPTELIKOS-10500", "Jira"),
+])
+def test_a_link_is_named_not_pasted(url, expected):
+    assert expected in chat_watch.describe_link(url)
+
+
+def test_a_message_that_is_only_a_link_says_what_was_shared():
+    out = chat_watch.summarise("https://github.com/VinishKumar1/incident-copilot")
+    assert out.startswith("shared GitHub")
+    assert "https://" not in out
+
+
+def test_a_message_with_text_and_a_link_keeps_both():
+    out = chat_watch.summarise("have a look at this https://github.com/a/b")
+    assert "have a look at this" in out and "GitHub: a/b" in out
+
+
+def test_a_long_message_is_cut_rather_than_sent_whole():
+    out = chat_watch.summarise("word " * 200)
+    assert len(out) <= 170 and out.endswith("…")

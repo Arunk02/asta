@@ -187,3 +187,62 @@ def test_a_call_already_in_progress_is_not_ours_to_answer(monkeypatch):
     from app import meetings
     monkeypatch.setattr(meetings, "_CALL", {"page": object()})
     assert incoming.meetings_busy()
+
+
+# --- can Asta actually be heard? ----------------------------------------------
+# The check that was missing when five calls were placed and every one transmitted
+# silence. `say_in_call` measured audio PLAYED and reported success; the far end
+# heard nothing, because macOS denies the microphone by handing the app a valid,
+# correctly-labelled track full of zeroes.
+
+def test_the_check_measures_what_ARRIVES_not_what_was_played():
+    """The distinction the whole failure turned on."""
+    import inspect
+    from app import voice
+    src = inspect.getsource(voice.self_test)
+    assert "browser_mic_delivers" in src
+    assert "play_to_device" in src
+
+
+def test_it_listens_before_it_plays():
+    """Starting playback first measures nothing — a browser that is not yet
+    listening cannot report a level. That cost a whole cycle the first time."""
+    import inspect
+    from app import voice
+    src = inspect.getsource(voice.self_test)
+    assert src.index("browser_mic_delivers") < src.index("play_to_device")
+
+
+def test_his_microphone_is_restored_whatever_happens():
+    """Twice in one day a test left his system input on BlackHole and his own Teams
+    calls had no working microphone."""
+    import inspect
+    from app import voice
+    src = inspect.getsource(voice.self_test)
+    assert "finally:" in src
+    tail = src[src.index("finally:"):]
+    assert "set_call_mic(device=was)" in tail
+
+
+def test_with_no_virtual_microphone_it_says_so_rather_than_testing_nothing(monkeypatch):
+    import asyncio as _a
+
+    from app import voice
+    monkeypatch.setattr(voice, "CALL_DEVICE", "")
+    out = _a.run(voice.self_test())
+    assert "no virtual microphone" in out["error"]
+    assert out["restored"] is False        # nothing was changed, nothing to restore
+
+
+def test_silence_is_reported_as_silence_not_as_success(monkeypatch):
+    """A peak of zero with a perfect device label is exactly what a denied
+    microphone looks like, and it must never read as working."""
+    import asyncio as _a
+
+    from app import agent, voice
+    monkeypatch.setattr(voice, "self_test",
+                        lambda: _done({"peak": 0.0, "label": "BlackHole 2ch",
+                                       "heard": False, "device": "BlackHole 2ch"}))
+    out = _a.run(agent.voice_check())
+    assert "SILENT" in out
+    assert "not be transmitted" in out

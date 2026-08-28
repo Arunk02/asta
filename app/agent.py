@@ -1181,6 +1181,28 @@ async def join_meeting(join_url: str, title: str = "", speak: bool = False) -> s
             f"anything from it that's yours. I'm only listening — I won't speak.")
 
 
+async def voice_check() -> str:
+    """Can Asta actually be HEARD in a call from this machine? Measures it.
+
+    Use before promising to speak in a call or meeting, and whenever a colleague
+    says they could not hear anything. It plays a tone into the virtual microphone
+    while a real browser listens, and reports the level that arrived — the check
+    that was missing when five calls were placed and every one transmitted
+    silence."""
+    from . import voice
+    r = await voice.self_test()
+    if r.get("error"):
+        return f"🎙 Cannot be heard — {r['error']}"
+    peak = r.get("peak")
+    if r.get("heard"):
+        return (f"🎙 Audio reaches the call: peak {peak:.4f} on "
+                f"{r.get('label') or r.get('device')}. Speaking works.")
+    return (f"🎙 SILENT — the browser got a track labelled "
+            f"{r.get('label') or r.get('device')!r} and every sample was zero "
+            f"(peak {peak}). Anything Asta says will not be transmitted. This is "
+            f"macOS refusing the microphone to the process Asta runs under.")
+
+
 async def answer_call(speak: bool = False) -> str:
     """Pick up the call that is RINGING right now.
 

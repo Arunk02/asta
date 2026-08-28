@@ -66,6 +66,25 @@ async def _teams_call(who: str = "", video: bool = False) -> str:
     return f"📞 Calling {result} — I'll tell you if they pick up, and how it went."
 
 
+@op("meeting_join", lambda a: f"Join {a.get('title') or 'the meeting'}"
+                              + (" and take part" if a.get("speak") else " (listen only)"))
+async def _meeting_join(title: str = "", join_url: str = "", speak: bool = False) -> str:
+    """Join the meeting he was offered. Silent unless he asked for the other thing.
+
+    Prefers the URL the offer captured over re-resolving the title: between the
+    ping and his yes the calendar can move on, and joining the WRONG call puts him
+    in a room in front of people who watch him arrive.
+    """
+    import asyncio as _asyncio
+    if join_url:
+        result = await meetings.join(join_url, speak=speak)
+    else:
+        result = await meetings.join_by_phrase(title, speak=speak)
+    _asyncio.create_task(meetings.watch_and_report(title))
+    mode = "taking part" if speak else "listening only"
+    return f"📅 {result} — {title or 'the meeting'} ({mode}). I'll report what was said."
+
+
 @op("call_answer", lambda a: "Answer the call"
                               + (" and talk" if a.get("speak") else " (listen only)"))
 async def _call_answer(speak: bool = False) -> str:

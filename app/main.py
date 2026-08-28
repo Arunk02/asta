@@ -924,6 +924,11 @@ async def api_say_in_call(request: Request):
     return {"message": await agent_mod.say_in_call(b["text"])}
 
 
+@app.post("/api/voice/check", dependencies=[Depends(require_auth)])
+async def api_voice_check():
+    return {"message": await agent_mod.voice_check()}
+
+
 @app.post("/api/calls/answer", dependencies=[Depends(require_auth)])
 async def api_answer_call(request: Request):
     """Pick up the ringing call. Only ever called after Arun said yes."""

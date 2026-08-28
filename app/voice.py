@@ -18,6 +18,7 @@ worth it for a cloned voice, painful for real-time chat.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -601,3 +602,70 @@ def speaking_hint() -> str:
             "anything.")
 
 
+
+
+async def self_test() -> dict:
+    """Can Asta actually BE HEARD from this process? Measured, not assumed.
+
+    The one check that would have saved four calls. `say_in_call` measured audio
+    PLAYED and reported success; Vinish heard silence every time. macOS denies
+    microphone access by handing the app a valid, correctly-labelled track that
+    produces digital silence — no exception, no prompt — so every layer looked
+    healthy and nothing was transmitted.
+
+    It matters WHICH process asks. macOS grants the microphone to the responsible
+    app, and a browser Playwright launches inherits the grant of whatever launched
+    it. Proven at the time: the identical script measured peak 0.999969 run from
+    Terminal and peak 0 run from Claude Code. Asta now runs under launchd, which is
+    a third responsible process again — so the only honest answer is to run the
+    whole path here and read the number.
+
+    Plays a tone into the virtual mic while a real browser listens, exactly as a
+    call does. The system input is restored in a `finally`: leaving it on BlackHole
+    breaks his own Teams calls, which happened twice in one day.
+    """
+    from . import meetings, teams_bridge
+    out: dict = {"device": CALL_DEVICE, "restored": False}
+    if not CALL_DEVICE:
+        out["error"] = "no virtual microphone configured (ASTA_CALL_AUDIO_DEVICE)"
+        return out
+    was = await meetings.current_mic()
+    out["was"] = was
+    pw = ctx = None
+    try:
+        out["switched"] = await meetings.set_call_mic(device=CALL_DEVICE)
+        if not out["switched"]:
+            out["error"] = f"could not select {CALL_DEVICE!r}"
+            return out
+        wav = await speak("Testing one two three. This is a microphone check.")
+        out["synth_bytes"] = len(wav or b"")
+        if not wav:
+            out["error"] = "speech synthesis produced nothing"
+            return out
+        await teams_bridge.close_pool()          # one writer per profile
+        pw, ctx = await teams_bridge._launch(headless=False)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        await page.goto("https://teams.microsoft.com/v2/",
+                        wait_until="domcontentloaded", timeout=60000)
+        # Play while the browser is already listening — starting playback first is
+        # a measurement of nothing, which cost a whole cycle the first time.
+        import asyncio as _a
+        listen = _a.create_task(browser_mic_delivers(page, 2500))
+        await _a.sleep(0.4)
+        await _a.to_thread(play_to_device, wav, CALL_DEVICE)
+        heard = await listen
+        out.update(heard or {})
+        out["heard"] = float((heard or {}).get("peak") or 0) > 0.01
+    except Exception as exc:                                     # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        with contextlib.suppress(Exception):
+            if ctx is not None:
+                await ctx.close()
+            if pw is not None:
+                await pw.stop()
+        # Never leave his input on the virtual device.
+        if was and was != CALL_DEVICE:
+            with contextlib.suppress(Exception):
+                out["restored"] = await meetings.set_call_mic(device=was)
+    return out

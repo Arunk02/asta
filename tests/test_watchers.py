@@ -226,11 +226,26 @@ def test_a_chat_message_is_left_to_the_reader_that_sees_it_properly(monkeypatch)
     "Zishan M invited you: Zishan - OOO - 31/08",
     "Vinish Kumar updated — AI Ideathon — 12:41",
 ])
-def test_things_that_are_not_messages_stay_with_the_feed(row, monkeypatch):
+def test_things_that_are_not_messages_are_never_deduplicated_away(row, monkeypatch):
     """A missed call, an invite and a calendar change never appear as a message in
-    any thread, so the feed is the only thing that can see them at all."""
+    any thread, so the feed is the only thing that can see them at all.
+
+    Asserts the dedup decision only. Whether a row is ultimately WANTED also runs
+    through `msnotify.keywords()`, which is derived from the machine's username and
+    from TEAMS_WATCH_KEYWORDS — so asserting it here passed on his laptop and
+    failed on CI, testing his .env rather than this change.
+    """
     monkeypatch.setenv("ASTA_CHATWATCH", "1")
     assert not teams_bridge.duplicates_chat_watch(row)
+
+
+@pytest.mark.parametrize("row", [
+    "Missed call from Vinish Kumar — Teams call — Call — Chat",
+    "Zishan M invited you: Zishan - OOO - 31/08",
+])
+def test_the_feed_still_delivers_what_only_it_can_see(row, monkeypatch):
+    """These two are interesting unconditionally, so this holds on any machine."""
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
     assert teams_bridge._activity_wanted(row)
 
 

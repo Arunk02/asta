@@ -52,6 +52,23 @@ MAX_PER_HOUR = int(os.environ.get("ASTA_RESPOND_MAX_PER_HOUR", "4"))
 #: complained about, wearing a different hat.
 MAX_PRIORITY = attention.P_TODAY
 
+#: How recent an ask has to be before it is worth investigating.
+#:
+#: The signal that was missing. `chat_watch` opens a thread for the first time and
+#: finds the whole day in it — new to Asta, old to the world — and a background
+#: task went off to check production issues Arun had already analysed and answered
+#: hours earlier. He put it exactly:
+#:
+#:   "already for the dead old message and done work if this shares then it is
+#:    worst , if it is his old work someone giving feedback then it work now
+#:    makes sense"
+#:
+#: Both cases fall out of one test on the message's own timestamp. Feedback about
+#: work he finished months ago is still fresh INPUT — it arrived just now — and is
+#: acted on. A message from this morning that he has already dealt with is not,
+#: however recently Asta happened to read it.
+MAX_AGE_MINUTES = float(os.environ.get("ASTA_RESPOND_MAX_AGE_MIN", "90"))
+
 _RATE_KEY = "responder_recent"
 _DONE_KEY = "responder_done"
 
@@ -333,8 +350,22 @@ def _note_handled(key: str) -> None:
     store.kv_set(_DONE_KEY, json.dumps(done[-200:]))
 
 
+def too_old(sent_at: float | None, now: float | None = None) -> bool:
+    """Was this said long enough ago that acting on it now is noise?
+
+    Unknown timestamps are treated as fresh. Refusing everything Teams did not
+    render a machine-readable time for would silently drop real asks, and a
+    missing timestamp is a scraping gap rather than evidence of age.
+    """
+    import time
+    if not sent_at:
+        return False
+    return ((now or time.time()) - sent_at) > MAX_AGE_MINUTES * 60
+
+
 def should_respond(kind: str, priority: int | None, key: str,
-                   now: float | None = None, broadcast: bool = False) -> str:
+                   now: float | None = None, broadcast: bool = False,
+                   sent_at: float | None = None) -> str:
     """"" when it should run, otherwise the reason it must not.
 
     Returned as a REASON rather than a bool because every one of these is a
@@ -349,6 +380,8 @@ def should_respond(kind: str, priority: int | None, key: str,
         return "nothing checkable in it"
     if broadcast:
         return "addressed to a room, not to him"
+    if too_old(sent_at, now):
+        return f"said more than {MAX_AGE_MINUTES:.0f} min ago — not a live ask"
     if priority is not None and priority > MAX_PRIORITY:
         return f"ranked p{priority} — below the bar for spending a turn"
     if already_handled(key):
@@ -415,7 +448,7 @@ def familiar(text: str) -> tuple[bool, str]:
 # --- the act ------------------------------------------------------------------
 
 def respond(source: str, who: str, text: str, priority: int | None = None,
-            key: str = "", workspace: str = "") -> dict | None:
+            key: str = "", workspace: str = "", sent_at: float | None = None) -> dict | None:
     """Start the investigation this message deserves. The spawned task, or None.
 
     Deliberately synchronous and tiny: it decides and delegates. Everything slow
@@ -427,7 +460,7 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     kind = what_it_asks(text)
     key = key or attention.key_for(text)
     why_not = should_respond(kind, priority, key, now=time.time(),
-                             broadcast=is_broadcast(who, text))
+                             broadcast=is_broadcast(who, text), sent_at=sent_at)
     if why_not:
         return None
     known, why = familiar(text)

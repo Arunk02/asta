@@ -117,3 +117,59 @@ def test_email_is_left_alone():
     """Mail addresses are not Teams threads, and warning on every one would be
     noise of exactly the kind this file is about."""
     assert main._recipient_warning({"to": "someone@maersk.com", "channel": "email"}) == ""
+
+
+# --- a call reaches the same wrong person, louder -----------------------------
+
+def test_a_short_name_resolves_to_the_person_he_talks_to(monkeypatch):
+    """Teams' own search ranks a 1:1 titled "Divya" — a real chat with no messages
+    in it — above "Palikala Divya Maheswari". His rail is the better authority."""
+    from app import contacts
+    monkeypatch.setattr(contacts, "known_threads",
+                        lambda limit=800: ["Vinish Kumar", "Palikala Divya Maheswari"])
+    assert contacts.resolve_name("divya")[0] == "Palikala Divya Maheswari"
+
+
+def test_an_exact_name_is_left_alone(monkeypatch):
+    from app import contacts
+    monkeypatch.setattr(contacts, "known_threads",
+                        lambda limit=800: ["Vinish Kumar", "Divya", "Palikala Divya Maheswari"])
+    assert contacts.resolve_name("Divya")[0] == "Divya"
+
+
+def test_an_ambiguous_name_is_left_undecided(monkeypatch):
+    """Guessing which colleague he meant is the mistake that cannot be walked back
+    — especially for a call, which rings them."""
+    from app import contacts
+    monkeypatch.setattr(contacts, "known_threads",
+                        lambda limit=800: ["Vinish Kumar", "Rajendra Kumar"])
+    settled, near = contacts.resolve_name("kumar")
+    assert settled == "" and len(near) == 2
+
+
+def test_calling_an_ambiguous_name_refuses_rather_than_ringing_someone(monkeypatch):
+    import asyncio
+
+    from app import contacts, meetings, teams_bridge
+    # Stated rather than inherited: `call_person` checks the bridge is on before it
+    # resolves anything, so without this the test passes on his laptop (where .env
+    # sets TEAMS_BRIDGE=1) and fails on CI for a reason that has nothing to do with
+    # name resolution.
+    monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
+    monkeypatch.setattr(contacts, "resolve_name",
+                        lambda n: ("", ["Vinish Kumar", "Rajendra Kumar"]))
+    monkeypatch.setattr(meetings, "_CALL", {})
+    with pytest.raises(RuntimeError, match="say which one"):
+        asyncio.run(meetings.call_person("kumar"))
+
+
+def test_the_call_path_uses_the_same_resolver_as_the_send_path():
+    """One answer for "who does this name mean", or the two drift and a call goes
+    somewhere a message would not."""
+    import inspect
+    assert "_contacts.resolve_name(who)" in inspect.getsource(meetings_src())
+
+
+def meetings_src():
+    from app import meetings
+    return meetings.call_person

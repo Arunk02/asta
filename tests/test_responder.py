@@ -435,3 +435,56 @@ def test_a_bare_imperative_aimed_at_him_is_an_ask(text, is_ask):
     pronoun, because "send the notes to the team" is somebody else's job."""
     from app import triage
     assert triage.classify("Vinish", text).action is is_ask, text
+
+
+# --- a live ask, not the day's backlog ----------------------------------------
+#
+#   "at the time if someone pings for example now asking , asking to debug , going
+#    to debug now and sharing report ... already for the dead old message and done
+#    work if this shares then it is worst , if it is his old work someone giving
+#    feedback then it work now makes sense"
+#
+# `chat_watch` opens a thread for the first time and finds the whole day in it —
+# new to Asta, old to the world. Task #74 went off to check production issues Arun
+# had already analysed and answered hours earlier.
+#
+# All three of his cases fall out of one test on the MESSAGE's own timestamp.
+
+def test_something_asked_just_now_is_investigated():
+    import time
+    assert not responder.should_respond("incident", attention.P_TODAY, "live",
+                                        sent_at=time.time())
+
+
+def test_this_morning_is_not_a_live_ask():
+    import time
+    why = responder.should_respond("incident", attention.P_TODAY, "old",
+                                   sent_at=time.time() - 6 * 3600)
+    assert "not a live ask" in why
+
+
+def test_feedback_on_old_work_is_still_fresh_input():
+    """His distinction. A review of something he built months ago arrived just
+    now, and acting on it is exactly right — the age of the WORK is irrelevant."""
+    import time
+    assert not responder.should_respond("pr_review", attention.P_TODAY, "fb",
+                                        sent_at=time.time() - 60)
+
+
+def test_a_missing_timestamp_is_treated_as_fresh():
+    """Teams does not always render a machine-readable time. Refusing everything
+    without one would silently drop real asks, and an absent timestamp is a
+    scraping gap rather than evidence of age."""
+    assert not responder.should_respond("incident", attention.P_TODAY, "notime",
+                                        sent_at=None)
+
+
+def test_the_reader_passes_the_timestamp_through():
+    """A gate nothing supplies is a gate that never closes."""
+    import inspect
+    from app import chat_watch
+    assert 'sent_at=m.get("sent_at")' in inspect.getsource(chat_watch.sweep)
+
+
+def test_the_age_limit_is_minutes_not_days():
+    assert responder.MAX_AGE_MINUTES <= 240

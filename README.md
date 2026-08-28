@@ -829,6 +829,36 @@ actually in. Asta will not resolve "Thursday at 3" itself — it asks, because a
 library that disagrees with you about which Thursday books real time in real
 calendars.
 
+### Going and finding out, instead of only telling you
+
+The inbound path used to end at a notification. `triage` decided somebody wanted
+something, wrote one line, and stopped — so "can you check whether the production
+Temporal bookings are stuck" produced a message on your phone and nothing else.
+
+`app/responder.py` is the deciding layer (`ASTA_RESPOND=1`). It reads what the
+message asks to be *checked*, goes and checks it, and puts the answer in front of
+you with the ask. Four rules keep it from becoming the noise it replaced:
+
+- **Auto-analyse, never auto-reply.** Reading Temporal, a PR or a dashboard changes
+  nothing and runs unprompted; a message to a colleague cannot be taken back and is
+  staged for your yes like every other outward act. It spawns `analysis` tasks only
+  — never `code`, never a send.
+- **Familiar work is continued; new work is offered.** A PR number, a Jira key or a
+  repo Asta has already run a task against is ground you are on, and acting there
+  continues something. Anything else goes through an offer carrying the *same brief*
+  your yes will run.
+- **A live ask, not the day's backlog.** The reader opens a thread for the first
+  time and finds hours of history in it — new to Asta, old to the world. Only
+  recently-sent messages are investigated (`ASTA_RESPOND_MAX_AGE_MIN`), and a thread
+  you have already replied in is left alone. Feedback on work you finished months
+  ago is unaffected: it arrived just now.
+- **Broadcasts are not asks.** A company-wide "Action Required", a channel post
+  opening "Everyone please review" — nobody is waiting on you, and an approval queue
+  you never answer teaches you to ignore the queue.
+
+Presence gates the *telling*, never the working: `notify` holds ambient pushes while
+you are at the laptop, and nothing in this path consults it.
+
 ### Sitting in on a call
 
 This section used to say **no live-call join, deliberately**, on the grounds that it
@@ -852,12 +882,37 @@ required them:
   recording there is nothing to summarise and promising one would be the confident
   lie. If there is a record, it reports only what concerns you: decisions affecting
   your work, anything assigned to you, questions left open for you. Not minutes.
+- **Joining muted is the default, not the only mode.** "Join and listen" and "join
+  and take part" are both reachable (`join_meeting(..., speak=True)`); silence is
+  what you get unless you asked for the other thing. Taking part is *refused*
+  without a virtual microphone, because an unmuted join is only safe while the
+  system input points at BlackHole — without one it would broadcast your real mic
+  to the whole meeting.
 - **Speaking is gated on hardware, not on a flag.** Being heard needs a virtual
   microphone Teams can select as input (BlackHole or Loopback on macOS) named in
   `ASTA_CALL_AUDIO_DEVICE`. Without it, "say this in the call" *refuses and says
   why*. Generating audio into a device nobody is listening to and reporting success
   would leave you believing your point was made — that's the failure this design
   exists to prevent.
+- **And the hardware is measured, not assumed.** `voice_check` plays a tone into
+  the virtual mic while a real browser listens, and reports the level that
+  *arrived*. macOS denies the microphone by handing an app a valid,
+  correctly-labelled track full of zeroes — no exception, no prompt — so five calls
+  were once placed reporting success while the far end heard silence. Which process
+  asks matters: the identical script measured peak 0.999969 from Terminal and 0
+  from another parent, because a Playwright browser inherits the grant of whatever
+  launched it.
+- **An incoming call says who is calling, and whether it is 1:1 or a group**
+  (`app/incoming.py`, `ASTA_INCOMING=1`), and asks before picking up — answering
+  puts Asta in front of somebody who thinks they reached you. Declining leaves it
+  ringing exactly as it would have. A ring is identified by its *words*, the way a
+  ringing call already is; the buttons are then found by their labels, because a
+  data-tid guess looks correct in review and fails silently on the one call that
+  mattered.
+- **A meeting that is starting asks whether to go.** The prep ping runs 15-30
+  minutes out, which is the wrong moment for that question; a second ping at start
+  time carries the join as a recorded operation, so your yes joins the meeting you
+  were shown rather than one a brain re-resolved after the calendar moved.
 
 #### Two modes, and the one that decides is your own voice
 
@@ -896,19 +951,36 @@ Sessions expire on your org's token policy; Asta notifies you to re-login.
 `data/teams_profile/` holds corporate session cookies — same exposure class as your
 browser profile, so keep FileVault on.
 
-### How Asta learns you were pinged — two triggers, Playwright by default
+### How Asta learns you were pinged — it reads your chats
 
-**Default: the Playwright activity poll** (`teams_bridge.activity_watch_loop`,
-`TEAMS_ACTIVITY_POLL=60`). It reads the Teams Activity feed in the same browser
-session that does the reading and sending, so it sees muted/DND chats, needs **no
-Full Disk Access**, and can act on what it finds. Latency is the poll interval.
-This is on whenever the Teams bridge is up.
+**The chat reader** (`app/chat_watch.py`, `ASTA_CHATWATCH=1`,
+`ASTA_CHATWATCH_SECONDS=180`) opens your conversations and reads them. That is the
+primary source, and the reason is structural: Teams' Activity feed lists mentions,
+replies, reactions and invites, and **never an ordinary message**. So a 1:1 — where
+every message is addressed to you by definition — was invisible unless somebody
+@mentioned you inside your own DM, and the second message of any conversation was
+invisible because nobody tags twice.
 
-It used to be 300s, and five minutes is a long time to not know someone is waiting on
-you. What made 300 necessary was the 2.49s browser launch on every poll; with the
-context pooled a poll costs ~0.01s of fixed overhead, so the interval could drop to
-**60s** without the cost that set it in the first place. The knob that mattered was
-never the interval.
+Three decisions in it, each checked against a live Teams rather than assumed:
+
+- **Asta's own high-water mark, not Teams' unread state.** This build exposes no
+  unread marker at all — rail rows carry an empty aria-label, an empty data-tid and
+  hashed Fluent class names. It is also the wrong question: anything you glanced at
+  on your phone would vanish from here.
+- **Read everything, forward only what is yours.** A 1:1 always counts. A group
+  counts once your name is in it, and then only the follow-ups from *whoever pulled
+  you in* — being tagged into a thread is not subscribing to a room. Everything else
+  is recorded in the ledger, so "what did I miss in that channel" still has an
+  answer; it just doesn't interrupt you.
+- **Bounded cost.** The head of the rail every sweep plus a rotating window through
+  the tail, capped at `ASTA_CHATWATCH_MAX_OPENS` — each open is a real navigation on
+  a profile that tolerates one writer.
+
+**The Activity poll** (`teams_bridge.activity_watch_loop`, `TEAMS_ACTIVITY_POLL=60`)
+still runs, for the things that are not messages in any thread: missed calls,
+invites and calendar changes. When the chat reader is on it yields chat messages to
+it, because two readers over one surface is the same message arriving twice in two
+different shapes.
 
 **Optional add-on: the macOS notification watcher** (`app/msnotify.py`,
 `TEAMS_WATCHER`, **default 0**). Reads Notification Center banners straight from
@@ -982,8 +1054,19 @@ app/offers.py           "shall I?" — persisted, expiring, one at a time
 app/ops.py              the outward acts, and the only place they may happen
 app/resume.py           checkpoints, so a dead brain hands over its work
 app/triage.py           what is this, does it need you — one policy, every channel
-app/meetings.py         invites, joining a call, leaving it again
+app/attention.py        ONE ledger, ONE ranking — every source records and asks here
+app/chat_watch.py       reads your actual chats; the Activity feed cannot see them
+app/responder.py        decides what an ask wants CHECKED, and goes and checks it
+app/consent.py          asking IS the consent; an act is never swapped for another
+app/contacts.py         who you actually talk to — your rail beats Teams' ranking
+app/meetings.py         joining a call and leaving it again
+app/invites.py          composing a calendar invite — the half with no browser
+app/incoming.py         somebody is ringing: who, 1:1 or group, and shall I answer
+app/conversation.py     holding a two-way call — the machinery, not the judgement
 app/call_brain.py       what to say in a call — judgement, no browser, no mic
+app/voice.py            speech in and out, and whether it can be HEARD at all
+app/recovery.py         the actuator: when a watcher wedges, act rather than report
+app/sandbox.py          nothing the bench runs can reach a human. Enforced.
 app/worktrees.py        a worktree per code task, so three can run at once
 app/selector_health.py  are the Teams selectors still matching live Teams
 app/evals.py            are the ANSWERS right — grounded cases, two tiers

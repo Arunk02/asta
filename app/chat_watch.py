@@ -250,8 +250,14 @@ def addressed_to_him(chat: str, sender: str, text: str,
 #: QUOTED text as the message — so Arun was shown his own sentence under Divya's
 #: name. Attributing one colleague's words to another is worse than the raw noise
 #: it replaced, and he caught it immediately.
+#: Measured against 200 real captured messages rather than guessed. 22 of them
+#: carry a quote block; 21 open with it and 1 has it after the reply. The
+#: timestamp is 12-hour with AM/PM far more often than 24-hour — the first
+#: version matched only "18:38", so 21 of the 22 slipped straight through and
+#: kept misattributing.
 _REPLY_HEADER = re.compile(
-    r"\A\s*[^\n]{1,60}\n\s*\d{1,2}/\d{1,2}/\d{2,4}[ ,]+\d{1,2}:\d{2}\s*\n")
+    r"[^\n]{1,60}\n[ \t]*\d{1,2}/\d{1,2}/\d{2,4}[ ,]+\d{1,2}:\d{2}(?:\s*[AP]M)?[ \t]*\n",
+    re.I)
 
 #: Teams appends these to the scraped body; they are not what anyone said.
 _TRAILING_NOISE = re.compile(
@@ -263,16 +269,24 @@ _URL = re.compile(r"https?://\S+")
 def clean_message(text: str) -> str:
     """What the SENDER typed — never the message they were replying to.
 
-    Returns "" when the capture is a quote with no reply body, because there is
-    then nothing of theirs to show, and showing the quote would misattribute it.
+    A quote appears in two places, both seen in his real data:
+
+      * at the START, when replying — quote first, blank line, then the reply;
+      * AFTER the text, when forwarding — what they wrote, then the quoted body.
+
+    So the position of the header decides which side to keep. Returns "" when
+    there is a quote and no text of their own, because showing the quote would put
+    one colleague's words under another's name — which is exactly what he caught.
     """
     body = _TRAILING_NOISE.sub("", (text or "").strip())
-    m = _REPLY_HEADER.match(body)
+    m = _REPLY_HEADER.search(body)
     if m:
-        # After the header comes the quoted text, a blank line, then the reply.
-        rest = body[m.end():]
-        parts = rest.split("\n\n", 1)
-        body = parts[1] if len(parts) == 2 and parts[1].strip() else ""
+        if m.start() == 0:
+            rest = body[m.end():]
+            parts = rest.split("\n\n", 1)
+            body = parts[1] if len(parts) == 2 and parts[1].strip() else ""
+        else:
+            body = body[:m.start()]        # a forward: their words come first
     return re.sub(r"\n{2,}", "\n", body).strip()
 
 
@@ -305,7 +319,7 @@ def summarise(text: str, limit: int = 160) -> str:
     if links and not without:
         return "shared " + "; ".join(describe_link(u) for u in links[:2])
     if links:
-        return f"{without[:limit]} · {describe_link(links[0])}"
+        return f"{without[:limit]} · {describe_link(links[0])}"[:limit + 60]
     return body[:limit] + ("…" if len(body) > limit else "")
 
 

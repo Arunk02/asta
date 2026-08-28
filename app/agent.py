@@ -80,6 +80,28 @@ CHANNEL_NOTES = {
 }
 
 
+#: Said only on turns where the toolset was narrowed by retrieval.
+#:
+#: The model cannot tell "Asta has no such tool" from "that tool was not loaded for
+#: this message", and on 27 August it guessed wrong twice in one conversation —
+#: "no live call/message capability is working right now" and "no cancel/stop tool
+#: is available to me", both false. The second stranded a task he had asked to
+#: stop: "it will push when done unless you intervene directly."
+#:
+#: A missing tool is a routing problem with a one-line fix. Reported as a missing
+#: capability it becomes a thing he believes Asta cannot do — and a reason to go
+#: do something else instead.
+NARROWED = """## About your toolset this turn
+Your tools were narrowed by retrieval to what this message looked like it needed. Asta
+has many more, including live Teams calls with real two-way conversation, and cancelling
+a running background task.
+
+So: never tell Arun that Asta *cannot* do something because you cannot see a tool for it.
+Say the tool is not loaded for this turn and ask him to name it — he can say "use the call
+tools" and it will be there next turn. And never do a different outward act instead of the
+one he asked for: no code task in place of a conversation, no message in place of a call."""
+
+
 def build_instructions(conversation_summary: str, recall_block: str, workspace: str | None,
                        channel: str = "web",
                        selected: list[str] | tuple[str, ...] | None = None) -> str:
@@ -97,6 +119,8 @@ def build_instructions(conversation_summary: str, recall_block: str, workspace: 
     notes = capabilities.notes_block(selected)
     if notes:
         parts.append(notes)
+    if selected is not None:
+        parts.append(NARROWED)
     # How he actually writes, measured from his own sent messages. Carried on
     # every turn because prepare_to_send is in the ALWAYS set — a draft can
     # happen at any point, and a message that reads like a bot has already been
@@ -1109,8 +1133,12 @@ async def request_leave(start_date: str, end_date: str = "", reason: str = "",
     return f"Staged the leave request — waiting for Arun's yes.\n{meetings.describe(invite)}"
 
 
-async def join_meeting_by_name(which: str) -> str:
+async def join_meeting_by_name(which: str, speak: bool = False) -> str:
     """Join a meeting Arun names rather than links — "join my 3pm", "join the standup".
+
+    `speak=True` ONLY when he asked Asta to take part ("join and talk", "answer for
+    me"). Default is listening: a room full of people did not ask for an
+    assistant's opinion, and he may well be in it himself.
 
     Use this whenever he refers to a meeting by time or by name; only fall back to
     join_meeting when he actually pastes a link. If the phrase does not pick out
@@ -1121,19 +1149,20 @@ async def join_meeting_by_name(which: str) -> str:
 
     from . import meetings
     try:
-        result = await meetings.join_by_phrase(which)
+        result = await meetings.join_by_phrase(which, speak=speak)
     except RuntimeError as exc:
         return f"Didn't join — {exc}"
     _asyncio.create_task(meetings.watch_and_report(which))
     return result
 
 
-async def join_meeting(join_url: str, title: str = "") -> str:
-    """Join a Teams meeting from its join link, muted with the camera off.
+async def join_meeting(join_url: str, title: str = "", speak: bool = False) -> str:
+    """Join a Teams meeting from its join link. Listening only unless he says otherwise.
 
-    Use when Arun says to sit in on a call he cannot attend. Joining is listening only —
-    to actually say something you need say_in_call, which is separate and usually not
-    available. Tell him he is joined and that you are only listening.
+    Use when Arun says to sit in on a call he cannot attend. `speak=True` ONLY when
+    he asked Asta to take part ("join and talk"); it joins unmuted and answers
+    questions about the work, and still never commits him to anything. Without a
+    virtual microphone it refuses rather than unmuting his real one.
 
     Asta stays in the call and hangs up by itself when it ends, then offers to pull out
     anything that concerned him. Don't wait for that: reply to him now."""
@@ -1141,7 +1170,7 @@ async def join_meeting(join_url: str, title: str = "") -> str:
 
     from . import meetings
     try:
-        result = await meetings.join(join_url)
+        result = await meetings.join(join_url, speak=speak)
     except RuntimeError as exc:
         return f"Didn't join — {exc}"
     # The watcher outlives this turn on purpose — a meeting lasts far longer than
@@ -1150,6 +1179,41 @@ async def join_meeting(join_url: str, title: str = "") -> str:
     _asyncio.create_task(meetings.watch_and_report(title))
     return (f"{result}. I'll stay on and hang up when it ends, then offer you "
             f"anything from it that's yours. I'm only listening — I won't speak.")
+
+
+async def voice_check() -> str:
+    """Can Asta actually be HEARD in a call from this machine? Measures it.
+
+    Use before promising to speak in a call or meeting, and whenever a colleague
+    says they could not hear anything. It plays a tone into the virtual microphone
+    while a real browser listens, and reports the level that arrived — the check
+    that was missing when five calls were placed and every one transmitted
+    silence."""
+    from . import voice
+    r = await voice.self_test()
+    if r.get("error"):
+        return f"🎙 Cannot be heard — {r['error']}"
+    peak = r.get("peak")
+    if r.get("heard"):
+        return (f"🎙 Audio reaches the call: peak {peak:.4f} on "
+                f"{r.get('label') or r.get('device')}. Speaking works.")
+    return (f"🎙 SILENT — the browser got a track labelled "
+            f"{r.get('label') or r.get('device')!r} and every sample was zero "
+            f"(peak {peak}). Anything Asta says will not be transmitted. This is "
+            f"macOS refusing the microphone to the process Asta runs under.")
+
+
+async def answer_call(speak: bool = False) -> str:
+    """Pick up the call that is RINGING right now.
+
+    Use only when Arun said to answer ("pick it up", "answer and talk"). `speak`
+    True means take part in the conversation; False means listen only. If the ring
+    has already stopped this says so rather than clicking something else."""
+    from . import ops
+    try:
+        return await ops.run({"name": "call_answer", "args": {"speak": bool(speak)}})
+    except RuntimeError as exc:
+        return f"Didn't answer — {exc}"
 
 
 async def leave_meeting() -> str:
@@ -1180,9 +1244,10 @@ async def say_in_call(text: str) -> str:
     """Say something out loud in the call, in Arun's voice. ONLY when he gave you the words.
 
     Never improvise in a live call and never answer a question on his behalf: say what he
-    told you to say, nothing else. Usually unavailable — it needs a virtual microphone
-    configured on the machine — and when it is, this returns the reason rather than
-    pretending something was said."""
+    told you to say, nothing else. For a two-way discussion use discuss_in_call, which is
+    allowed to answer because it is answering the other person, not speaking for Arun.
+    If the microphone is not configured this returns the reason rather than pretending
+    something was said."""
     from . import meetings
     try:
         return await meetings.say_in_call(text)
@@ -1486,7 +1551,16 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
         what = writing.fit_address(what, to)
     loop.set_pending_send(cid, what, to, channel, to_group=to_group)
     tgt = f" to {'group ' if to_group else ''}{to}" if to else ""
-    return f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
+    staged = f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
+    # The length backstop. `guidance()` already tells the model how short he
+    # writes; this is what notices when it did not listen. Reported to the BRAIN
+    # here — the draft is staged either way, because it is his to approve, but a
+    # brain told its draft reads like a bot can shorten it before he ever sees it.
+    if channel in ("teams", "chat", "whatsapp", "email"):
+        overrun = writing.too_long(what, to)
+        if overrun:
+            staged += f"\n⚠ Length: {overrun} Consider redrafting shorter before he sees it."
+    return staged
 
 
 def delegate_task(title: str, prompt: str, kind: str = "analysis",
@@ -1496,7 +1570,7 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     chat context). kind: analysis (read-only, parallel) | code (edits code — set
     the workspace) | teams_draft (drafts a Teams reply — set teams_chat; the
     draft waits for Arun's approval, it is never sent automatically)."""
-    from . import capabilities, relevance, tasks
+    from . import capabilities, consent, relevance, tasks
     # A turn running ALONGSIDE other work is answering a read-only question, and
     # must not start work that edits code.
     #
@@ -1514,6 +1588,13 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
                 "I won't start a code task from here — that would edit a repo off "
                 "the back of a question. Ask me directly when the current work is "
                 "done, or say so and I'll propose it properly.")
+    # He asked for a person, not for code. Spawning here is a SUBSTITUTION: the act
+    # he wanted does not happen, a different and irreversible one does, and he finds
+    # out afterwards. This is the 27 August failure — "call Vinish and discuss the
+    # comments" answered with seven unreviewed edits heading for a branch.
+    instead = consent.substitution(capabilities.TURN_TEXT.get(), kind)
+    if instead:
+        return instead
     # A question is not a request to go do work. If this turn was opened by a
     # passive question and the model is now trying to spawn work off it, hold and
     # ask first rather than silently running (and touching a repo) unasked.
@@ -1937,6 +2018,38 @@ async def teams_send_message(chat: str, text: str, to_group: bool = False) -> st
         return f"Teams send failed: {exc}"
 
 
+async def teams_unread(debug: bool = False) -> str:
+    """Messages Arun has NOT dealt with yet — 1:1 and group, tagged or not.
+
+    Use for "anything I missed", "any unread", "what came in". This reads his
+    actual CHATS, not the Activity feed: the feed only ever lists mentions,
+    replies and invites, so an ordinary message — and every untagged follow-up in
+    a conversation — never appears there at all.
+
+    Looking does not mark anything as handled, so asking twice gives the same
+    answer. `debug=True` returns the raw rail signals instead."""
+    from . import chat_watch, teams_bridge
+    if not teams_bridge.enabled():
+        return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
+    try:
+        if debug:
+            rows = await teams_bridge.rail_diagnostic()
+            return "Rail signals:\n" + "\n".join(
+                (f"  ERROR {r['error']} url={r.get('url','')}" if r.get("error")
+                 else f"  {r.get('name','?')!r} text={r.get('text','')[:60]!r} "
+                      f"aria={r.get('aria','')[:60]!r} tid={r.get('tid','')!r}")
+                for r in rows)
+        items = await chat_watch.pending()
+    except RuntimeError as exc:
+        if "SESSION_EXPIRED" in str(exc):
+            return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
+        return f"Couldn't read the chats: {exc}"
+    if not items:
+        return "Nothing new in your Teams chats."
+    lines = [f"• {i['chat']} — {i['who']}: {i['text'][:120]}" for i in items]
+    return f"{len(items)} message(s) you haven't dealt with:\n" + "\n".join(lines)
+
+
 async def teams_resolve(chat: str, to_group: bool = False) -> str:
     """Check WHO a Teams message would actually reach, without sending anything.
 
@@ -1958,20 +2071,60 @@ async def teams_resolve(chat: str, to_group: bool = False) -> str:
 
 
 async def teams_call(who: str, video: bool = False) -> str:
-    """Propose ringing someone on Teams. Only when Arun asked for a call.
+    """Ring someone on Teams. Places the call; use discuss_in_call to actually talk.
 
-    This does NOT dial. A call interrupts a person immediately and cannot be taken
-    back, so it stages like any other outward act and waits for his yes. Reading a
-    chat or sending a message is almost always the lighter thing to offer first."""
-    from . import offers, teams_bridge
+    When Arun asked for the call in his own words this DIALS. His asking is the
+    consent — staging it back to him is a second gate on a door he just opened,
+    and he said so: "if i ask to call, then im aware right still what is the
+    issue?" When the call is Asta's own idea it stages and waits, because there
+    the first he would know of it is a colleague's phone ringing.
+
+    Never answer "I can't call" — if something fails, say which part failed."""
+    from . import capabilities, consent, offers, ops, teams_bridge
     if not teams_bridge.enabled():
         return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
     kind = "video call" if video else "call"
+    if consent.asked_to_call(capabilities.TURN_TEXT.get()):
+        # The same recorded call an approval would run — one execution path, so a
+        # dialled call and an approved call cannot drift apart.
+        try:
+            return await ops.run({"name": "teams_call",
+                                  "args": {"who": who, "video": video}})
+        except RuntimeError as exc:
+            return f"Didn't place the {kind} to {who} — {exc}. Nothing rang."
     offers.staged_write(
         "teams_call", {"who": who, "video": video},
         f"📞 {kind.title()} {who}", f"Teams {kind} to {who}.",
         f"Ring {who} on Teams?", kind="teams_write")
     return f"Staged the {kind} to {who} — waiting for Arun's yes. Nothing is ringing yet."
+
+
+async def discuss_in_call(who: str, topic: str, workspace: str = "") -> str:
+    """Ring someone and HOLD THE CONVERSATION — listen to them, reply, hang up.
+
+    This is the tool for "call X and discuss Y", "call X and sort out Z". It is not
+    a script: it hears what they actually say and answers that. Use it instead of
+    teams_call whenever Arun wants something talked through rather than just dialled.
+
+    Asta never commits Arun to anything on the call — an unknown becomes "I'll check
+    with Arun and come back". The call runs in the background; reply to Arun now and
+    the outcome arrives when it ends."""
+    import asyncio as _asyncio
+
+    from . import conversation, teams_bridge
+    if not teams_bridge.enabled():
+        return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
+
+    async def _go() -> None:
+        from . import notify
+        outcome = await conversation.converse(who, topic, workspace)
+        with contextlib.suppress(Exception):
+            await notify.notify(f"📞 {outcome}", "calls", urgency="direct")
+
+    _asyncio.create_task(_go())
+    return (f"Calling {who} now to talk through {topic} — I'll listen and answer as "
+            f"we go, and send you what was said when it ends. I won't commit you to "
+            f"anything.")
 
 
 def build_agent(selected: list[str] | tuple[str, ...] | None = None) -> Agent:

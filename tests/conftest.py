@@ -60,7 +60,14 @@ _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 #: tier is "his stored choice, else the environment", and Arun's .env pins
 #: ASTA_CLAUDE_CLI_MODEL=claude-sonnet-5. A test asserting what an unset tier
 #: does would therefore pass here and fail on any machine that leaves it blank.
-_MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE")
+#:
+#: `ASTA_RESPOND` joined them the day it was added. It is on in Arun's .env, so
+#: with it inherited the responder fired inside attention tests and changed what
+#: they observed — three failures whose messages were all about the ledger and
+#: none about the responder. A behaviour switched on for one machine is not a
+#: behaviour the suite should be silently exercising.
+_MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND",
+                       "ASTA_CHATWATCH", "ASTA_INCOMING")
 
 
 #: What this machine's .env said, captured before it is cleared. A handful of
@@ -238,3 +245,38 @@ def live_workspaces():
     if not list(registry.all_workspaces()):
         pytest.skip("no workspaces registered on this machine")
     yield
+
+
+#: The two edges a test must never actually cross.
+#:
+#: Found the way these always are. A test wrote a stub for `meetings` that did not
+#: take — `from . import meetings` resolves the package ATTRIBUTE, not the
+#: `sys.modules` entry a `setitem` had replaced — so the real call path ran:
+#: `set_call_mic` switched Arun's system input to BlackHole and left it there, and
+#: the next Teams call he takes has no working microphone. It got as far as opening
+#: a browser before the test timed out. Nothing dialled, that time.
+#:
+#: `app.sandbox` already had this guarantee and the bench already used it. The test
+#: suite — which runs two thousand times more often — did not.
+#:
+#: Guarding the EDGES rather than the named operations, because the first attempt
+#: blocked `call_person`, `join` and `set_call_mic` themselves and broke twenty
+#: tests whose whole subject is that machinery. Those tests mock the layer below;
+#: this is that layer:
+#:
+#:   teams_bridge._launch   no browser, so nothing can be dialled or typed
+#:   meetings.SWITCH_AUDIO  a path that does not exist, so his input cannot move
+#:
+#: A test about either patches it itself, which still works and says so out loud.
+@pytest.fixture(autouse=True)
+def _no_outward_moves(monkeypatch):
+    from app import meetings, teams_bridge
+
+    async def _no_browser(*_a, **_k):
+        raise AssertionError(
+            "teams_bridge._launch was called for real in a test — that opens a "
+            "browser on Arun's machine and can dial a colleague. Patch it.")
+
+    monkeypatch.setattr(teams_bridge, "_launch", _no_browser)
+    monkeypatch.setattr(meetings, "SWITCH_AUDIO",
+                        "/nonexistent/SwitchAudioSource-blocked-in-tests")

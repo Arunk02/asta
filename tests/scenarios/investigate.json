@@ -1,0 +1,103 @@
+{
+  "_comment": "LIVE — these spend tokens through Copilot CLI. They measure the QUERY, not the data: letting the brain actually hit Grafana would grade whichever incident happens to be in the logs this afternoon, so a red run would mean 'production is quiet' as often as 'Asta got worse'. What is stable, and what actually goes wrong, is whether it knows WHERE to look. Every expectation is a fact stated in the skill file the brain is holding — nothing here reveals a namespace the playbook does not already contain.",
+  "capability": "investigate",
+  "cases": [
+    {
+      "id": "perf-is-the-namespace-that-does-not-echo-its-name",
+      "live": true,
+      "given": {"skills": ["grafana-analyser"]},
+      "ask": "I need to search logs in the perf environment only. Give me just the namespace matcher.",
+      "must": ["telikos-spt"],
+      "must_not": ["telikos-perf", "telikos-sit", "telikos-uat"],
+      "budget": {"seconds": 180, "tokens": 2500},
+      "why": "perf maps to telikos-spt — the one env whose namespace does not echo its name, so naming it means reading the table rather than reciting the pattern",
+      "source": "skills/grafana-analyser.md — Envs → namespace"
+    },
+    {
+      "id": "an-identifier-is-a-line-filter-not-a-label",
+      "live": true,
+      "given": {"skills": ["grafana-analyser"]},
+      "ask": "Give me the exact Loki query to trace booking reference MHYX72QTXXFM in sit. Just the query.",
+      "must": ["telikos-sit", "MHYX72QTXXFM", "|="],
+      "must_not": ["namespace=~\".+\"", "telikos-uat", "telikos-dev"],
+      "budget": {"seconds": 180, "tokens": 2500},
+      "why": "identifiers are high-cardinality — putting one in a label matcher is the mistake that makes the query return nothing and read as 'no such booking'",
+      "source": "skills/grafana-analyser.md — Trace by identifier"
+    },
+    {
+      "id": "errors-are-a-logs-question-not-a-metrics-one",
+      "live": true,
+      "given": {"skills": ["grafana-analyser"]},
+      "ask": "The booking service is throwing exceptions in sit. Is that a Loki question or a Prometheus question? Answer with one word.",
+      "any_of": [["loki", "Loki"]],
+      "must_not": ["Prometheus", "prometheus"],
+      "budget": {"seconds": 180, "tokens": 2500},
+      "why": "reaching for Prometheus on an error question spends calls to learn nothing — metrics are performance-only. Asked as a one-word choice on purpose: the first version asked 'which datasource, and why', and a CORRECT answer then has to name Prometheus in order to rule it out. A must_not term that a right answer would naturally use measures phrasing, not knowledge — and flakes, because whether the model volunteers the contrast varies run to run.",
+      "source": "skills/grafana-analyser.md — Datasources & when to use"
+    },
+    {
+      "id": "uat-temporal-lives-in-sits-namespace",
+      "live": true,
+      "given": {"skills": ["temporal-analyser"]},
+      "ask": "Which Temporal namespace does the uat environment use? Just the namespace.",
+      "must": ["telikos-sit-cdt"],
+      "must_not": ["telikos-uat-cdt", "telikos-uat"],
+      "budget": {"seconds": 180, "tokens": 2500},
+      "why": "uat shares sit's namespace — guessing from the env name gives an answer that is wrong and looks right",
+      "source": "skills/temporal-analyser.md — Envs table"
+    },
+    {
+      "id": "preprod-temporal-is-spt-not-preprod",
+      "live": true,
+      "given": {"skills": ["temporal-analyser"]},
+      "ask": "Which Temporal namespace does preprod use? Just the namespace.",
+      "must": ["telikos-spt-cdt"],
+      "must_not": ["telikos-preprod-cdt", "telikos-preprod"],
+      "budget": {"seconds": 180, "tokens": 2500},
+      "why": "the skill calls this out explicitly as a trap — the pattern-guess is wrong and confident",
+      "source": "skills/temporal-analyser.md — 'preprod runs in telikos-spt-cdt'"
+    },
+    {
+      "id": "the-two-namespaces-for-one-env-are-not-the-same",
+      "live": true,
+      "given": {"skills": ["grafana-analyser", "temporal-analyser"]},
+      "ask": "For the sit environment, name BOTH the Grafana logs namespace and the Temporal namespace. Two names, nothing else.",
+      "must": ["telikos-sit", "telikos-sit-cdt"],
+      "budget": {"seconds": 180, "tokens": 3500},
+      "why": "the hardest one, and the most costly to get wrong: using one where the other belongs returns nothing, and nothing reads as 'no workflows' rather than as a wrong lookup",
+      "source": "skills/temporal-analyser.md — 'The Temporal namespace is not the Grafana namespace'"
+    },
+    {
+      "id": "start-by-listing-workflows-not-by-describing-one",
+      "live": true,
+      "given": {"skills": ["temporal-analyser"]},
+      "ask": "Bookings are not progressing in sit and I do not know which workflow is stuck. Which Temporal tool do I call first? Name the tool.",
+      "must": ["list_workflows"],
+      "must_not": ["count_workflows"],
+      "budget": {"seconds": 180, "tokens": 2500},
+      "why": "describe_workflow needs an id he does not have yet, and count_workflows returns a number that cannot tell him which",
+      "source": "skills/temporal-analyser.md — 'list_workflows — start here'"
+    },
+    {
+      "id": "a-stuck-workflow-explains-itself-in-describe",
+      "live": true,
+      "given": {"skills": ["temporal-analyser"]},
+      "ask": "I have the workflow id of a stuck execution in sit. Which tool shows me the pending activity and its failure? Name the tool.",
+      "must": ["describe_workflow"],
+      "budget": {"seconds": 180, "tokens": 2500},
+      "why": "the pending-activity failure is the answer to 'why is it stuck', and it lives in exactly one tool",
+      "source": "skills/temporal-analyser.md — describe_workflow"
+    },
+    {
+      "id": "never-search-every-namespace-at-once",
+      "live": true,
+      "given": {"skills": ["grafana-analyser"]},
+      "ask": "I think the error is in sit. Give me the label matcher to start with — the matcher only, nothing else.",
+      "must": ["telikos-sit"],
+      "must_not": ["=~"],
+      "budget": {"seconds": 180, "tokens": 2500},
+      "why": "an unbounded namespace query is slow, expensive and returns a wall. Asked for the matcher ALONE: the first version asked for the one it would use 'instead', and a correct answer then quotes {namespace=~\".+\"} in order to reject it — failing a case it had actually got right.",
+      "source": "skills/grafana-analyser.md — 'Always namespace-bound (never {namespace=~\".+\"})'"
+    }
+  ]
+}

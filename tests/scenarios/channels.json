@@ -1,0 +1,98 @@
+{
+  "_comment": "Channel messages — the surface that had NO scenarios until a real ping reached him only when he opened his laptop. Every phrasing below is taken from his own Teams activity feed (300 rows, 62 of them @everyone); only the content is anonymised. That distinction is the whole point: the old triage suite was written from imagination and used 1:1 phrasing — 'can you approve the PR' — while his channels speak to the room. 7 of 62 real @everyone asks were being detected. A suite invented rather than sampled cannot find that.",
+  "capability": "triage",
+  "cases": [
+    {
+      "id": "channel-pls-do-update-is-an-ask",
+      "given": {"who": "team lead", "subject": "everyone pls do update your mid year performance reflection in workday"},
+      "must": ["action=True"],
+      "must_not": ["action=False"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "'pls' is as common as 'please' in his channels and was matched by neither — this exact message reached him only when he opened the screen",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-please-suggest-is-an-ask",
+      "given": {"who": "scrum master", "subject": "hi everyone please suggest if we have anything for the sprint demo"},
+      "must": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "'suggest' was missing from the verb list behind 'please' — the list was written for 1:1 review requests",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-can-someone-is-an-ask",
+      "given": {"who": "QA", "subject": "everyone can someone confirm whether additional fields were added on the UI"},
+      "must": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "'can someone' is how a room is asked; only 'can you' was matched, which is how one person is asked",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-kindly-is-an-ask",
+      "given": {"who": "release manager", "subject": "hi everyone kindly refrain from deploying anything to the uat environment today"},
+      "must": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "a constraint on what he may do is an ask — and 'kindly' was matched by nothing at all",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-please-vote-by-a-deadline-is-an-ask",
+      "given": {"who": "organiser", "subject": "everyone please vote by 2 pm"},
+      "must": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "short, deadlined, and aimed at everyone including him — the shape most likely to be missed and least forgivable to miss",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-please-help-is-an-ask",
+      "given": {"who": "tech lead", "subject": "everyone please help in adding the incidents you are working on with the rca"},
+      "must": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "work assigned to the room is work assigned to him",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-an-absence-notice-wants-nothing",
+      "given": {"who": "teammate", "subject": "hi everyone will be away for the rest of the week"},
+      "must": ["action=False"],
+      "must_not": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "the other half of the job — widening the ask detector must not turn every announcement into an interruption",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-a-completion-notice-wants-nothing",
+      "given": {"who": "deploy lead", "subject": "we have completed the deployment and sanity, all looks good on our side"},
+      "must": ["action=False"],
+      "must_not": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "finished work is the most common thing in his channels and needs nothing from him",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-a-polite-announcement-is-still-an-announcement",
+      "given": {"who": "platform team", "subject": "everyone please to inform that the billing sharding changes have been successfully promoted"},
+      "must": ["action=False"],
+      "must_not": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "the trap in the other direction: it opens with 'please' and asks for nothing. Matching 'please <anything>' caught this and it had to be narrowed to a verb list.",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-an-outage-notice-wants-nothing",
+      "given": {"who": "platform team", "subject": "everyone the preprod environment will be down for an hour due to a deployment"},
+      "must": ["action=False"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "worth knowing, nothing wanted — the FYI tail is exactly where this belongs",
+      "source": "his Teams activity feed, @everyone row"
+    },
+    {
+      "id": "channel-a-deleted-message-is-nothing",
+      "given": {"who": "teammate", "subject": "this message has been deleted"},
+      "must": ["action=False"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "the feed carries these verbatim and they must never reach his phone",
+      "source": "his Teams activity feed, @everyone row"
+    }
+  ]
+}

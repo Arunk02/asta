@@ -1,0 +1,85 @@
+{
+  "_comment": "Reading a finished run and naming what it wasted. Grounded because the categories are facts about the record, not opinions about it — 'this run re-read the same file four times' is checkable.",
+  "capability": "analyse",
+  "cases": [
+    {
+      "id": "names-a-duplicate-read",
+      "given": {
+        "record": {
+          "calls": 12, "executor": "claude",
+          "reads": [["src/BookingService.java", true], ["src/BookingService.java", true],
+                    ["src/BookingService.java", true]],
+          "results": {}, "result_turn": {}, "bash": [], "text_blocks": [],
+          "new_tokens": 0, "out_tokens": 1, "resumes": 0
+        }
+      },
+      "must": ["duplicate_reads"],
+      "must_not": ["none"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "re-opening a file re-pays its tokens every time; this is the cheapest waste to spot and the most common",
+      "source": "token_audit.detect_waste category 1"
+    },
+    {
+      "id": "names-an-unbounded-read",
+      "given": {
+        "record": {
+          "calls": 6, "executor": "claude",
+          "reads": [["src/TmsServiceImpl.java", false]],
+          "results": {}, "result_turn": {}, "bash": [], "text_blocks": [],
+          "new_tokens": 0, "out_tokens": 1, "resumes": 0
+        }
+      },
+      "must": ["full_reads"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "a read with no line bound dumps a whole class into context — the single largest avoidable cost in a code run",
+      "source": "token_audit.detect_waste category 2"
+    },
+    {
+      "id": "names-discovery-that-should-have-been-resolved",
+      "given": {
+        "record": {
+          "calls": 20, "executor": "claude", "reads": [],
+          "results": {}, "result_turn": {},
+          "bash": ["grep a", "grep b", "grep c", "grep d", "grep e",
+                   "grep f", "grep g", "grep h", "grep i", "grep j"],
+          "text_blocks": [], "new_tokens": 0, "out_tokens": 1, "resumes": 0
+        }
+      },
+      "must": ["excess_greps"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "ten greps means it was hunting rather than resolving — the resolver exists to cut exactly this",
+      "source": "token_audit.detect_waste category 4"
+    },
+    {
+      "id": "a-clean-run-is-not-accused",
+      "given": {
+        "record": {
+          "calls": 5, "executor": "claude",
+          "reads": [["src/Booking.java", true]],
+          "results": {}, "result_turn": {}, "bash": ["grep one"],
+          "text_blocks": [], "new_tokens": 0, "out_tokens": 1, "resumes": 0
+        }
+      },
+      "must": ["none"],
+      "must_not": ["duplicate_reads", "full_reads", "excess_greps"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "an auditor that always finds something is an auditor nobody reads — a lean run must score clean",
+      "source": "token_audit.detect_waste returns {} when nothing crosses a threshold"
+    },
+    {
+      "id": "finds-both-faults-not-just-the-first",
+      "given": {
+        "record": {
+          "calls": 15, "executor": "claude",
+          "reads": [["src/A.java", false], ["src/A.java", false]],
+          "results": {}, "result_turn": {}, "bash": [], "text_blocks": [],
+          "new_tokens": 0, "out_tokens": 1, "resumes": 0
+        }
+      },
+      "must": ["duplicate_reads", "full_reads"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "reporting one cause and stopping is how a second, larger cost stays invisible",
+      "source": "detect_waste accumulates categories rather than returning the first"
+    }
+  ]
+}

@@ -218,7 +218,7 @@ def _events(evs):
 def test_joining_by_time_reaches_the_right_link(monkeypatch):
     joined = {}
 
-    async def _join(url, muted=True, camera=False):
+    async def _join(url, muted=True, camera=False, speak=False):
         joined["url"] = url
         return "joined (muted, camera off)"
 

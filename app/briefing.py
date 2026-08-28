@@ -17,6 +17,7 @@ Both also run on demand: POST /api/brief/now, /api/standup/now, or just ask.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import json as _json
 import os
@@ -217,6 +218,12 @@ _SPEAKING_MEETING = re.compile(
     r"planning|review|demo|1[:-]?1|one[- ]on[- ]one|catch[- ]?up|weekly)\b", re.I)
 
 PREMEET_MINUTES = int(os.environ.get("ASTA_PREMEET_MINUTES", "30"))
+
+#: How close to the start "it is starting now" means. The prep ping runs 15-30
+#: minutes out and is the wrong moment to offer a join — he cannot answer it yet,
+#: and by the time he can the offer has been superseded. This is a second, later
+#: ping whose only question is whether Asta should go.
+STARTING_LEAD = int(os.environ.get("ASTA_MEETING_START_LEAD", "2"))
 _MEET_CACHE_TTL = 900     # scraping the calendar spins a browser; don't do it per tick
 
 
@@ -244,6 +251,32 @@ async def _cached_meetings() -> list[dict]:
     return events
 
 
+async def _offer_to_join(ev: dict, now: dt.datetime) -> None:
+    """Ask, once, whether to go to the meeting that is starting.
+
+    Staged rather than asked in prose so his "yes" runs the recorded join instead
+    of a brain re-deciding which meeting he meant — the calendar can move between
+    the ping and the answer, and joining the wrong call is not quietly undone.
+    """
+    from . import notify, offers
+    key = f"joinoffer:{now.date().isoformat()}:{ev['start']}:{ev['title'][:30]}"
+    if store.kv_get(key):
+        return
+    store.kv_set(key, "1")
+    if not ev.get("join_url"):
+        return          # nothing to join; the prep ping already covered the meeting
+    offers.staged_write(
+        "meeting_join",
+        {"title": ev["title"], "join_url": ev["join_url"], "speak": False},
+        f"📅 {ev['title']} is starting ({ev['start']})",
+        f"{ev['title']} — {ev['start']}"
+        + (f", by {ev['organizer']}" if ev.get("organizer") else ""),
+        "Want me to join? Say yes and I'll listen, or 'join and talk' to take part.",
+        kind="meeting")
+    with contextlib.suppress(Exception):
+        await notify.notify(offers.pending().render(), "premeeting", urgency="direct")
+
+
 async def premeeting_loop() -> None:
     """Ping ~30 min before each meeting.
 
@@ -265,6 +298,13 @@ async def premeeting_loop() -> None:
                     # fixed lead treated them identically.
                     want = agenda.lead_minutes(ev, PREMEET_MINUTES) if agenda.enabled() \
                         else PREMEET_MINUTES
+                    # "notify me meeting starting and someone trying to pull me, u
+                    # want me to join and take forward" — a separate, later ping
+                    # whose only question is whether Asta should go. The prep ping
+                    # fires 15-30 minutes out, which is the wrong moment to ask:
+                    # he cannot answer it yet, and by the time he can it is stale.
+                    if 0 <= lead <= STARTING_LEAD:
+                        await _offer_to_join(ev, now)
                     # One tick's worth of window, so a ping can't be missed or doubled.
                     if not (want - 2 <= lead <= want + 2):
                         continue

@@ -66,6 +66,45 @@ async def _teams_call(who: str = "", video: bool = False) -> str:
     return f"📞 Calling {result} — I'll tell you if they pick up, and how it went."
 
 
+@op("meeting_join", lambda a: f"Join {a.get('title') or 'the meeting'}"
+                              + (" and take part" if a.get("speak") else " (listen only)"))
+async def _meeting_join(title: str = "", join_url: str = "", speak: bool = False) -> str:
+    """Join the meeting he was offered. Silent unless he asked for the other thing.
+
+    Prefers the URL the offer captured over re-resolving the title: between the
+    ping and his yes the calendar can move on, and joining the WRONG call puts him
+    in a room in front of people who watch him arrive.
+    """
+    import asyncio as _asyncio
+    if join_url:
+        result = await meetings.join(join_url, speak=speak)
+    else:
+        result = await meetings.join_by_phrase(title, speak=speak)
+    _asyncio.create_task(meetings.watch_and_report(title))
+    mode = "taking part" if speak else "listening only"
+    return f"📅 {result} — {title or 'the meeting'} ({mode}). I'll report what was said."
+
+
+@op("call_answer", lambda a: "Answer the call"
+                              + (" and talk" if a.get("speak") else " (listen only)"))
+async def _call_answer(speak: bool = False) -> str:
+    """Pick up the call that is ringing NOW.
+
+    Re-checks the ring rather than trusting the offer. A ring lasts about thirty
+    seconds and his yes can arrive after it stopped; clicking Accept on a toast
+    that is gone would either do nothing or hit whatever replaced it, and telling
+    him "answered" when nothing was answered is the failure that matters.
+    """
+    from . import incoming, teams_bridge
+    async with teams_bridge.teams_page() as page:
+        call = await incoming.look(page)
+        if not call:
+            incoming.clear()
+            return "📞 Too late — it stopped ringing before you answered."
+        result = await incoming.answer(page, speak=speak)
+    return f"📞 {incoming.describe(call)} {result}"
+
+
 @op("jira_comment", lambda a: f"Comment on {a.get('key', '?')}")
 async def _jira_comment(key: str = "", text: str = "") -> str:
     await jira.add_comment(key, text)

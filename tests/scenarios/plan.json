@@ -1,0 +1,47 @@
+{
+  "_comment": "The plan gate's own promise, measured. He reads these on WhatsApp, standing up — thirty seconds, and he must be able to see the shape before the steps.",
+  "capability": "plan",
+  "cases": [
+    {
+      "id": "a-plan-shows-its-shape-first",
+      "given": {
+        "plan": "STRUCTURE\n```\nEtaValidator ──uses──> BookingReferences\n     │                      │\n     └──raises──> BusinessException(TELIKOS-123)\n```\n\nSTEPS\n1. app/validation/EtaValidator.java — compare import ETA to port gate-in\n2. app/booking/BookingService.java — record the exception instead of a 400\n\nVERIFY\n- unit test for ETA after gate-in\n- component test proves the message is consumed, not rejected"
+      },
+      "must": ["structure=True", "too_long=False", "EtaValidator", "VERIFY"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "the shape is what makes a plan graspable standing up — steps alone are a list he has to simulate in his head",
+      "source": "tasks.CODE_OVERRIDES — 'open it with a STRUCTURE block'"
+    },
+    {
+      "id": "a-plan-with-no-shape-is-rejected",
+      "given": {
+        "plan": "I will look at the validator and then change the booking service so the message is consumed. After that I will add some tests and raise a PR."
+      },
+      "must": ["structure=False"],
+      "must_not": ["structure=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "this is the shape of plan that got a PR raised with nothing approved — prose that sounds like agreement",
+      "source": "tasks._structure_span returns -1 when no STRUCTURE heading is present"
+    },
+    {
+      "id": "class-diagram-counts-as-structure",
+      "given": {
+        "plan": "Class diagram:\n```\nRecoveryLadder ──runs──> Rung[]\n```\n\nSTEPS\n1. app/recovery.py — the ladder"
+      },
+      "must": ["structure=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "he asked for 'kind of class diagram' — the heading he writes must count, not only the word STRUCTURE",
+      "source": "tasks._STRUCTURE_HEAD matches structure|class diagram|shape"
+    },
+    {
+      "id": "thirty-seconds-means-short",
+      "given": {
+        "plan": "STRUCTURE\n```\nA ──> B\n```\n\nSTEPS\n1. Do the thing that needs doing, and while doing it consider all of the surrounding context which includes the historical reasons the module was written this way, the several alternatives that were weighed at the time, the trade-offs each of them carried, the people who were consulted, the tickets that were raised and later closed, the follow-up work that was deferred, and the reasons the deferral was thought acceptable, none of which changes what actually has to be typed but all of which is presented here at length regardless, so that by the time he reaches the end of this sentence he has entirely lost the thread of what the change actually is and has to scroll back to the top to find it again, which is precisely the failure this bound exists to prevent."
+      },
+      "must": ["structure=True", "too_long=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "a plan he has to scroll is a plan he approves without reading, which is worse than no gate at all",
+      "source": "the gate promises a plan readable in thirty seconds"
+    }
+  ]
+}

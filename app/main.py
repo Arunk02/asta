@@ -128,9 +128,32 @@ async def startup() -> None:
     if telegram.enabled():
         daemon.start("telegram", lambda: telegram.poll_loop(_telegram_turn))
     if teams_bridge.enabled():
+        # The voice model's cold start is 11.4 seconds; every later utterance is
+        # 1.05. Paying it here means the first call of the day does not pay it in
+        # front of whoever picked up. Fire-and-forget — a warm-up that fails must
+        # never stop the server coming up, which is exactly what an unguarded
+        # call did: `meetings` is not in main's import list, so this raised
+        # NameError inside the startup handler and the whole server refused to
+        # boot. The full suite was green throughout — nothing exercises startup.
+        with contextlib.suppress(Exception):
+            from . import meetings as _meetings
+            _meetings.warm_the_voice()
         daemon.start("teams_session", teams_bridge.session_watch_loop)
         if teams_bridge.ACTIVITY_POLL_SECONDS > 0:
             daemon.start("teams_activity", teams_bridge.activity_watch_loop)
+        # The Activity feed carries mentions, replies and invites — never an
+        # ordinary message. So a 1:1, where every message is addressed to him by
+        # definition, was invisible unless somebody @mentioned him inside his own
+        # DM, and the second message of any conversation was invisible because
+        # nobody tags twice. This reads the chat rail itself.
+        from . import chat_watch as _chat_watch
+        if _chat_watch.enabled():
+            daemon.start("teams_chats", _chat_watch.watch_loop)
+        # A ringing phone was invisible until it turned up afterwards as "Missed
+        # call from …". This notices the ring and asks him whether to pick up.
+        from . import incoming as _incoming
+        if _incoming.enabled():
+            daemon.start("teams_incoming", _incoming.watch_loop)
         # A selector that stopped matching returns nothing, which looks exactly
         # like "no new messages" — so the break hides until it fails in front of
         # somebody. Daily, supervised like every other loop.
@@ -405,12 +428,29 @@ async def api_invoke(body: dict):
         raise HTTPException(404, f"no capability '{name}'")
     if not isinstance(args, dict):
         raise HTTPException(400, "args must be an object")
+    # The turn's conversation, carried across the MCP hop. Without it every
+    # capability that reads `tasks.current_conversation()` — prepare_to_send,
+    # continue_working — fails here and only here, because a fresh HTTP request
+    # has none of the chat path's ContextVars. Bound rather than defaulted: a
+    # guessed conversation would stage a draft into the wrong chat, which is
+    # worse than refusing.
+    #
+    # Bound for THIS call only. Letting it persist is worse than not binding at
+    # all: the next invocation that arrives without a conv_id would inherit a
+    # stale conversation and stage a draft into the wrong chat — silently, and
+    # looking exactly like success. The suite caught it as an unrelated call test
+    # failing only in a full run, which is what a leaked ContextVar looks like.
+    conv_id = (body or {}).get("conv_id") or ""
+    token = tasks.bind_conversation(conv_id) if conv_id else None
     try:
         result = cap.fn(**args)
         if inspect.isawaitable(result):
             result = await result
     except TypeError as exc:
         raise HTTPException(400, f"bad arguments for {name}: {exc}")
+    finally:
+        if token is not None:
+            tasks.unbind_conversation(token)
     return {"result": result}
 
 
@@ -811,6 +851,11 @@ async def api_propose_next(request: Request):
     return {"offered": _staged(message, before)["staged"], "message": message}
 
 
+@app.get("/api/teams/unread", dependencies=[Depends(require_auth)])
+async def api_teams_unread(debug: bool = False):
+    return {"message": await agent_mod.teams_unread(debug=debug)}
+
+
 @app.get("/api/teams/presence", dependencies=[Depends(require_auth)])
 async def api_teams_presence():
     return {"message": await agent_mod.teams_status()}
@@ -877,6 +922,35 @@ async def api_say_in_call(request: Request):
     if not b.get("text"):
         raise HTTPException(400, "text is required")
     return {"message": await agent_mod.say_in_call(b["text"])}
+
+
+@app.post("/api/voice/check", dependencies=[Depends(require_auth)])
+async def api_voice_check():
+    return {"message": await agent_mod.voice_check()}
+
+
+@app.post("/api/calls/answer", dependencies=[Depends(require_auth)])
+async def api_answer_call(request: Request):
+    """Pick up the ringing call. Only ever called after Arun said yes."""
+    b = {}
+    with contextlib.suppress(Exception):
+        b = await request.json()
+    return {"message": await agent_mod.answer_call(speak=bool((b or {}).get("speak")))}
+
+
+@app.post("/api/meetings/discuss", dependencies=[Depends(require_auth)])
+async def api_discuss_in_call(request: Request):
+    """Ring someone and actually talk with them.
+
+    Exposed over HTTP for the same reason every other capability is: a CLI brain
+    reaches Asta this way, and a capability only chat can use is a capability most
+    of his traffic cannot.
+    """
+    b = await request.json()
+    if not b.get("who") or not b.get("topic"):
+        raise HTTPException(400, "who and topic are required")
+    return {"message": await agent_mod.discuss_in_call(
+        b["who"], b["topic"], b.get("workspace", ""))}
 
 
 @app.post("/api/ci/watch", dependencies=[Depends(require_auth)])
@@ -1619,6 +1693,9 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     # for why the selection is sticky rather than per-message.
     selected = tool_index.select_sticky(conv["id"], user_text)
     turn_agent = AGENT if selected is None else agent_mod.build_agent(selected)
+    # His actual words, for tools that must check what was asked rather than what
+    # the model decided to do about it — see capabilities.TURN_TEXT.
+    capabilities.TURN_TEXT.set(user_text or "")
     instructions = agent_mod.build_instructions(conv["summary"], "", conv["workspace"],
                                                 channel, selected)
     assistant_text = ""
@@ -1932,6 +2009,46 @@ async def _conduct(conv0: dict, first_text: str, sink, channel: str) -> None:
         return
 
 
+def _known_threads() -> list[str]:
+    """Distinct chat names Asta has actually read messages in."""
+    try:
+        rows = store.teams_messages(limit=800)
+    except Exception:                                          # noqa: BLE001
+        return []
+    return sorted({(r.get("chat") or "").strip() for r in rows if (r.get("chat") or "").strip()})
+
+
+def _recipient_warning(intent: dict) -> str:
+    """Say when the name he is approving is not the thread he actually talks in.
+
+    What he approves is the NAME the model typed, and Teams opens whatever that
+    name resolves to. "Divya" resolves to a real, EMPTY 1:1 — while the person he
+    actually talks to is "Palikala Divya Maheswari". The message would have gone
+    to the wrong person and the approval would have looked completely normal.
+
+    Answered from threads Asta has already read, so it costs nothing and cannot
+    fail. His rule from the first week: verify sends, never assume.
+    """
+    to = (intent.get("to") or "").strip()
+    if not to or intent.get("channel") not in ("teams", "chat"):
+        return ""
+    known = _known_threads()
+    if not known:
+        return ""
+    low = to.lower()
+    if any(low == k.lower() for k in known):
+        return ""                                   # exactly the thread he uses
+    near = [k for k in known if low in k.lower()]
+    if len(near) == 1:
+        return (f"⚠️ You talk to **{near[0]}** — “{to}” may open a different "
+                f"chat with a similar name.\n\n")
+    if len(near) > 1:
+        return (f"⚠️ “{to}” matches {len(near)} of your threads "
+                f"({', '.join(near[:3])}) — name the person in full.\n\n")
+    return (f"⚠️ No messages on record with **{to}** — check this is the right "
+            f"person before it goes out.\n\n")
+
+
 async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> None:
     """Show Arun a drafted outward message and ask before it is sent. The draft is
     persisted as an assistant turn so it survives in history, and the loop waits:
@@ -1943,6 +2060,7 @@ async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> No
     to = f" to {where}*{intent['to']}*" if intent.get("to") else ""
     body = (f"📤 Ready to send{to} on **{intent.get('channel', 'chat')}** — can I send this?\n\n"
             f"———\n{intent.get('what', '')}\n———\n\n"
+            + _recipient_warning(intent) +
             "Reply “send” to confirm, or tell me what to change.")
     store.add_ui_message(cid, "assistant", body, {"via": "loop-confirm-send", "channel": channel})
     await sink.send({"type": "delta", "text": body})

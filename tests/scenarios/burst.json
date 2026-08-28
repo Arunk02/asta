@@ -1,0 +1,114 @@
+{
+  "_comment": "Ten people at once. Every other capability judges ONE arrival; this is what Arun actually experiences — the pile. Does it become one message or ten, does the urgent one lead, does the same thing said twice count twice, and do the ones he never answered come back later without nesting inside each other. All free and deterministic: the ledger and the summariser are pure given a clock.",
+  "capability": "burst",
+  "cases": [
+    {
+      "id": "ten-pings-become-one-message-not-ten",
+      "given": {
+        "now": 1700000000,
+        "label": "💬 Teams",
+        "arrivals": [
+          {"who": "reviewer", "subject": "can you approve PR 1409 today?", "addressed": true},
+          {"who": "QA", "subject": "we are blocked on your sign-off for the booking fix"},
+          {"who": "tech lead", "subject": "everyone pls do update your reflection in workday"},
+          {"who": "scrum master", "subject": "hi everyone please suggest anything for the sprint demo"},
+          {"who": "release manager", "subject": "FYI - sprint 42 notes, no action needed"},
+          {"who": "deploy bot", "subject": "Automated: deployment to sit succeeded"},
+          {"who": "engineering-news", "subject": "Weekly newsletter: platform updates"},
+          {"who": "teammate", "subject": "hi everyone will be away for the rest of the week"},
+          {"who": "platform team", "subject": "everyone preprod will be down for an hour"},
+          {"who": "product owner", "subject": "mentioned you in Daily deployment slot"}
+        ]
+      },
+      "must": ["arrivals=10", "messages=1", "needs=True"],
+      "must_not": ["messages=0"],
+      "budget": {"seconds": 0.5, "tokens": 0},
+      "why": "ten arrivals must reach his phone as ONE message. Ten notifications for one poll is the flood he complained about, and it is what makes him stop reading them at all.",
+      "source": "triage.summarize renders a poll as one message; attention.consider decides what enters it"
+    },
+    {
+      "id": "the-urgent-one-leads-the-pile",
+      "given": {
+        "now": 1700000100,
+        "label": "💬 Teams",
+        "arrivals": [
+          {"who": "engineering-news", "subject": "Weekly newsletter: platform updates"},
+          {"who": "teammate", "subject": "hi everyone will be away for the rest of the week"},
+          {"who": "monitoring", "subject": "booking-api pods are down in prod"},
+          {"who": "reviewer", "subject": "can you approve PR 1409 today?", "addressed": true}
+        ]
+      },
+      "must": ["top_priority=0", "needs=True"],
+      "budget": {"seconds": 0.5, "tokens": 0},
+      "why": "an outage buried under a newsletter is the same as no outage — the pile has to be ordered before it is rendered. Uses 'pods are down', which is already breakage: an error-rate threshold breach is deliberately NOT critical, because it is a warning that may settle and the alert path holds those briefly rather than interrupting him.",
+      "source": "attention.rank → looks_critical → P_NOW; outlook's alert design separates 'is down' from 'may settle'"
+    },
+    {
+      "id": "the-same-thing-said-twice-counts-once",
+      "given": {
+        "now": 1700000200,
+        "label": "💬 Teams",
+        "arrivals": [
+          {"who": "reviewer", "subject": "can you approve PR 1409 today?", "addressed": true},
+          {"who": "reviewer", "subject": "can you approve PR 1409 today?", "addressed": true},
+          {"who": "reviewer", "subject": "can you approve PR 1409 today?", "addressed": true}
+        ]
+      },
+      "must": ["arrivals=3", "pushed=1"],
+      "must_not": ["pushed=3"],
+      "budget": {"seconds": 0.5, "tokens": 0},
+      "why": "the feed re-renders the same row every poll — without dedup the pile grows on its own and he is chased about one PR three times",
+      "source": "attention.consider returns False for a key it has already pushed"
+    },
+    {
+      "id": "a-quiet-pile-produces-nothing-at-all",
+      "given": {
+        "now": 1700000300,
+        "label": "💬 Teams",
+        "arrivals": [
+          {"who": "deploy bot", "subject": "Automated: deployment to sit succeeded"},
+          {"who": "engineering-news", "subject": "Weekly newsletter: platform updates"},
+          {"who": "teammate", "subject": "hi everyone will be away for the rest of the week"}
+        ]
+      },
+      "must": ["needs=False"],
+      "must_not": ["needs=True"],
+      "budget": {"seconds": 0.5, "tokens": 0},
+      "why": "three arrivals that want nothing must not become an interruption — the ambient path exists for exactly this",
+      "source": "triage.summarize returns needs=False with no tier-0/1 items"
+    },
+    {
+      "id": "what-he-never-answered-comes-back",
+      "given": {
+        "now": 1700000400,
+        "chase_at": 1700053200,
+        "label": "💬 Teams",
+        "arrivals": [
+          {"who": "reviewer", "subject": "can you approve PR 1409 today?", "addressed": true},
+          {"who": "QA", "subject": "we are blocked on your sign-off for the booking fix"}
+        ]
+      },
+      "must": ["owed=2"],
+      "budget": {"seconds": 0.5, "tokens": 0},
+      "why": "the follow-up half. Something owed must still be owed hours later — a ledger that forgets is the same as no ledger, and he goes back to holding it in his head.",
+      "source": "attention.open_items — everything still owed, most urgent first"
+    },
+    {
+      "id": "a-settled-item-stops-being-owed",
+      "given": {
+        "now": 1700000500,
+        "label": "💬 Teams",
+        "acted": ["can you approve PR 1409 today?"],
+        "arrivals": [
+          {"who": "reviewer", "subject": "can you approve PR 1409 today?", "addressed": true},
+          {"who": "QA", "subject": "we are blocked on your sign-off for the booking fix"}
+        ]
+      },
+      "must": ["owed=1"],
+      "must_not": ["owed=2"],
+      "budget": {"seconds": 0.5, "tokens": 0},
+      "why": "he dealt with it — chasing him about it again is the noise the ledger exists to end, and the single most annoying failure it can have",
+      "source": "attention.mark_acted / should_push skips SETTLED"
+    }
+  ]
+}

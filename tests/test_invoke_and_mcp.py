@@ -260,4 +260,158 @@ def test_mcp_proxy_forwards_to_invoke(monkeypatch):
     out = asyncio.run(proxy())
     assert out == "ok"
     assert sent["url"].endswith("/api/_invoke")
-    assert sent["payload"] == {"tool": "health_check", "args": {}}
+    # conv_id rides on every forwarded call — without it the capabilities that
+    # read the conversation fail on the far side of this hop, and did.
+    assert sent["payload"] == {"tool": "health_check", "args": {}, "conv_id": ""}
+
+
+# --- the conversation has to survive the hop ---------------------------------
+# Every test above picked a capability that does not need one, so the seam looked
+# healthy while two of the three tools in the ALWAYS floor were dead across it.
+#
+# `prepare_to_send` and `continue_working` read the conversation from a ContextVar
+# that only the in-process chat path sets. Over MCP the call arrives as a fresh
+# HTTP request, which has no ContextVars at all, so both returned "No active
+# conversation" — every time, for hours, while 2038 tests stayed green. Asta could
+# draft a reply to a colleague and had no approved way to stage it.
+#
+# The lesson these encode: test the seam with the capability that actually depends
+# on what the seam carries, not with the one that happens to be easiest to call.
+
+def test_prepare_to_send_works_across_the_mcp_hop(client):
+    """The failure Arun hit all evening: "No active conversation — cannot stage a
+    send", repeated across many retries and never transient."""
+    async def go():
+        async with client as c:
+            r = await c.post("/api/_invoke", json={
+                "tool": "prepare_to_send",
+                "args": {"what": "fixes are pushed and CI is green",
+                         "to": "Vinish", "channel": "teams"},
+                "conv_id": "conv-abc"})
+            assert r.status_code == 200
+            assert "No active conversation" not in r.json()["result"]
+    asyncio.run(go())
+
+
+def test_continue_working_works_across_the_mcp_hop(client):
+    """Same ContextVar, same floor, same silent breakage."""
+    async def go():
+        async with client as c:
+            r = await c.post("/api/_invoke", json={
+                "tool": "continue_working",
+                "args": {"next_step": "verify CI"},
+                "conv_id": "conv-abc"})
+            assert r.status_code == 200
+            assert "No active conversation" not in r.json()["result"]
+    asyncio.run(go())
+
+
+def test_a_send_really_is_staged_for_that_conversation(client):
+    """Not just "no error" — the draft has to land where he will be asked about it.
+    A staged send nobody is shown is the same outcome as the failure."""
+    from app import loop
+
+    async def go():
+        async with client as c:
+            await c.post("/api/_invoke", json={
+                "tool": "prepare_to_send",
+                "args": {"what": "the draft", "to": "Vinish", "channel": "teams"},
+                "conv_id": "conv-xyz"})
+        pending = loop.take("conv-xyz")
+        assert pending, "nothing was staged for the conversation"
+        assert pending["kind"] == "send"
+        assert pending["what"] == "the draft"
+        assert pending["to"] == "Vinish"
+    asyncio.run(go())
+
+
+def test_no_conversation_still_refuses_rather_than_guessing(client):
+    """The fix must not become "pick a conversation". Staging a draft into the
+    wrong chat is worse than refusing to stage it."""
+    async def go():
+        async with client as c:
+            r = await c.post("/api/_invoke", json={
+                "tool": "prepare_to_send",
+                "args": {"what": "x", "to": "Vinish", "channel": "teams"}})
+            assert r.status_code == 200
+            assert "No active conversation" in r.json()["result"]
+    asyncio.run(go())
+
+
+def test_the_spawned_server_is_told_which_conversation_it_is_in():
+    from app import mcp_server
+    env = mcp_server.config_entry(tools=["remember"], conv_id="conv-7")["mcpServers"]
+    assert env["asta"]["env"]["ASTA_MCP_CONV"] == "conv-7"
+
+
+def test_both_cli_brains_pass_it():
+    """One brain fixed and the other not is the per-brain drift that has caused
+    this before — the same message reaching two different sets of rules."""
+    import inspect
+
+    from app import claude_cli, copilot_cli
+    for mod in (claude_cli, copilot_cli):
+        src = inspect.getsource(mod)
+        assert "config_entry(tools=selected, conv_id=" in src, mod.__name__
+
+
+def test_every_conversation_dependent_capability_is_tested_across_the_hop():
+    """Close the class, not just the two instances.
+
+    `prepare_to_send` and `continue_working` both read the conversation and both
+    failed over MCP, for hours, while this very file stayed green. Nothing would
+    stop a third from being added tomorrow and failing exactly the same way.
+
+    So the rule is mechanical: a capability that reads `current_conversation()`
+    must appear in a test in this file that supplies a `conv_id`. Add one without
+    covering it and this fails by name, before it reaches him.
+    """
+    import inspect
+    from pathlib import Path
+
+    needs_conv = []
+    for name, cap in capabilities.registry().items():
+        if cap.fn is None:
+            continue
+        try:
+            src = inspect.getsource(cap.fn)
+        except (OSError, TypeError):
+            continue
+        if "current_conversation()" in src:
+            needs_conv.append(name)
+
+    assert needs_conv, "the detector broke — it should find at least two"
+    here = Path(__file__).read_text()
+    covered = [n for n in needs_conv
+               if f'"tool": "{n}"' in here and '"conv_id"' in here]
+    missing = sorted(set(needs_conv) - set(covered))
+    assert not missing, (
+        f"these read the conversation but are never invoked with a conv_id here: "
+        f"{missing}. Over the MCP hop they will return 'No active conversation' "
+        f"every time, and nothing else in the suite will notice.")
+
+
+def test_the_binding_does_not_outlive_the_call(client):
+    """The dangerous half of the fix.
+
+    A ContextVar left set in a long-lived server is inherited by the NEXT call
+    that arrives without one — so a draft meant for nobody in particular would be
+    staged into whichever conversation was invoked last, and look like success.
+    Caught as an unrelated call test failing only in a full run, which is exactly
+    what a leaked ContextVar looks like.
+    """
+    from app import tasks
+
+    async def go():
+        async with client as c:
+            await c.post("/api/_invoke", json={
+                "tool": "prepare_to_send",
+                "args": {"what": "x", "to": "Vinish", "channel": "teams"},
+                "conv_id": "conv-leak"})
+            # A second call with no conversation must NOT inherit the first's.
+            r = await c.post("/api/_invoke", json={
+                "tool": "prepare_to_send",
+                "args": {"what": "y", "to": "Someone Else", "channel": "teams"}})
+            assert "No active conversation" in r.json()["result"]
+        assert tasks.current_conversation() is None
+    asyncio.run(go())

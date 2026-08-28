@@ -1,0 +1,36 @@
+{
+  "_comment": "LIVE, and they need the browser to themselves — one Chromium per profile, and the running server owns it. Stop the server first: `launchctl bootout gui/$(id -u)/com.asta.server`. That is not a testing inconvenience, it is the same single-writer limit that serialises Teams and Outlook in production, measured rather than assumed. Chats named here must be ones he has already read: opening a conversation marks it read, and consuming his unread markers to run a test would be worse than anything this catches.",
+  "capability": "readpath",
+  "cases": [
+    {
+      "id": "teams-activity-feed-still-reads",
+      "live": true,
+      "given": {"read": "activity", "limit": 15},
+      "must": ["rows="],
+      "must_not": ["rows=0"],
+      "budget": {"seconds": 20, "tokens": 0},
+      "why": "the watcher that was dead for fourteen and a half hours while every test stayed green. Measured at 7.4s on a warm pool.",
+      "source": "teams_bridge.read_activity_rows"
+    },
+    {
+      "id": "an-old-already-seen-chat-can-still-be-read",
+      "live": true,
+      "given": {"read": "chat", "chat": "telikos - all teams", "limit": 8},
+      "must": ["messages="],
+      "must_not": ["messages=0"],
+      "budget": {"seconds": 25, "tokens": 0},
+      "why": "he asked directly whether Asta can read an old message it has already seen. It can — 8 messages back to the previous evening, measured at 8.2s. This pins it.",
+      "source": "teams_bridge.read_chat"
+    },
+    {
+      "id": "outlook-inbox-still-reads",
+      "live": true,
+      "given": {"read": "mail", "limit": 8},
+      "must": ["mails="],
+      "must_not": ["mails=0"],
+      "budget": {"seconds": 30, "tokens": 0},
+      "why": "the surface that kept working through the Teams outage and made it look like a Teams-specific fault. Measured at 12.3s.",
+      "source": "outlook.read_mail"
+    }
+  ]
+}

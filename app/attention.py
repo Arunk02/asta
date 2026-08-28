@@ -183,6 +183,33 @@ def chase_at() -> int:
         return 3
 
 
+#: Already breakage, rather than something that might settle. Lives HERE, next to
+#: `score`, because it is a ranking decision and ranking has exactly one home.
+#:
+#: It used to live in `outlook` and `outlook` was its only caller, so an outage
+#: that arrived by mail interrupted him and the SAME outage posted in a Teams
+#: channel scored "no ask detected" — nobody asks anything when prod falls over —
+#: and went down the ambient path, which presence suppresses while he is at the
+#: laptop. Per-source drift, the same shape as every other per-source constant
+#: that has bitten this codebase.
+_CRITICAL = re.compile(
+    r"\b(down|outage|unavailable|unreachable|not responding|no longer responding|"
+    r"crash ?loop|crashloopbackoff|oom ?killed|out of memory|"
+    r"pods? (are )?(down|restarting|failing|not ready|unavailable)|"
+    r"service (is )?(down|unavailable|degraded)|"
+    r"cannot connect|connection refused|refusing connections|"
+    r"p1|sev ?1|severity ?1|critical|data loss|all requests failing)\b", re.I)
+
+
+def looks_critical(*parts: str) -> bool:
+    """Whether this text describes something already broken.
+
+    Takes loose parts so a caller can pass subject and body, or one rendered feed
+    row, without either of them having to know the other's shape.
+    """
+    return bool(_CRITICAL.search(" ".join(p for p in parts if p)))
+
+
 def score(action: bool, text: str, *, addressed: bool = False, critical: bool = False,
           key: str = "", who: str = "", now: float | None = None
           ) -> tuple[int, str, float | None]:
@@ -217,6 +244,71 @@ def score(action: bool, text: str, *, addressed: bool = False, critical: bool = 
     from . import contacts
     adjusted, note = contacts.adjust(base, who)
     return adjusted, (f"{why} · {note}" if note else why), due
+
+
+#: Queues and groups Arun is ON. Work assigned to one of these is assigned to
+#: HIM — "assigned to group OH - TELIKOS - L2" is not a broadcast, it is a
+#: ticket landing in his queue. Configured rather than guessed: nothing can infer
+#: which rotas somebody is on, and guessing wrong in the quiet direction is how a
+#: real incident goes unread.
+MY_GROUPS = tuple(g.strip().lower() for g in
+                  os.environ.get("ASTA_MY_GROUPS", "").split(",") if g.strip())
+
+
+def assigned_to_him(text: str) -> bool:
+    """Whether this lands in a queue he is on, however it is worded."""
+    low = (text or "").lower()
+    return bool(MY_GROUPS) and any(g in low for g in MY_GROUPS)
+
+
+#: An acknowledgement, not a request. "X reacted to your message" carries the
+#: "in chat with you" marker like every other row, so without this every emoji
+#: somebody leaves on his message would become a direct push — the noise that
+#: gets a notifier muted, and a muted notifier loses the real ones too.
+_REACTION = re.compile(r"\b(reacted to|liked|hearted)\b.{0,24}\byour\b", re.I)
+
+
+def is_reaction(text: str) -> bool:
+    return bool(_REACTION.search(text or ""))
+
+
+def rank(action: bool, text: str, *, addressed: bool = False, key: str = "",
+         who: str = "", now: float | None = None) -> tuple[int, str, float | None]:
+    """The WHOLE per-arrival ranking: criticality, score, chase escalation.
+
+    One function because there is one policy. Every caller that assembled these
+    three steps by hand assembled them slightly differently — the mail path passed
+    `critical`, the Teams path did not, and an outage in a channel was filed under
+    "FYI, nothing needed from you" as a result. The bench then reimplemented the
+    same three steps a third time and measured its own copy, which passed while
+    the product was wrong.
+
+    So: callers rank, they do not compose. Adding a signal here reaches every
+    source at once, which is the only version of this that stays true.
+    """
+    mine = assigned_to_him(text)
+    pri, why, due = score(action or mine, text, addressed=addressed or mine,
+                          critical=looks_critical(text), key=key, who=who, now=now)
+    if mine:
+        # A ticket in his own queue must never be silenced by what the SENDER
+        # usually sends. IT Service Desk sends mostly noise, so its act-rate is
+        # low, so `contacts.adjust` dropped every incident to P_MUTE — recorded,
+        # never pushed. `outlook.needs_attention` already exempts ServiceNow from
+        # the bulk filter; the exemption simply did not survive to the ranking
+        # layer, which is the same shape as every other per-layer drift here.
+        pri = min(pri, P_TODAY)
+        why = f"assigned to your group · {why}"
+    elif addressed and not is_reaction(text):
+        # Somebody used his name. That IS the ask, whether or not the sentence
+        # parses as one — "hi Arunkumar K" contains no ask verb and is
+        # unmistakably someone wanting him. Ranked P_FYI it went out ambient, and
+        # ambient is held while he is at the laptop, so on 28 August four people
+        # tagged him between 11:58 and 13:04 and not one reached his phone. He had
+        # already said the rule: "if they tag me u have to respond to me".
+        pri = min(pri, P_TODAY)
+        why = f"they tagged you · {why}"
+    pri, chased = escalate_for_chase(pri, key, now=now)
+    return pri, (chased or why), due
 
 
 def escalate_for_chase(priority: int, key: str, now: float | None = None) -> tuple[int, str]:

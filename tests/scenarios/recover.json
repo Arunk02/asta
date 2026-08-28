@@ -1,0 +1,75 @@
+{
+  "_comment": "The capability that did not exist until now: fixing itself. Every source name here is unique because the ladder has a per-source cooldown — reusing one would make the second case report 'cooling down' and pass for the wrong reason.",
+  "capability": "recover",
+  "cases": [
+    {
+      "id": "the-cheapest-rung-usually-does-it",
+      "given": {
+        "source": "bench-recycle",
+        "rungs": ["recycle", "restart", "repair"],
+        "heals_at": "recycle",
+        "stale_polls": 3
+      },
+      "must": ["healed=True", "by=recycle", "told_him=False", "tried=recycle"],
+      "must_not": ["tried=recycle,restart"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "recycling the browser is seconds — it must be tried before anything expensive, and he must not hear about it",
+      "source": "recovery.ladder — cheapest rung first, silent while it works"
+    },
+    {
+      "id": "it-keeps-climbing-when-the-cheap-fix-fails",
+      "given": {
+        "source": "bench-climb",
+        "rungs": ["recycle", "restart", "repair"],
+        "heals_at": "repair",
+        "stale_polls": 5
+      },
+      "must": ["healed=True", "by=repair", "told_him=False", "tried=recycle,restart,repair"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "the night of 26 August needed the third rung — a ladder that stops at the first failure would have stayed broken",
+      "source": "the leaked-browser outage: recycle alone would not have cleared a damaged profile"
+    },
+    {
+      "id": "he-is-told-only-when-everything-failed",
+      "given": {
+        "source": "bench-exhausted",
+        "rungs": ["recycle", "restart", "repair"],
+        "heals_at": "",
+        "stale_polls": 9
+      },
+      "must": ["healed=False", "told_him=True", "tried=recycle,restart,repair"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "this is the ONLY case that is his — and the message has to name what was tried, or it is an alarm rather than a report",
+      "source": "recovery.ladder escalation path"
+    },
+    {
+      "id": "one-bad-poll-is-not-an-outage",
+      "given": {
+        "source": "bench-hiccup",
+        "rungs": ["recycle"],
+        "heals_at": "recycle",
+        "stale_polls": 1,
+        "threshold": 3
+      },
+      "must": ["healed=False", "told_him=False", "tried="],
+      "must_not": ["tried=recycle"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "a network that has not reassociated after the lid opens fails one poll — repairing on that would relaunch a browser every minute",
+      "source": "recovery.DEFAULT_THRESHOLD — one failure is a hiccup, three is a pattern"
+    },
+    {
+      "id": "a-rung-that-throws-does-not-stop-the-ladder",
+      "given": {
+        "source": "bench-throws",
+        "rungs": ["explodes", "repair"],
+        "throws": ["explodes"],
+        "heals_at": "repair",
+        "stale_polls": 4
+      },
+      "must": ["healed=True", "by=repair"],
+      "budget": {"seconds": 0.2, "tokens": 0},
+      "why": "the blunt repair is exactly what is needed when the delicate one is too broken to run",
+      "source": "recovery.ladder catches a rung's exception and continues"
+    }
+  ]
+}

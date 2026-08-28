@@ -1,0 +1,81 @@
+{
+  "_comment": "The first decision of every code task, and the one that has gone wrong most expensively. Routing a QUESTION to a task spawns work he never asked for; routing a real assignment to chat means the plan gate never runs — which is exactly how a PR got raised with no plan approved.",
+  "capability": "code",
+  "cases": [
+    {
+      "id": "a-plain-assignment-is-work",
+      "given": {"text": "fix the NPE in BEPTELIKOS-9397 when the vessel ETA is null"},
+      "must": ["work=True", "ticket=BEPTELIKOS-9397"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "the ordinary case — if this does not route to a task, the plan gate never runs",
+      "source": "work_intent.is_work_assignment"
+    },
+    {
+      "id": "a-question-is-never-work",
+      "given": {"text": "where is the vessel ETA validated in the booking service?"},
+      "must": ["work=False"],
+      "must_not": ["work=True"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "spawning a task from a question is the failure that erodes trust — he asked, he did not assign",
+      "source": "work_intent: a trailing '?' can never be an assignment"
+    },
+    {
+      "id": "thinking-out-loud-is-not-an-order",
+      "given": {"text": "I was wondering whether we should refactor the EtaValidator at some point"},
+      "must": ["work=False"],
+      "must_not": ["work=True"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "musing must not become a branch, a PR and a review request while he is still thinking",
+      "source": "work_intent._DISCUSS"
+    },
+    {
+      "id": "a-ticket-survives-an-other-flow-word",
+      "given": {"text": "comment on BEPTELIKOS-9397 and fix the null check"},
+      "must": ["work=True", "ticket=BEPTELIKOS-9397"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "a ticket key names a unit of tracked work — it outranks the guard that would send this elsewhere",
+      "source": "work_intent: 'a ticket key is evidence on its own'"
+    },
+    {
+      "id": "ok-must-never-reach-a-paid-model",
+      "given": {"text": "ok"},
+      "must": ["trivial=True", "work=False"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "token waste in its purest form — the single cheapest saving in the system",
+      "source": "router.is_trivial"
+    },
+    {
+      "id": "thanks-is-trivial-too",
+      "given": {"text": "thanks!"},
+      "must": ["trivial=True"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "the pleasantries that make up a real share of daily turns",
+      "source": "router._TRIVIAL"
+    },
+    {
+      "id": "real-content-is-never-trivial-however-short",
+      "given": {"text": "prod is down"},
+      "must": ["trivial=False"],
+      "must_not": ["trivial=True"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "short is not the same as unimportant — answering an outage with '👍' is the worst possible failure here",
+      "source": "router.is_trivial — 'never for real content'"
+    },
+    {
+      "id": "the-title-is-in-his-own-words",
+      "given": {"text": "BEPTELIKOS-9397 add the null guard before the gate-in comparison"},
+      "must": ["BEPTELIKOS-9397", "null guard"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "he has to recognise his own task in a list of twenty",
+      "source": "work_intent.title_for"
+    },
+    {
+      "id": "an-essay-is-not-an-assignment",
+      "given": {"text": "so the thing is that when we look at the booking service and the way the vessel dates are handled across both the references store and the service dates store, there is a long history here going back several sprints, and I have been thinking about whether the right move is to consolidate them or to keep them separate and just enforce the sync more strictly, because both have tradeoffs and the team has gone back and forth on it more than once, and honestly I am still not sure which way I would go if it were entirely up to me today"},
+      "must": ["work=False"],
+      "budget": {"seconds": 0.02, "tokens": 0},
+      "why": "a 600-character bound exists because a wall of text is thinking, not an instruction",
+      "source": "work_intent: len(t) > 600 returns False"
+    }
+  ]
+}

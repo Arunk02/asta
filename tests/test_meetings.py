@@ -20,7 +20,7 @@ from datetime import datetime
 
 import pytest
 
-from app import meetings, offers, store
+from app import meetings, voice, offers, store
 
 
 @pytest.fixture(autouse=True)
@@ -162,6 +162,9 @@ def test_an_invite_that_did_not_send_is_reported_as_not_sent(monkeypatch):
 # --- calls ------------------------------------------------------------------
 
 def test_speaking_is_refused_when_no_microphone_is_configured(monkeypatch):
+    # can_speak/speaking_hint live in `voice` now (audio capability has one
+    # home); patch the value they actually read.
+    monkeypatch.setattr(voice, "CALL_DEVICE", "")
     monkeypatch.setattr(meetings, "AUDIO_DEVICE", "")
     store.kv_set("teams_in_call", "https://teams/x")
     with pytest.raises(RuntimeError, match="virtual microphone"):
@@ -169,13 +172,20 @@ def test_speaking_is_refused_when_no_microphone_is_configured(monkeypatch):
 
 
 def test_the_refusal_explains_what_would_make_it_work(monkeypatch):
+    # can_speak/speaking_hint live in `voice` now (audio capability has one
+    # home); patch the value they actually read.
+    monkeypatch.setattr(voice, "CALL_DEVICE", "")
     monkeypatch.setattr(meetings, "AUDIO_DEVICE", "")
     assert "ASTA_CALL_AUDIO_DEVICE" in meetings.speaking_hint()
     assert not meetings.can_speak()
 
 
 def test_speaking_outside_a_call_is_refused(monkeypatch):
-    monkeypatch.setattr(meetings, "AUDIO_DEVICE", "BlackHole 2ch")
+    # `can_speak` moved to voice and reads voice.CALL_DEVICE. Patching
+    # meetings.AUDIO_DEVICE stopped controlling it, so this test only passed on
+    # Arun's laptop — where .env supplies a real device — and failed on CI, which
+    # has none. Patch the name the code actually reads.
+    monkeypatch.setattr(voice, "CALL_DEVICE", "BlackHole 2ch")
     store.kv_set("teams_in_call", "")
     with pytest.raises(RuntimeError, match="not in a call"):
         asyncio.run(meetings.say_in_call("hello"))
@@ -184,13 +194,12 @@ def test_speaking_outside_a_call_is_refused(monkeypatch):
 def test_silent_speech_generation_is_not_reported_as_spoken(monkeypatch):
     """Audio that came back empty means nothing was said, whatever the pipeline
     thought it was doing."""
-    monkeypatch.setattr(meetings, "AUDIO_DEVICE", "BlackHole 2ch")
+    monkeypatch.setattr(voice, "CALL_DEVICE", "BlackHole 2ch")
     store.kv_set("teams_in_call", "https://teams/x")
 
     async def nothing(text, profile="", engine="", voice=""):
         return b""
 
-    from app import voice
     monkeypatch.setattr(voice, "speak", nothing)
     with pytest.raises(RuntimeError, match="said nothing"):
         asyncio.run(meetings.say_in_call("hello"))
@@ -200,6 +209,9 @@ def test_the_tool_reports_the_reason_rather_than_raising(monkeypatch):
     """A tool that raises gives the model a stack trace to paraphrase; a tool that
     explains gives it something true to relay."""
     from app import agent
+    # can_speak/speaking_hint live in `voice` now (audio capability has one
+    # home); patch the value they actually read.
+    monkeypatch.setattr(voice, "CALL_DEVICE", "")
     monkeypatch.setattr(meetings, "AUDIO_DEVICE", "")
     out = asyncio.run(agent.say_in_call("hello"))
     assert out.startswith("Said nothing")

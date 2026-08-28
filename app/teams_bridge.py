@@ -176,6 +176,100 @@ async def close_pool() -> None:
         await _discard_pool()
 
 
+def profile_processes() -> list[int]:
+    """PIDs of the top-level Chromium processes holding OUR Teams profile.
+
+    Renderers and GPU helpers carry the same `--user-data-dir` on their command
+    line, so they are filtered out: killing a parent takes its children with it,
+    and counting them would report eighteen browsers as fifty-four.
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-Ao", "pid=,command="],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    marker = str(PROFILE_DIR)
+    pids = []
+    for line in out.splitlines():
+        if marker not in line or "--type=" in line:
+            continue
+        head = line.strip().split(None, 1)
+        if head and head[0].isdigit():
+            pids.append(int(head[0]))
+    return pids
+
+
+def reap_orphans() -> int:
+    """Kill every browser still holding our profile. Returns how many died.
+
+    The invariant that makes this safe rather than reckless: call it only when we
+    hold no pooled browser of our own — at startup, or straight after
+    `_discard_pool`. Anything on OUR profile directory at that moment is a leak
+    from a call that never cleaned up, and every one of them is a writer
+    contending for a store that tolerates exactly one.
+
+    Silent by design. A leak that has already been cleaned up is not news, and
+    this is the rung that should fix things before he ever hears about them.
+    """
+    import os as _os
+    import signal
+    killed = 0
+    for pid in profile_processes():
+        try:
+            _os.kill(pid, signal.SIGTERM)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            continue
+    if killed:
+        store.record_outcome("recovery", "reaped", subject="teams",
+                             detail=f"{killed} orphaned browser(s) on the profile")
+    return killed
+
+
+def _teams_leveldb() -> Path:
+    """Teams' own IndexedDB store — the thing that gets wedged by co-writers."""
+    return (PROFILE_DIR / "Default" / "IndexedDB"
+            / "https_teams.microsoft.com_0.indexeddb.leveldb")
+
+
+def repair_rungs() -> list[tuple[str, object]]:
+    """How the Teams watcher can be repaired, cheapest first.
+
+    Declared here, next to the resource it repairs, and handed to the generic
+    ladder in `recovery`. A Teams-specific recovery loop would leave Outlook, the
+    bridges and everything added next year with the same hole — which is exactly
+    how this became a recurring bug rather than a one-off one.
+    """
+    async def recycle() -> bool:
+        """Seconds. Drop our browser, kill the leaks, prove a fresh one loads."""
+        await close_pool()
+        reap_orphans()
+        return await check_session()
+
+    async def restart() -> bool:
+        """Same, but insist on a genuinely new app boot rather than a reused tab."""
+        await close_pool()
+        reap_orphans()
+        _POOL.clear()
+        return await check_session()
+
+    async def repair_profile() -> bool:
+        """Last resort: clear Teams' wedged local store. The LOGIN SURVIVES —
+        cookies live elsewhere, so this costs a re-sync, not an SSO round."""
+        import shutil
+        await close_pool()
+        reap_orphans()
+        target = _teams_leveldb()
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+            store.record_outcome("recovery", "cleared_indexeddb", subject="teams",
+                                 detail=str(target.name))
+        return await check_session()
+
+    return [("recycle", recycle), ("restart", restart), ("repair_profile", repair_profile)]
+
+
 # Markers that only exist in the authenticated Teams app (NOT its pre-redirect shell
 # or the Microsoft login page — generic ones like #app match those too).
 APP_MARKERS = '[data-tid="app-bar"], [data-tid="chat-list"], [data-tid="app-layout-area--main"]'
@@ -255,6 +349,94 @@ _CHAT_ROWS = """
         .map(n => (n.innerText || '').split('\\n')[0].trim())
         .filter(t => t && t.length < 80)
 """
+
+#: The same rail rows, but keeping what `_CHAT_ROWS` throws away.
+#:
+#: Reading the Activity feed was always the wrong reader, and Arun said why:
+#: "if they didnt tag , still if it one to one chat na , that message is for me
+#: correct , sometimes the first message they tag and second message they wont tag
+#: in both personal one to one chat as well as group chat this is basic thing".
+#:
+#: He is right, and it is basic. Teams' Activity feed lists mentions, replies,
+#: reactions and invites — never an ordinary message. So every untagged follow-up
+#: in a 1:1, which is most of a conversation, was structurally invisible.
+#:
+#: Unread state is not exposed by one dependable attribute across Teams versions,
+#: so this returns every SIGNAL it can see and lets Python decide. A row is unread
+#: if any of them says so; guessing one selector and trusting it is how the call
+#: buttons broke twice.
+_CHAT_ROWS_FULL = """
+    () => Array.from(document.querySelectorAll('[role="treeitem"]'))
+        .filter(n => !n.querySelector('[role="treeitem"]'))
+        .map(n => {
+            const txt = (n.innerText || '').trim();
+            const marks = Array.from(n.querySelectorAll('*'))
+                .map(e => ((e.getAttribute('data-tid') || '') + ' ' +
+                           (e.className && e.className.baseVal !== undefined
+                              ? e.className.baseVal : (e.className || '')))).join(' ');
+            return {
+                name: txt.split('\\n')[0].trim(),
+                text: txt.slice(0, 400),
+                aria: (n.getAttribute('aria-label') || '').slice(0, 300),
+                tid: (n.getAttribute('data-tid') || ''),
+                marks: marks.slice(0, 600),
+                bold: !!n.querySelector('[class*="bold" i], strong, b'),
+            };
+        })
+        .filter(r => r.name && r.name.length < 80)
+"""
+
+# NOTE: there is deliberately no unread-styling reader here.
+#
+# The first attempt at this read the rail for an unread marker. Against his live
+# Teams there is none to read: `role="treeitem"` rows carry an empty aria-label,
+# an empty data-tid, and hashed Fluent class names (`___8rueir0`), and the row
+# text is the contact name alone — no preview, no timestamp, no badge. A detector
+# built on that would have reported "nothing unread" forever while looking like it
+# worked.
+#
+# `chat_watch` uses Asta's own high-water mark instead, which is both robust and
+# the behaviour he asked for: what matters is whether ASTA has handled a message,
+# not whether Teams believes he has seen it.
+
+
+#: The rail is lazy: `_open_teams` returns as soon as the app shell exists, and
+#: the chat list paints seconds later. Reading it immediately finds nothing — the
+#: same trap that made a headed call search report "no person match for 'Vinish'
+#: (saw: nothing)" on a name that resolves fine.
+async def wait_for_rail(page, timeout: float = 20.0) -> int:
+    """Wait until the chat rail has painted. Returns how many rows it ended with."""
+    deadline = time.time() + timeout
+    count = 0
+    while time.time() < deadline:
+        try:
+            count = await page.evaluate(
+                '() => document.querySelectorAll(\'[role="treeitem"]\').length')
+        except Exception:
+            count = 0
+        if count:
+            return count
+        await asyncio.sleep(0.5)
+    return count
+
+
+async def rail_diagnostic(limit: int = 12) -> list[dict]:
+    """What the rail actually exposes, for checking the unread signals are real.
+
+    Exists because the alternative is guessing a selector and believing it. Runs
+    through the pooled page like every other read, so it never competes with the
+    server for the single-writer profile.
+    """
+    async with teams_page() as page:
+        found = await wait_for_rail(page)
+        try:
+            rows = await page.evaluate(_CHAT_ROWS_FULL)
+        except Exception as exc:
+            return [{"error": str(exc)[:200]}]
+        if not rows:
+            return [{"error": f"rail painted {found} treeitem(s) but none parsed",
+                     "url": page.url[:120]}]
+    return (rows or [])[:limit]
 #: Rail entries that are furniture rather than conversations.
 _NOT_A_CHAT = {"copilot", "mentions", "discover", "drafts", "saved", "chats",
                "favorites", "quick views", "new chat", "unread"}
@@ -511,7 +693,22 @@ _MESSAGE_JS = """
     const author = item.querySelector(
       '[data-tid="message-author-name"], [data-tid="threadBodyDisplayName"]');
     const body = item.querySelector('[data-tid="messageBodyContent"]') || n;
-    const text = (body.innerText || '').trim();
+    // A REPLY renders the message it answers inside its own body, so innerText
+    // returned the quoted sentence and the reply glued together — and the
+    // notification showed the QUOTED half under the replier's name, which put
+    // Arun's own words in Divya's mouth. Clone and drop the quote, so the text is
+    // only ever what this person typed. Several selectors because which one Teams
+    // uses has moved; if none matches, `chat_watch.clean_message` still refuses to
+    // show a quote as if it were a message.
+    let src = body;
+    try {
+      const clone = body.cloneNode(true);
+      const quotes = clone.querySelectorAll(
+        '[data-tid="quoted-reply"], [data-tid="message-quote"], blockquote, ' +
+        '[class*="quotedReply" i], [class*="messageQuote" i], [class*="replyPreview" i]');
+      if (quotes.length) { quotes.forEach(q => q.remove()); src = clone; }
+    } catch (e) { src = body; }
+    const text = (src.innerText || '').trim();
     if (!text) continue;
 
     let iso = '', stamp = '';
@@ -1010,9 +1207,40 @@ def _activity_key(item: str) -> str:
 
 
 
+#: Feed rows that describe a MESSAGE — the thing `chat_watch` now reads directly.
+_A_MESSAGE = ("mentioned you", "replied to you", "in chat with you")
+
+#: Feed rows for things that never appear as a message in a thread, so the feed is
+#: the only place they can be seen at all.
+_FEED_ONLY = ("missed call", "invited you", "updated", "reacted to")
+
+
+def duplicates_chat_watch(item: str) -> bool:
+    """Would `chat_watch` deliver this same message, with better text?
+
+    Two readers over one surface is two notifications. Once chat_watch reads the
+    conversations directly it sees every message the feed describes — and sees the
+    actual sentence rather than the feed's truncated rendering — so the feed
+    stepping in as well is the duplication he hit: the same line from Abhijit
+    arriving twice, in two different shapes.
+
+    Missed calls, invites and reactions are NOT messages in any thread, so they
+    stay with the feed, which is the only thing that can see them.
+    """
+    from . import chat_watch
+    if not chat_watch.enabled():
+        return False                      # the feed is the only reader; keep it all
+    t = (item or "").lower()
+    if any(k in t for k in _FEED_ONLY):
+        return False
+    return any(k in t for k in _A_MESSAGE)
+
+
 def _activity_wanted(item: str) -> bool:
     t = item.lower()
     if "reacted to your message" in t:
+        return False
+    if duplicates_chat_watch(item):
         return False
     if any(p in t for p in _ACTIVITY_INTERESTING):
         return True
@@ -1027,26 +1255,57 @@ async def _push_activity(notify, wanted: list[str]) -> None:
     now on whether anyone actually wants a move from him — not merely on whether
     his name appeared.
     """
-    from . import attention, triage
+    from . import attention, responder, triage
     verdicts = []
+    #: Investigations this batch started, so he is told the checking is under way
+    #: rather than merely that someone asked. "X is asking about Y" is another
+    #: thing on his list; "X is asking about Y, I'm checking" is one fewer.
+    started: list[str] = []
     for it in wanted[:12]:
         who, _, rest = it.partition(" — ")
         addressed = any(m in it.lower() for m in _DIRECT_MARKERS)
         v = triage.classify(who, rest or it, addressed=addressed)
         v = await triage.refine(v, who, rest or it)
         led_key = attention.key_for(it)
-        pri, why, due = attention.score(v.action, it, addressed=addressed,
-                                        key=led_key, who=who)
-        pri, chased = attention.escalate_for_chase(pri, led_key)
+        # `critical` was never passed here, only from the mail path — so an
+        # outage posted in a channel scored "no ask detected" (nobody ASKS
+        # anything when prod falls over), landed under "FYI, nothing needed from
+        # you", and went out ambient, which presence suppresses while he is at
+        # the laptop. Same detector as mail now, so both sources agree.
+        pri, why, due = attention.rank(v.action, it, addressed=addressed,
+                                       key=led_key, who=who)
         if not attention.consider("teams", led_key, who=who, what=v.one_line,
-                                  why=chased or why, priority=pri, due_at=due):
+                                  why=why, priority=pri, due_at=due):
             continue
         verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)
+        # The actuator. Everything above this line decides how loudly to tell
+        # him; this is the part that goes and finds out. Read-only, so it needs
+        # no permission, and it does not consult presence — he asked for this to
+        # happen "whether im online or not".
+        # `who` here is the whole feed row — the " — " split above does not fire on
+        # most renderings — so the name is pulled out properly for anything that
+        # ends up in a title he reads hours later.
+        asker = responder.asker_from(it, who)
+        task = responder.respond("teams", asker, it, priority=pri, key=led_key)
+        if task:
+            started.append(responder.line_for(task, asker, responder.what_it_asks(it)))
     text, needs = triage.summarize(verdicts, "💬 Teams")
+    if started:
+        text = (text + "\n\n" if text else "") + "\n".join(started)
     if text:
         ranks = [v.priority for v in verdicts if v.priority is not None]
-        await notify.notify(text, "teams", urgency="direct" if needs else "ambient",
-                            priority=min(ranks) if ranks else None,
+        top = min(ranks) if ranks else None
+        # Work started on his behalf is always worth an interrupt: it is the
+        # difference between a queue he must drain and one that is draining.
+        # Urgency from the RANK too, not only from whether triage found an ask
+        # verb. "hi Arunkumar K" parses as no-ask, so `needs` was False and the
+        # push went ambient — which notify holds while he is at the laptop. Being
+        # tagged has already floored this to P_TODAY; the urgency decision has to
+        # read that, or the floor only changes a number nobody acts on.
+        wants_him = needs or started or (top is not None and top <= attention.P_TODAY)
+        await notify.notify(text, "teams",
+                            urgency="direct" if wants_him else "ambient",
+                            priority=top,
                             considered=True)   # attention.consider ran above
 
 
@@ -1057,8 +1316,13 @@ async def activity_watch_loop() -> None:
     DND, and with notifications disabled — it reads Teams itself.
     """
     import json as _json
-    from . import attention, notify
+    from . import attention, notify, recovery
     attention.note_watching("teams")     # running, and expected to succeed
+    # A previous run that crashed or was killed leaves its browsers behind, still
+    # holding the profile. Starting up is the one moment we are certain we own
+    # none of them, so it is the safest possible time to clear the ground.
+    reap_orphans()
+    consecutive_failures = 0
     while True:
         # wake.sleep, not asyncio.sleep: when the lid opens after eight hours
         # this returns immediately instead of idling out the remainder of a
@@ -1073,7 +1337,16 @@ async def activity_watch_loop() -> None:
             # But the REASON is kept now. This handler ran silently every five
             # minutes while the watcher was dead, and nothing anywhere said so.
             attention.note_scrape_error("teams", exc)
+            consecutive_failures += 1
+            # …and keeping the reason is still not fixing it. Every previous round
+            # on this bug added a better sensor; on 26 August the store held the
+            # exact cause, the exact age and the exact subsystem, and nothing
+            # happened for fourteen hours because every path ended in "tell Arun"
+            # and Arun was asleep. This is the part that acts.
+            await recovery.ladder("teams", repair_rungs(), consecutive_failures,
+                                  notify=notify.notify)
             continue
+        consecutive_failures = 0
         attention.note_scrape("teams")   # only on success — see attention.stale_sources
         if not rows:
             continue
@@ -1102,23 +1375,47 @@ async def activity_watch_loop() -> None:
 
 
 async def check_session() -> bool:
-    """Headless probe: is the stored Teams session still valid?"""
-    async with _lock:
-        pw, ctx = await _launch()
-        try:
-            await _open_teams(ctx)
+    """Is the stored Teams session still valid?
+
+    This function used to launch its own browser and never close it. No `finally`,
+    on any path — success or failure — while `session_watch_loop` called it every
+    thirty minutes. On the night of 26 August that leaked one Chromium and one
+    Playwright driver per call: eighteen live browsers by lunchtime, 1.2 GB, all
+    of them writing to a single-writer profile directory. Teams' IndexedDB grew to
+    76 files where Outlook's had 11, the SPA could no longer initialise its token
+    store, and every Teams operation failed with "did not load within 75s" for
+    fourteen and a half hours while Outlook — which re-auths from cookies — kept
+    working and made it look like a Teams-specific fault.
+
+    It now goes through the pooled accessor like everything else, which owns the
+    browser's lifetime and discards it on any error.
+    """
+    try:
+        async with teams_page():
             store.kv_set("teams_session_ok", "1")
             return True
-        except RuntimeError as exc:
-            if "SESSION_EXPIRED" in str(exc):
-                store.kv_set("teams_session_ok", "0")
-                return False
-            raise
+    except RuntimeError as exc:
+        if "SESSION_EXPIRED" in str(exc):
+            store.kv_set("teams_session_ok", "0")
+            return False
+        raise
+
+
+#: A read this recent already proves the session — see `session_watch_loop`.
+SESSION_PROVEN_BY_READ = SESSION_CHECK_SECONDS
 
 
 async def session_watch_loop() -> None:
-    """Every 30 min verify the session; notify ONCE when it expires."""
-    from . import notify
+    """Verify the session — but only when the real work has not already proved it.
+
+    The cheapest browser launch is the one that does not happen. `read_activity_rows`
+    sets `teams_session_ok=1` every sixty seconds and Outlook's poll sets it every
+    five minutes; a synthetic probe on top of that is redundant work competing with
+    real work for a resource that only tolerates one writer. So the probe now runs
+    only when nothing has read successfully inside the window — which, on a healthy
+    day, is never.
+    """
+    from . import attention, notify
     while True:
         # A suspended laptop is the most likely moment for the Teams session to
         # have gone stale, so waking is exactly when it is worth re-checking.
@@ -1126,6 +1423,9 @@ async def session_watch_loop() -> None:
         if not logged_in_once():
             continue
         try:
+            proven = time.time() - attention.last_scrape("teams")
+            if proven < SESSION_PROVEN_BY_READ:
+                continue          # a real read already answered this, for free
             was_ok = store.kv_get("teams_session_ok") != "0"
             ok = await check_session()
             if was_ok and not ok:

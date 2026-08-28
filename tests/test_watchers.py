@@ -140,6 +140,22 @@ def test_nothing_at_all_sends_nothing():
 
 
 def test_teams_push_splits_asks_from_mentions_with_no_ask():
+    """Both still arrive in one message, and the ask is still marked as the ask.
+
+    What changed on 28 August is the URGENCY of the second one. This test used to
+    assert that a mention with no ask verb rides the ambient path — and ambient is
+    held while he is at the laptop, so on that morning Komal, Nakka Harika and
+    Abhijit (twice) all used his name between 11:58 and 13:04 and not one reached
+    his phone. He found them by opening the screen.
+
+    His rule, given twice: "if they tag me u have to respond to me". Someone using
+    his name IS the ask, whether or not the sentence parses as one — "hi Arunkumar
+    K" has no verb in it and is unmistakably somebody wanting him. The cost is
+    asymmetric and known: an unneeded push costs a glance, a missed one costs a
+    colleague waiting on a reply that never comes.
+
+    Reactions are the exception and stay quiet — see test_tagged_reaches_him.
+    """
     n = _Notify()
     asyncio.run(teams_bridge._push_activity(n, [
         "Priya — mentioned you — can you review the PR?",
@@ -148,13 +164,24 @@ def test_teams_push_splits_asks_from_mentions_with_no_ask():
     text, urgency = n.sent[0]
     assert urgency == "direct"
     assert "Priya" in text and "Ravi" in text
-    assert "nothing needed from you" in text            # Ravi's praise asks nothing
 
 
-def test_teams_all_quiet_batch_does_not_interrupt():
+def test_a_batch_of_only_tags_still_reaches_him():
+    """Formerly `test_teams_all_quiet_batch_does_not_interrupt`, which asserted the
+    behaviour that lost four pings. A batch where nobody used an ask verb is not a
+    quiet batch if his name is in it."""
     n = _Notify()
     asyncio.run(teams_bridge._push_activity(n, ["Ravi — mentioned you — nice work"]))
-    assert n.sent[0][1] == "ambient"
+    assert n.sent[0][1] == "direct"
+
+
+def test_a_batch_of_reactions_still_does_not_interrupt():
+    """The thing that must stay quiet, and the reason the rule above is safe: emoji
+    are by far the highest-volume row in his feed."""
+    n = _Notify()
+    asyncio.run(teams_bridge._push_activity(
+        n, ["Divya — reacted to your message — nice work — In chat with you"]))
+    assert not n.sent or n.sent[0][1] == "ambient"
 
 
 # --- helpers: drive the dedup + read-state logic of the real loop -----------
@@ -178,3 +205,52 @@ def _fresh_activity(rows: list[dict]) -> list[str]:
     store.kv_set(teams_bridge.ACTIVITY_SEEN_KEY, json.dumps(keys[:300]))
     opened = {teams_bridge._activity_key(r["text"]) for r in rows if r.get("unread") is False}
     return [it for it in fresh if teams_bridge._activity_key(it) not in opened]
+
+
+# --- one reader per surface ---------------------------------------------------
+# "ABhijit msg is returning now it bloating unwanted arrey"
+#
+# Once `chat_watch` reads the conversations directly it sees every message the
+# Activity feed describes, and sees the real sentence rather than the feed's
+# truncated rendering. The feed pushing them as well is the same message arriving
+# twice in two different shapes.
+
+def test_a_chat_message_is_left_to_the_reader_that_sees_it_properly(monkeypatch):
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
+    assert teams_bridge.duplicates_chat_watch(
+        "Abhijit Mohapatra mentioned you — hi Arunkumar K — 13:04 — In chat with you")
+
+
+@pytest.mark.parametrize("row", [
+    "Missed call from Vinish Kumar — Teams call — Call — Chat",
+    "Zishan M invited you: Zishan - OOO - 31/08",
+    "Vinish Kumar updated — AI Ideathon — 12:41",
+])
+def test_things_that_are_not_messages_are_never_deduplicated_away(row, monkeypatch):
+    """A missed call, an invite and a calendar change never appear as a message in
+    any thread, so the feed is the only thing that can see them at all.
+
+    Asserts the dedup decision only. Whether a row is ultimately WANTED also runs
+    through `msnotify.keywords()`, which is derived from the machine's username and
+    from TEAMS_WATCH_KEYWORDS — so asserting it here passed on his laptop and
+    failed on CI, testing his .env rather than this change.
+    """
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
+    assert not teams_bridge.duplicates_chat_watch(row)
+
+
+@pytest.mark.parametrize("row", [
+    "Missed call from Vinish Kumar — Teams call — Call — Chat",
+    "Zishan M invited you: Zishan - OOO - 31/08",
+])
+def test_the_feed_still_delivers_what_only_it_can_see(row, monkeypatch):
+    """These two are interesting unconditionally, so this holds on any machine."""
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
+    assert teams_bridge._activity_wanted(row)
+
+
+def test_with_the_chat_reader_off_the_feed_keeps_everything(monkeypatch):
+    """Deduplicating against a reader that is not running would lose the message."""
+    monkeypatch.delenv("ASTA_CHATWATCH", raising=False)
+    assert not teams_bridge.duplicates_chat_watch(
+        "Abhijit Mohapatra mentioned you — hi Arunkumar K — In chat with you")

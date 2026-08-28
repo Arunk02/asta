@@ -37,13 +37,15 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 from . import quiet, store
+from .voice import (  # noqa: F401  (re-exported: callers and tests use these)
+    can_speak, ensure_unmuted, mic_is_live, speaking_hint)
 from .call_brain import (  # noqa: F401  (re-exported: callers and tests use these)
     _ANSWERABLE, _ANSWER_PROMPT, _ASKED, _HIS_TO_ANSWER, _ask_key, _call_tools,
     answer_from_knowledge, classify_line, clear_noticed, confident, notice_asks,
     pending_for_him, spoken_form, CONFIRM_SPEECH, SPOKEN_ANSWER_WORDS)
 
 
-COMPOSE_URL = "https://outlook.office.com/calendar/deeplink/compose"
+COMPOSE_URL = "https://outlook.office.com/calendar/deeplink/compose"  # noqa: F811 (re-exported below for callers)
 
 
 def _now() -> float:
@@ -88,130 +90,13 @@ ANSWER_BUDGET_SECONDS = float(os.environ.get("ASTA_ANSWER_BUDGET", "25"))
 
 
 # --- building an invite ------------------------------------------------------
-
-def _iso(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%dT%H:%M:%S")
-
-
-def compose_url(subject: str, start: datetime, end: datetime,
-                attendees: list[str] | None = None, body: str = "",
-                all_day: bool = False, online: bool = True) -> str:
-    """The Outlook deeplink that opens a fully pre-filled invite.
-
-    Every field is placed by Outlook's own parser rather than by us clicking
-    around its UI, so either the whole invite is right or the link is obviously
-    wrong — there is no half-filled middle state to notice too late.
-    """
-    params = {
-        "subject": subject,
-        "startdt": _iso(start),
-        "enddt": _iso(end),
-        "body": body,
-        "path": "/calendar/action/compose",
-        "rru": "addevent",
-    }
-    if all_day:
-        params["allday"] = "true"
-    if online:
-        params["online"] = "1"
-    if attendees:
-        params["to"] = ";".join(a.strip() for a in attendees if a.strip())
-    return COMPOSE_URL + "?" + urllib.parse.urlencode(
-        {k: v for k, v in params.items() if v not in ("", None)})
-
-
-def leave_invite(start_date: str, end_date: str = "", reason: str = "",
-                 to: list[str] | None = None) -> dict:
-    """An all-day leave/out-of-office invite. Returns the invite, unsent.
-
-    End date is EXCLUSIVE in the calendar's own model, so a single day off runs
-    to the next morning. Getting that wrong by one day is the classic off-by-one
-    in leave booking, and the person who finds it is whoever needed him on the
-    day he was actually there.
-    """
-    start = _parse_day(start_date)
-    end = _parse_day(end_date) if end_date else start
-    if end < start:
-        raise RuntimeError(f"leave ends ({end_date}) before it starts ({start_date})")
-    subject = "Leave — Arun" + (f" ({reason})" if reason else "")
-    return {
-        "subject": subject,
-        "start": start,
-        "end": end + timedelta(days=1),        # exclusive: the day itself is included
-        "all_day": True,
-        "attendees": to or [],
-        "body": (reason or "Out of office."),
-        "days": (end - start).days + 1,
-        "url": compose_url(subject, start, end + timedelta(days=1),
-                           to or [], reason or "Out of office.",
-                           all_day=True, online=False),
-    }
-
-
-def meeting_invite(subject: str, when: str, minutes: int = 30,
-                   attendees: list[str] | None = None, agenda: str = "") -> dict:
-    """A normal meeting. Returns the invite, unsent."""
-    start = _parse_when(when)
-    end = start + timedelta(minutes=max(5, minutes))
-    return {
-        "subject": subject,
-        "start": start,
-        "end": end,
-        "all_day": False,
-        "attendees": attendees or [],
-        "body": agenda,
-        "url": compose_url(subject, start, end, attendees or [], agenda, online=True),
-    }
-
-
-_DAY = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})\s*$")
-_WHEN = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})\s*$")
-
-
-def _parse_day(s: str) -> datetime:
-    m = _DAY.match(s or "")
-    if not m:
-        raise RuntimeError(f"date must be YYYY-MM-DD, got '{s}'")
-    try:
-        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    except ValueError as exc:
-        # Shaped right but impossible ("2026-13-01", "2026-02-30"). Raised as a
-        # RuntimeError like every other rejection here, so the calling tool
-        # answers with a sentence instead of dying on a ValueError it never
-        # thought to catch.
-        raise RuntimeError(f"'{s}' is not a real date — {exc}") from exc
-
-
-def _parse_when(s: str) -> datetime:
-    """Local wall-clock time, given explicitly.
-
-    Deliberately NOT a natural-language parser. "Thursday at 3" resolved by a
-    library that disagrees with him about which Thursday books a real meeting in
-    other people's calendars on the wrong day — so whoever calls this resolves the
-    words first and passes an unambiguous timestamp.
-    """
-    m = _WHEN.match(s or "")
-    if not m:
-        raise RuntimeError(f"time must be 'YYYY-MM-DD HH:MM' (local), got '{s}'")
-    y, mo, d, h, mi = (int(g) for g in m.groups())
-    try:
-        return datetime(y, mo, d, h, mi)
-    except ValueError as exc:
-        raise RuntimeError(f"'{s}' is not a real date/time — {exc}") from exc
-
-
-def describe(invite: dict) -> str:
-    """What he reads before approving — the facts, in the order he checks them."""
-    if invite.get("all_day"):
-        days = invite.get("days", 1)
-        when = (f"{invite['start']:%a %d %b}" if days == 1
-                else f"{invite['start']:%a %d %b} → {invite['end'] - timedelta(days=1):%a %d %b}"
-                     f" ({days} days)")
-        when += ", all day"
-    else:
-        when = f"{invite['start']:%a %d %b, %H:%M}–{invite['end']:%H:%M}"
-    who = ", ".join(invite.get("attendees") or []) or "no attendees"
-    return f"{invite['subject']}\n{when}\nTo: {who}"
+#
+# Lives in `invites` now: composing a calendar URL has nothing to do with running
+# a live call, and only one of the two can be tested without a browser. Re-exported
+# so every caller and every monkeypatch keeps working.
+from .invites import (                                          # noqa: E402
+    _iso, _parse_day, _parse_when, compose_url, describe, leave_invite,
+    meeting_invite)
 
 
 # --- sending it (outward — only through an approved offer) -------------------
@@ -254,34 +139,26 @@ async def open_and_send(url: str, send: bool = False) -> str:
 _JOIN_BUTTONS = ('button[aria-label*="Join now" i]', 'button:has-text("Join now")',
                  '[data-tid="prejoin-join-button"]', 'button[aria-label*="Join" i]')
 _MUTE_TOGGLES = ('[data-tid="toggle-mute"]', 'button[aria-label*="Mute" i]')
+
 _CAMERA_TOGGLES = ('[data-tid="toggle-video"]', 'button[aria-label*="camera" i]')
 
 
-def can_speak() -> bool:
-    """Whether Asta can actually be heard in a call on this machine."""
-    return bool(AUDIO_DEVICE)
-
-
-def speaking_hint() -> str:
-    return ("Speaking in calls needs a virtual microphone Teams can select "
-            "(BlackHole or Loopback on macOS), then ASTA_CALL_AUDIO_DEVICE set to "
-            "its name in .env. Until then I can join and listen, but I cannot say "
-            "anything.")
-
-
-#: The live call, if there is one. Held in the module rather than only in kv
-#: because a browser context is not serialisable — and without the handle, nothing
-#: can later hang up or notice the call ended. The kv row is the durable "am I in
-#: a call" flag that survives a restart; this is what can act on it.
 _CALL: dict = {}
 
 
-async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
+async def join(join_url: str, muted: bool = True, camera: bool = False,
+               speak: bool = False) -> str:
     """Join a meeting from its join link. Muted with the camera off by default.
 
     Those defaults are not a preference. An assistant that joins someone's call
     with an open mic broadcasts whatever his laptop can hear to everyone in it,
     and a camera-on join shows a room he did not agree to show.
+
+    `speak=True` arms the in-meeting speech path, which existed in full and was
+    unreachable because `_CALL["speaks"]` was only ever assigned False. Refused
+    without a virtual microphone: an unmuted join is safe only because the system
+    input points at BlackHole, so what goes out is synthesis rather than the room
+    he is sitting in. Without one it would broadcast his real microphone.
 
     The browser context stays OPEN on success — closing it is what leaving a call
     means — and is handed to `watch`, which hangs up when the call ends or when
@@ -292,13 +169,21 @@ async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
         raise RuntimeError("need the meeting's join link")
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
+    from . import voice as _voice
+    if speak and not _voice.can_speak():
+        raise RuntimeError("can't take part — no virtual microphone configured, and "
+                           "joining unmuted without one would broadcast your real "
+                           "mic. " + speaking_hint())
+    warm_the_voice()                  # cold start lands here, not in the meeting
+    await set_call_mic(device=AUDIO_DEVICE)   # before Teams binds a track
+    await teams_bridge.close_pool()   # one writer per profile — see call_person
     pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
     joined = False
     try:
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await page.goto(join_url, wait_until="domcontentloaded", timeout=60000)
         await asyncio.sleep(6)
-        if muted:
+        if muted and not speak:      # taking part means being audible
             await _click_first(page, _MUTE_TOGGLES)
         if not camera:
             await _click_first(page, _CAMERA_TOGGLES)
@@ -312,7 +197,7 @@ async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
         # with words he gave is how it gets broken.
         _CALL.update(pw=pw, ctx=ctx, page=page, url=join_url,
                      joined_at=_now(), captions=[],
-                     answered_at=_now(), speaks=False,
+                     answered_at=_now(), speaks=bool(speak),
                      who="")
         store.kv_set("teams_in_call", join_url)
         # Captions are what make a recap possible at all. Failing to turn them on
@@ -320,6 +205,10 @@ async def join(join_url: str, muted: bool = True, camera: bool = False) -> str:
         # is recorded and reported later rather than raised now.
         _CALL["captions_on"] = await start_captions(page)
         note = "" if _CALL["captions_on"] else " (no live captions — recap will be thin)"
+        if speak:
+            with contextlib.suppress(Exception):
+                await _voice.ensure_unmuted(page)
+            return "joined and taking part (camera off)" + note
         return ("joined (muted, camera off)" if muted else "joined") + note
     finally:
         if not joined:
@@ -414,10 +303,20 @@ async def wait_for_answer(page, seconds: float = 0) -> str:
     """
     deadline = _now() + (seconds or RING_SECONDS)
     state = "unknown"
+    saw_ringing = False
     while _now() < deadline:
         state = await call_state(page)
         if state in ("connected", "ended"):
             return state
+        if state == "ringing":
+            saw_ringing = True
+        elif saw_ringing:
+            # Was ringing, is not now, has not ended: that transition IS the
+            # answer, and it is the only evidence Teams cannot rename. _CONNECTED
+            # shipped unverified and does not match; _TIMER_JS caught a clock on
+            # one call and nothing on the next. Vinish picked up, asked questions
+            # and heard silence while this reported "unknown" for forty seconds.
+            return "connected"
         await asyncio.sleep(1.0)
     return "no answer" if state == "ringing" else state
 
@@ -446,6 +345,51 @@ async def _wait_for_chat_list(page) -> bool:
     return False
 
 
+#: How many times to re-search when the headed window opens the wrong chat.
+_FIND_ATTEMPTS = int(os.environ.get("ASTA_CALL_FIND_ATTEMPTS", "4"))
+_FIND_BACKOFF = 1.5
+
+
+async def _find_chat_settled(page, who: str) -> str:
+    """Find the chat, retrying while the headed window is still settling.
+
+    Placing a real call to Vinish is what exposed this. Headless `resolve` finds
+    "Vinish Kumar" every time; the HEADED window opened a chat called 'Author' and
+    aborted — correctly, because opening the wrong conversation and dialling it
+    would ring a stranger on Arun's behalf. But aborting on the FIRST mismatch
+    made calling by name fail every time rather than merely be slow.
+
+    `_wait_for_chat_list` waits for the rail to have entries, which is a proxy: it
+    proves there are items, not that search has settled on the right one. Rather
+    than tune that proxy — the next Teams build would move it again — the real
+    condition is used directly. The title check already knows whether the right
+    chat is open, so a mismatch simply means "too early", and too early is worth
+    retrying.
+
+    The refusal is preserved exactly: after the last attempt the mismatch is
+    raised, and nothing is ever dialled on a chat whose title did not match.
+    """
+    from . import teams_bridge
+    last: Exception | None = None
+    for attempt in range(_FIND_ATTEMPTS):
+        try:
+            return await teams_bridge._find_chat(page, who, allow_group=False)
+        except RuntimeError as exc:
+            last = exc
+            # Only a "wrong chat / not found" is a timing problem. A refusal on
+            # policy — a group, an ambiguous name — must not be retried into
+            # succeeding, because retrying does not make it any more what he meant.
+            if "group" in str(exc).lower() or "ambiguous" in str(exc).lower():
+                raise
+            if attempt == _FIND_ATTEMPTS - 1:
+                break
+            await asyncio.sleep(_FIND_BACKOFF * (attempt + 1))
+            with contextlib.suppress(Exception):
+                await page.keyboard.press("Escape")   # drop a half-open search
+    raise RuntimeError(
+        f"{last} — still wrong after {_FIND_ATTEMPTS} attempts; nothing was dialled")
+
+
 async def call_person(who: str, video: bool = False) -> str:
     """Ring a PERSON on Teams. Returns who it actually rang.
 
@@ -468,6 +412,22 @@ async def call_person(who: str, video: bool = False) -> str:
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
     kind = "video" if video else "audio"
+    # Pay the model's cold start NOW, while the browser is still opening and the
+    # phone has not even rung. Measured: the first utterance after Voicebox starts
+    # takes 11.4 seconds, every later one takes 1.05 — so the cost is a one-time
+    # model load, not synthesis, and the only question is whether it lands in
+    # front of Vinish or in front of nobody. It was wired into join_by_phrase and
+    # nowhere else, so every CALL paid it out loud.
+    warm_the_voice()
+    # Claim the mic BEFORE Teams binds its track on connect — switching after, as
+    # say_in_call did, cannot move an open track. Measured: the browser handed
+    # Teams the built-in mic while BlackHole sat unselected, so Vinish heard the
+    # laptop while Asta played into a device nobody listened to.
+    await set_call_mic(device=AUDIO_DEVICE)
+    # One writer per user-data-dir. The pool keeps its browser alive between
+    # operations, so a headed launch on top of it corrupts the store both are
+    # writing — what left Teams unable to boot for 14.5 hours on 26 August.
+    await teams_bridge.close_pool()
     pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
     placed = False
     try:
@@ -480,7 +440,7 @@ async def call_person(who: str, video: bool = False) -> str:
         # that makes search work, rather than sleeping a guessed number of
         # seconds and hoping.
         await _wait_for_chat_list(page)
-        title = await teams_bridge._find_chat(page, who, allow_group=False)
+        title = await _find_chat_settled(page, who)
         if not await _click_first(page, _CALL_BUTTONS[kind], timeout=5000):
             raise RuntimeError(
                 f"no {kind} call button in the chat with '{title}' — either the Teams "
@@ -508,7 +468,8 @@ async def call_person(who: str, video: bool = False) -> str:
             await pw.stop()
 
 
-async def join_by_phrase(phrase: str, now_minutes: int | None = None) -> str:
+async def join_by_phrase(phrase: str, now_minutes: int | None = None,
+                         speak: bool = False) -> str:
     """Join the meeting he named — "join my 3pm", "join the standup".
 
     `join()` has always needed a URL and nothing ever produced one, so this
@@ -536,7 +497,7 @@ async def join_by_phrase(phrase: str, now_minutes: int | None = None) -> str:
         raise RuntimeError(
             f"found '{ev['title']}' at {ev['start']} but the calendar row carries no "
             f"join link — open it in Outlook and send me the link")
-    return f"{await join(ev['join_url'])} — {ev['title']} ({ev['start']})"
+    return f"{await join(ev['join_url'], speak=speak)} — {ev['title']} ({ev['start']})"
 
 
 async def _click_first(page, selectors, timeout: float = 3000) -> bool:
@@ -821,6 +782,20 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
 
     borrowed = False
     if page is not None:
+        # Teams must be transmitting AND the browser must actually RECEIVE audio.
+        # macOS denies a mic by handing over a valid track full of zeros, so five
+        # calls reported speech and sent silence.
+        if not await ensure_unmuted(page):
+            raise RuntimeError(
+                "Teams is muted — said nothing rather than reporting speech "
+                "nobody would hear")
+        heard = await voice.browser_mic_delivers(page)
+        if heard and not heard.get("error") and heard.get("peak", 1.0) == 0:
+            raise RuntimeError(
+                f"the browser receives digital silence on {heard.get('label') or 'its mic'} "
+                f"— macOS has not granted microphone access to Google Chrome for "
+                f"Testing. System Settings → Privacy & Security → Microphone. "
+                f"Said nothing rather than reporting speech nobody would hear.")
         borrowed = await set_call_mic(page, AUDIO_DEVICE)
         if not borrowed:
             raise RuntimeError(
@@ -921,13 +896,19 @@ def overran(now: float | None = None) -> bool:
 # when captions are turned on rather than when the meeting did. Every one of those
 # is stated to Arun instead of being smoothed over.
 
+#: Specific first — the data-tid also survives localisation.
 _CAPTION_TOGGLES = [
-    'button[aria-label*="Turn on live captions" i]',
     '[data-tid="closed-caption-button"]',
+    'button[aria-label*="Turn on live captions" i]',
     'div[role="menuitem"][aria-label*="captions" i]',
 ]
-_MORE_MENU = ['button[aria-label="More"]', 'button[aria-label*="More actions" i]',
-              '[data-tid="callingButtons-showMoreBtn"]']
+#: SPECIFIC FIRST — `_click_first` takes the first match, so order is behaviour.
+#: A bare aria-label="More" belongs to the APP BAR; listing it first opened that
+#: instead of the call's menu, so start_captions returned False and Asta could
+#: talk in a call but never hear a word back.
+_MORE_MENU = ['[data-tid="callingButtons-showMoreBtn"]',
+              'button[aria-label*="More actions" i]',
+              'button[aria-label="More"]']
 _LANGUAGE_MENU = ['div[role="menuitem"][aria-label*="Language and speech" i]',
                   'div[role="menuitem"][aria-label*="language" i]']
 #: One rendered caption line: who spoke, and what the recogniser heard.
@@ -1181,6 +1162,19 @@ async def watch(poll_seconds: float = 30) -> str:
     page = _CALL.get("page")
     lines = _CALL.setdefault("captions", [])
     ticks = max(1, int(poll_seconds // CAPTION_POLL_SECONDS) or 1)
+
+    # A ringing call is neither "ended" nor "overran", so this loop sat on one for
+    # MAX_CALL_MINUTES — 90 minutes ringing a colleague at their desk. Only a
+    # VISIBLY ringing call is dropped; hanging up on a live one cannot be undone.
+    if page is not None and not _CALL.get("answered_at"):
+        state = await wait_for_answer(page)
+        if state == "no answer":
+            await leave()
+            return f"no answer after {int(RING_SECONDS)}s — hung up"
+        if state == "ended":
+            await leave()
+            return "the call ended"
+
     while _CALL:
         if overran():
             await leave()

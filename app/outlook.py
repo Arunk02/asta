@@ -176,13 +176,9 @@ _HOLD_KEY = "alert_hold"
 # Breakage that is already real: no window, whatever the rest of the wording says.
 # Deliberately narrow — everything here means "a thing that was serving traffic
 # has stopped", not "a number moved".
-_CRITICAL = re.compile(
-    r"\b(down|outage|unavailable|unreachable|not responding|no longer responding|"
-    r"crash ?loop|crashloopbackoff|oom ?killed|out of memory|"
-    r"pods? (are )?(down|restarting|failing|not ready|unavailable)|"
-    r"service (is )?(down|unavailable|degraded)|"
-    r"cannot connect|connection refused|refusing connections|"
-    r"p1|sev ?1|severity ?1|critical|data loss|all requests failing)\b", re.I)
+# _CRITICAL moved to attention.looks_critical — one detector, both sources.
+# It lived here, mail was its only caller, and the same outage posted in a
+# Teams channel was filed as "FYI, nothing needed from you".
 
 
 def is_critical(m: dict) -> bool:
@@ -191,8 +187,14 @@ def is_critical(m: dict) -> bool:
     Checked against the body as well as the subject, because a monitoring subject
     names the channel and the words that matter — "pods down", "connection
     refused" — are in the mail itself.
+
+    The detection itself now lives in `attention.looks_critical`, shared with the
+    Teams path. It was here, mail was its only caller, and the result was that an
+    outage interrupted him by email and was filed as FYI when it arrived in a
+    channel.
     """
-    return bool(_CRITICAL.search(f"{m.get('subject', '')} {m.get('preview', '')}"))
+    from . import attention
+    return attention.looks_critical(m.get("subject", ""), m.get("preview", ""))
 
 _ALERTY = re.compile(
     r"\b(alert|alarm|incident|error|failed|failure|down|unhealthy|degraded|"
@@ -648,8 +650,10 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
     is judged: only real asks are marked as needing him, and the rest are simply
     stated once so he has the context without being asked for anything.
     """
-    from . import attention, triage
+    from . import attention, responder, triage
     verdicts = []
+    #: Investigations this batch started — see the Teams path for why he is told.
+    started: list[str] = []
     for m in fresh[:12]:
         v = triage.classify(m.get("sender", ""), m.get("subject", ""),
                             m.get("preview", ""))
@@ -661,15 +665,26 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
         # dropped here rather than announced twice in two different words.
         led_key = attention.key_for(m.get("sender", ""), m.get("subject", ""))
         blob = f"{m.get('subject', '')} {m.get('preview', '')}"
-        pri, why, due = attention.score(v.action, blob, critical=is_critical(m),
-                                        key=led_key, who=m.get("sender", ""))
-        pri, chased = attention.escalate_for_chase(pri, led_key)
+        # attention.rank, not score+escalate by hand — the composed form is how
+        # the Teams path lost `critical` and how incidents lost their exemption.
+        pri, why, due = attention.rank(v.action, blob, key=led_key,
+                                       who=m.get("sender", ""))
         if not attention.consider("outlook", led_key, who=m.get("sender", ""),
-                                  what=v.one_line, why=chased or why,
+                                  what=v.one_line, why=why,
                                   priority=pri, due_at=due):
             continue
         verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)
+        # Same actuator as the Teams path, called the same way. A responder wired
+        # into one source and not the other is the per-source drift that lost
+        # `critical` on Teams and the L2 queue exemption on mail.
+        task = responder.respond("outlook", m.get("sender", ""), blob,
+                                 priority=pri, key=led_key)
+        if task:
+            started.append(responder.line_for(task, m.get("sender", ""),
+                                              responder.what_it_asks(blob)))
     text, needs = triage.summarize(verdicts, "📧 Outlook")
+    if started:
+        text = (text + "\n\n" if text else "") + "\n".join(started)
     if not text:
         return
     # Only a genuine ask earns an immediate interrupt. Pure FYI rides the ambient
@@ -677,8 +692,16 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
     # rank of the most urgent thing in the batch travels with it, so delivery can
     # tell "prod is down" from "someone asked a question" at three in the morning.
     ranks = [v.priority for v in verdicts if v.priority is not None]
-    await notify.notify(text, "outlook", urgency="direct" if needs else "ambient",
-                        priority=min(ranks) if ranks else None,
+    top = min(ranks) if ranks else None
+# Urgency from the RANK too, not only from whether triage found an ask
+    # verb. "hi Arunkumar K" parses as no-ask, so `needs` was False and the
+    # push went ambient — which notify holds while he is at the laptop. Being
+    # tagged has already floored this to P_TODAY; the urgency decision has to
+    # read that, or the floor only changes a number nobody acts on.
+    wants_him = needs or started or (top is not None and top <= attention.P_TODAY)
+    await notify.notify(text, "outlook",
+                        urgency="direct" if wants_him else "ambient",
+                        priority=top,
                         considered=True)   # attention.consider ran above
 
 

@@ -1,0 +1,447 @@
+"""What a scenario actually executes — the real function, never a stand-in.
+
+The whole harness is worthless if these call mocks. A bench that exercises a
+double proves the double works; the thing Arun uses is the code in `triage`,
+`writing`, `tasks` and `token_audit`, so that is what runs here. Where a
+capability genuinely needs a brain, the runner spends the tokens and the case is
+marked `live` so nobody pays for it by accident.
+
+Each runner takes a case and returns an observation:
+
+    {"text": str, "tokens": int, "violations": list[str]}
+
+`text` is what gets graded, so a runner's real job is rendering a decision into
+something a `must` can match: not the Verdict object, but "action=True asks you
+directly Vinish: …". That keeps the scenarios readable as data and keeps the
+grading in one place (`evals.grade`) instead of one comparison per capability.
+
+`violations` is for rules that must hold regardless of quality — a draft that
+still carries a term of address Arun has never used for that person, a chat turn
+that wrote a file. Those cap the reward in `bench.score` rather than reducing it,
+because being fast is not a defence.
+"""
+
+from __future__ import annotations
+
+from typing import Awaitable, Callable
+
+
+def _given(case: dict) -> dict:
+    return case.get("given", {}) or {}
+
+
+# --- triage: does this need him, and how urgently ----------------------------
+
+async def _triage(case: dict) -> dict:
+    """`triage.classify` — pure, free, and the most-exercised decision in Asta."""
+    from . import triage
+    g = _given(case)
+    v = triage.classify(g.get("who", ""), g.get("subject", ""),
+                        g.get("preview", ""), addressed=g.get("addressed"))
+    # Rendered so a case can assert on the DECISION ("action=True") as easily as
+    # on the wording. Both matter: the decision drives whether his phone buzzes,
+    # the wording is what he then reads.
+    return {"text": f"action={v.action} why={v.why} line={v.one_line}"}
+
+
+# --- summarise: compressing a pile into the part worth reading ---------------
+
+async def _summarise(case: dict) -> dict:
+    """`triage.summarize` over verdicts built from the case's items."""
+    from . import triage
+    verdicts = []
+    for item in _given(case).get("items", []):
+        v = triage.classify(item.get("who", ""), item.get("subject", ""),
+                            item.get("preview", ""), addressed=item.get("addressed"))
+        if item.get("priority") is not None:
+            v = v.ranked(int(item["priority"]))
+        verdicts.append(v)
+    text, needs = triage.summarize(verdicts, _given(case).get("source", "💬 Teams"))
+    return {"text": f"needs={needs}\n{text}"}
+
+
+# --- analyse: reading a failure and naming its cause -------------------------
+
+async def _analyse(case: dict) -> dict:
+    """`token_audit.detect_waste` — given a session's shape, name what it wasted.
+
+    Analysis with a right answer: the categories are facts about the record, so
+    this is gradeable without asking a model for a second opinion.
+    """
+    from . import token_audit
+    waste = token_audit.detect_waste(_given(case).get("record", {}))
+    hits = sorted(k for k, v in waste.items() if v)
+    return {"text": "waste=" + (",".join(hits) if hits else "none")}
+
+
+# --- message: writing to a colleague in his voice ----------------------------
+
+async def _message(case: dict) -> dict:
+    """`writing.fit_address` on a draft, then structural checks against his style.
+
+    The guardrail is what is being measured. A model told the rule still slips,
+    and the cost is a message calling a colleague something Arun never has — a
+    thing he would have to apologise for rather than correct.
+    """
+    from . import writing
+    g = _given(case)
+    draft = g.get("draft", "")
+    chat = g.get("chat", "")
+    fitted = writing.tidy_links(writing.fit_address(draft, chat))
+    violations = []
+    for banned in g.get("must_not_address", []) or []:
+        # Whole-word, case-insensitive: "bro" must not survive, "brochure" may.
+        import re
+        if re.search(rf"\b{re.escape(banned)}\b", fitted, re.I):
+            # A genuine violation: this one goes OUT, to a person, in his name.
+            violations.append(f"still addresses them as '{banned}'")
+    # The REAL backstop, not a check reimplemented in the harness. A bench that
+    # measures its own copy of the rule passes while the product has no rule at
+    # all — which is exactly what this case did until `writing.too_long` existed.
+    cap = int(g.get("max_chars") or 0)
+    if cap:
+        # A case may pin an explicit ceiling when it is testing the bound itself
+        # rather than his measured style, which needs history the bench does not
+        # carry in an isolated store.
+        overrun = (f"{len(fitted)} characters, over {cap}"
+                   if len(fitted) > cap else "")
+    else:
+        overrun = writing.too_long(fitted, chat)
+    # Length is graded, not a violation. The line is deliberate: a violation is
+    # something that would embarrass him if it went out; everything else the
+    # cases grade for themselves. Conflating the two caps the reward on cases
+    # whose whole purpose is to OBSERVE a bad draft.
+    return {"text": f"too_long={bool(overrun)} chars={len(fitted)} {overrun}\n{fitted}",
+            "violations": violations}
+
+
+# --- plan: something he can grasp in thirty seconds --------------------------
+
+async def _plan(case: dict) -> dict:
+    """The plan gate's own rules, applied to a plan: structure, brevity, files.
+
+    Uses `tasks._structure_span` rather than a fresh regex so a change to the
+    gate's wording moves this measurement with it instead of leaving it stale.
+    """
+    from . import tasks
+    g = _given(case)
+    plan = g.get("plan", "")
+    lines = plan.splitlines()
+    start, end = tasks._structure_span(lines)
+    has_structure = start >= 0
+    words = len(plan.split())
+    # Thirty seconds standing up, reading a phone, is about 130 words. Not a
+    # number he has to take on trust — it is what the gate already promises him,
+    # made checkable. Graded, never a violation: a case that exists to prove a
+    # bad plan is caught must be able to observe one without being punished.
+    too_long = words > int(g.get("max_words") or 130)
+    return {
+        "text": (f"structure={has_structure} too_long={too_long} "
+                 f"words={words} lines={len(lines)}\n{plan}"),
+    }
+
+
+# --- recover: healing itself without him -------------------------------------
+
+async def _recover(case: dict) -> dict:
+    """Drive `recovery.ladder` against a simulated fault and report what it did.
+
+    The capability Arun actually asked for: not "did it notice", which Asta has
+    always been good at, but "did it fix the thing without me".
+    """
+    from . import recovery
+    g = _given(case)
+    trace: list[str] = []
+
+    heals_at = g.get("heals_at", "")
+    throws = set(g.get("throws", []) or [])
+
+    def make(name: str) -> Callable[[], Awaitable[bool]]:
+        async def go() -> bool:
+            trace.append(name)
+            if name in throws:
+                # A repair step can itself be too broken to run — the ladder has
+                # to survive that, because the blunter rung below is exactly what
+                # such a state needs.
+                raise RuntimeError(f"{name} could not run")
+            return name == heals_at
+        return go
+
+    rungs = [(n, make(n)) for n in g.get("rungs", [])]
+    outcome = await recovery.ladder(
+        g.get("source", "teams"), rungs,
+        stale_polls=int(g.get("stale_polls", 99)),
+        threshold=int(g.get("threshold", 3)))
+    return {"text": f"healed={outcome['healed']} by={outcome['healed_by']} "
+                    f"told_him={outcome['told_him']} tried={','.join(trace)}"}
+
+
+# --- code: is this work, whose ticket, and is it worth a brain at all --------
+
+async def _code(case: dict) -> dict:
+    """The routing decisions that start every code task — all pure, all free.
+
+    This is where his two most expensive failures begin. Routing a QUESTION to a
+    code task spawns work he never asked for; routing a real assignment to chat
+    means a plan gate that never runs. And `is_trivial` is the token-waste
+    decision in its purest form: "ok" must never reach a paid model.
+    """
+    from . import router, work_intent
+    g = _given(case)
+    text = g.get("text", "")
+    repos = tuple(g.get("repos", []) or [])
+    return {"text": (
+        f"work={work_intent.is_work_assignment(text, repos)} "
+        f"trivial={router.is_trivial(text)} "
+        f"ticket={work_intent.ticket_in(text) or 'none'} "
+        f"title={work_intent.title_for(text)}")}
+
+
+# --- jira: reading a ticket and knowing what it actually asks for ------------
+
+async def _jira(case: dict) -> dict:
+    """Parse a ticket fixture the way the real reader does — no network.
+
+    Ticket bodies here are FIXTURES, not live issues: a bench that hits Jira
+    measures Jira's uptime as much as Asta's, and would put read load on a
+    corporate system every time someone runs the suite.
+    """
+    from . import jira
+    g = _given(case)
+    issue = g.get("issue", {})
+    parts = [f"key={issue.get('key', '')}", f"status={issue.get('status', '')}"]
+    # Acceptance criteria hide in comments — one of the lessons that cost him a
+    # round-trip on a real ticket, and the reason comments are read at all.
+    body = " ".join([issue.get("summary", ""), issue.get("description", "")]
+                    + [c.get("body", "") for c in issue.get("comments", [])])
+    parts.append(f"sprint_jql={jira.sprint_jql()}" if g.get("want_jql") else "")
+    return {"text": " ".join(p for p in parts if p) + "\n" + body}
+
+
+# --- meetings: which one he meant, and whether he need be there --------------
+
+async def _meetings(case: dict) -> dict:
+    """`agenda.pick` and friends — pure, and the decisions that precede a join.
+
+    `pick` returning None for AMBIGUOUS is the behaviour under test, not an
+    inconvenience: joining the wrong call puts him in a room he did not mean to
+    be in, in front of people who watch him arrive, and that cannot be undone.
+    """
+    from . import agenda
+    g = _given(case)
+    events = g.get("events", [])
+    ev = agenda.pick(events, g.get("phrase", ""), g.get("now_minutes"))
+    parts = [f"picked={ev['title'] if ev else 'none'}"]
+    if ev is not None and g.get("want_attendance"):
+        needed, why = agenda.attendance(ev)
+        parts.append(f"needed={needed} why={why}")
+    if g.get("want_warnings"):
+        parts.append("warnings=" + ("; ".join(agenda.day_warnings(events)) or "none"))
+    return {"text": " ".join(parts)}
+
+
+# --- ask: not asking him the same thing twice --------------------------------
+
+async def _ask(case: dict) -> dict:
+    """`asking.recent_answer` — the fix for the complaint that stung most.
+
+    He answered a question, Asta coded it, raised the PR, and then asked him the
+    same question again. "this is worst i feel." These cases pin the window and
+    the matching, so it cannot come back.
+    """
+    from . import asking, store
+    g = _given(case)
+    for prior in g.get("answered", []) or []:
+        row = store.create_question(prior["q"], source="bench")
+        store.close_question(row["id"], prior["a"])
+    # `now` is supplied by the case so the REPEAT_WINDOW boundary can be tested
+    # from either side without the result depending on what time the suite ran —
+    # the exact defect that turned main red once already.
+    found = asking.recent_answer(g.get("question", ""),
+                                 now=g.get("now") and float(g["now"]) or None)
+    return {"text": f"reused={bool(found)} answer={found or 'none'}"}
+
+
+# --- burst: ten people at once, and what he actually gets ---------------------
+
+async def _burst(case: dict) -> dict:
+    """Drive a whole poll's worth of arrivals through the REAL ledger and delivery.
+
+    The scenario nobody had written: ten pings land back to back. Every capability
+    up to now judged ONE arrival. What Arun actually experiences is the pile —
+    whether it becomes one message or ten, whether the urgent one leads, whether
+    the same thing said twice counts twice, and whether the ones he never answered
+    come back later without nesting inside each other.
+
+    This is the exact path `_push_activity` takes: classify → score → consider →
+    summarize. Keys are namespaced per case because the bench shares one isolated
+    store across a run, and two cases colliding on a key would dedup each other
+    and pass for the wrong reason.
+    """
+    import os
+
+    from . import attention, delivery, triage
+    g = _given(case)
+    os.environ["ASTA_ATTENTION"] = "1"      # the ledger IS the thing under test
+    now = float(g.get("now", 1_700_000_000.0))
+    tag = case["id"]
+    source = g.get("source", "teams")
+
+    # Things he has already dealt with, marked settled BEFORE the poll — the case
+    # that matters most, because chasing him about a thing he handled is the
+    # single most annoying failure the ledger can have.
+    acted = {f"{tag}:{attention.key_for(a)}" for a in g.get("acted", []) or []}
+
+    verdicts, pushed, keys = [], 0, []
+    for a in g.get("arrivals", []):
+        text = f"{a.get('who','')} — {a.get('subject','')}"
+        addressed = bool(a.get("addressed"))
+        v = triage.classify(a.get("who", ""), a.get("subject", ""),
+                            a.get("preview", ""), addressed=addressed)
+        key = f"{tag}:{attention.key_for(text)}"
+        # attention.rank, not a hand-assembled score+escalate: the bench must not
+        # carry its own copy of the ranking policy. It did, briefly, and passed a
+        # case the product was failing.
+        pri, why, due = attention.rank(v.action, text, addressed=addressed,
+                                       key=key, who=a.get("who", ""), now=now)
+        keys.append(key)
+        if not attention.consider(source, key, who=a.get("who", ""), what=v.one_line,
+                                  why=why, priority=pri, due_at=due, now=now):
+            continue                        # suppressed: a duplicate, or settled
+        pushed += 1
+        verdicts.append(v.ranked(pri, why, due))
+        if f"{tag}:{attention.key_for(a.get('subject', ''))}" in acted:
+            attention.mark_acted(key, now=now)
+
+    text, needs = triage.summarize(verdicts, g.get("label", "💬 Teams"))
+    owed = attention.open_items(limit=50)
+    mine = [r for r in owed if str(r.get("key", "")).startswith(tag + ":")]
+    top = min((r.get("priority", 9) for r in mine), default=9)
+
+    # Follow-up: nothing is owed forever without being raised again. `chase_due`
+    # derives end-of-day from the clock it is GIVEN — never time.time() — which is
+    # what made three chase tests pass all evening and fail on CI at 17:37.
+    chased = []
+    if g.get("chase_at"):
+        chased = [r for r in delivery.chase_due(now=float(g["chase_at"]))
+                  if str(r.get("key", "")).startswith(tag + ":")]
+
+    return {"text": (
+        f"arrivals={len(g.get('arrivals', []))} pushed={pushed} messages={1 if text else 0} "
+        f"needs={needs} owed={len(mine)} top_priority={top} chased={len(chased)}\n{text}")}
+
+
+# --- readpath: the live plumbing, end to end ---------------------------------
+
+async def _readpath(case: dict) -> dict:
+    """Drive a REAL read against Teams or Outlook and report what came back.
+
+    Everything else on this bench measures judgement. This measures plumbing —
+    the half that stayed green through a fourteen-hour Teams outage, a call path
+    that refused every time, and a server that would not boot.
+
+    Two constraints that are properties of the system, not of the test:
+
+    EXCLUSIVE BROWSER. One Chromium per profile, and the running server owns it.
+    These cases contend with it and will be slow or fail while it is up, which is
+    honest rather than inconvenient: it is the same single-writer limit that
+    serialises Teams and Outlook in production. Stop the server to run them.
+
+    READS ONLY, AND ONLY WHAT HE HAS SEEN. Opening a conversation marks it read
+    in Teams. Burning his own unread markers to run a test would be a worse
+    failure than any this could catch, so a case naming a chat must name one he
+    has already read.
+    """
+    from . import outlook, teams_bridge
+    g = _given(case)
+    what = g.get("read", "")
+    if what == "activity":
+        rows = await teams_bridge.read_activity_rows(limit=int(g.get("limit", 15)))
+        return {"text": f"rows={len(rows)} first={rows[0]['text'][:70] if rows else ''}"}
+    if what == "chat":
+        msgs = await teams_bridge.read_chat(g["chat"], limit=int(g.get("limit", 8)))
+        return {"text": f"messages={len(msgs)} oldest={str(msgs[0])[:70] if msgs else ''}"}
+    if what == "mail":
+        mails = await outlook.read_mail(limit=int(g.get("limit", 8)))
+        return {"text": f"mails={len(mails)} top={mails[0].get('subject','')[:60] if mails else ''}"}
+    raise RuntimeError(f"unknown read '{what}' — expected activity|chat|mail")
+
+
+# --- investigate: production failures, through a real brain ------------------
+
+#: Rough tokens-per-character. Only for reporting cost on the live tier, where
+#: an order of magnitude is the useful precision — nothing is decided on it.
+_CHARS_PER_TOKEN = 4
+
+
+async def _investigate(case: dict) -> dict:
+    """Ask a REAL brain, holding the real playbook, where it would look.
+
+    Deliberately measures the QUERY, not the data. Letting the brain actually hit
+    Grafana and Temporal would grade whichever incident happens to be in the logs
+    this afternoon: the expected answer changes hourly, so a red run would mean
+    "production is quiet today" as often as it means "Asta got worse". What is
+    stable, and what actually matters, is whether it knows WHERE to look — the
+    namespace, the datasource, the filter shape, the tool order. Those are facts
+    with right answers, and they are the part that goes wrong.
+
+    The playbook is the skill file itself, so these score the same text a real
+    turn loads. A case that passes because the grader was told the answer would
+    be worthless; nothing here reveals a namespace the skill does not already
+    contain.
+    """
+    from . import copilot_cli, skills
+    g = _given(case)
+    parts = []
+    for name in g.get("skills", []) or []:
+        body = skills.load(name)
+        if body:
+            parts.append(f"--- {name} ---\n{body}")
+    playbook = "\n\n".join(parts)
+    prompt = (
+        f"{playbook}\n\n"
+        f"Answer using ONLY the playbook above. Be exact and brief — the query or "
+        f"the name asked for, nothing else. Do not call any tools.\n\n"
+        f"{case.get('ask', '')}")
+    answer = await copilot_cli.one_shot(
+        prompt, timeout=int(g.get("timeout", 180)), effort=g.get("effort", ""))
+    return {"text": answer or "",
+            "tokens": (len(prompt) + len(answer or "")) // _CHARS_PER_TOKEN}
+
+
+# --- context: using what the workspace already knows -------------------------
+
+async def _context(case: dict) -> dict:
+    """The existing grounded Q&A suite, reached through its own entry point.
+
+    `evals` stays the owner of workspace answer quality — this only borrows it so
+    one capability's score sits on the same scoreboard as the other eight.
+    """
+    from . import meetings
+    g = _given(case)
+    answer = await meetings.answer_from_knowledge(case.get("ask", ""), g.get("playbook", ""))
+    return {"text": answer or ""}
+
+
+#: capability -> runner. A capability with no runner scores as an error rather
+#: than silently as a zero, so a typo in a suite is visible instead of damning.
+RUNNERS: dict[str, Callable[[dict], Awaitable[dict]]] = {
+    "triage": _triage,
+    "summarise": _summarise,
+    "analyse": _analyse,
+    "message": _message,
+    "plan": _plan,
+    "code": _code,
+    "jira": _jira,
+    "meetings": _meetings,
+    "ask": _ask,
+    "burst": _burst,
+    "readpath": _readpath,
+    "investigate": _investigate,
+    "recover": _recover,
+    "context": _context,
+}
+
+
+def for_capability(name: str):
+    return RUNNERS.get(name)

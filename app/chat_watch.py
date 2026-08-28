@@ -41,10 +41,28 @@ from . import store
 #: and no chat is opened unless something moved.
 POLL_SECONDS = float(os.environ.get("ASTA_CHATWATCH_SECONDS", "180"))
 
-#: Chats opened per sweep, at most. Each one is a real browser navigation; ten
-#: people pinging at once must not become ten page loads on a profile that
-#: tolerates a single writer.
-MAX_OPENS = int(os.environ.get("ASTA_CHATWATCH_MAX_OPENS", "3"))
+#: Conversations at the head of the list, read on EVERY sweep. These are the ones
+#: with recent activity, so this is where a new message almost always is.
+ALWAYS_TOP = int(os.environ.get("ASTA_CHATWATCH_TOP", "3"))
+
+#: Plus this many from the tail, rotating, so every conversation is eventually
+#: read even if Teams never reorders it.
+#:
+#: The first version read only what MOVED UP the rail, on the theory that a new
+#: message pushes its chat toward the top. Arun called it: "why u watching via
+#: notification , can't use playwright and open teams and fetch from there via
+#: direct visible from there". He was right. Inferring activity from ordering
+#: means anything the ordering does not reflect is never read at all — fourteen
+#: hours, two conversations, and nothing anywhere saying so. Opening the chats and
+#: reading them is the obvious correct thing; the only real question was cost, and
+#: cost is answered by a bounded window rather than by a clever signal.
+ROTATE = int(os.environ.get("ASTA_CHATWATCH_ROTATE", "2"))
+
+#: Chats opened per sweep, at most. Each one is a real browser navigation on a
+#: profile that tolerates a single writer.
+MAX_OPENS = int(os.environ.get("ASTA_CHATWATCH_MAX_OPENS", "5"))
+
+_CURSOR_KEY = "chatwatch_cursor"
 
 #: Messages pulled per chat. Enough to cover a burst since the last poll without
 #: paying for scrollback.
@@ -86,6 +104,24 @@ def enabled() -> bool:
 
 def _seen_key(chat: str) -> str:
     return f"chatwatch_seen:{chat.strip().lower()[:60]}"
+
+
+def pick(current: list[str], cursor: int) -> tuple[list[str], int]:
+    """Which conversations to open this sweep, and where the rotation got to.
+
+    The head of the list every time — that is where a new message lands — plus a
+    moving window through the tail so nothing is permanently unread. No dependence
+    on Teams reordering anything, on unread styling, or on the Activity feed.
+    """
+    if not current:
+        return [], cursor
+    top = current[:ALWAYS_TOP]
+    tail = current[ALWAYS_TOP:]
+    if not tail:
+        return top[:MAX_OPENS], 0
+    start = cursor % len(tail)
+    window = [tail[(start + i) % len(tail)] for i in range(min(ROTATE, len(tail)))]
+    return list(dict.fromkeys(top + window))[:MAX_OPENS], start + len(window)
 
 
 def moved_up(previous: list[str], current: list[str]) -> list[str]:
@@ -189,6 +225,28 @@ def is_from_him(sender: str) -> bool:
     return meetings.speaker_is_arun(sender or "")
 
 
+#: Rows that only ever appear on the real chat list. Their presence is how we
+#: know we are looking at the rail and not at something else.
+_LIST_MARKERS = ("copilot", "mentions", "discover", "drafts", "saved")
+
+
+def looks_like_the_chat_list(rows: list[str]) -> bool:
+    """Is this the chat rail, or whatever the last operation left on screen?
+
+    The Teams page is POOLED and shared with every other loop. `_find_chat` runs a
+    search to open a thread, and a search replaces the rail with its results — so
+    `[role="treeitem"]` then returns matches for whatever was last searched. That
+    is not a hypothetical: the stored rail had "Divya" and "Palikala Divya
+    Maheswari" at the top, which were results of a resolve call, and the watcher
+    compared THAT against the previous order. Fourteen hours, two chats processed.
+
+    The furniture at the head of the real list is the tell — search results never
+    contain Copilot, Mentions or Discover.
+    """
+    head = " ".join(r.strip().lower() for r in rows[:8])
+    return any(m in head for m in _LIST_MARKERS)
+
+
 async def candidates() -> list[str]:
     """Rail names worth opening this sweep, newest activity first."""
     from . import teams_bridge
@@ -198,15 +256,29 @@ async def candidates() -> list[str]:
             rows = await page.evaluate(teams_bridge._CHAT_ROWS)
         except Exception:
             return []
+        if not looks_like_the_chat_list(rows or []):
+            # Someone left a search on the shared page. Go back to the chat list
+            # rather than comparing an order that means nothing.
+            try:
+                await page.goto(teams_bridge.TEAMS_URL, wait_until="domcontentloaded",
+                                timeout=60000)
+                await teams_bridge.wait_for_rail(page)
+                rows = await page.evaluate(teams_bridge._CHAT_ROWS)
+            except Exception:
+                return []
+            if not looks_like_the_chat_list(rows or []):
+                return []          # still not the list — report nothing, change nothing
     current = [r.strip() for r in (rows or [])
                if r.strip() and r.strip().lower() not in teams_bridge._NOT_A_CHAT
                and not is_furniture(r)]
-    try:
-        previous = json.loads(store.kv_get(_RAIL_KEY) or "[]")
-    except Exception:                                          # noqa: BLE001
-        previous = []
     store.kv_set(_RAIL_KEY, json.dumps(current[:60]))
-    return moved_up(previous, current)[:MAX_OPENS]
+    try:
+        cursor = int(store.kv_get(_CURSOR_KEY) or "0")
+    except ValueError:
+        cursor = 0
+    chosen, cursor = pick(current, cursor)
+    store.kv_set(_CURSOR_KEY, str(cursor))
+    return chosen
 
 
 async def new_in(chat: str, advance: bool = True) -> list[dict]:
@@ -254,10 +326,13 @@ async def sweep(notify=None) -> list[dict]:
     handled: list[dict] = []
     lines: list[str] = []
     started: list[str] = []
+    opened = failed = 0
     for chat in await candidates():
+        opened += 1
         try:
             fresh = await new_in(chat)
         except Exception:                                      # noqa: BLE001
+            failed += 1
             continue                # one unreadable thread must not end the sweep
         for m in fresh:
             who = (m.get("sender") or chat).strip()
@@ -278,6 +353,14 @@ async def sweep(notify=None) -> list[dict]:
             if task:
                 started.append(responder.line_for(task, who,
                                                   responder.what_it_asks(text)))
+    # Every thread failing looks exactly like a quiet morning, and that is how
+    # this ran for fourteen hours having read two chats while saying nothing. The
+    # sweep now records its own health so `attention.stale_sources` can notice.
+    if opened and failed >= opened:
+        attention.note_scrape_error(
+            "teams-chat", RuntimeError(f"all {opened} chat(s) failed to open"))
+    elif opened:
+        attention.note_scrape("teams-chat")
     if notify and (lines or started):
         body = "\n".join(lines + ([""] if lines and started else []) + started)
         await notify("💬 Teams\n" + body, "teams",

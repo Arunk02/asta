@@ -269,3 +269,144 @@ def test_the_ways_he_is_tagged(text):
 
 def test_someone_elses_name_is_not_his_tag():
     assert not chat_watch.mentions_him("komal can you check this")
+
+
+# --- the shared page is not always showing the chat list ----------------------
+# Fourteen hours running, two chats ever processed. The Teams page is POOLED and
+# shared with every other loop; `_find_chat` runs a search to open a thread, and a
+# search replaces the rail with its results. So `[role="treeitem"]` returned
+# matches for whatever was last searched, and the watcher compared THAT against
+# the previous order. The stored rail had "Divya" and "Palikala Divya Maheswari"
+# at the top — results of a resolve call, not his conversations.
+
+def test_the_real_chat_list_is_recognised():
+    assert chat_watch.looks_like_the_chat_list(
+        ["Copilot", "Mentions", "Discover", "Drafts", "Saved", "Vinish Kumar"])
+
+
+def test_search_results_are_not_mistaken_for_the_rail():
+    """The exact contamination that was found in his live store."""
+    assert not chat_watch.looks_like_the_chat_list(
+        ["Divya", "Palikala Divya Maheswari", "BEP_Telikos : Defect Triage"])
+
+
+def test_an_empty_read_is_not_a_chat_list():
+    assert not chat_watch.looks_like_the_chat_list([])
+
+
+def test_a_contaminated_rail_is_never_remembered(monkeypatch):
+    """The damage was not only missing a poll — the bad order was SAVED, so the
+    next comparison was against nonsense too."""
+    store.kv_set(chat_watch._RAIL_KEY, '["Vinish Kumar", "Komal Jayswal"]')
+
+    async def _contaminated():
+        return []          # candidates() bails rather than storing search results
+
+    monkeypatch.setattr(chat_watch, "candidates", _contaminated)
+    asyncio.run(chat_watch.sweep())
+    import json
+    assert json.loads(store.kv_get(chat_watch._RAIL_KEY)) == ["Vinish Kumar", "Komal Jayswal"]
+
+
+def test_every_chat_failing_is_reported_not_swallowed(monkeypatch):
+    """A sweep where nothing opens looks exactly like a quiet morning. That is how
+    this ran for fourteen hours saying nothing while reading almost nothing."""
+    from app import attention
+
+    async def _candidates():
+        return ["A", "B"]
+
+    async def _fails(chat, advance=True):
+        raise RuntimeError("thread would not open")
+
+    monkeypatch.setattr(chat_watch, "candidates", _candidates)
+    monkeypatch.setattr(chat_watch, "new_in", _fails)
+    noted = {}
+    monkeypatch.setattr(attention, "note_scrape_error",
+                        lambda src, exc: noted.update({"src": src, "why": str(exc)}))
+    asyncio.run(chat_watch.sweep())
+    assert noted["src"] == "teams-chat"
+    assert "failed to open" in noted["why"]
+
+
+def test_a_partly_working_sweep_counts_as_healthy(monkeypatch):
+    """One bad thread among several is normal and must not read as a dead watcher —
+    that would train him to ignore the alarm."""
+    from app import attention
+
+    async def _candidates():
+        return ["Good", "Bad"]
+
+    async def _mixed(chat, advance=True):
+        if chat == "Bad":
+            raise RuntimeError("nope")
+        return [{"key": "k", "sender": "Vinish", "text": "prod is stuck"}]
+
+    monkeypatch.setattr(chat_watch, "candidates", _candidates)
+    monkeypatch.setattr(chat_watch, "new_in", _mixed)
+    ok = {}
+    monkeypatch.setattr(attention, "note_scrape", lambda src, now=None: ok.update({"src": src}))
+    monkeypatch.setattr(attention, "note_scrape_error",
+                        lambda src, exc: pytest.fail("reported dead on one bad thread"))
+    asyncio.run(chat_watch.sweep())
+    assert ok["src"] == "teams-chat"
+
+
+# --- open the chats and read them --------------------------------------------
+# Arun: "why u watching via notification , can't use playwright and open teams and
+# fetch from there via direct visible from there , from notifications u wont get
+# all right ?"
+#
+# He was right twice over. The Activity feed carries mentions only, and the first
+# replacement still inferred activity from the rail ORDER — so anything the
+# ordering did not reflect was never read. Fourteen hours, two conversations, and
+# nothing anywhere saying so. These pin the obvious correct thing instead: open the
+# conversations and read them, bounded by a window rather than by a clever signal.
+
+def _rail(n=8):
+    return [f"chat{i}" for i in range(n)]
+
+
+def test_the_head_of_the_list_is_read_every_sweep():
+    """Where a new message almost always is."""
+    cur = 0
+    for _ in range(5):
+        picked, cur = chat_watch.pick(_rail(), cur)
+        assert picked[:chat_watch.ALWAYS_TOP] == _rail()[:chat_watch.ALWAYS_TOP]
+
+
+def test_every_conversation_is_eventually_read():
+    """The property the order-based version could not offer at all."""
+    rail, cur, seen = _rail(8), 0, set()
+    for _ in range(6):
+        picked, cur = chat_watch.pick(rail, cur)
+        seen |= set(picked)
+    assert seen == set(rail), f"never read: {sorted(set(rail) - seen)}"
+
+
+def test_a_sweep_never_exceeds_the_cap():
+    """Each open is a real navigation on a single-writer profile."""
+    cur = 0
+    for _ in range(4):
+        picked, cur = chat_watch.pick(_rail(40), cur)
+        assert len(picked) <= chat_watch.MAX_OPENS
+
+
+def test_no_chat_is_opened_twice_in_one_sweep():
+    picked, _ = chat_watch.pick(_rail(4), 0)
+    assert len(picked) == len(set(picked))
+
+
+def test_a_short_list_is_handled():
+    picked, cur = chat_watch.pick(["only"], 0)
+    assert picked == ["only"]
+    picked, _ = chat_watch.pick([], 0)
+    assert picked == []
+
+
+def test_the_cap_cannot_silently_disable_the_rotation():
+    """`ASTA_CHATWATCH_MAX_OPENS=3` was left pinned in .env from the earlier
+    design, so the rotating tail was truncated away and only the head was ever
+    read — the configured cap quietly reinstated the bug the code had fixed."""
+    assert chat_watch.MAX_OPENS >= chat_watch.ALWAYS_TOP + chat_watch.ROTATE, (
+        "MAX_OPENS is below TOP+ROTATE, so the tail is never reached")

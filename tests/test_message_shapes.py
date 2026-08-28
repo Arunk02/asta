@@ -161,3 +161,51 @@ def test_the_corpus_check_is_actually_reaching_his_data():
     if not rows:
         pytest.skip("no live store here — expected on CI")
     assert len(rows) >= 20, f"only {len(rows)} messages — the corpus check is hollow"
+
+
+# --- the quote with no blank line before the reply ---------------------------
+# The common shape, and the one that beat the first two attempts. Captured live
+# from his Nakka Harika thread:
+#
+#     Nakka Harika                                      <- who is quoted
+#     28/08/2026 12:39                                  <- when
+#     Swamy in vinish and urs team..                    <- HER words
+#     Arrey I'm in multiple teams for Background support <- his reply
+#
+# Nothing in the text says where one ends and the other begins. But a quoted line
+# is by definition a message that already exists in the thread, so the thread
+# itself identifies it.
+
+TIGHT_QUOTE = ("Nakka Harika\n28/08/2026 12:39\nSwamy in vinish and urs team..\n"
+               "Arrey I'm in multiple teams for Background support")
+
+
+def test_the_thread_identifies_the_quote_when_spacing_does_not():
+    out = chat_watch.clean_message(
+        TIGHT_QUOTE, known={"Swamy in vinish and urs team.."})
+    assert out == "Arrey I'm in multiple teams for Background support"
+
+
+def test_a_multi_line_reply_survives_when_the_thread_is_known():
+    """The reason the lookup is preferred over "keep the last paragraph": that
+    fallback would throw away everything but the final line."""
+    raw = ("Nakka Harika\n28/08/2026 12:39\nSwamy in vinish and urs team..\n"
+           "first point\nsecond point")
+    out = chat_watch.clean_message(raw, known={"Swamy in vinish and urs team.."})
+    assert "first point" in out and "second point" in out
+
+
+def test_without_the_thread_it_still_refuses_to_misattribute():
+    """Degrades to the last paragraph rather than showing the quoted line — losing
+    a sentence is recoverable, attributing one is not."""
+    out = chat_watch.clean_message(TIGHT_QUOTE)
+    assert "Swamy in vinish" not in out
+    assert out == "Arrey I'm in multiple teams for Background support"
+
+
+def test_the_reader_passes_the_thread_through():
+    """A lookup nothing supplies is a lookup that never runs."""
+    import inspect
+    src = inspect.getsource(chat_watch.sweep)
+    assert "store.teams_messages(chat=chat" in src
+    assert "known=known" in src

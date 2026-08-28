@@ -266,28 +266,54 @@ _TRAILING_NOISE = re.compile(
 _URL = re.compile(r"https?://\S+")
 
 
-def clean_message(text: str) -> str:
+def clean_message(text: str, known: set[str] | None = None) -> str:
     """What the SENDER typed — never the message they were replying to.
 
-    A quote appears in two places, both seen in his real data:
+    A quote appears in two places, both in his real data: at the START when
+    replying, and AFTER the text when forwarding. Position decides which side to
+    keep.
 
-      * at the START, when replying — quote first, blank line, then the reply;
-      * AFTER the text, when forwarding — what they wrote, then the quoted body.
+    The hard case is a leading quote with NO blank line before the reply, which is
+    the common shape:
 
-    So the position of the header decides which side to keep. Returns "" when
-    there is a quote and no text of their own, because showing the quote would put
-    one colleague's words under another's name — which is exactly what he caught.
+        Nakka Harika              <- who is quoted
+        28/08/2026 12:39          <- when
+        Swamy in vinish and urs team..     <- HER words
+        Arrey I'm in multiple teams for Background support   <- his reply
+
+    Nothing in the text marks where one ends and the other begins. But the quoted
+    line is, by definition, a message that already exists in the thread — so
+    `known` (the texts Asta has already stored for this chat) identifies it
+    exactly. Where that is unavailable the last paragraph is used, because the
+    reply is always last; that truncates a multi-paragraph reply, which is why the
+    lookup is preferred and the fallback is only a fallback.
     """
     body = _TRAILING_NOISE.sub("", (text or "").strip())
     m = _REPLY_HEADER.search(body)
-    if m:
-        if m.start() == 0:
-            rest = body[m.end():]
-            parts = rest.split("\n\n", 1)
-            body = parts[1] if len(parts) == 2 and parts[1].strip() else ""
-        else:
-            body = body[:m.start()]        # a forward: their words come first
-    return re.sub(r"\n{2,}", "\n", body).strip()
+    if not m:
+        return re.sub(r"\n{2,}", "\n", body).strip()
+    if m.start() > 0:
+        return re.sub(r"\n{2,}", "\n", body[:m.start()]).strip()   # a forward
+
+    rest = body[m.end():]
+    head, _, tail = rest.partition("\n\n")
+    if tail.strip():
+        return re.sub(r"\n{2,}", "\n", tail).strip()      # blank line separated them
+    lines = [ln for ln in rest.split("\n") if ln.strip()]
+    if known:
+        # Drop the leading lines that are already messages in this thread — those
+        # are the quote, whatever the spacing looks like.
+        seen = {_norm(k) for k in known}
+        while lines and _norm(lines[0]) in seen:
+            lines.pop(0)
+        if lines:
+            return "\n".join(lines).strip()
+        return ""
+    return lines[-1].strip() if len(lines) > 1 else ""
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
 
 def describe_link(url: str) -> str:
@@ -307,9 +333,9 @@ def describe_link(url: str) -> str:
     return f"{label}: {'/'.join(tail)}" if tail else label
 
 
-def summarise(text: str, limit: int = 160) -> str:
+def summarise(text: str, limit: int = 160, known: set[str] | None = None) -> str:
     """One readable line for a message — links named rather than pasted raw."""
-    body = clean_message(text)
+    body = clean_message(text, known)
     if not body:
         # A reply whose own body did not survive the capture. Saying so is honest;
         # showing the quoted text would put someone else's words in their mouth.
@@ -323,12 +349,13 @@ def summarise(text: str, limit: int = 160) -> str:
     return body[:limit] + ("…" if len(body) > limit else "")
 
 
-def render(chat: str, who: str, text: str, priority: int | None = None) -> str:
+def render(chat: str, who: str, text: str, priority: int | None = None,
+           known: set[str] | None = None) -> str:
     """The line on his phone. Names the person once."""
     mark = "🔴" if (priority is not None and priority <= 1) else "·"
     where = "" if (chat or "").strip().lower() == (who or "").strip().lower() \
         else f" in {chat}"
-    return f"{mark} {who}{where}: {summarise(text)}"
+    return f"{mark} {who}{where}: {summarise(text, known=known)}"
 
 
 def is_from_him(sender: str) -> bool:
@@ -441,6 +468,13 @@ async def sweep(notify=None) -> list[dict]:
     opened = failed = 0
     for chat in await candidates():
         opened += 1
+        # What has already been said in this thread. A quoted line is by
+        # definition one of these, which is how the quote is told from the reply
+        # when Teams puts no blank line between them.
+        try:
+            known = {(r.get("text") or "") for r in store.teams_messages(chat=chat, limit=300)}
+        except Exception:                                      # noqa: BLE001
+            known = set()
         try:
             fresh = await new_in(chat)
         except Exception:                                      # noqa: BLE001
@@ -468,7 +502,7 @@ async def sweep(notify=None) -> list[dict]:
             if not direct:
                 continue
             handled.append({"chat": chat, "who": who, "text": text, "priority": pri})
-            lines.append(render(chat, who, text, pri))
+            lines.append(render(chat, who, text, pri, known=known))
             task = responder.respond("teams-chat", who, text, priority=pri, key=key)
             if task:
                 started.append(responder.line_for(task, who,

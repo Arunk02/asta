@@ -150,7 +150,12 @@ def test_an_ambiguous_name_is_left_undecided(monkeypatch):
 def test_calling_an_ambiguous_name_refuses_rather_than_ringing_someone(monkeypatch):
     import asyncio
 
-    from app import contacts, meetings
+    from app import contacts, meetings, teams_bridge
+    # Stated rather than inherited: `call_person` checks the bridge is on before it
+    # resolves anything, so without this the test passes on his laptop (where .env
+    # sets TEAMS_BRIDGE=1) and fails on CI for a reason that has nothing to do with
+    # name resolution.
+    monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
     monkeypatch.setattr(contacts, "resolve_name",
                         lambda n: ("", ["Vinish Kumar", "Rajendra Kumar"]))
     monkeypatch.setattr(meetings, "_CALL", {})

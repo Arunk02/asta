@@ -254,13 +254,16 @@ def test_the_reply_after_the_tag_counts_without_a_second_tag():
 def test_the_window_closes():
     """A tag last week does not make today's standup chatter his."""
     import time
-    chat_watch.note_tagged("Prod Support", now=time.time())
-    assert not chat_watch.engaged("Prod Support",
-                                  now=time.time() + (chat_watch.ENGAGED_HOURS + 1) * 3600)
+    chat_watch.note_tagged("Prod Support", now=time.time(), by="Komal")
+    # `engaged` now reports WHO pulled him in as well as whether the window is
+    # open — being pulled into a thread is not subscribing to the room.
+    open_window, by = chat_watch.engaged(
+        "Prod Support", now=time.time() + (chat_watch.ENGAGED_HOURS + 1) * 3600)
+    assert not open_window
 
 
 def test_a_group_he_was_never_tagged_in_stays_quiet():
-    assert not chat_watch.engaged("Some Other Channel")
+    assert chat_watch.engaged("Some Other Channel") == (False, "")
 
 
 @pytest.mark.parametrize("text", ["Arun can you check", "arunkumar please review",
@@ -585,3 +588,94 @@ def test_a_message_with_text_and_a_link_keeps_both():
 def test_a_long_message_is_cut_rather_than_sent_whole():
     out = chat_watch.summarise("word " * 200)
     assert len(out) <= 170 and out.endswith("…")
+
+
+# --- being pulled into a thread is not subscribing to the room ----------------
+# Vinish tagged him once in a release channel. For the next twelve hours every
+# message in that room reached his phone: Navya's schema question, Roshan's "22nd
+# September ko release hai", and "Vinish Kumar what do you say", which is
+# addressed to Vinish. The window was right; its breadth was not.
+
+CHAT = "Prod Support till 11th September"
+
+
+@pytest.fixture(autouse=True)
+def _clear_window():
+    store.kv_set(chat_watch._engaged_key(CHAT), "")
+
+
+def test_the_tag_opens_the_window():
+    assert chat_watch.addressed_to_him(CHAT, "Vinish Kumar",
+                                       "Arunkumar, could you look into these issues")
+
+
+def test_the_follow_up_from_whoever_pulled_him_in_still_counts():
+    """His ask: "follow up convo with or without tagging as well"."""
+    chat_watch.addressed_to_him(CHAT, "Vinish Kumar", "Arunkumar, could you look")
+    assert chat_watch.addressed_to_him(CHAT, "Vinish Kumar",
+                                       "also the duplicate key one is still open")
+
+
+def test_the_rest_of_the_room_does_not_come_with_it():
+    """The flood, verbatim from what he was sent."""
+    chat_watch.addressed_to_him(CHAT, "Vinish Kumar", "Arunkumar, could you look")
+    for who, text in [("Navya R", "2) I found this issue for two Service Plan numbers"),
+                      ("Roshan Kumar Thakur", "22nd September ko release hai"),
+                      ("Roshan Kumar Thakur", "Also inform telemetry now")]:
+        assert not chat_watch.addressed_to_him(CHAT, who, text), f"{who}: {text}"
+
+
+def test_a_message_aimed_at_a_third_person_is_theirs():
+    """"Vinish Kumar what do you say" is a question for Vinish."""
+    chat_watch.addressed_to_him(CHAT, "Vinish Kumar", "Arunkumar, could you look")
+    assert not chat_watch.addressed_to_him(CHAT, "Roshan Kumar Thakur",
+                                           "Vinish Kumar what do you say")
+
+
+def test_anyone_naming_him_still_reaches_him():
+    """The window must never become a filter that loses a direct ask."""
+    chat_watch.addressed_to_him(CHAT, "Vinish Kumar", "Arunkumar, could you look")
+    assert chat_watch.addressed_to_him(CHAT, "Navya R",
+                                       "Arunkumar can you confirm the topic name")
+
+
+def test_the_window_is_hours_not_a_working_day():
+    """A tag at breakfast should not make the room his until the evening. A
+    conversation that resumes tomorrow gets tagged again — that is what people do."""
+    assert chat_watch.ENGAGED_HOURS <= 4
+
+
+def test_naming_himself_is_not_naming_someone_else():
+    assert not chat_watch.names_someone_else("Vinish Kumar here, any update", "Vinish Kumar")
+
+
+def test_an_ordinary_sentence_is_not_read_as_addressing_anyone():
+    """Over-filtering loses him a message, which is the worse failure."""
+    assert not chat_watch.names_someone_else("Activity getting missed in prod", "Navya R")
+
+
+# --- do not re-investigate what he has already answered -----------------------
+
+def test_a_thread_he_has_replied_in_is_not_investigated_again(monkeypatch):
+    """"i have already shared na the analysis then why again it doing" — his own
+    answer was sitting in the thread above the task that went to find it."""
+    monkeypatch.setattr(store, "teams_messages",
+                        lambda chat="", limit=200, **k: [
+                            {"sender": "Vinish Kumar", "text": "look into these", "sent_at": 100},
+                            {"sender": "Arunkumar K", "text": "already checked, it's the schema",
+                             "sent_at": 200}])
+    from app import meetings
+    monkeypatch.setattr(meetings, "speaker_is_arun", lambda s: "arun" in (s or "").lower())
+    assert chat_watch.answered_by_him(CHAT, {"sent_at": 100})
+
+
+def test_an_unanswered_ask_is_still_picked_up(monkeypatch):
+    monkeypatch.setattr(store, "teams_messages",
+                        lambda chat="", limit=200, **k: [
+                            {"sender": "Vinish Kumar", "text": "look into these", "sent_at": 300}])
+    assert not chat_watch.answered_by_him(CHAT, {"sent_at": 300})
+
+
+def test_an_untimed_message_is_not_guessed_about(monkeypatch):
+    """A row with no timestamp cannot honestly be said to come after anything."""
+    assert not chat_watch.answered_by_him(CHAT, {"sent_at": None})

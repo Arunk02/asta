@@ -81,7 +81,10 @@ _RAIL_KEY = "chatwatch_rail"
 #: do not get tagged again, and they are the substance. So the tag starts a window
 #: rather than marking one message. A 1:1 needs none of this — every message there
 #: is his by construction.
-ENGAGED_HOURS = float(os.environ.get("ASTA_GROUP_FOLLOW_HOURS", "12"))
+#: Shortened from 12h after it fired live. A tag at breakfast should not make the
+#: room his until the evening; a conversation that resumes tomorrow gets tagged
+#: again, because that is what people do.
+ENGAGED_HOURS = float(os.environ.get("ASTA_GROUP_FOLLOW_HOURS", "2"))
 
 #: Rail rows that are not somebody talking to him.
 #:
@@ -182,23 +185,33 @@ def mentions_him(text: str) -> bool:
     return any(n and n in low for n in meetings.HIS_NAMES)
 
 
-def note_tagged(chat: str, now: float | None = None) -> None:
+def note_tagged(chat: str, now: float | None = None, by: str = "") -> None:
+    """Remember WHEN he was pulled in, and by WHOM.
+
+    Who matters as much as when. Vinish tagged him in a release channel and, for
+    the next twelve hours, every message in the room reached his phone — Navya's
+    schema question, Roshan's "22nd September ko release hai", and "Vinish Kumar
+    what do you say", which is addressed to Vinish. Being pulled into a thread is
+    not being subscribed to a room.
+    """
     import time
-    store.kv_set(_engaged_key(chat), str(now if now is not None else time.time()))
+    when = now if now is not None else time.time()
+    store.kv_set(_engaged_key(chat), f"{when}|{(by or '').strip()}")
 
 
-def engaged(chat: str, now: float | None = None) -> bool:
-    """Is this group still a conversation he was pulled into?"""
+def engaged(chat: str, now: float | None = None) -> tuple[bool, str]:
+    """(is this still a conversation he was pulled into, who pulled him in)."""
     import time
     raw = (store.kv_get(_engaged_key(chat)) or "").strip()
     if not raw:
-        return False
+        return False, ""
+    stamp, _, by = raw.partition("|")
     try:
-        when = float(raw)
+        when = float(stamp)
     except ValueError:
-        return False
+        return False, ""
     now = time.time() if now is None else now
-    return (now - when) < ENGAGED_HOURS * 3600
+    return ((now - when) < ENGAGED_HOURS * 3600), by
 
 
 def addressed_to_him(chat: str, sender: str, text: str,
@@ -215,9 +228,17 @@ def addressed_to_him(chat: str, sender: str, text: str,
     if (sender or "").strip().lower() == (chat or "").strip().lower():
         return True                         # a 1:1: the chat IS the person
     if mentions_him(text):
-        note_tagged(chat, now)
+        note_tagged(chat, now, by=sender)
         return True
-    return engaged(chat, now)
+    open_window, by = engaged(chat, now)
+    if not open_window:
+        return False
+    # Inside the window, the follow-up is what the person who pulled him in says
+    # next — not everything the room says. Anything naming somebody ELSE is
+    # theirs: "Vinish Kumar what do you say" is a question for Vinish.
+    if names_someone_else(text, sender):
+        return False
+    return (sender or "").strip().lower() == (by or "").strip().lower()
 
 
 # --- what he actually reads ---------------------------------------------------
@@ -356,6 +377,45 @@ def render(chat: str, who: str, text: str, priority: int | None = None,
     where = "" if (chat or "").strip().lower() == (who or "").strip().lower() \
         else f" in {chat}"
     return f"{mark} {who}{where}: {summarise(text, known=known)}"
+
+
+def names_someone_else(text: str, sender: str) -> bool:
+    """Does this message open by addressing a different person?
+
+    A cheap, deliberately narrow test: a name at the very start is how people
+    direct a message in a busy channel. Anything subtler is left alone, because
+    over-filtering loses him a message and that is the failure that matters.
+    """
+    lead = (text or "").strip()[:40]
+    if not lead or mentions_him(lead):
+        return False
+    # Two capitalised words at least — a FULL name, which is how people address
+    # somebody in a busy channel. One word is far too loose: "Activity getting
+    # missed in prod" opens with a capitalised noun and is not addressed to
+    # anybody, and reading it as a name would have silenced a real report.
+    m = re.match(r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s*[,:]?\s+\w", lead)
+    if not m:
+        return False
+    named = m.group(1).strip().lower()
+    return named != (sender or "").strip().lower()
+
+
+def answered_by_him(chat: str, message: dict) -> bool:
+    """Has Arun himself said something in this thread since this message?
+
+    Read from what Asta has already stored, so it costs nothing. Anything without
+    a timestamp is ignored rather than guessed at: an untimed row cannot be
+    honestly claimed to come after anything.
+    """
+    when = message.get("sent_at")
+    if not when:
+        return False
+    try:
+        rows = store.teams_messages(chat=chat, limit=200)
+    except Exception:                                          # noqa: BLE001
+        return False
+    return any(r.get("sent_at") and r["sent_at"] > when
+               and is_from_him(r.get("sender", "")) for r in rows)
 
 
 def is_from_him(sender: str) -> bool:
@@ -503,7 +563,15 @@ async def sweep(notify=None) -> list[dict]:
                 continue
             handled.append({"chat": chat, "who": who, "text": text, "priority": pri})
             lines.append(render(chat, who, text, pri, known=known))
-            task = responder.respond("teams-chat", who, text, priority=pri, key=key)
+            # He has already dealt with it. "i have already shared na the
+            # analysis then why again it doing" — Vinish's list of production
+            # issues was investigated by a background task while Arun's own answer
+            # was already sitting in the thread above it. A reply of his, later
+            # than the ask, is the clearest possible signal that it is handled.
+            if answered_by_him(chat, m):
+                continue
+            task = responder.respond("teams-chat", who, text, priority=pri, key=key,
+                                     sent_at=m.get("sent_at"))
             if task:
                 started.append(responder.line_for(task, who,
                                                   responder.what_it_asks(text)))

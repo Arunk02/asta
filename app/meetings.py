@@ -411,6 +411,18 @@ async def call_person(who: str, video: bool = False) -> str:
         raise RuntimeError("Teams bridge is off (set TEAMS_BRIDGE=1 in .env)")
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
+    # His rail beats Teams' search ranking. "divya" ranks a 1:1 titled "Divya"
+    # — a real chat with no messages in it — above "Palikala Divya Maheswari",
+    # who is the person he actually talks to. A message there reaches the wrong
+    # person; a call RINGS them, and neither is undone by noticing afterwards.
+    from . import contacts as _contacts
+    settled, candidates = _contacts.resolve_name(who)
+    if settled and settled.lower() != (who or "").strip().lower():
+        who = settled
+    elif not settled and len(candidates) > 1:
+        raise RuntimeError(
+            f"{who!r} matches {len(candidates)} people you talk to "
+            f"({', '.join(candidates[:3])}) — say which one")
     kind = "video" if video else "audio"
     # Pay the model's cold start NOW, while the browser is still opening and the
     # phone has not even rung. Measured: the first utterance after Voicebox starts

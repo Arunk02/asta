@@ -216,6 +216,11 @@ _TABLE: tuple[Capability, ...] = (
                     "link — 'join my 3pm', 'join the standup'. Refuses and lists the day "
                     "when the phrase fits more than one; hand that back and ask which. "
                     "Joining the wrong call cannot be quietly undone."),
+    Capability("answer_call", "teams", write=True,
+               http='POST /api/calls/answer {"speak":false}',
+               note="Picks up a RINGING call. Only after Arun said yes — answering "
+                    "puts Asta in front of someone who thinks they reached him. "
+                    "speak=true only when he asked it to talk."),
     Capability("leave_meeting", "teams", http="POST /api/meetings/leave", write=True,
                note="Hangs up. Safe to call when not in a call — it says so."),
     Capability("meeting_notes", "teams", http="GET /api/meetings/notes",

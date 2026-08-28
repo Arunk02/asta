@@ -205,3 +205,37 @@ def _fresh_activity(rows: list[dict]) -> list[str]:
     store.kv_set(teams_bridge.ACTIVITY_SEEN_KEY, json.dumps(keys[:300]))
     opened = {teams_bridge._activity_key(r["text"]) for r in rows if r.get("unread") is False}
     return [it for it in fresh if teams_bridge._activity_key(it) not in opened]
+
+
+# --- one reader per surface ---------------------------------------------------
+# "ABhijit msg is returning now it bloating unwanted arrey"
+#
+# Once `chat_watch` reads the conversations directly it sees every message the
+# Activity feed describes, and sees the real sentence rather than the feed's
+# truncated rendering. The feed pushing them as well is the same message arriving
+# twice in two different shapes.
+
+def test_a_chat_message_is_left_to_the_reader_that_sees_it_properly(monkeypatch):
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
+    assert teams_bridge.duplicates_chat_watch(
+        "Abhijit Mohapatra mentioned you — hi Arunkumar K — 13:04 — In chat with you")
+
+
+@pytest.mark.parametrize("row", [
+    "Missed call from Vinish Kumar — Teams call — Call — Chat",
+    "Zishan M invited you: Zishan - OOO - 31/08",
+    "Vinish Kumar updated — AI Ideathon — 12:41",
+])
+def test_things_that_are_not_messages_stay_with_the_feed(row, monkeypatch):
+    """A missed call, an invite and a calendar change never appear as a message in
+    any thread, so the feed is the only thing that can see them at all."""
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
+    assert not teams_bridge.duplicates_chat_watch(row)
+    assert teams_bridge._activity_wanted(row)
+
+
+def test_with_the_chat_reader_off_the_feed_keeps_everything(monkeypatch):
+    """Deduplicating against a reader that is not running would lose the message."""
+    monkeypatch.delenv("ASTA_CHATWATCH", raising=False)
+    assert not teams_bridge.duplicates_chat_watch(
+        "Abhijit Mohapatra mentioned you — hi Arunkumar K — In chat with you")

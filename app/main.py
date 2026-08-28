@@ -149,6 +149,11 @@ async def startup() -> None:
         from . import chat_watch as _chat_watch
         if _chat_watch.enabled():
             daemon.start("teams_chats", _chat_watch.watch_loop)
+        # A ringing phone was invisible until it turned up afterwards as "Missed
+        # call from …". This notices the ring and asks him whether to pick up.
+        from . import incoming as _incoming
+        if _incoming.enabled():
+            daemon.start("teams_incoming", _incoming.watch_loop)
         # A selector that stopped matching returns nothing, which looks exactly
         # like "no new messages" — so the break hides until it fails in front of
         # somebody. Daily, supervised like every other loop.
@@ -917,6 +922,15 @@ async def api_say_in_call(request: Request):
     if not b.get("text"):
         raise HTTPException(400, "text is required")
     return {"message": await agent_mod.say_in_call(b["text"])}
+
+
+@app.post("/api/calls/answer", dependencies=[Depends(require_auth)])
+async def api_answer_call(request: Request):
+    """Pick up the ringing call. Only ever called after Arun said yes."""
+    b = {}
+    with contextlib.suppress(Exception):
+        b = await request.json()
+    return {"message": await agent_mod.answer_call(speak=bool((b or {}).get("speak")))}
 
 
 @app.post("/api/meetings/discuss", dependencies=[Depends(require_auth)])

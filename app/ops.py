@@ -66,6 +66,26 @@ async def _teams_call(who: str = "", video: bool = False) -> str:
     return f"📞 Calling {result} — I'll tell you if they pick up, and how it went."
 
 
+@op("call_answer", lambda a: "Answer the call"
+                              + (" and talk" if a.get("speak") else " (listen only)"))
+async def _call_answer(speak: bool = False) -> str:
+    """Pick up the call that is ringing NOW.
+
+    Re-checks the ring rather than trusting the offer. A ring lasts about thirty
+    seconds and his yes can arrive after it stopped; clicking Accept on a toast
+    that is gone would either do nothing or hit whatever replaced it, and telling
+    him "answered" when nothing was answered is the failure that matters.
+    """
+    from . import incoming, teams_bridge
+    async with teams_bridge.teams_page() as page:
+        call = await incoming.look(page)
+        if not call:
+            incoming.clear()
+            return "📞 Too late — it stopped ringing before you answered."
+        result = await incoming.answer(page, speak=speak)
+    return f"📞 {incoming.describe(call)} {result}"
+
+
 @op("jira_comment", lambda a: f"Comment on {a.get('key', '?')}")
 async def _jira_comment(key: str = "", text: str = "") -> str:
     await jira.add_comment(key, text)

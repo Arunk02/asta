@@ -1133,8 +1133,12 @@ async def request_leave(start_date: str, end_date: str = "", reason: str = "",
     return f"Staged the leave request — waiting for Arun's yes.\n{meetings.describe(invite)}"
 
 
-async def join_meeting_by_name(which: str) -> str:
+async def join_meeting_by_name(which: str, speak: bool = False) -> str:
     """Join a meeting Arun names rather than links — "join my 3pm", "join the standup".
+
+    `speak=True` ONLY when he asked Asta to take part ("join and talk", "answer for
+    me"). Default is listening: a room full of people did not ask for an
+    assistant's opinion, and he may well be in it himself.
 
     Use this whenever he refers to a meeting by time or by name; only fall back to
     join_meeting when he actually pastes a link. If the phrase does not pick out
@@ -1145,18 +1149,20 @@ async def join_meeting_by_name(which: str) -> str:
 
     from . import meetings
     try:
-        result = await meetings.join_by_phrase(which)
+        result = await meetings.join_by_phrase(which, speak=speak)
     except RuntimeError as exc:
         return f"Didn't join — {exc}"
     _asyncio.create_task(meetings.watch_and_report(which))
     return result
 
 
-async def join_meeting(join_url: str, title: str = "") -> str:
-    """Join a Teams meeting from its join link, muted with the camera off.
+async def join_meeting(join_url: str, title: str = "", speak: bool = False) -> str:
+    """Join a Teams meeting from its join link. Listening only unless he says otherwise.
 
-    Use when Arun says to sit in on a call he cannot attend. Joining alone does not
-    speak — say_in_call does that, and it works. Tell him he is joined and listening.
+    Use when Arun says to sit in on a call he cannot attend. `speak=True` ONLY when
+    he asked Asta to take part ("join and talk"); it joins unmuted and answers
+    questions about the work, and still never commits him to anything. Without a
+    virtual microphone it refuses rather than unmuting his real one.
 
     Asta stays in the call and hangs up by itself when it ends, then offers to pull out
     anything that concerned him. Don't wait for that: reply to him now."""
@@ -1164,7 +1170,7 @@ async def join_meeting(join_url: str, title: str = "") -> str:
 
     from . import meetings
     try:
-        result = await meetings.join(join_url)
+        result = await meetings.join(join_url, speak=speak)
     except RuntimeError as exc:
         return f"Didn't join — {exc}"
     # The watcher outlives this turn on purpose — a meeting lasts far longer than
@@ -1173,6 +1179,19 @@ async def join_meeting(join_url: str, title: str = "") -> str:
     _asyncio.create_task(meetings.watch_and_report(title))
     return (f"{result}. I'll stay on and hang up when it ends, then offer you "
             f"anything from it that's yours. I'm only listening — I won't speak.")
+
+
+async def answer_call(speak: bool = False) -> str:
+    """Pick up the call that is RINGING right now.
+
+    Use only when Arun said to answer ("pick it up", "answer and talk"). `speak`
+    True means take part in the conversation; False means listen only. If the ring
+    has already stopped this says so rather than clicking something else."""
+    from . import ops
+    try:
+        return await ops.run({"name": "call_answer", "args": {"speak": bool(speak)}})
+    except RuntimeError as exc:
+        return f"Didn't answer — {exc}"
 
 
 async def leave_meeting() -> str:

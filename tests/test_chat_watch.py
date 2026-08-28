@@ -174,14 +174,16 @@ def test_one_unreadable_thread_does_not_end_the_sweep(monkeypatch):
     async def _candidates():
         return ["Broken", "Fine"]
 
-    async def _new_in(chat):
+    async def _new_in(chat, advance=True):
         if chat == "Broken":
             raise RuntimeError("thread would not open")
-        return [{"key": "k", "sender": "Vinish", "text": "prod is stuck"}]
+        # A 1:1 (sender == chat), so it is unambiguously his and the assertion is
+        # about the sweep surviving, not about who a message was for.
+        return [{"key": "k", "sender": "Fine", "text": "prod is stuck"}]
 
     monkeypatch.setattr(chat_watch, "candidates", _candidates)
     monkeypatch.setattr(chat_watch, "new_in", _new_in)
-    assert asyncio.run(chat_watch.sweep())
+    assert asyncio.run(chat_watch.sweep()), "one bad thread ended the whole sweep"
 
 
 def test_it_is_off_until_switched_on(monkeypatch):
@@ -410,3 +412,71 @@ def test_the_cap_cannot_silently_disable_the_rotation():
     read — the configured cap quietly reinstated the bug the code had fixed."""
     assert chat_watch.MAX_OPENS >= chat_watch.ALWAYS_TOP + chat_watch.ROTATE, (
         "MAX_OPENS is below TOP+ROTATE, so the tail is never reached")
+
+
+# --- read everything, forward only what is his --------------------------------
+# "see here some of messages are not meant for me in the group, still it throwing
+# the messages inn teams"
+#
+# `direct` was computed on every message and then never used: every line of every
+# group conversation went to his phone. A release-triage channel sent him "Shall
+# we join here now?" and "Hi Sumith just wanted to check what we have concluded" —
+# other people talking to each other, none of it his.
+#
+# Reading every conversation is right. Forwarding every conversation is not.
+
+def _sweep_with(monkeypatch, chat, sender, text):
+    async def _candidates():
+        return [chat]
+
+    async def _new_in(c, advance=True):
+        return [{"key": "k1", "sender": sender, "text": text}]
+
+    monkeypatch.setattr(chat_watch, "candidates", _candidates)
+    monkeypatch.setattr(chat_watch, "new_in", _new_in)
+    sent = []
+
+    async def _notify(text, source, **kw):
+        sent.append(text)
+
+    asyncio.run(chat_watch.sweep(_notify))
+    return sent
+
+
+def test_group_chatter_between_other_people_is_not_forwarded(monkeypatch):
+    """The exact line he was sent."""
+    sent = _sweep_with(monkeypatch, "BEP_Telikos : Defect Triage", "Rupesh Kumar",
+                       "Hi Sumith just wanted to check what we have concluded")
+    assert not sent, f"forwarded a conversation between other people: {sent}"
+
+
+def test_a_group_message_naming_him_is_forwarded(monkeypatch):
+    sent = _sweep_with(monkeypatch, "BEP_Telikos : Defect Triage", "Rupesh Kumar",
+                       "Arunkumar can you check this defect")
+    assert sent and "Arunkumar can you check" in sent[0]
+
+
+def test_a_one_to_one_is_always_forwarded(monkeypatch):
+    """No tag needed — the chat IS the person."""
+    sent = _sweep_with(monkeypatch, "Abhijit Mohapatra", "Abhijit Mohapatra",
+                       "you are in code atlas team")
+    assert sent and "code atlas" in sent[0]
+
+
+def test_the_follow_up_after_a_tag_is_still_forwarded(monkeypatch):
+    """Nobody tags twice, and the replies are the substance."""
+    _sweep_with(monkeypatch, "Prod Support", "Komal", "arun please look")
+    sent = _sweep_with(monkeypatch, "Prod Support", "Komal", "and the ETA one too")
+    assert sent, "lost the untagged follow-up inside a conversation he was pulled into"
+
+
+def test_unforwarded_group_traffic_is_still_recorded(monkeypatch):
+    """Silence is not amnesia — "what did I miss in that channel" still has an
+    answer, it simply does not interrupt him."""
+    from app import attention
+    seen = []
+    monkeypatch.setattr(attention, "consider",
+                        lambda src, key, **kw: seen.append(kw.get("what")) or True)
+    _sweep_with(monkeypatch, "BEP_Telikos : Defect Triage", "Rupesh Kumar",
+                "Shall we join here now?")
+    assert seen, "dropped it entirely instead of recording it"

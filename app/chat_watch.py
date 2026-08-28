@@ -347,6 +347,14 @@ async def sweep(notify=None) -> list[dict]:
             if not attention.consider("teams-chat", key, who=who, what=v.one_line,
                                       why=why, priority=pri, due_at=due):
                 continue
+            # Recorded above, pushed only if it is HIS. Reading every conversation
+            # is right; forwarding every conversation is not. Without this gate a
+            # release-triage channel sent him "Shall we join here now?" and "Hi
+            # Sumith just wanted to check what we have concluded" — a standing
+            # group discussion between other people, none of it his, delivered to
+            # his phone. `direct` was computed here and then never used.
+            if not direct:
+                continue
             handled.append({"chat": chat, "who": who, "text": text, "priority": pri})
             lines.append(f"{'🔴' if v.action else '·'} {chat} — {who}: {text[:120]}")
             task = responder.respond("teams-chat", who, text, priority=pri, key=key)

@@ -1192,9 +1192,40 @@ def _activity_key(item: str) -> str:
 
 
 
+#: Feed rows that describe a MESSAGE — the thing `chat_watch` now reads directly.
+_A_MESSAGE = ("mentioned you", "replied to you", "in chat with you")
+
+#: Feed rows for things that never appear as a message in a thread, so the feed is
+#: the only place they can be seen at all.
+_FEED_ONLY = ("missed call", "invited you", "updated", "reacted to")
+
+
+def duplicates_chat_watch(item: str) -> bool:
+    """Would `chat_watch` deliver this same message, with better text?
+
+    Two readers over one surface is two notifications. Once chat_watch reads the
+    conversations directly it sees every message the feed describes — and sees the
+    actual sentence rather than the feed's truncated rendering — so the feed
+    stepping in as well is the duplication he hit: the same line from Abhijit
+    arriving twice, in two different shapes.
+
+    Missed calls, invites and reactions are NOT messages in any thread, so they
+    stay with the feed, which is the only thing that can see them.
+    """
+    from . import chat_watch
+    if not chat_watch.enabled():
+        return False                      # the feed is the only reader; keep it all
+    t = (item or "").lower()
+    if any(k in t for k in _FEED_ONLY):
+        return False
+    return any(k in t for k in _A_MESSAGE)
+
+
 def _activity_wanted(item: str) -> bool:
     t = item.lower()
     if "reacted to your message" in t:
+        return False
+    if duplicates_chat_watch(item):
         return False
     if any(p in t for p in _ACTIVITY_INTERESTING):
         return True

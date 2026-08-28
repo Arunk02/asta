@@ -165,3 +165,48 @@ def scoreboard(limit: int = 20) -> list[dict]:
                     "rate": round(row["engaged"] / total, 2) if total else None,
                     "acting": total >= min_evidence()})
     return out
+
+
+# --- which thread does a name actually mean? ---------------------------------
+#
+# "divya" resolves, in Teams' own search, to a 1:1 titled "Divya" — a real chat
+# with no messages in it. The person Arun actually talks to is "Palikala Divya
+# Maheswari". A message there would reach the wrong person and a CALL would ring
+# them, and neither is undone by noticing afterwards.
+#
+# His own rail is the better authority than Teams' ranking, and Asta already has
+# it: the threads it has read messages in are the conversations he really has.
+
+def known_threads(limit: int = 800) -> list[str]:
+    """Distinct chats Asta has actually read messages in, newest activity first."""
+    from . import store
+    try:
+        rows = store.teams_messages(limit=limit)
+    except Exception:                                          # noqa: BLE001
+        return []
+    seen: dict[str, None] = {}
+    for r in reversed(rows):
+        name = (r.get("chat") or "").strip()
+        if name:
+            seen.setdefault(name, None)
+    return list(seen)
+
+
+def resolve_name(name: str) -> tuple[str, list[str]]:
+    """(the thread he means, all the threads it could be).
+
+    An exact match wins. Otherwise a name that matches exactly one real
+    conversation resolves to that one — "divya" is unambiguous among the people he
+    talks to, even though Teams' search prefers a different chat with the shorter
+    title. Anything matching several is returned undecided, because guessing which
+    colleague he meant is the mistake that cannot be walked back.
+    """
+    wanted = (name or "").strip().lower()
+    if not wanted:
+        return "", []
+    threads = known_threads()
+    exact = [t for t in threads if t.lower() == wanted]
+    if exact:
+        return exact[0], exact
+    near = [t for t in threads if wanted in t.lower()]
+    return (near[0] if len(near) == 1 else ""), near

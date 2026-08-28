@@ -693,7 +693,22 @@ _MESSAGE_JS = """
     const author = item.querySelector(
       '[data-tid="message-author-name"], [data-tid="threadBodyDisplayName"]');
     const body = item.querySelector('[data-tid="messageBodyContent"]') || n;
-    const text = (body.innerText || '').trim();
+    // A REPLY renders the message it answers inside its own body, so innerText
+    // returned the quoted sentence and the reply glued together — and the
+    // notification showed the QUOTED half under the replier's name, which put
+    // Arun's own words in Divya's mouth. Clone and drop the quote, so the text is
+    // only ever what this person typed. Several selectors because which one Teams
+    // uses has moved; if none matches, `chat_watch.clean_message` still refuses to
+    // show a quote as if it were a message.
+    let src = body;
+    try {
+      const clone = body.cloneNode(true);
+      const quotes = clone.querySelectorAll(
+        '[data-tid="quoted-reply"], [data-tid="message-quote"], blockquote, ' +
+        '[class*="quotedReply" i], [class*="messageQuote" i], [class*="replyPreview" i]');
+      if (quotes.length) { quotes.forEach(q => q.remove()); src = clone; }
+    } catch (e) { src = body; }
+    const text = (src.innerText || '').trim();
     if (!text) continue;
 
     let iso = '', stamp = '';

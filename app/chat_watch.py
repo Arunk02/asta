@@ -237,23 +237,43 @@ def addressed_to_him(chat: str, sender: str, text: str,
 # inside a REPLY — scraped along with the text, so the actual sentence starts on
 # line three. And a bare URL says nothing at all about what it is.
 
-#: The quote block Teams puts at the top of a reply: a name, then a timestamp.
+#: The quote block Teams renders at the top of a REPLY, captured verbatim from a
+#: real stored message:
+#:
+#:     Ashwin Kumar                 <- who is being quoted
+#:     20/07/2026 11:14             <- when they said it
+#:     Ayashkant - What is IP...    <- THEIR words
+#:                                  <- blank line
+#:     IP is specific integration…  <- what the sender actually typed
+#:
+#: The first version stripped only the name and the timestamp, which left the
+#: QUOTED text as the message — so Arun was shown his own sentence under Divya's
+#: name. Attributing one colleague's words to another is worse than the raw noise
+#: it replaced, and he caught it immediately.
 _REPLY_HEADER = re.compile(
-    r"^\s*[^\n]{1,60}\n\s*\d{1,2}/\d{1,2}/\d{2,4}[ ,]+\d{1,2}:\d{2}\s*\n",
-    re.M)
+    r"\A\s*[^\n]{1,60}\n\s*\d{1,2}/\d{1,2}/\d{2,4}[ ,]+\d{1,2}:\d{2}\s*\n")
 
 #: Teams appends these to the scraped body; they are not what anyone said.
 _TRAILING_NOISE = re.compile(
-    r"\n+\s*\d*\s*(like|heart|laugh|surprised|sad|angry)\s+reactions?[^\n]*$", re.I)
+    r"\n+\s*\d*\s*(like|heart|laugh|surprised|sad|angry)\s+reactions?[^\n]*\Z", re.I)
 
 _URL = re.compile(r"https?://\S+")
 
 
 def clean_message(text: str) -> str:
-    """The sentence somebody actually typed, without Teams' furniture."""
-    out = _REPLY_HEADER.sub("", (text or "").strip(), count=1)
-    out = _TRAILING_NOISE.sub("", out)
-    return re.sub(r"\n{2,}", "\n", out).strip()
+    """What the SENDER typed — never the message they were replying to.
+
+    Returns "" when the capture is a quote with no reply body, because there is
+    then nothing of theirs to show, and showing the quote would misattribute it.
+    """
+    body = _TRAILING_NOISE.sub("", (text or "").strip())
+    m = _REPLY_HEADER.match(body)
+    if m:
+        # After the header comes the quoted text, a blank line, then the reply.
+        rest = body[m.end():]
+        parts = rest.split("\n\n", 1)
+        body = parts[1] if len(parts) == 2 and parts[1].strip() else ""
+    return re.sub(r"\n{2,}", "\n", body).strip()
 
 
 def describe_link(url: str) -> str:
@@ -276,6 +296,10 @@ def describe_link(url: str) -> str:
 def summarise(text: str, limit: int = 160) -> str:
     """One readable line for a message — links named rather than pasted raw."""
     body = clean_message(text)
+    if not body:
+        # A reply whose own body did not survive the capture. Saying so is honest;
+        # showing the quoted text would put someone else's words in their mouth.
+        return "replied (couldn't read their text)"
     links = _URL.findall(body)
     without = _URL.sub("", body).strip(" -–—:\n\t")
     if links and not without:

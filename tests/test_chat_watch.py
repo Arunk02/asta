@@ -512,11 +512,44 @@ def test_a_group_message_says_which_group():
     assert "Rupesh Kumar" in line and "BEP_Telikos" in line
 
 
-def test_the_quoted_reply_header_is_not_the_message():
-    """Teams renders "<name>\\n<dd/mm/yyyy hh:mm>" above a reply, and it was scraped
-    with the body — so the sentence he needed started on the third line."""
-    assert chat_watch.clean_message(REPLY).startswith("lets analyse")
-    assert "28/08/2026" not in chat_watch.clean_message(REPLY)
+#: A real reply, captured verbatim from his store. Sender was Ayashkant Baral;
+#: the first three lines are Ashwin Kumar's message being replied TO.
+REAL_REPLY = (
+    "Ashwin Kumar\n20/07/2026 11:14\nAyashkant - What is IP. For NAM, in the "
+    "future we many get combined invoice scenario.\n\nIP is specific integration "
+    "from EDI like we have many channels (WebEC, SoftPoint)\n\n"
+    "1 Like reaction with medium dark skin tone.")
+
+
+def test_a_reply_shows_what_the_sender_typed_not_what_they_quoted():
+    """The misattribution he caught: "msg was mine but u shoing divya".
+
+    Stripping only the name and timestamp left the QUOTED text as the message, so
+    one person's sentence was shown under another's name. Putting a colleague's
+    words in someone else's mouth is worse than the raw noise it replaced.
+    """
+    out = chat_watch.clean_message(REAL_REPLY)
+    assert out.startswith("IP is specific integration")
+    assert "What is IP" not in out, "showed the quoted message as the reply"
+
+
+def test_a_quote_with_no_reply_body_is_not_passed_off_as_one():
+    """His exact case: the capture held only his own quoted sentence. There is
+    nothing of theirs to show, and showing the quote would misattribute it."""
+    assert chat_watch.clean_message(REPLY) == ""
+    assert "couldn't read" in chat_watch.summarise(REPLY)
+    assert "lets analyse" not in chat_watch.summarise(REPLY)
+
+
+def test_the_scrape_drops_the_quoted_block_before_the_text_is_read():
+    """The real fix is upstream — a reply renders the quoted message inside its own
+    body, so innerText glued both together. The text-level guard above stays as the
+    fallback for when these selectors stop matching."""
+    import inspect
+
+    from app import teams_bridge
+    js = inspect.getsource(teams_bridge)
+    assert "quoted-reply" in js and "quotes.forEach(q => q.remove())" in js
 
 
 def test_reaction_counts_are_not_part_of_what_was_said():

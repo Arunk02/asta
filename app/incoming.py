@@ -99,6 +99,55 @@ def describe(call: dict) -> str:
     return f"📞 {who} is calling — {kind}."
 
 
+#: Find the Accept control by what it SAYS, the way `_RINGING` finds a ringing
+#: call. The data-tid list below is tried first because it is precise when it
+#: matches, but it is guesswork — nobody has rung this laptop to find out — and a
+#: selector that silently matches nothing is how the mute button, the captions menu
+#: and the microphone all went wrong this week. Text is the part Teams rewords
+#: least, so it is the fallback that has to work.
+_ACCEPT_BY_TEXT = """
+() => {
+  const want = /^(accept|answer)\b/i;
+  const nodes = document.querySelectorAll(
+    'button,[role="button"],[role="menuitem"]');
+  for (const n of nodes) {
+    const label = ((n.getAttribute('aria-label') || '') + ' ' +
+                   (n.getAttribute('title') || '') + ' ' +
+                   (n.innerText || '')).trim();
+    if (!want.test(label)) continue;
+    if (/decline|reject|ignore|video/i.test(label)) continue;   // audio only
+    n.setAttribute('data-asta-accept', '1');
+    return label.slice(0, 60);
+  }
+  return '';
+}
+"""
+
+
+async def capture_toast(page) -> str:
+    """Record the ring's markup the FIRST time one is seen, for calibration.
+
+    The accept selectors above were written without a real incoming call to check
+    them against. Rather than leave that as a permanent unknown, the first genuine
+    ring writes what Teams actually rendered to data/ so the guess can be replaced
+    with the truth. Read-only, once, and never overwritten.
+    """
+    from pathlib import Path
+    out = Path(__file__).resolve().parent.parent / "data" / "incoming-toast.html"
+    if out.exists():
+        return ""
+    try:
+        html = await page.evaluate(
+            "() => document.body ? document.body.innerHTML.slice(0, 200000) : ''")
+    except Exception:                                          # noqa: BLE001
+        return ""
+    with contextlib.suppress(Exception):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html)
+        return str(out)
+    return ""
+
+
 async def look(page) -> dict | None:
     """Is a call ringing on this page right now? {who, group} or None."""
     if page is None:
@@ -142,7 +191,14 @@ async def answer(page, speak: bool = False) -> str:
         return ("Didn't answer — you asked me to talk, and there is no virtual "
                 "microphone configured, so I would have picked up mute. "
                 + meetings.speaking_hint())
-    if not await meetings._click_first(page, ACCEPT, timeout=4000):
+    clicked = await meetings._click_first(page, ACCEPT, timeout=4000)
+    if not clicked:
+        # The data-tid guesses missed. Fall back to whatever the button SAYS.
+        with contextlib.suppress(Exception):
+            if await page.evaluate(_ACCEPT_BY_TEXT):
+                await page.click('[data-asta-accept="1"]', timeout=3000)
+                clicked = True
+    if not clicked:
         return "Couldn't find the Accept button — the call was not answered."
     meetings._CALL.update(page=page, joined_at=meetings._now(), captions=[],
                           answered_at=meetings._now(), speaks=bool(speak), who="")
@@ -178,9 +234,12 @@ async def watch_loop() -> None:
             continue
         if meetings_busy():
             continue
+        saved = ""
         try:
             async with teams_bridge.teams_page() as page:
                 call = await look(page)
+                if call:
+                    saved = await capture_toast(page)
         except Exception:                                      # noqa: BLE001
             continue
         if not call:
@@ -189,6 +248,9 @@ async def watch_loop() -> None:
         if already_offered(call):
             continue
         note_offered(call)
+        if saved:
+            from . import quiet
+            quiet.note("incoming.toast_captured", RuntimeError(saved))
         offers.staged_write(
             "call_answer", {"speak": False},
             describe(call),

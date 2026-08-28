@@ -246,3 +246,47 @@ def test_silence_is_reported_as_silence_not_as_success(monkeypatch):
     out = _a.run(agent.voice_check())
     assert "SILENT" in out
     assert "not be transmitted" in out
+
+
+# --- the selectors are a guess, so do not depend on them ----------------------
+# Nobody has rung this laptop, so the data-tid list for Accept was written without
+# anything to check it against. That is exactly how the mute button, the captions
+# menu and the microphone all went wrong this week.
+
+def test_accept_falls_back_to_what_the_button_says(clickable, monkeypatch):
+    """When the data-tid guesses miss, find the control by its label — the same
+    approach `meetings._RINGING` uses, and for the same reason."""
+    from app import meetings, voice
+
+    async def _never(p, selectors, timeout=3000):
+        return False
+
+    monkeypatch.setattr(meetings, "_click_first", _never)
+    monkeypatch.setattr(voice, "can_speak", lambda: True)
+
+    class _P(_Page):
+        async def evaluate(self, js, *a):
+            self.clicked.append("by-text")
+            return "Accept"
+
+        async def click(self, sel, timeout=0):
+            self.clicked.append(sel)
+
+    page = _P()
+    out = asyncio.run(incoming.answer(page, speak=False))
+    assert "Answered" in out
+    assert '[data-asta-accept="1"]' in page.clicked
+
+
+def test_the_text_search_never_picks_decline_or_video():
+    """Answering a call by clicking Decline, or picking up on VIDEO when he asked
+    for audio, are both unrecoverable in front of a colleague."""
+    assert "decline|reject|ignore|video" in incoming._ACCEPT_BY_TEXT
+
+
+def test_the_first_real_ring_records_what_teams_rendered():
+    """Rather than leaving the guess as a permanent unknown, the first genuine call
+    writes the actual markup so the selectors can be replaced with the truth."""
+    import inspect
+    assert "incoming-toast.html" in inspect.getsource(incoming.capture_toast)
+    assert "if out.exists():" in inspect.getsource(incoming.capture_toast)

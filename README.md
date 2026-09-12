@@ -682,7 +682,7 @@ which is off by default, so the answer was an empty string and the flag was neve
 passed. Every background task therefore ran with **no Jira, no Teams, no memory and
 no `prepare_to_send`**. Task #86 reported exactly that. Task #88 implemented a
 missing avro mapping across eleven files with a green build and finished with *"I
-can't message Vinish directly"* — the work done and nobody told. `tasks.task_tools`
+can't message Alex directly"* — the work done and nobody told. `tasks.task_tools`
 now composes Asta's own server with the dev servers, bound to the conversation that
 spawned the task so an approval lands in the chat you asked from.
 
@@ -706,7 +706,7 @@ attention to isn't spent approving something the workflow will reject.
 
 ## Daily rhythm
 
-- **Reminders** — "remind me at 3pm to reply to Vinish", from any channel. One-shot
+- **Reminders** — "remind me at 3pm to reply to Alex", from any channel. One-shot
   or daily/weekdays/weekly. Overdue ones (laptop asleep) fire on wake with a "was
   due N min ago" note.
 - **Morning brief** (`BRIEF_TIME=08:30`, weekdays) — finished work, things waiting
@@ -843,7 +843,7 @@ permission. One-time login, where you complete SSO yourself:
 .venv/bin/python -m app.teams_bridge login
 ```
 
-Then: "any messages for me", "read my chat with Vinish", "send Vinish: running
+Then: "any messages for me", "read my chat with Alex", "send Alex: running
 late", "any mail needing my attention", "what meetings do I have", "set me to do not
 disturb". Deterministic automation — no tokens unless you ask Asta to reason about
 what it read.

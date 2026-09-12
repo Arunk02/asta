@@ -1,10 +1,10 @@
 """“sendd” is a yes.
 
-2026-09-07, 12:26. A draft to Vinish was staged and Asta asked him to reply
+2026-09-07, 12:26. A draft to Alex was staged and Asta asked him to reply
 "send". He replied `sendd`. It missed the regex by one key, so it was routed as
 revision feedback: the brain was told he had NOT approved it, could make nothing
 of the word, and re-staged the identical draft — "Re-staged the same draft to
-Vinish. It's queued". He typed `send` again a minute later and it went.
+Alex. It's queued". He typed `send` again a minute later and it went.
 
 So a confirmation he had already given cost two more messages, a turn, and the
 time. The fix forgives the slip; these tests are mostly about what it must NOT
@@ -50,7 +50,7 @@ def test_an_exact_yes_is_not_reported_as_a_correction():
 
 @pytest.mark.parametrize("typed", [
     "sent",          # one substitution from "send" — and the opposite claim
-    "spend", "sand", "end", "send to divya instead", "resend later",
+    "spend", "sand", "end", "send to blake instead", "resend later",
     "n",             # one substitution from "y"
     "no", "nope", "not now", "stop", "don't", "dont send",
     "shorten it", "s", "", "   ",
@@ -87,11 +87,11 @@ class _Sink:
 
 
 def _staged(monkeypatch):
-    """A draft to Vinish waiting on 'can I send this?', as on the day."""
+    """A draft to Alex waiting on 'can I send this?', as on the day."""
     conv = store.create_conversation(model="copilot", workspace=None)
     loop._awaiting[conv["id"]] = {
         "kind": "send", "what": "the retry fix is merged too, same change as the timeout one.",
-        "to": "Vinish", "channel": "teams", "to_group": False,
+        "to": "Alex", "channel": "teams", "to_group": False,
     }
     return conv
 
@@ -114,7 +114,7 @@ def test_the_typo_sends_instead_of_re_staging_the_same_draft(monkeypatch):
     assert task is None                          # no turn burned re-drafting
     assert started == []                         # nothing went back to a brain
     assert len(ran) == 1                         # the recorded send ran
-    assert ran[0]["args"]["to"] == "Vinish"
+    assert ran[0]["args"]["to"] == "Alex"
     assert "Read “sendd” as “send”" in sink.texts()
     assert loop.awaiting(conv["id"]) is None
 

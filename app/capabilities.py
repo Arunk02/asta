@@ -410,7 +410,7 @@ def names() -> tuple[str, ...]:
 
 #: Set for the whole life of a turn that runs ALONGSIDE another one.
 #:
-#: A read-only question — "what's the CI status", "what did Vinish say" — has no
+#: A read-only question — "what's the CI status", "what did Alex say" — has no
 #: conflict with work already running, and queueing it behind a forty-minute
 #: implementation is why Arun got "still finishing the previous one" instead of an
 #: answer. So those are answered concurrently.

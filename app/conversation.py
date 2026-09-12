@@ -11,12 +11,12 @@ asks `call_brain` what to say. Judgement on one side, mechanism on the other.
 
 Every piece of the loop below was proven live on 27 August in a real call, and
 then left in a scratch script — so Asta could ring a person, and could answer a
-question, and had no capability that did both. Asked to "call Vinish and discuss
-the PR comments" it answered "I can't hold a live conversation with Vinish
+question, and had no capability that did both. Asked to "call Alex and discuss
+the PR comments" it answered "I can't hold a live conversation with Alex
 myself", which was true only because this file did not exist.
 
 It is deliberately NOT a script of prepared lines. A script is what produced the
-failure Vinish described himself — "he keep on asking questions, nothing was
+failure Alex described himself — "he keep on asking questions, nothing was
 spoken" — because the far side does not follow a script. This reads what he
 actually said, answers THAT, and stops when he stops.
 """
@@ -71,7 +71,7 @@ async def converse(who: str, topic: str, workspace: str = "") -> str:
 
     * Never speak into a call nobody answered. `wait_for_answer` returning
       "no answer" or "ended" means hang up in silence — and "unknown" does NOT,
-      which is the bug that once cut Vinish off mid-sentence.
+      which is the bug that once cut Alex off mid-sentence.
     * Never hold the line in silence. If the brain cannot produce an answer, say
       so out loud and offer to come back, because the alternative is a colleague
       talking to nothing for forty seconds.

@@ -4,7 +4,7 @@
 "Cannot be heard — ConnectError: All connection attempts failed" while
 `can_speak()` returned True. Nothing was listening on Voicebox's port at all —
 it has no supervisor and had simply been down for who knows how long. Had the
-call gone out on `can_speak()`'s word, Vinish would have answered a silent line.
+call gone out on `can_speak()`'s word, Alex would have answered a silent line.
 
 This is the same lesson this module already learned once: macOS answers a denied
 microphone request with a valid, correctly-labelled track full of digital

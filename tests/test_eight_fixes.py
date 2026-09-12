@@ -18,7 +18,7 @@ from app import attention, chat_watch, incoming, outlook, responder, store, task
 # Task #86: "no Jira MCP/API tool is connected in this session... no Teams tool
 # available... prepare_to_send not among my available tools". Task #88 wrote the
 # transportAssetPriority mapping across eleven files, build green, and finished
-# with "I can't message Vinish directly". The work done and nobody told.
+# with "I can't message Alex directly". The work done and nobody told.
 
 def test_a_task_run_gets_astas_own_tools(monkeypatch):
     monkeypatch.setenv("ASTA_CLI_MCP", "1")
@@ -74,11 +74,11 @@ def _owed(who: str, what: str, key: str, priority: int = 1) -> str:
 
 def test_answering_someone_settles_what_they_were_owed(monkeypatch):
     monkeypatch.setenv("ASTA_ATTENTION", "1")
-    _owed("Vinish Kumar", "Retry fix merged?", "k1")
-    _owed("Vinish Kumar", "Schema mapping pending?", "k2")
+    _owed("Alex Kumar", "Retry fix merged?", "k1")
+    _owed("Alex Kumar", "Schema mapping pending?", "k2")
     _owed("Meera", "can you share the bug id", "k3")
 
-    assert attention.settle_with("Vinish Kumar") == 2
+    assert attention.settle_with("Alex Kumar") == 2
     assert store.attention_get("k1")["state"] == "acted"
     assert store.attention_get("k2")["state"] == "acted"
     # Somebody else's question is still open — settling is per person, not global.
@@ -90,8 +90,8 @@ def test_one_reply_settles_the_whole_conversation(monkeypatch):
     the exact key would leave the other two chasing him at end of day."""
     monkeypatch.setenv("ASTA_ATTENTION", "1")
     for i in range(3):
-        _owed("Vinish Kumar", f"question {i}", f"q{i}")
-    assert attention.settle_with("Vinish Kumar") == 3
+        _owed("Alex Kumar", f"question {i}", f"q{i}")
+    assert attention.settle_with("Alex Kumar") == 3
 
 
 def test_astas_own_notices_are_never_settled_as_his_replies(monkeypatch):
@@ -107,18 +107,18 @@ def test_sending_a_reply_clears_what_it_answered(monkeypatch):
     """Asta sent the reply itself and then chased him about the question it had
     just answered — "Retry fix merged?" was still owed after the send went out."""
     monkeypatch.setenv("ASTA_ATTENTION", "1")
-    _owed("Vinish Kumar", "Retry fix merged?", "sent1")
+    _owed("Alex Kumar", "Retry fix merged?", "sent1")
     sent = {}
 
     async def fake_send(to, text, allow_group=False):
         sent["to"] = to
-        return "Vinish Kumar"
+        return "Alex Kumar"
 
     from app import ops, teams_bridge
     monkeypatch.setattr(teams_bridge, "send_message", fake_send)
     out = asyncio.run(ops.run({"name": "teams_send",
-                               "args": {"to": "Vinish", "text": "retry fix is merged"}}))
-    assert "Sent to Vinish Kumar" in out
+                               "args": {"to": "Alex", "text": "retry fix is merged"}}))
+    assert "Sent to Alex Kumar" in out
     assert store.attention_get("sent1")["state"] == "acted"
 
 
@@ -153,17 +153,17 @@ def test_a_message_that_IS_his_still_gets_through(monkeypatch):
     monkeypatch.setenv("ASTA_CHATWATCH", "1")
 
     async def one_direct_chat():
-        return ["Vinish Kumar"]
+        return ["Alex Kumar"]
 
     async def one_message(chat, advance=True):
-        return [{"sender": "Vinish Kumar", "sent_at": 1_800_000_000.0,
+        return [{"sender": "Alex Kumar", "sent_at": 1_800_000_000.0,
                  "text": "Schema mapping is pending i think"}]
 
     monkeypatch.setattr(chat_watch, "candidates", one_direct_chat)
     monkeypatch.setattr(chat_watch, "new_in", one_message)
     monkeypatch.setattr(responder, "respond", lambda *a, **k: None)
     handled = asyncio.run(chat_watch.sweep())
-    assert [h["who"] for h in handled] == ["Vinish Kumar"]
+    assert [h["who"] for h in handled] == ["Alex Kumar"]
 
 
 def test_a_question_he_already_answered_is_not_forwarded_again(monkeypatch):
@@ -174,10 +174,10 @@ def test_a_question_he_already_answered_is_not_forwarded_again(monkeypatch):
     monkeypatch.setenv("ASTA_CHATWATCH", "1")
 
     async def one_direct_chat():
-        return ["Vinish Kumar"]
+        return ["Alex Kumar"]
 
     async def one_message(chat, advance=True):
-        return [{"sender": "Vinish Kumar", "sent_at": 1_800_000_000.0,
+        return [{"sender": "Alex Kumar", "sent_at": 1_800_000_000.0,
                  "text": "Retry fix merged?"}]
 
     monkeypatch.setattr(chat_watch, "candidates", one_direct_chat)
@@ -194,18 +194,18 @@ def test_his_reply_is_found_in_a_long_thread():
     `store.teams_messages` orders oldest-first and THEN applies the limit, so an
     unwindowed read of a busy thread returns the oldest 200 messages — and a
     reply, which is by definition the newest thing in it, is never among them.
-    His Vinish thread holds 200+ messages, so "has he answered this?" was False
+    His Alex thread holds 200+ messages, so "has he answered this?" was False
     for every question in it however fast he replied, and the ledger went on
     chasing him about conversations he had finished minutes earlier.
     """
     ask_at = 3_000.0
     store.save_teams_messages(
-        [{"key": f"old-{i}", "chat": "Vinish Kumar", "sender": "Vinish Kumar",
+        [{"key": f"old-{i}", "chat": "Alex Kumar", "sender": "Alex Kumar",
           "text": f"message {i}", "sent_at": 1_000.0 + i} for i in range(260)]
-        + [{"key": "his-reply", "chat": "Vinish Kumar", "sender": "Arunkumar K",
+        + [{"key": "his-reply", "chat": "Alex Kumar", "sender": "Arunkumar K",
             "text": "sorted, thanks", "sent_at": ask_at + 60}])
 
-    assert chat_watch.answered_by_him("Vinish Kumar", {"sent_at": ask_at}) is True
+    assert chat_watch.answered_by_him("Alex Kumar", {"sent_at": ask_at}) is True
 
 
 def test_a_thread_he_has_not_answered_is_still_open():
@@ -213,7 +213,7 @@ def test_a_thread_he_has_not_answered_is_still_open():
     store.save_teams_messages(
         [{"key": f"o-{i}", "chat": "Harini", "sender": "Harini S",
           "text": f"message {i}", "sent_at": 1_000.0 + i} for i in range(260)])
-    assert chat_watch.answered_by_him("Harika", {"sent_at": 3_000.0}) is False
+    assert chat_watch.answered_by_him("Frankie", {"sent_at": 3_000.0}) is False
 
 
 # --- 3. waiting on him for a room he is only sitting in --------------------------------
@@ -222,19 +222,19 @@ def test_a_thread_he_has_not_answered_is_still_open():
 # items in that screenshot, verbatim.
 
 REAL_BROADCASTS = [
-    ("Yogesh Kumar Singh", "Everyone all the new development and bug fixes are "
+    ("Marlowe Kumar Singh", "Everyone all the new development and bug fixes are "
                            "getting deployed to MDP only so please use the MDP server"),
     ("Facilitator", "About 7 minutes remain; please prioritize event mapping and "
                     "settle the Walmart 3P handling before time is up"),
 ]
 
 REAL_ASKS = [
-    ("Vinish Kumar", "Retry fix merged?"),
-    ("Vinish Kumar", "Schema Mapping is pending i think"),
+    ("Alex Kumar", "Retry fix merged?"),
+    ("Alex Kumar", "Schema Mapping is pending i think"),
     ("Kavya Ramesh Iyer", "Arunkumar K share me the bug id"),
     ("Harini S", "okayy.."),
     # The word appears, but he is being TOLD about a room, not addressed as one.
-    ("Vinish Kumar", "we told everyone about the release already"),
+    ("Alex Kumar", "we told everyone about the release already"),
 ]
 
 
@@ -260,7 +260,7 @@ def test_an_announcement_is_never_floored_up_to_today():
 def test_being_tagged_still_reaches_him():
     """The floor that got four people through to his phone must survive this."""
     pri, why, _ = attention.rank(False, "Arunkumar K can you check this",
-                                 addressed=True, who="Vinish Kumar")
+                                 addressed=True, who="Alex Kumar")
     assert pri <= attention.P_TODAY
 
 
@@ -284,7 +284,7 @@ def test_an_outage_announced_to_a_room_is_still_an_outage():
     """Criticality outranks the room. Being wrong the other way costs him an
     outage he was told about in the wrong words."""
     pri, _, _ = attention.rank(True, "Everyone: production is down, payments failing",
-                               addressed=True, who="Yogesh Kumar Singh")
+                               addressed=True, who="Marlowe Kumar Singh")
     assert pri <= attention.P_TODAY
 
 
@@ -296,11 +296,11 @@ def test_the_repair_clears_what_the_old_behaviour_left_behind(monkeypatch):
     # `asta` is the source Asta stamps on its own notices — see SELF_SOURCE.
     attention.consider(attention.SELF_SOURCE, "r-self", who="",
                        what="✅ DONE — #88 mapping", priority=1)
-    attention.consider("teams-chat", "r-bcast", who="Yogesh Kumar Singh",
-                       what="Yogesh Kumar Singh: Everyone all the new development "
+    attention.consider("teams-chat", "r-bcast", who="Marlowe Kumar Singh",
+                       what="Marlowe Kumar Singh: Everyone all the new development "
                             "and bug fixes are getting deployed to MDP", priority=1)
-    attention.consider("teams-chat", "r-open", who="Vinish Kumar",
-                       what="Vinish Kumar: Schema mapping pending?", priority=1)
+    attention.consider("teams-chat", "r-open", who="Alex Kumar",
+                       what="Alex Kumar: Schema mapping pending?", priority=1)
 
     assert attention.reconcile() == 2
     assert store.attention_get("r-self")["state"] == "dropped"
@@ -350,12 +350,12 @@ def test_a_call_already_in_progress_is_not_a_ring():
 
 
 def test_a_real_ring_is_still_recognised():
-    assert incoming.looks_incoming("Vinish Kumar is calling you") is True
+    assert incoming.looks_incoming("Alex Kumar is calling you") is True
     assert incoming.looks_incoming("Incoming call from Meera") is True
 
 
 @pytest.mark.parametrize("text,want", [
-    ("Vinish Kumar is calling you", "Vinish Kumar"),
+    ("Alex Kumar is calling you", "Alex Kumar"),
     ("Incoming call from Meera Iyer", "Meera Iyer"),
 ])
 def test_the_caller_is_named(text, want):
@@ -375,10 +375,10 @@ def test_a_nameless_ring_is_never_pushed():
 def test_a_named_ring_still_gets_through():
     class _Page:
         async def evaluate(self, _js):
-            return "Vinish Kumar is calling you"
+            return "Alex Kumar is calling you"
 
     call = asyncio.run(incoming.look(_Page()))
-    assert call and call["who"] == "Vinish Kumar"
+    assert call and call["who"] == "Alex Kumar"
 
 
 # --- 6. he heard about messages minutes late -------------------------------------------------
@@ -457,7 +457,7 @@ def test_a_live_meeting_is_not(title):
 def test_a_cancelled_meeting_leaves_the_calendar_entirely():
     """No prep offer, no join offer, nothing — "meeting is cancelled ... for that
     u dont have to ask do i have to prepare anything"."""
-    rows = ["Canceled: Ideation, 3:00 PM to 4:00 PM, Busy, By Vinish Kumar",
+    rows = ["Canceled: Ideation, 3:00 PM to 4:00 PM, Busy, By Alex Kumar",
             "Sprint review, 2:00 PM to 3:00 PM, Busy, By Sam"]
     assert [e["title"] for e in outlook._events_from(rows)] == ["Sprint review"]
 

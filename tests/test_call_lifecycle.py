@@ -59,8 +59,8 @@ class FakePage:
         return object() if self.connected_marker else None
 
 
-RINGING = "Vinish\nRinging…\nCancel"
-CONNECTED = "Vinish\nYou are connected"
+RINGING = "Alex\nRinging…\nCancel"
+CONNECTED = "Alex\nYou are connected"
 ENDED = "Call ended\nRejoin"
 
 
@@ -70,7 +70,7 @@ def call(monkeypatch):
     monkeypatch.setattr(meetings, "can_speak", lambda: True)
     monkeypatch.setattr(meetings, "AUDIO_DEVICE", "BlackHole 2ch")
     monkeypatch.setattr(meetings, "HIS_MIC", "MacBook Pro Microphone")
-    store.kv_set("teams_in_call", "call:Vinish")
+    store.kv_set("teams_in_call", "call:Alex")
     # By default the confirming model agrees it is a code question, which is the
     # ordinary case these tests describe. Speaking now needs that second opinion —
     # a regex is enough to put something on his phone and not enough to say it out
@@ -78,7 +78,7 @@ def call(monkeypatch):
     from app import memory
     monkeypatch.setattr(memory, "local_llm_complete", lambda prompt, n=8: "CODE")
     meetings._CALL.update(page=FakePage(RINGING), captions=[], answered_at=0.0,
-                          speaks=True, who="Vinish",
+                          speaks=True, who="Alex",
                           joined_at=meetings._now())
     yield meetings._CALL
     store.kv_set("teams_in_call", "")
@@ -142,7 +142,7 @@ async def test_a_caption_proves_the_call_connected(call):
     """The load-bearing evidence. Nobody talks into a phone that is still ringing,
     so a caption existing means somebody picked up — and unlike the duration
     selectors, the caption reader is proven against live Teams."""
-    call["captions"] = [{"speaker": "Vinish", "text": "hey, what's up"}]
+    call["captions"] = [{"speaker": "Alex", "text": "hey, what's up"}]
     assert await meetings.call_state(FakePage(RINGING)) == "connected"
 
 
@@ -240,7 +240,7 @@ async def test_hanging_up_keeps_the_duration(call):
     call["answered_at"] = meetings._now() - 30
     await meetings.leave()
     ended = meetings.last_call()
-    assert ended["who"] == "Vinish"
+    assert ended["who"] == "Alex"
     assert ended["answered"] is True
     assert 29 <= ended["seconds"] <= 32
 
@@ -251,7 +251,7 @@ async def test_hanging_up_keeps_the_duration(call):
 async def test_a_call_nobody_answers_is_hung_up_and_reported(call, pushed, monkeypatch):
     monkeypatch.setattr(meetings, "RING_SECONDS", 1.5)
     call["page"] = FakePage(RINGING)
-    await meetings.call_watch("Vinish")
+    await meetings.call_watch("Alex")
     assert store.kv_get("teams_in_call") in ("", None), "the call was never cleared"
     assert not meetings._CALL, "the call handle leaked — the next call would be refused"
     assert any("didn't pick up" in p for p in pushed)
@@ -268,7 +268,7 @@ async def test_an_unreadable_call_is_kept_but_silenced(call, pushed, monkeypatch
 
     monkeypatch.setattr(meetings, "watch_and_report", stop)
     call["page"] = FakePage("unrecognised screen")
-    await meetings.call_watch("Vinish")
+    await meetings.call_watch("Alex")
     assert meetings._CALL, "it hung up on a call it could not read"
     assert meetings.may_speak() is False, "it would have spoken into an unknown call"
     assert any("can't tell" in p for p in pushed)
@@ -289,9 +289,9 @@ async def test_a_placed_call_gets_a_watcher(monkeypatch):
 
     monkeypatch.setattr(meetings, "call_person", fake_call)
     monkeypatch.setattr(meetings, "call_watch", fake_watch)
-    await ops._teams_call(who="Vinish")
+    await ops._teams_call(who="Alex")
     await asyncio.sleep(0.05)               # the watcher is spawned, not awaited
-    assert watched == ["Vinish"], "nothing was watching the call"
+    assert watched == ["Alex"], "nothing was watching the call"
 
 
 # --- his conversation, his voice ----------------------------------------------
@@ -303,7 +303,7 @@ def test_hearing_him_closes_astas_mouth(call):
 
 
 def test_hearing_somebody_else_changes_nothing(call):
-    meetings._note_speaker("Vinish")
+    meetings._note_speaker("Alex")
     assert meetings.may_speak() is True
 
 
@@ -311,13 +311,13 @@ def test_the_silence_never_lifts_mid_call(call):
     """A one-way latch. Anything that turned speech back on would be a way for
     Asta to interrupt him; the call ending is what clears it."""
     meetings._note_speaker("Arun")
-    meetings._note_speaker("Vinish")
+    meetings._note_speaker("Alex")
     meetings._note_speaker("someone")
     assert meetings.may_speak() is False
 
 
 def test_a_caption_from_him_is_what_triggers_it(call):
-    meetings._merge_caption(call["captions"], "Vinish", "hey")
+    meetings._merge_caption(call["captions"], "Alex", "hey")
     meetings._note_speaker("Arun Kumar")
     assert meetings.may_speak() is False
 
@@ -487,10 +487,10 @@ async def test_when_no_brain_can_answer_it_asks_him_instead(
 
 @pytest.mark.asyncio
 async def test_sleeping_through_a_call_ends_it_and_says_so(call, pushed):
-    assert await meetings.drop_call_lost_to_sleep(3600) == "Vinish"
+    assert await meetings.drop_call_lost_to_sleep(3600) == "Alex"
     assert store.kv_get("teams_in_call") in ("", None)
     assert not meetings._CALL, "the next call would be refused as 'already in a call'"
-    assert any("slept" in p and "Vinish" in p for p in pushed)
+    assert any("slept" in p and "Alex" in p for p in pushed)
 
 
 @pytest.mark.asyncio
@@ -522,7 +522,7 @@ async def test_the_wake_watcher_ends_a_slept_through_call(call, pushed, monkeypa
 
     async def spy(gap):
         seen.append(gap)
-        return "Vinish"
+        return "Alex"
 
     monkeypatch.setattr(meetings, "drop_call_lost_to_sleep", spy)
     monkeypatch.setattr(wake, "TICK_SECONDS", 0.01)
@@ -627,7 +627,7 @@ async def test_reacting_never_blocks_caption_polling(call, monkeypatch):
         await asyncio.sleep(5)
 
     monkeypatch.setattr(meetings, "handle_ask", slow)
-    lines = [{"speaker": "Vinish",
+    lines = [{"speaker": "Alex",
               "text": "how does the ATA fallback pick the transport order"}]
     meetings.react_to(lines)                 # returns immediately, or this hangs
     await asyncio.wait_for(started.wait(), timeout=1)
@@ -661,8 +661,8 @@ async def test_two_answers_are_never_spoken_over_each_other(call, monkeypatch):
 
     monkeypatch.setattr(meetings, "handle_ask", one)
     meetings.react_to([
-        {"speaker": "Vinish", "text": "how does the ATA fallback pick the order"},
-        {"speaker": "Vinish", "text": "where is the vessel schedule sync handled"},
+        {"speaker": "Alex", "text": "how does the ATA fallback pick the order"},
+        {"speaker": "Alex", "text": "where is the vessel schedule sync handled"},
     ])
     await asyncio.sleep(0.3)
     assert peak and max(peak) == 1, "two answers were being spoken at once"

@@ -5,7 +5,7 @@ The inbound pipeline was all sensor and no actuator:
     read → triage.classify → attention.rank → attention.consider → notify
 
 `triage` already decides that somebody wants a move from him. Then it writes one
-line and stops. So Vinish asking whether production Temporal bookings are stuck
+line and stops. So Alex asking whether production Temporal bookings are stuck
 produced a notification and nothing else — and Arun, in his words, "doesn't seen
 or not i'm not aware". The same shape as the 26 August Teams outage, where every
 path ended in "tell Arun" and Arun was asleep.
@@ -92,8 +92,8 @@ _INCIDENT = re.compile(
 #: Feedback on a pull request. He wants the points verified, not accepted.
 #:
 #: The URL form is not an extra — it is the common one. Against his real activity
-#: feed the word-form matched Vinish's "comments on PR 1409" and missed both rows
-#: that actually mattered: "hi vinish arunkumar https github com … /pull/1409" and
+#: feed the word-form matched Alex's "comments on PR 1409" and missed both rows
+#: that actually mattered: "hi alex arunkumar https github com … /pull/1409" and
 #: "please review https …". Teams strips the punctuation out of links in the feed
 #: rendering, so `pull/1409` arrives as `pull 1409` — matched either way here.
 _PR = re.compile(
@@ -111,8 +111,8 @@ _REVIEW_ASK = re.compile(
     r"|\breview\s+(?:this|these|my|the)\b.{0,20}\b(?:pr|change|code|branch)\b",
     re.I)
 
-#: How an Activity row names the person, so a title reads "Vinish asked: …" and not
-#: "vinish kumar mentioned you arunkumar could you please…". The feed renders two
+#: How an Activity row names the person, so a title reads "Alex asked: …" and not
+#: "alex kumar mentioned you arunkumar could you please…". The feed renders two
 #: shapes ("<name> mentioned you <text>" and "<name> mentioned you — <text> — …"),
 #: so the split is on the marker verb rather than on punctuation.
 _ROW_MARKER = re.compile(
@@ -124,7 +124,7 @@ def message_of(raw: str) -> str:
     """Just what was said, with the Activity row's own preamble removed.
 
     The feed renders "<name> mentioned you <the actual message>". Left in, the
-    title reads "vinish kumar asked: vinish kumar mentioned you arunkumar could
+    title reads "alex kumar asked: alex kumar mentioned you arunkumar could
     you…" and the worker's brief quotes Teams' chrome back at it as if it were
     the message.
     """
@@ -156,7 +156,7 @@ _DEBUG = re.compile(
 
 #: Text that is not the sender's words — a URL. Stripped before deciding what an
 #: ask IS, because a link is a reference and not a description of the problem.
-#: "https://github.com/VinishKumar1/incident-copilot" was classified as a
+#: "https://github.com/example-dev/incident-copilot" was classified as a
 #: production INCIDENT and queued an approval request, on the strength of the word
 #: "incident" inside a repository name.
 _URL_IN_TEXT = re.compile(r"https?://\S+")
@@ -307,7 +307,7 @@ def title_for(kind: str, who: str, text: str) -> str:
 
     It always names the asker. The completion push reads "✅ Task #N done — <title>"
     and arrives possibly hours later, so a title that omits who asked delivers an
-    answer detached from its question. "Vinish asked: are prod bookings stuck" is
+    answer detached from its question. "Alex asked: are prod bookings stuck" is
     a reply he can act on; "Check production" is a puzzle.
     """
     who = (who or "Someone").strip() or "Someone"
@@ -455,7 +455,7 @@ _HANDLE = re.compile(
     r"|\bhttps?://[\w.-]*(?:maersk|github)[\w.-]*/\S{4,}"      # a real link
     # An internal host and a path, however Teams chose to render the gap between
     # them — its link previews turn "host/path" into "host: path", which is what
-    # Vinish's booking link actually arrived as.
+    # Alex's booking link actually arrived as.
     r"|\b[\w.-]*maersk[\w.-]*\.(?:net|io|com|dev)\b[\s:]{0,3}\S*/\S{3,}"
     r"|\b[A-Z][A-Z0-9]{1,9}-\d+\b", re.I)                       # Jira key
 
@@ -541,7 +541,7 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     # The ASK is judged on the message itself — context must not be able to
     # invent a question nobody asked. Everything else reads the surrounding
     # lines, because people paste the link and then ask about it in the next
-    # breath: Vinish's booking id was in the message BEFORE "can you check why
+    # breath: Alex's booking id was in the message BEFORE "can you check why
     # STF not done?", so the one line handed over here had a question and
     # nothing to check it against.
     grounds = f"{context}\n{text}".strip() if context else text

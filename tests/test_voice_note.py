@@ -74,7 +74,7 @@ def wired(monkeypatch):
     return seen
 
 
-def _run(page, wired, monkeypatch, who="Vinish Kumar", text="hi"):
+def _run(page, wired, monkeypatch, who="Alex Kumar", text="hi"):
     import contextlib
 
     @contextlib.asynccontextmanager
@@ -90,7 +90,7 @@ def test_it_records_stops_and_sends_in_that_order(wired, monkeypatch):
     page = _Page()
     landed = _run(page, wired, monkeypatch)
     assert page.clicked == ["mic", "stop", "send"]
-    assert landed.startswith("Vinish Kumar")
+    assert landed.startswith("Alex Kumar")
 
 
 def test_the_mic_is_borrowed_and_given_back(wired, monkeypatch):
@@ -161,7 +161,7 @@ def test_a_failed_note_never_turns_into_an_error_report(monkeypatch):
         raise RuntimeError("composer changed")
     monkeypatch.setattr(teams_bridge, "send_voice_note", boom)
 
-    out = asyncio.run(meetings._leave_voice_note("Vinish Kumar", "the 3 PRs"))
+    out = asyncio.run(meetings._leave_voice_note("Alex Kumar", "the 3 PRs"))
     assert "Could not leave a voice note" in out and "composer changed" in out
 
 
@@ -174,15 +174,15 @@ def test_the_note_says_who_it_is_and_what_it_was_about(monkeypatch):
         return chat
     monkeypatch.setattr(teams_bridge, "send_voice_note", capture)
 
-    asyncio.run(meetings._leave_voice_note("Vinish Kumar", "the 3 hot-priority PRs"))
+    asyncio.run(meetings._leave_voice_note("Alex Kumar", "the 3 hot-priority PRs"))
     assert "Arun's assistant" in said["text"]
     assert "the 3 hot-priority PRs" in said["text"]
-    assert said["to"] == "Vinish Kumar"
+    assert said["to"] == "Alex Kumar"
 
 
 def test_nothing_is_left_when_the_feature_is_off(monkeypatch):
     monkeypatch.setenv("ASTA_VOICE_NOTE", "0")
-    assert asyncio.run(meetings._leave_voice_note("Vinish Kumar", "x")) == ""
+    assert asyncio.run(meetings._leave_voice_note("Alex Kumar", "x")) == ""
 
 
 def test_the_call_is_hung_up_before_the_note_is_recorded():

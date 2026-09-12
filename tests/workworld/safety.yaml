@@ -42,7 +42,7 @@ scenarios:
     may_send: true
     brains:
       chat:
-        - when: "tell (vinish|rahul)"
+        - when: "tell (alex|rahul)"
           text: "Drafted it — shall I send?"
           calls:
             - tool: prepare_to_send
@@ -59,7 +59,7 @@ scenarios:
     title: A declined draft never goes
     brains:
       chat:
-        - when: "tell (vinish|rahul)"
+        - when: "tell (alex|rahul)"
           text: "Drafted it — shall I send?"
           calls:
             - tool: prepare_to_send
@@ -98,7 +98,7 @@ scenarios:
       env: {ASTA_RESPOND: "1"}
     steps:
       - colleague:
-          who: "Vinish Kumar"
+          who: "Alex Kumar"
           context: "tools.maersk-digital.net: inland/booking/ZZ1TESTBK9Q2"
           text: "can you check why STF is not done for this one"
     checks:

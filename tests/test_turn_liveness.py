@@ -1,7 +1,7 @@
 """A brain doing tool work is not a brain that has stopped.
 
 The incident, 2026-09-07 12:15. Arun asked for a multi-step job — find the topic
-files, work out what needs refreshing, tell Vinish. Copilot did exactly that: ten
+files, work out what needs refreshing, tell Alex. Copilot did exactly that: ten
 tool calls in two minutes, found the files, recorded what it learned, and staged
 the message. Thirteen seconds after it staged the draft, Asta killed it and told
 him "stuck — no output for 120s, more time would not have helped".

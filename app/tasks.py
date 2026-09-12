@@ -374,7 +374,7 @@ def conversation_of(task_id: int) -> str:
     # NOTHING spawned it from a chat — the responder's investigations, and every
     # other task a background loop starts. Those are the ones that most need to
     # hand something back, and they were the ones that could not: task #96 read
-    # prod, found why STF never ran, wrote the reply to Vinish, and then said
+    # prod, found why STF never ran, wrote the reply to Alex, and then said
     # "Teams send tool isn't available in this environment, so please send
     # manually". The work done and nobody told.
     #
@@ -401,7 +401,7 @@ def task_tools(task_id: int, cwd: str, kind: str = "") -> str:
 
     That is not a missing nicety. It is the last step of the loop Arun actually
     asked for: task #88 implemented `transportAssetPriority` across eleven files
-    with a green build, then finished with "I can't message Vinish directly" —
+    with a green build, then finished with "I can't message Alex directly" —
     the work done and nobody told.
 
     Bound to the spawning conversation so an approval lands in the chat he asked

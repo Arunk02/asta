@@ -1,6 +1,6 @@
 """Noticing that somebody picked up.
 
-Written after the worst outcome this code can produce: Asta rang Vinish, Vinish
+Written after the worst outcome this code can produce: Asta rang Alex, Alex
 answered and started asking questions, and Asta said nothing at all for forty
 seconds and then hung up. The call was connected the whole time; `call_state`
 reported "unknown", because every piece of positive evidence it had was broken.

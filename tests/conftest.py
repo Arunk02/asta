@@ -68,9 +68,12 @@ _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 #: behaviour the suite should be silently exercising.
 #:
 #: `ASTA_GRAPH` chooses the task engine. Inherited, it would move every old-engine
-#: task test onto the graph without saying so; the graph's own tests set it.
+#: task test onto the graph without saying so; the graph's own tests set it. The
+#: P3 switches are the same kind of thing — routing, the front desk, the second
+#: reviewer and the chat tool set are his machine's choices, not the code's.
 _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND",
-                       "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_GRAPH")
+                       "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_GRAPH", "ASTA_ROUTING",
+                       "ASTA_FRONTDESK", "ASTA_CROSS_REVIEW", "ASTA_CLAUDE_CHAT_TOOLS")
 
 
 #: What this machine's .env said, captured before it is cleared. A handful of

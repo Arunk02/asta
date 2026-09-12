@@ -98,17 +98,17 @@ what it learns day by day.
 | "implement PROJ-1234 in booking" | Mission: plan drafted → you approve → headless implement per your org's project context playbooks → Claude verify → notified |
 | "approve mission 3" / "reject mission 3" | from your phone, mid-commute |
 | "delegate a task to analyze X" | parallel background worker; chat stays free; result pushed to phone |
-| "draft a Teams reply to Vinish saying …" | draft task → held for your approval → "approve task N" sends it |
-| "read my Teams chat with Vinish" | Playwright bridge reads via your web session |
+| "draft a Teams reply to Alex saying …" | draft task → held for your approval → "approve task N" sends it |
+| "read my Teams chat with Alex" | Playwright bridge reads via your web session |
 | "review PR 123 in booking" | reads PR + diff + CI + your context → reviewer notes; posting is staged |
 | "merge PR 123 in booking" | staged — and **refused** if CI is red, still running, conflicted, draft, or changes requested |
-| "call Vinish" | places a Teams call; muted, camera off, hangs up if unanswered in 45s |
+| "call Alex" | places a Teams call; muted, camera off, hangs up if unanswered in 45s |
 | "say X in the call" | speaks only if a virtual mic is configured, and never once you have spoken in that call |
 | "check teams selectors" | health-checks the 7 critical Teams selectors against live Teams |
 | "run evals" | grounded correctness cases — deterministic tier is free, live tier costs a brain call |
 | "any mentions / anything for me?" | Teams activity feed, read live (pre-fetched in Python — works even when Copilot's shell is blocked) |
 | "any mail needing my attention?" / "what meetings today?" | Outlook web, read live via the same session |
-| "remind me at 15:00 to reply to Vinish" / "…every weekday at 9" | fires on phone + UI |
+| "remind me at 15:00 to reply to Alex" / "…every weekday at 9" | fires on phone + UI |
 | "morning brief" / "standup" | on-demand run of the daily digests |
 | "health check" / "ci status" | integration health / recent pipeline runs |
 | "task 5 result" / "what's running?" | background work visibility |

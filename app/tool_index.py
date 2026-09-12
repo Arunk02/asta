@@ -168,10 +168,10 @@ def rank(query: str) -> list[tuple[str, float]]:
 
 
 #: When Arun names an act in plain words, the tools for THAT act are not left to a
-#: similarity score. On 27 August "Call Vinish and discuss the 1409 PR" ranked the
+#: similarity score. On 27 August "Call Alex and discuss the 1409 PR" ranked the
 #: call tools out of the top-8, and the model — which cannot see that a selection
 #: happened — reported the gap as a fact about Asta: "I can't hold a live
-#: conversation with Vinish myself." It then reached for the one write tool the
+#: conversation with Alex myself." It then reached for the one write tool the
 #: floor guarantees, `delegate_task`, and spawned code changes he never asked for.
 #:
 #: Ranking may be wrong about what a message is like. It must not be wrong about

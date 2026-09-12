@@ -1,6 +1,6 @@
 """A commitment that outlives the turn it was made in.
 
-*"track on with vinish and get this all these 3 PR's for hot priority, get review
+*"track on with alex and get this all these 3 PR's for hot priority, get review
 and merged by tmr EOD, if not done let me know what issue notify me"* is not a
 question and it is not a code task. It is a promise: keep looking, chase the
 person, and speak up BEFORE the deadline rather than after it.
@@ -178,7 +178,7 @@ async def _nudge(row: dict, blockers: int, now: float) -> str:
         return ""
     # A draft he has not sent is not a reason to write him another one. The time
     # window alone produced four identical "any chance you can take a look at
-    # these today?" drafts for Vinish over three days — none sent, none
+    # these today?" drafts for Alex over three days — none sent, none
     # rejected, each one asking Arun the same question he had already not
     # answered. Chasing the chaser is not follow-through, it is nagging with
     # extra steps.

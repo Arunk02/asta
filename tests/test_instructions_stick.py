@@ -39,7 +39,7 @@ def test_a_ticket_feed_is_machine_traffic(who):
     assert responder.is_broadcast(who, _INC) is True
 
 
-@pytest.mark.parametrize("who", ["Vinish Kumar", "Ravi Menon", "Anita Rao"])
+@pytest.mark.parametrize("who", ["Alex Kumar", "Ravi Menon", "Anita Rao"])
 def test_a_colleague_is_not(who):
     assert responder.is_broadcast(who, _BOOKING) is False
 
@@ -66,7 +66,7 @@ def test_a_ticket_number_from_a_machine_is_not_permission(decided):
 
 def test_the_same_handle_from_a_colleague_still_is(decided):
     """The fix must not undo yesterday's — this is the case he asked for."""
-    responder.respond("teams-chat", "Vinish Kumar",
+    responder.respond("teams-chat", "Alex Kumar",
                       "Can you check why STF is not done for this one?", context=_BOOKING)
     assert decided.get("spawned") is True
 

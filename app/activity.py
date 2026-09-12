@@ -156,7 +156,7 @@ def _is_addition(t: str) -> bool:
 
     `_ADD` matched the cue ANYWHERE, and "as well" is the ordinary English tail
     of a complete instruction. So "Can you update the topic details in the
-    booking and ap and raise PR and inform Vinish as well" — a whole piece of
+    booking and ap and raise PR and inform Alex as well" — a whole piece of
     work, its own repos, its own recipient — was folded into task #117, a
     different task in a different repo, on the strength of its last two words.
 

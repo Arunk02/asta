@@ -120,7 +120,7 @@ def test_code_leg_passes_empty_config_when_everything_is_disabled(monkeypatch):
     This used to assert "" with only the dev servers off, which quietly asserted
     something else as well: that a task run gets no Asta tools either. It was
     true, and it was the bug — task #86 reported no Jira, no Teams and no
-    prepare_to_send, and task #88 wrote the code and could not tell Vinish.
+    prepare_to_send, and task #88 wrote the code and could not tell Alex.
     """
     monkeypatch.delenv("ASTA_DEV_MCP", raising=False)
     monkeypatch.setenv("ASTA_CLI_MCP", "0")
@@ -165,7 +165,7 @@ def test_analysis_gets_the_dev_servers_and_a_draft_task_gets_astas(monkeypatch):
     assert json.loads(seen_analysis["mcp_config"])["mcpServers"]
 
     seen_draft = _capture_one_shot(monkeypatch, copilot_cli)
-    t2 = store.create_task("reply to Vinish", "teams_draft", "draft a reply", None)
+    t2 = store.create_task("reply to Alex", "teams_draft", "draft a reply", None)
     store.kv_set(f"task_executor:{t2['id']}", "copilot")
     asyncio.run(tasks._run_simple(t2["id"], store.get_task(t2["id"]), "draft a reply"))
     drafting = set(json.loads(seen_draft["mcp_config"])["mcpServers"])

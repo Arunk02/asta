@@ -59,13 +59,13 @@ def test_a_failure_is_reported_not_swallowed(monkeypatch):
         raise RuntimeError("teams never opened")
 
     async def main():
-        await daemon.once("call:Vinish", boom())
+        await daemon.once("call:Alex", boom())
 
     asyncio.run(main())
     assert said and "did not complete" in said[0]
     assert "teams never opened" in said[0]
     rows = [r for r in store.recent_outcomes(10) if r["kind"] == "background"]
-    assert rows and rows[0]["subject"] == "call:Vinish"
+    assert rows and rows[0]["subject"] == "call:Alex"
 
 
 def test_a_cancelled_job_is_not_reported_as_a_failure(monkeypatch):

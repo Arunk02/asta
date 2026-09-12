@@ -6,7 +6,7 @@
 Everything Asta had was outbound. `call_state` reads the screen of a call ASTA
 placed, from `_CALL`, and there is no `_CALL` when the phone simply rings — so an
 incoming call was invisible until it turned up in the Activity feed afterwards as
-"Missed call from Vinish Kumar". By then the only honest thing to say is that it
+"Missed call from Alex Kumar". By then the only honest thing to say is that it
 was missed.
 
 **Detected on TEXT, not on a toast selector.** `meetings._RINGING` already works
@@ -54,7 +54,7 @@ _INCOMING = re.compile(
     r"|\bcalling you\b",
     re.I)
 
-#: "Vinish Kumar is calling you" / "Incoming call from Vinish Kumar".
+#: "Alex Kumar is calling you" / "Incoming call from Alex Kumar".
 _WHO = (re.compile(r"^\s*(.{2,60}?)\s+is calling you", re.I | re.M),
         re.compile(r"incoming (?:call|video call)\s+from\s+(.{2,60}?)\s*$", re.I | re.M))
 

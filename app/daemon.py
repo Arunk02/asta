@@ -154,7 +154,7 @@ def once(name: str, coro) -> asyncio.Task:
     `start` supervises a loop and restarts it; that is wrong for a job which is
     meant to finish. But the reference problem is identical, and this is where it
     bit hardest: `discuss_in_call` did `create_task(_go())` and kept nothing, so
-    "Calling Vinish now — I'll send you what was said" was a claim with nothing
+    "Calling Alex now — I'll send you what was said" was a claim with nothing
     behind it. On 2026-09-07 the call left no log line, no notification and no
     outcome row, and the only honest reading is that it never rang.
 

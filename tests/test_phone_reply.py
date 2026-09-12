@@ -168,7 +168,7 @@ def test_his_actual_words_reach_the_shortcut():
 def test_a_real_question_is_still_not_swallowed():
     """The `$` anchor is what keeps it safe — a status ask carries no object."""
     from app import activity
-    for q in ("what are you doing about the PR?", "any update on vinish",
+    for q in ("what are you doing about the PR?", "any update on alex",
               "status of the booking service", "how long does the build take",
               "what is happening to the email service"):
         assert not activity.is_status_ask(q), q

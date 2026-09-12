@@ -37,6 +37,7 @@ CRISP_HARD_CHARS = 1800
 #: Steps that deliberately leave work in flight — the next step is meant to
 #: arrive WHILE Asta is busy, which is the only way to test an interjection.
 SKIP_SETTLE = {"say_async", "approve_async"}
+LIVE_SETTLE_SECONDS = 900.0
 
 
 @dataclass
@@ -102,11 +103,14 @@ async def run(sc: Scenario, seed: int = 0, live: bool = False) -> list[str]:
                    "conv": None, "sink": W.Sink(world)}
     try:
         _apply_setup(sc, world, state)
+        # A real brain leg takes a minute or more; a scripted one takes nothing.
+        # The window is the same thing either way: "let what this step started finish".
+        window = LIVE_SETTLE_SECONDS if live else 20.0
         for step in sc.steps:
             await _do(step, sc, world, state, seed)
             if next(iter(step)) not in SKIP_SETTLE:
-                await W.settle()
-        await W.settle()
+                await W.settle(window)
+        await W.settle(window)
         failures += _run_checks(sc, world, state)
         failures += _constitution(sc, world, state)
     except Exception as exc:                                   # noqa: BLE001
@@ -489,6 +493,16 @@ def _check_brain_flags(arg, world, state):
     return ""
 
 
+def _check_scratch_file(arg, world, state):
+    """A file the work should have written in the scratch tree — `{path, text}`."""
+    f = world.scratch / arg["path"]
+    if not f.exists():
+        return f"{arg['path']} was not written"
+    if arg.get("text") and not re.search(arg["text"], f.read_text(errors="replace"), re.I | re.S):
+        return f"{arg['path']} lacks {arg['text']!r}"
+    return ""
+
+
 def _check_frontdesk(arg, world, state):
     """How the front desk routed the scenario's messages — `{route: state, min: 1}`."""
     from app import store
@@ -537,6 +551,7 @@ CHECKS = {
     "tool_result_contains": _check_tool_result,
     "brain_flags": _check_brain_flags,
     "frontdesk": _check_frontdesk,
+    "scratch_file": _check_scratch_file,
     "health_says": _check_health,
     "reply_max_chars": _check_reply_max,
 }

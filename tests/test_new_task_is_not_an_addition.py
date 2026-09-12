@@ -110,7 +110,7 @@ def test_naming_a_finished_task_does_not_hand_the_message_to_a_running_one():
     """`_named_task` only matches ids that are LIVE, so naming a finished task
     read as "named nothing" — and the single live task then claimed the message.
 
-    On 10 September "prepare all list of topics per env and send it to Vinish
+    On 10 September "prepare all list of topics per env and send it to Alex
     from task 121" was answered as task #117: a different task, a different repo.
     #121 had shipped, so it was invisible to the matcher, and #117 was the only
     thing in flight."""
@@ -164,13 +164,13 @@ def test_the_live_route_is_skipped_when_another_task_is_named():
 
 def test_a_whole_request_ending_as_well_is_not_an_amendment():
     """From WhatsApp, 4:13pm: "Can you update the topic details in the booking
-    and ap and raise PR and inform Vinish as well" — its own repos, its own
+    and ap and raise PR and inform Alex as well" — its own repos, its own
     recipient, a complete piece of work — was answered "✚ noted for task #117",
     a different task in a different repo, on the strength of its last two words.
 
     `_ADD` matched the cue ANYWHERE in the message."""
     text = ("Can you update the topic details in the booking and ap and raise PR "
-            "and inform Vinish as well")
+            "and inform Alex as well")
     assert activity.classify_interjection(text) != "augment"
 
 

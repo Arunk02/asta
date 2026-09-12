@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 from . import world as W
 
-PEOPLE = ["Vinish Kumar", "Priya Nair", "Rahul Verma", "Meera Iyer", "Harini S"]
+PEOPLE = ["Alex Kumar", "Priya Nair", "Rahul Verma", "Meera Iyer", "Harini S"]
 TEAM_CHAT = "Team Booking and AP"
 
 ASKS = [

@@ -302,7 +302,7 @@ async def wait_for_answer(page, seconds: float = 0) -> str:
             # Was ringing, is not now, has not ended: that transition IS the
             # answer, and it is the only evidence Teams cannot rename. _CONNECTED
             # shipped unverified and does not match; _TIMER_JS caught a clock on
-            # one call and nothing on the next. Vinish picked up, asked questions
+            # one call and nothing on the next. Alex picked up, asked questions
             # and heard silence while this reported "unknown" for forty seconds.
             return "connected"
         await asyncio.sleep(1.0)
@@ -372,8 +372,8 @@ _FIND_BACKOFF = 1.5
 async def _find_chat_settled(page, who: str) -> str:
     """Find the chat, retrying while the headed window is still settling.
 
-    Placing a real call to Vinish is what exposed this. Headless `resolve` finds
-    "Vinish Kumar" every time; the HEADED window opened a chat called 'Author' and
+    Placing a real call to Alex is what exposed this. Headless `resolve` finds
+    "Alex Kumar" every time; the HEADED window opened a chat called 'Author' and
     aborted — correctly, because opening the wrong conversation and dialling it
     would ring a stranger on Arun's behalf. But aborting on the FIRST mismatch
     made calling by name fail every time rather than merely be slow.
@@ -430,8 +430,8 @@ async def call_person(who: str, video: bool = False) -> str:
         raise RuntimeError("Teams bridge is off (set TEAMS_BRIDGE=1 in .env)")
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
-    # His rail beats Teams' search ranking. "divya" ranks a 1:1 titled "Divya"
-    # — a real chat with no messages in it — above "Palikala Divya Maheswari",
+    # His rail beats Teams' search ranking. "blake" ranks a 1:1 titled "Blake"
+    # — a real chat with no messages in it — above "Stone Blake Rivers",
     # who is the person he actually talks to. A message there reaches the wrong
     # person; a call RINGS them, and neither is undone by noticing afterwards.
     from . import contacts as _contacts
@@ -447,12 +447,12 @@ async def call_person(who: str, video: bool = False) -> str:
     # phone has not even rung. Measured: the first utterance after Voicebox starts
     # takes 11.4 seconds, every later one takes 1.05 — so the cost is a one-time
     # model load, not synthesis, and the only question is whether it lands in
-    # front of Vinish or in front of nobody. It was wired into join_by_phrase and
+    # front of Alex or in front of nobody. It was wired into join_by_phrase and
     # nowhere else, so every CALL paid it out loud.
     warm_the_voice()
     # Claim the mic BEFORE Teams binds its track on connect — switching after, as
     # say_in_call did, cannot move an open track. Measured: the browser handed
-    # Teams the built-in mic while BlackHole sat unselected, so Vinish heard the
+    # Teams the built-in mic while BlackHole sat unselected, so Alex heard the
     # laptop while Asta played into a device nobody listened to.
     await call_audio.set_call_mic(device=AUDIO_DEVICE)
     # CLAIM the browser before touching it, not after the dial succeeds.
@@ -482,7 +482,7 @@ async def call_person(who: str, video: bool = False) -> str:
         # A HEADED window paints far slower than the headless one every other
         # code path uses: _open_teams returns as soon as the app shell exists,
         # and searching that early found nothing at all — "no person match for
-        # 'Vinish' (saw: nothing)" on a name that resolves fine headless. Wait
+        # 'Alex' (saw: nothing)" on a name that resolves fine headless. Wait
         # for the chat rail to actually be populated, which is the condition
         # that makes search work, rather than sleeping a guessed number of
         # seconds and hoping.
@@ -595,7 +595,7 @@ def call_duration() -> float:
     """Seconds since somebody picked up. Zero if nobody did.
 
     Zero for an unanswered call is the honest number rather than a missing one —
-    "rang Vinish for 45 seconds" is not a 45-second call, and reporting it as one
+    "rang Alex for 45 seconds" is not a 45-second call, and reporting it as one
     would put a conversation in his day that never happened.
     """
     started = float(_CALL.get("answered_at") or 0)
@@ -988,7 +988,7 @@ def transcript_text(lines: list[dict]) -> str:
 # --- noticing what the other person asked ------------------------------------
 #
 # Arun wanted this to feel natural: Asta listens while he talks, spots something
-# worth looking up, and asks HIM — "can I analyse this that Vinish asked?" — on
+# worth looking up, and asks HIM — "can I analyse this that Alex asked?" — on
 # his phone, never out loud in the call.
 #
 # The split below is the whole design. Some questions Asta can answer from the

@@ -2258,8 +2258,8 @@ def _recipient_warning(intent: dict) -> str:
     """Say when the name he is approving is not the thread he actually talks in.
 
     What he approves is the NAME the model typed, and Teams opens whatever that
-    name resolves to. "Divya" resolves to a real, EMPTY 1:1 — while the person he
-    actually talks to is "Palikala Divya Maheswari". The message would have gone
+    name resolves to. "Blake" resolves to a real, EMPTY 1:1 — while the person he
+    actually talks to is "Stone Blake Rivers". The message would have gone
     to the wrong person and the approval would have looked completely normal.
 
     Answered from threads Asta has already read, so it costs nothing and cannot
@@ -2290,7 +2290,7 @@ async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> No
     persisted as an assistant turn so it survives in history, and the loop waits:
     his next message is routed as the yes/no (see _dispatch)."""
     # A group is named as a group. The difference between a 1:1 and a fourteen-person
-    # thread is the whole risk of the question being asked, and "to *Vinish*" and
+    # thread is the whole risk of the question being asked, and "to *Alex*" and
     # "to *prod issue - triaging*" look identical when skimmed on a phone.
     where = "👥 GROUP " if intent.get("to_group") else ""
     to = f" to {where}*{intent['to']}*" if intent.get("to") else ""
@@ -3228,7 +3228,7 @@ def _names_another_task(text: str, live: list[int]) -> bool:
 
     `_named_task` only matches ids that are live, so naming a finished one read
     as "named nothing" — and the single live task then claimed the message. On
-    10 September "prepare all list of topics per env and send it to Vinish from
+    10 September "prepare all list of topics per env and send it to Alex from
     task 121" was answered as task #117, a different task in a different repo:
     #121 had already shipped, so it was invisible to the matcher, and #117 was
     the only thing live.

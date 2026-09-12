@@ -6,7 +6,7 @@
 Everything Asta had was outbound. `call_state` reads the screen of a call ASTA
 placed, out of `_CALL`, and there is no `_CALL` when the phone simply rings — so
 an incoming call was invisible until it appeared in the Activity feed afterwards
-as "Missed call from Vinish Kumar", by which point the only honest thing to say is
+as "Missed call from Alex Kumar", by which point the only honest thing to say is
 that it was missed.
 """
 
@@ -18,9 +18,9 @@ import pytest
 
 from app import incoming, store
 
-ONE_TO_ONE = "Vinish Kumar is calling you\nAccept  Decline"
-GROUP = "Incoming call from Komal, Vinish +3"
-ORDINARY = "Chat  Teams  Calendar\nVinish Kumar\nOkay I will check"
+ONE_TO_ONE = "Alex Kumar is calling you\nAccept  Decline"
+GROUP = "Incoming call from Dana, Alex +3"
+ORDINARY = "Chat  Teams  Calendar\nAlex Kumar\nOkay I will check"
 
 
 @pytest.fixture(autouse=True)
@@ -43,8 +43,8 @@ def test_an_ordinary_teams_screen_is_not_a_call():
 
 def test_it_says_who_is_calling():
     """He asked for the name first: "tell their name who calling"."""
-    assert incoming.who_is_calling(ONE_TO_ONE) == "Vinish Kumar"
-    assert "Komal" in incoming.who_is_calling(GROUP)
+    assert incoming.who_is_calling(ONE_TO_ONE) == "Alex Kumar"
+    assert "Dana" in incoming.who_is_calling(GROUP)
 
 
 def test_it_says_whether_it_is_one_to_one_or_group():
@@ -54,8 +54,8 @@ def test_it_says_whether_it_is_one_to_one_or_group():
 
 
 def test_the_line_he_reads_names_both():
-    line = incoming.describe({"who": "Vinish Kumar", "group": False})
-    assert "Vinish Kumar" in line and "1:1" in line
+    line = incoming.describe({"who": "Alex Kumar", "group": False})
+    assert "Alex Kumar" in line and "1:1" in line
     assert "group" in incoming.describe({"who": "A, B", "group": True})
 
 
@@ -73,14 +73,14 @@ def test_detection_does_not_rest_on_a_toast_selector():
 def test_the_same_ring_is_only_offered_once():
     """Polling every eight seconds through a thirty-second ring must not ask him
     four times."""
-    call = {"who": "Vinish Kumar", "group": False}
+    call = {"who": "Alex Kumar", "group": False}
     assert not incoming.already_offered(call)
     incoming.note_offered(call)
     assert incoming.already_offered(call)
 
 
 def test_a_later_call_from_the_same_person_is_a_new_call():
-    call = {"who": "Vinish Kumar", "group": False}
+    call = {"who": "Alex Kumar", "group": False}
     incoming.note_offered(call)
     incoming.clear()                      # the ring stopped
     assert not incoming.already_offered(call)

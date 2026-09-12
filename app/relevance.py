@@ -2,7 +2,7 @@
 silently spawning a side-effecting action.
 
 The failure it closes: Arun asked "No recent one..?" (a question about whether
-Vinish had messaged) and Asta went and ran a repo analysis on an unrelated project
+Alex had messaged) and Asta went and ran a repo analysis on an unrelated project
 — it answered a question he never asked and *acted* on it. That is intent drift.
 
 The insight that makes this cheap and durable: don't judge whether an answer is

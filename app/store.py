@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
--- Teams messages Asta has actually seen, kept so that "what did Vinish say last
+-- Teams messages Asta has actually seen, kept so that "what did Alex say last
 -- night" is answerable at all.
 --
 -- Reading a chat used to mean one querySelectorAll over whatever Teams happened
@@ -730,7 +730,7 @@ def attention_open_from(who: str, limit: int = 200) -> list[dict]:
     """Open rows raised by one person — how "he answered them" settles a thread.
 
     Matched case-insensitively on the stored name, because the same colleague
-    arrives as "Vinish Kumar" from the chat rail and "Vinish" from a draft.
+    arrives as "Alex Kumar" from the chat rail and "Alex" from a draft.
     """
     if not (who or "").strip():
         return []
@@ -994,8 +994,8 @@ def teams_messages(chat: str = "", since: float | None = None,
                    until: float | None = None, limit: int = 200) -> list[dict]:
     """Stored messages, oldest first, optionally windowed by time.
 
-    `chat` matches loosely: he asks for "Vinish" and the thread was stored under
-    the full header Teams renders, "Vinish Kumar".
+    `chat` matches loosely: he asks for "Alex" and the thread was stored under
+    the full header Teams renders, "Alex Kumar".
 
     Rows with no `sent_at` are excluded once a window is asked for — an untimed
     message cannot be honestly claimed to fall inside "last night".

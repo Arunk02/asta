@@ -443,7 +443,7 @@ _TITLE_POLL = 0.4
 def _title_matches(title: str, wanted: str) -> bool:
     """Whether the open conversation is the one that was asked for.
 
-    Any token, not all: he asks for "Vinish" and the header reads "Vinish Kumar",
+    Any token, not all: he asks for "Alex" and the header reads "Alex Kumar",
     he asks for "Daily deployment slot" and the header carries the full name with
     the environments appended.
     """
@@ -472,9 +472,9 @@ def _display_name(o: dict) -> str:
 def _matches(o: dict, wanted: str) -> bool:
     """Whole-word match, not substring.
 
-    Substring was matching "Vinisha Vijay Shetty" for "Vinish" — a different
+    Substring was matching "Alexa Vijay Shetty" for "Alex" — a different
     person entirely, who then counted as a rival candidate and made an
-    unambiguous name look ambiguous. Names are words; "Vinish" is not a partial
+    unambiguous name look ambiguous. Names are words; "Alex" is not a partial
     spelling of anybody, it is somebody.
     """
     hay = f"{o.get('aria', '')} {o.get('text', '')}".lower()
@@ -544,7 +544,7 @@ _CHAT_ROWS_FULL = """
 
 #: The rail is lazy: `_open_teams` returns as soon as the app shell exists, and
 #: the chat list paints seconds later. Reading it immediately finds nothing — the
-#: same trap that made a headed call search report "no person match for 'Vinish'
+#: same trap that made a headed call search report "no person match for 'Alex'
 #: (saw: nothing)" on a name that resolves fine.
 async def wait_for_rail(page, timeout: float = 20.0) -> int:
     """Wait until the chat rail has painted. Returns how many rows it ended with."""
@@ -586,7 +586,7 @@ _NOT_A_CHAT = {"copilot", "mentions", "discover", "drafts", "saved", "chats",
 
 #: Names ever seen on his rail, newest first. Persisted because the rail is
 #: VIRTUALISED — only the rendered rows are readable, so two identical runs can
-#: see different halves of it. Live-only, "Suraj" resolved on one poll and
+#: see different halves of it. Live-only, "Casey" resolved on one poll and
 #: refused on the next with nothing changed but scroll position, and an assistant
 #: that answers differently to the same question twice cannot be trusted with
 #: either answer. Remembering makes it monotonic: the set only grows, and it
@@ -599,7 +599,7 @@ async def recent_chats(page) -> set[str]:
     """Lowercased names of the conversations he actually has, most recent first.
 
     This is the difference between who Arun talks to and who exists at Maersk. The
-    directory has three Vinish Kumars and five Harikas; his rail has one of each,
+    directory has three Alex Kumars and five Frankies; his rail has one of each,
     because it is a record of real conversations rather than a name index. When he
     means somebody new he types the full name — so the common case is someone
     already here, and that is the case worth being right about.
@@ -626,7 +626,7 @@ def _known(o: dict, chats: set[str]) -> bool:
     name = _display_name(o).lower()
     if not name:
         return False
-    # "Vinish Kumar" on the rail should match the search row for Vinish Kumar even
+    # "Alex Kumar" on the rail should match the search row for Alex Kumar even
     # when one of them carries a trailing "(You)" or an alias in brackets.
     return any(name == c or name.startswith(c) or c.startswith(name) for c in chats)
 
@@ -636,7 +636,7 @@ def _is_top_hit(o: dict) -> bool:
 
     Teams splits its own suggestions: TOPHITS is who you actually deal with,
     PEOPLE is everyone else in a 100,000-person company who shares the name. Arun
-    has one Vinish; the directory has three plus a Vinisha. Using Teams' own
+    has one Alex; the directory has three plus a Alexa. Using Teams' own
     ranking beats inventing a heuristic, because it is derived from his real
     interaction history rather than from my guess about names.
     """
@@ -658,14 +658,14 @@ def _one_of(matches: list[dict], asked: str, noun: str,
     """Narrow to one, or refuse and name the candidates.
 
     Taking the first of several was the old behaviour, and it is the failure with
-    the worst ending: "Kumar" quietly opened Vinish Kumar's chat while four other
+    the worst ending: "Kumar" quietly opened Alex Kumar's chat while four other
     Kumars sat behind it in the same list. Nobody finds out from Asta — they find
     out from the person who received it.
 
     Four rounds, ordered from fact to inference:
 
       1. One match. Nothing to decide.
-      2. The exact name, so "Vinish Kumar" is not made ambiguous by a "Vinish
+      2. The exact name, so "Alex Kumar" is not made ambiguous by a "Alex
          Kumar Balaji" also existing in a company of a hundred thousand people.
       3. Someone he is ALREADY talking to. This is the one that carries the
          common case, and it is Arun's own reasoning: a half-name is nearly
@@ -838,7 +838,7 @@ _MESSAGE_JS = """
     // A REPLY renders the message it answers inside its own body, so innerText
     // returned the quoted sentence and the reply glued together — and the
     // notification showed the QUOTED half under the replier's name, which put
-    // Arun's own words in Divya's mouth. Clone and drop the quote, so the text is
+    // Arun's own words in Blake's mouth. Clone and drop the quote, so the text is
     // only ever what this person typed. Several selectors because which one Teams
     // uses has moved; if none matches, `chat_watch.clean_message` still refuses to
     // show a quote as if it were a message.
@@ -954,7 +954,7 @@ def _capture(chat: str, raw: list[dict]) -> list[dict]:
 
 
 def fmt_message(r: dict) -> str:
-    """'[Mon 21:14] Vinish Kumar: …' — time first, because that is what was missing."""
+    """'[Mon 21:14] Alex Kumar: …' — time first, because that is what was missing."""
     import datetime as _dt
     when = r.get("sent_at")
     if when:
@@ -1049,7 +1049,7 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
         # insert_text (not type) puts each line in as ONE atomic input event.
         # type() streams per-character keystrokes, and the first few were
         # landing before the editor had finished focusing — the "iff got
-        # truncated" instead of "1) Diff got truncated" that reached Vinish.
+        # truncated" instead of "1) Diff got truncated" that reached Alex.
         # As a bonus, insert_text doesn't fire the keypress that turns a
         # leading "- " into an auto-list, so bullet lines stay literal.
         lines = text.split("\n")
@@ -1363,7 +1363,7 @@ def duplicates_chat_watch(item: str) -> bool:
     Two readers over one surface is two notifications. Once chat_watch reads the
     conversations directly it sees every message the feed describes — and sees the
     actual sentence rather than the feed's truncated rendering — so the feed
-    stepping in as well is the duplication he hit: the same line from Abhijit
+    stepping in as well is the duplication he hit: the same line from Glen
     arriving twice, in two different shapes.
 
     Missed calls, invites and reactions are NOT messages in any thread, so they

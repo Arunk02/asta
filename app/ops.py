@@ -45,7 +45,7 @@ async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> s
     handed BACK to a brain as a prompt saying "send this now" — which is the one
     thing the module docstring above says never to do. Everything that made a
     staged Jira comment trustworthy was absent here: the brain could reword it,
-    address it to a different Vinish, decide the tool call was optional, or answer
+    address it to a different Alex, decide the tool call was optional, or answer
     about the send instead of performing it. All four look identical to Arun,
     because all four end with the message not arriving.
     """

@@ -16,7 +16,7 @@ door he already opened, and the cost is not politeness — it is that the call d
 not happen.
 
 **Rule two: an act Asta cannot perform is never replaced by a different one.** Asked
-to call Vinish and talk through his review comments, Asta could not reach the call
+to call Alex and talk through his review comments, Asta could not reach the call
 tools (`tool_index` had not selected them), said so — and then dispatched a
 background task to rewrite the code and push it:
 
@@ -91,7 +91,7 @@ _TALK = re.compile(
     r"\s*(?:it|this|that|them)?\s*"
     r"(?:with|to)\b"
     r"|\b(?:ask|check|confirm|clarify|raise\s+it)\s+(?:with|to)\s+"
-    r"(?:him|her|them|vinish|[a-z][\w.'-]*)"
+    r"(?:him|her|them|alex|[a-z][\w.'-]*)"
     r"|\b(?:ask|ping|message|msg|dm|reply\s+to|respond\s+to|follow\s+up\s+with)\s+"
     r"(?:him|her|them|[a-z][\w.'-]*)"
     r"|\bget\s+(?:his|her|their)\s+(?:view|opinion|take|input|thoughts|confirmation)\b"
@@ -153,8 +153,8 @@ def substitution(turn_text: str, kind: str, repos: tuple[str, ...] = ()) -> str:
     which is nothing like a branch he never approved. So it holds only when he
     asked for a person and asked for no code:
 
-        "call Vinish and discuss the comments"     -> blocked, he wanted a call
-        "call Vinish, then fix the ETA validation" -> allowed, he asked for both
+        "call Alex and discuss the comments"     -> blocked, he wanted a call
+        "call Alex, then fix the ETA validation" -> allowed, he asked for both
         "fix the ETA validation"                   -> allowed, no person named
     """
     if kind != "code" or not (turn_text or "").strip():

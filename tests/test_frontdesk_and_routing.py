@@ -27,6 +27,7 @@ _REAL_COPILOT = copilot_cli.one_shot
     ("BEPTELIKOS-10159 ETA validation", "implement the ticket", routing.T2),
     ("add the priority field to the Avro schema", "and the consumers", routing.T3),
     ("prod is down for bookings", "find out why", routing.T3),
+    ("add retentionMs to the kafka topic config", "and its mapper", routing.T1),
 ])
 def test_cheap_signals_pick_a_starting_tier(title, prompt, tier):
     assert routing.pre_tier(title, prompt)[0] == tier
@@ -227,3 +228,19 @@ def test_the_scorecard_counts_messages_that_needed_no_brain():
     rows = {r["key"]: r for r in scorecard.compute()["rows"]}
     assert rows["no_brain"]["value"] == 0.5
     assert "task_tiers" in rows
+
+
+# --- a chat turn carries only the tools it reads with --------------------------------------
+
+def test_a_chat_turn_gets_the_lean_built_in_tool_set(monkeypatch):
+    conv = {"id": "c-lean", "workspace": "", "model": "claude_cli"}
+    cmd = claude_cli._build_cmd(conv, "what is task 116 waiting for?")
+    assert cmd[cmd.index("--tools") + 1] == claude_cli.CHAT_TOOLS
+    assert "Task" not in claude_cli.CHAT_TOOLS and "Edit" not in claude_cli.CHAT_TOOLS
+    monkeypatch.setenv("ASTA_CLAUDE_CHAT_TOOLS", "default")
+    assert "--tools" not in claude_cli._build_cmd(conv, "hi")
+
+
+def test_a_chat_that_may_edit_keeps_every_tool(monkeypatch):
+    monkeypatch.setenv("ASTA_CHAT_MAY_EDIT", "1")
+    assert "--tools" not in claude_cli._build_cmd({"id": "c-edit", "workspace": "", "model": "claude_cli"}, "fix it")

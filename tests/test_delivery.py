@@ -4,7 +4,7 @@ From a real WhatsApp thread, 30 July:
 
     13:10  Arun   Yes try help me to understand how vts cams works
     13:11  Asta   ⏳ on it — I'll send the answer here in a moment.
-    13:19  Arun   What is this msg from Vinish from outlook…
+    13:19  Arun   What is this msg from Alex from outlook…
     13:19  Asta   💬 still finishing the previous one — I'll answer this right after.
     13:22  Arun   Change the LLM model to Claude cli
     13:22  Asta   💬 still finishing the previous one — I'll answer this right after.

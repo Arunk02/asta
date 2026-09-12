@@ -22,7 +22,7 @@ def _window(phrase, now=NOW):
 
 def test_last_night_starts_yesterday_evening_and_runs_into_this_morning():
     """The bug worth naming: reading 'night' as 'yesterday's date' drops 00:40."""
-    start, end, label = _window("what did vinish say last night")
+    start, end, label = _window("what did alex say last night")
     assert start == dt.datetime(2026, 8, 11, 18, 0)
     assert end == dt.datetime(2026, 8, 12, 6, 0)
     assert label == "last night"
@@ -43,7 +43,7 @@ def test_asking_at_2am_treats_the_evening_as_still_running():
 
 
 def test_yesterday_is_the_whole_calendar_day():
-    start, end, label = _window("anything from suraj yesterday")
+    start, end, label = _window("anything from casey yesterday")
     assert start == dt.datetime(2026, 8, 11, 0, 0)
     assert end == dt.datetime(2026, 8, 12, 0, 0)
     assert label == "yesterday"

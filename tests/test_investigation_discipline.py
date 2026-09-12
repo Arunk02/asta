@@ -80,7 +80,7 @@ def test_it_says_one_fetch_then_reason():
 @pytest.mark.parametrize("kind", ["incident", "pr_review", "debug", "ask"])
 def test_every_brief_carries_the_discipline(kind):
     """A rule only the chat persona states is a rule background work never gets."""
-    brief = responder.brief_for(kind, "Vinish Kumar", "why is STF not done?")
+    brief = responder.brief_for(kind, "Alex Kumar", "why is STF not done?")
     assert "load_skill('grafana-analyser')" in brief
     # The prod namespace and the Helm path are HIS facts, so they live in his
     # guardrails (Investigation) and reach the worker with the leg — see
@@ -92,19 +92,19 @@ def test_every_brief_carries_the_discipline(kind):
 def test_the_brief_survives_formatting_with_a_message_containing_braces():
     """`_CLOSING` is `.format`ted, so a literal `${VAR:default}` in it must be
     escaped or every brief raises instead of being written."""
-    brief = responder.brief_for("debug", "Vinish", "check {this} and ${that}")
+    brief = responder.brief_for("debug", "Alex", "check {this} and ${that}")
     assert "${VAR:default}" in brief
 
 
 def test_the_worker_is_told_the_logs_come_first():
-    brief = responder.brief_for("debug", "Vinish Kumar", "why is STF not done?")
+    brief = responder.brief_for("debug", "Alex Kumar", "why is STF not done?")
     assert "logs decide" in brief and "hypothesis" in brief
 
 
 def test_staging_the_reply_is_still_the_last_word():
     """The discipline is prepended, so the send rule must not have been pushed
     out of the brief."""
-    brief = responder.brief_for("debug", "Vinish Kumar", "why?")
+    brief = responder.brief_for("debug", "Alex Kumar", "why?")
     assert "prepare_to_send — never send anything yourself" in brief
 
 
@@ -166,6 +166,6 @@ def test_a_read_only_pass_does_not_stop_at_the_service_boundary():
     didn't have logs from the billing service in scope" — then stopped one query
     short of the answer. Reading logs changes nothing, so scope is not a reason
     to stop; and the evidence for "did it land?" sits downstream by definition."""
-    brief = responder.brief_for("debug", "Vinish Kumar", "why is STF not done?")
+    brief = responder.brief_for("debug", "Alex Kumar", "why is STF not done?")
     assert "EVERY service in that namespace is in scope" in brief
     assert "DOWNSTREAM" in brief

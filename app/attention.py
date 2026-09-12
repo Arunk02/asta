@@ -523,7 +523,7 @@ def settle_with(who: str, why: str = "he replied", now: float | None = None) -> 
     itself sent the reply to. 1,779 rows sat in `notified` against 90 `acted`.
 
     Settling by PERSON rather than by key is deliberate. A reply in a thread
-    answers the conversation, not one sentence of it: Vinish asked three things
+    answers the conversation, not one sentence of it: Alex asked three things
     in four minutes and one "yes" covers all three. Settling only the exact key
     would have left the other two chasing him at end of day.
 
@@ -561,7 +561,7 @@ def reconcile(now: float | None = None) -> int:
         #
         # The stored summary is "<sender>: <message>", and the room-opener rule is
         # anchored to the start of what they WROTE — so the prefix has to come off
-        # or "Yogesh Kumar Singh: Everyone all the new development…" reads as an
+        # or "Marlowe Kumar Singh: Everyone all the new development…" reads as an
         # ordinary sentence. Only the row's own sender is stripped, never an
         # arbitrary prefix.
         said = row.get("what") or ""

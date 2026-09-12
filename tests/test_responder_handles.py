@@ -82,7 +82,7 @@ def spawned(monkeypatch):
 def test_it_investigates_instead_of_asking_permission(spawned):
     """The whole complaint. The handle IS the permission — somebody saying
     "here, this one" — and the work it unlocks is read-only."""
-    task = responder.respond("teams-chat", "Vinish Kumar", _ASK, context=_LINK)
+    task = responder.respond("teams-chat", "Alex Kumar", _ASK, context=_LINK)
 
     assert task is not None, "it asked instead of looking"
     assert "asked_first" not in spawned
@@ -92,21 +92,21 @@ def test_it_investigates_instead_of_asking_permission(spawned):
 def test_the_handle_reaches_the_worker(spawned):
     """A brief that says "check why STF not done" without the booking id sends a
     worker to look for something it cannot name."""
-    responder.respond("teams-chat", "Vinish Kumar", _ASK, context=_LINK)
+    responder.respond("teams-chat", "Alex Kumar", _ASK, context=_LINK)
     assert "ZZ1TESTBK9Q2" in spawned["brief"]
 
 
 def test_without_the_context_it_still_has_nothing_to_go_on(spawned):
     """Pins the second half: the fix is not the regex alone. Same message, no
     surrounding lines, and there is genuinely nothing to check."""
-    responder.respond("teams-chat", "Vinish Kumar", _ASK)
+    responder.respond("teams-chat", "Alex Kumar", _ASK)
     assert "asked_first" in spawned
 
 
 def test_a_vague_ask_with_no_handle_still_asks_first(spawned):
     """The offer path is right when there is nothing concrete — this narrows it,
     it does not remove it."""
-    responder.respond("teams-chat", "Vinish Kumar",
+    responder.respond("teams-chat", "Alex Kumar",
                       "can you check why that thing is slow?",
                       context="morning\nthanks for yesterday")
     assert "asked_first" in spawned
@@ -122,7 +122,7 @@ def test_the_reason_says_who_handed_what_over():
 def test_context_cannot_invent_a_question_nobody_asked(spawned):
     """The ASK is judged on the message itself. Otherwise a stray link in the
     scrollback turns every "ok" into an investigation."""
-    responder.respond("teams-chat", "Vinish Kumar", "ok cool", context=_LINK)
+    responder.respond("teams-chat", "Alex Kumar", "ok cool", context=_LINK)
     assert spawned == {}
 
 
@@ -137,7 +137,7 @@ def test_the_chat_sweep_actually_passes_the_previous_lines():
 # --- and it has somewhere to hand the answer back ----------------------------
 
 def test_a_background_investigation_can_stage_its_reply():
-    """Task #96 read prod, found why STF never ran, wrote the reply to Vinish —
+    """Task #96 read prod, found why STF never ran, wrote the reply to Alex —
     and then said "Teams send tool isn't available in this environment, so
     please send manually". The work done and nobody told.
 

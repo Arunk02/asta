@@ -116,7 +116,7 @@ def test_prep_survives_a_jira_failure(monkeypatch):
 # From a real notification, 29 minutes before a code review:
 #
 #     📝 Draft for it:
-#     📝 Prep — Code Review at 11:15 AM (with Vinish Kumar):
+#     📝 Prep — Code Review at 11:15 AM (with Alex Kumar):
 #     (local model offline — blank checklist)
 #     *Talking points*
 #     -

@@ -223,7 +223,7 @@ def test_a_message_addressed_to_one_colleague_by_first_name(monkeypatch):
     """"Priya Nair: Rahul lets take the billtoparty change tomorrow". The rule
     wanted TWO capitalised words, so a one-word address was invisible."""
     monkeypatch.setattr(chat_watch, "_people_he_talks_to",
-                        lambda: ["Rahul Verma", "Vinish Kumar"])
+                        lambda: ["Rahul Verma", "Alex Kumar"])
     assert chat_watch.names_someone_else(
         "Rahul lets take the billtoparty change tomorrow", "Priya Nair") is True
 
@@ -232,14 +232,14 @@ def test_a_capitalised_noun_is_not_a_name(monkeypatch):
     """The reason the one-word rule needs evidence rather than grammar: over-
     filtering loses him a real report."""
     monkeypatch.setattr(chat_watch, "_people_he_talks_to",
-                        lambda: ["Rahul Verma", "Vinish Kumar"])
+                        lambda: ["Rahul Verma", "Alex Kumar"])
     for text in ("Activity getting missed in prod", "Booking service is down",
                  "Production is failing for bulk upload"):
         assert chat_watch.names_someone_else(text, "Priya Nair") is False
 
 
 def test_a_message_naming_him_is_still_his(monkeypatch):
-    monkeypatch.setattr(chat_watch, "_people_he_talks_to", lambda: ["Vinish Kumar"])
+    monkeypatch.setattr(chat_watch, "_people_he_talks_to", lambda: ["Alex Kumar"])
     assert chat_watch.names_someone_else("Arunkumar can you check this",
                                          "Priya Nair") is False
 
@@ -262,7 +262,7 @@ def test_a_poll_posted_by_a_person_is_still_a_poll():
 
 def test_a_person_asking_about_a_poll_is_not_a_poll():
     assert attention.addressed_to_a_room(
-        "Vinish Kumar", "did you fill the form for tomorrow?") is False
+        "Alex Kumar", "did you fill the form for tomorrow?") is False
 
 
 def _owed_at(key: str, age_days: float, now: float) -> None:

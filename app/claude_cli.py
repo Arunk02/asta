@@ -178,6 +178,15 @@ _CHAT_DENY = ("Write", "Edit", "NotebookEdit",
               "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh pr create:*)")
 
 
+#: The built-in tools a chat turn gets. "default" hands back Claude Code's whole set.
+CHAT_TOOLS = "Bash,Read,Grep,Glob,WebFetch,WebSearch"
+
+
+def chat_tools() -> str:
+    raw = os.environ.get("ASTA_CLAUDE_CHAT_TOOLS", CHAT_TOOLS).strip()
+    return "" if raw.lower() in ("", "default", "all") else raw
+
+
 def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     from . import copilot_cli, memory
     import datetime as _dt
@@ -222,6 +231,14 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     from . import capabilities
     if not capabilities.chat_may_write():
         cmd += ["--disallowed-tools", ",".join(_CHAT_DENY)]
+        # And only the built-in tools a chat turn reads with. Claude Code's full
+        # kit — sub-agents, todo lists, notebooks, plan mode — is ~12k tokens of
+        # schema re-read on EVERY call of every turn (measured 12 Sep: 29.8k →
+        # 17.5k for "reply ok"), for tools a chat answer never needs. Asta's own
+        # capabilities arrive over MCP and are unaffected.
+        lean = chat_tools()
+        if lean:
+            cmd += ["--tools", lean]
     # Native tools instead of curl, when enabled: Claude Code spawns Asta's MCP
     # server and calls capabilities as `mcp__asta__*` tools that forward to the
     # running server. Off by default — the curl path is the proven one, and this

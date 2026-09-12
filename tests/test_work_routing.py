@@ -49,7 +49,7 @@ def test_these_are_work(text):
     "review PR 123 in booking",
     "trace booking 88271",
     "check the logs for errors",
-    "read my chat with Vinish",
+    "read my chat with Alex",
 ])
 def test_these_are_not_work(text):
     assert not work_intent.is_work_assignment(text), text
@@ -66,7 +66,7 @@ def test_these_are_not_work(text):
     "delete that message",
     "update the ticket status to done",
     "change my status to busy",
-    "reply to Vinish and add that I'll be late",
+    "reply to Alex and add that I'll be late",
 ])
 def test_other_flows_are_never_hijacked(text):
     """Every one of these leads with a listed work verb and none is code work.

@@ -240,7 +240,7 @@ a 36,653-line stylesheet.
 | **Analysis** | Strong for *your* stack (Grafana/Temporal/Loki via MCP + skill discipline) | No web research; no cross-incident trend analysis |
 | **Review (non-code)** | Absent | No document/design-review pass |
 | **Meeting draft / replies** | `teams_draft` with approval | Outlook is read-only — no reply drafting, no send. Jira comment drafting isn't a pipeline. No per-person tone/history model |
-| **Reply persons** | Teams 1:1 send with a hard rule | No **people model**: who Vinish is, what you owe him, what you last promised, what's outstanding |
+| **Reply persons** | Teams 1:1 send with a hard rule | No **people model**: who Alex is, what you owe him, what you last promised, what's outstanding |
 
 Two structural gaps stand out beyond individual features:
 

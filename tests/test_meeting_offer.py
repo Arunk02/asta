@@ -27,7 +27,7 @@ NOW = dt.datetime(2026, 8, 28, 17, 0)
 
 def _ev(title="AI Ideathon", start="5:00 PM", join="https://teams.microsoft.com/l/meetup-join/x"):
     return {"title": title, "start": start, "minutes": 1020, "ends": 1080,
-            "organizer": "Vinish Kumar", "join_url": join, "status": "Busy"}
+            "organizer": "Alex Kumar", "join_url": join, "status": "Busy"}
 
 
 @pytest.fixture(autouse=True)

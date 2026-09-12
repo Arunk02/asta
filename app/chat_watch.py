@@ -203,10 +203,10 @@ def mentions_him(text: str) -> bool:
 def note_tagged(chat: str, now: float | None = None, by: str = "") -> None:
     """Remember WHEN he was pulled in, and by WHOM.
 
-    Who matters as much as when. Vinish tagged him in a release channel and, for
-    the next twelve hours, every message in the room reached his phone — Navya's
-    schema question, Roshan's "22nd September ko release hai", and "Vinish Kumar
-    what do you say", which is addressed to Vinish. Being pulled into a thread is
+    Who matters as much as when. Alex tagged him in a release channel and, for
+    the next twelve hours, every message in the room reached his phone — Peyton's
+    schema question, Hayden's "22nd September ko release hai", and "Alex Kumar
+    what do you say", which is addressed to Alex. Being pulled into a thread is
     not being subscribed to a room.
     """
     import time
@@ -250,7 +250,7 @@ def addressed_to_him(chat: str, sender: str, text: str,
         return False
     # Inside the window, the follow-up is what the person who pulled him in says
     # next — not everything the room says. Anything naming somebody ELSE is
-    # theirs: "Vinish Kumar what do you say" is a question for Vinish.
+    # theirs: "Alex Kumar what do you say" is a question for Alex.
     if names_someone_else(text, sender):
         return False
     return (sender or "").strip().lower() == (by or "").strip().lower()
@@ -262,10 +262,10 @@ def addressed_to_him(chat: str, sender: str, text: str,
 #
 # He was sent this, verbatim:
 #
-#     · Palikala Divya Maheswari — Palikala Divya Maheswari: Arunkumar K
+#     · Stone Blake Rivers — Stone Blake Rivers: Arunkumar K
 #     28/08/2026 18:38
 #     lets analyse on some idea and see how it going on weekend sunday and Monday
-#     · Vinish Kumar — Vinish Kumar: https://maersk.service-now.com/now/platform-…
+#     · Alex Kumar — Alex Kumar: https://maersk.service-now.com/now/platform-…
 #
 # Three faults in one line. The 1:1 names the person twice, because the chat and
 # the sender are the same thing and both were printed. The body opens with
@@ -276,14 +276,14 @@ def addressed_to_him(chat: str, sender: str, text: str,
 #: The quote block Teams renders at the top of a REPLY, captured verbatim from a
 #: real stored message:
 #:
-#:     Ashwin Kumar                 <- who is being quoted
+#:     Oakley Kumar                 <- who is being quoted
 #:     20/07/2026 11:14             <- when they said it
-#:     Ayashkant - What is IP...    <- THEIR words
+#:     Reese - What is IP...    <- THEIR words
 #:                                  <- blank line
 #:     IP is specific integration…  <- what the sender actually typed
 #:
 #: The first version stripped only the name and the timestamp, which left the
-#: QUOTED text as the message — so Arun was shown his own sentence under Divya's
+#: QUOTED text as the message — so Arun was shown his own sentence under Blake's
 #: name. Attributing one colleague's words to another is worse than the raw noise
 #: it replaced, and he caught it immediately.
 #: Measured against 200 real captured messages rather than guessed. 22 of them
@@ -314,7 +314,7 @@ def clean_message(text: str, known: set[str] | None = None) -> str:
 
         Harini S              <- who is quoted
         28/08/2026 12:39          <- when
-        Swamy in vinish and urs team..     <- HER words
+        Brooks in alex and urs team..     <- HER words
         Arrey I'm in multiple teams for Background support   <- his reply
 
     Nothing in the text marks where one ends and the other begins. But the quoted
@@ -355,7 +355,7 @@ def _norm(s: str) -> str:
 def describe_link(url: str) -> str:
     """What a bare link IS, in the words he would use to decide whether to open it.
 
-    "Vinish Kumar: https://github.com/VinishKumar1/incident-copilot" told him
+    "Alex Kumar: https://github.com/example-dev/incident-copilot" told him
     nothing he could act on. The host and the path do.
     """
     from urllib.parse import urlparse
@@ -466,7 +466,7 @@ def answered_by_him(chat: str, message: dict) -> bool:
         # WINDOWED, not "the first 200". `teams_messages` orders oldest-first and
         # then applies the limit, so an unwindowed call on a long thread returns
         # the oldest 200 messages — and his reply, which is by definition the
-        # newest thing in it, is never in the window. The Vinish thread has 200+
+        # newest thing in it, is never in the window. The Alex thread has 200+
         # stored messages, so this returned False for every question in it no
         # matter how promptly he answered, and the ledger kept chasing him about
         # conversations he had finished.
@@ -494,8 +494,8 @@ def looks_like_the_chat_list(rows: list[str]) -> bool:
     The Teams page is POOLED and shared with every other loop. `_find_chat` runs a
     search to open a thread, and a search replaces the rail with its results — so
     `[role="treeitem"]` then returns matches for whatever was last searched. That
-    is not a hypothetical: the stored rail had "Divya" and "Palikala Divya
-    Maheswari" at the top, which were results of a resolve call, and the watcher
+    is not a hypothetical: the stored rail had "Blake" and "Stone Blake
+    Rivers" at the top, which were results of a resolve call, and the watcher
     compared THAT against the previous order. Fourteen hours, two chats processed.
 
     The furniture at the head of the real list is the tell — search results never
@@ -620,7 +620,7 @@ async def sweep(notify=None) -> list[dict]:
             # Recorded above, pushed only if it is HIS. Reading every conversation
             # is right; forwarding every conversation is not. Without this gate a
             # release-triage channel sent him "Shall we join here now?" and "Hi
-            # Sumith just wanted to check what we have concluded" — a standing
+            # Kendall just wanted to check what we have concluded" — a standing
             # group discussion between other people, none of it his, delivered to
             # his phone. `direct` was computed here and then never used.
             if not direct:
@@ -638,7 +638,7 @@ async def sweep(notify=None) -> list[dict]:
                 attention.mark_dropped(key)
                 continue
             # He has already dealt with it. "i have already shared na the
-            # analysis then why again it doing" — Vinish's list of production
+            # analysis then why again it doing" — Alex's list of production
             # issues was investigated by a background task while Arun's own answer
             # was already sitting in the thread above it. A reply of his, later
             # than the ask, is the clearest possible signal that it is handled.
@@ -654,7 +654,7 @@ async def sweep(notify=None) -> list[dict]:
             handled.append({"chat": chat, "who": who, "text": text, "priority": pri})
             lines.append(render(chat, who, text, pri, known=known))
             # The few lines BEFORE this one, from the same person. People paste
-            # the link and ask about it in the next breath — Vinish's booking id
+            # the link and ask about it in the next breath — Alex's booking id
             # was one message above "can you check why STF is not done?", so
             # the responder got a question with nothing to check it against and
             # asked Arun for permission instead of just looking.

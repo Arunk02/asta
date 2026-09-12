@@ -1,6 +1,6 @@
 """Calling by name, after a real call to a real colleague exposed the race.
 
-What happened: headless `resolve` finds "Vinish Kumar" every time. The HEADED
+What happened: headless `resolve` finds "Alex Kumar" every time. The HEADED
 window opened a chat titled 'Author' and aborted — correctly, because dialling a
 chat whose title does not match would ring a stranger on Arun's behalf. But
 aborting on the FIRST mismatch made calling by name fail every time rather than
@@ -39,12 +39,12 @@ async def test_a_mismatch_is_retried_and_succeeds_once_the_rail_settles(monkeypa
         calls["n"] += 1
         if calls["n"] < 3:
             raise RuntimeError(f"opened 'Author' instead of '{who}' — aborted without typing")
-        return "Vinish Kumar"
+        return "Alex Kumar"
 
     monkeypatch.setattr("app.teams_bridge._find_chat", flaky)
     monkeypatch.setattr(meetings, "_FIND_BACKOFF", 0.0)
     page = _Page()
-    assert await meetings._find_chat_settled(page, "vinish") == "Vinish Kumar"
+    assert await meetings._find_chat_settled(page, "alex") == "Alex Kumar"
     assert calls["n"] == 3
     # A half-open search box is what makes the next attempt land on the same wrong
     # row, so each retry clears it.
@@ -59,7 +59,7 @@ async def test_it_still_refuses_rather_than_dialling_the_wrong_person(monkeypatc
     monkeypatch.setattr("app.teams_bridge._find_chat", always_wrong)
     monkeypatch.setattr(meetings, "_FIND_BACKOFF", 0.0)
     with pytest.raises(RuntimeError) as exc:
-        await meetings._find_chat_settled(_Page(), "vinish")
+        await meetings._find_chat_settled(_Page(), "alex")
     assert "nothing was dialled" in str(exc.value)
     assert "Author" in str(exc.value), "the message must still name what it opened"
 
@@ -85,11 +85,11 @@ async def test_a_group_refusal_is_not_retried_into_succeeding(monkeypatch):
 @pytest.mark.asyncio
 async def test_the_first_attempt_costs_nothing_when_it_works(monkeypatch):
     async def fine(page, who, allow_group=False):
-        return "Vinish Kumar"
+        return "Alex Kumar"
 
     monkeypatch.setattr("app.teams_bridge._find_chat", fine)
     page = _Page()
-    assert await meetings._find_chat_settled(page, "vinish") == "Vinish Kumar"
+    assert await meetings._find_chat_settled(page, "alex") == "Alex Kumar"
     assert page.escapes == 0, "the happy path must not press keys at the UI"
 
 

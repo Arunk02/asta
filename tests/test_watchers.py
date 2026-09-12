@@ -145,7 +145,7 @@ def test_teams_push_splits_asks_from_mentions_with_no_ask():
     What changed on 28 August is the URGENCY of the second one. This test used to
     assert that a mention with no ask verb rides the ambient path — and ambient is
     held while he is at the laptop, so on that morning three colleagues and
-    Abhijit (twice) all used his name between 11:58 and 13:04 and not one reached
+    Glen (twice) all used his name between 11:58 and 13:04 and not one reached
     his phone. He found them by opening the screen.
 
     His rule, given twice: "if they tag me u have to respond to me". Someone using
@@ -180,7 +180,7 @@ def test_a_batch_of_reactions_still_does_not_interrupt():
     are by far the highest-volume row in his feed."""
     n = _Notify()
     asyncio.run(teams_bridge._push_activity(
-        n, ["Divya — reacted to your message — nice work — In chat with you"]))
+        n, ["Blake — reacted to your message — nice work — In chat with you"]))
     assert not n.sent or n.sent[0][1] == "ambient"
 
 
@@ -208,7 +208,7 @@ def _fresh_activity(rows: list[dict]) -> list[str]:
 
 
 # --- one reader per surface ---------------------------------------------------
-# "ABhijit msg is returning now it bloating unwanted arrey"
+# "Glen msg is returning now it bloating unwanted arrey"
 #
 # Once `chat_watch` reads the conversations directly it sees every message the
 # Activity feed describes, and sees the real sentence rather than the feed's
@@ -218,13 +218,13 @@ def _fresh_activity(rows: list[dict]) -> list[str]:
 def test_a_chat_message_is_left_to_the_reader_that_sees_it_properly(monkeypatch):
     monkeypatch.setenv("ASTA_CHATWATCH", "1")
     assert teams_bridge.duplicates_chat_watch(
-        "Abhijit Mohapatra mentioned you — hi Arunkumar K — 13:04 — In chat with you")
+        "Glen Hart mentioned you — hi Arunkumar K — 13:04 — In chat with you")
 
 
 @pytest.mark.parametrize("row", [
-    "Missed call from Vinish Kumar — Teams call — Call — Chat",
-    "Zishan M invited you: Zishan - OOO - 31/08",
-    "Vinish Kumar updated — AI Ideathon — 12:41",
+    "Missed call from Alex Kumar — Teams call — Call — Chat",
+    "Tatum M invited you: Tatum - OOO - 31/08",
+    "Alex Kumar updated — AI Ideathon — 12:41",
 ])
 def test_things_that_are_not_messages_are_never_deduplicated_away(row, monkeypatch):
     """A missed call, an invite and a calendar change never appear as a message in
@@ -240,8 +240,8 @@ def test_things_that_are_not_messages_are_never_deduplicated_away(row, monkeypat
 
 
 @pytest.mark.parametrize("row", [
-    "Missed call from Vinish Kumar — Teams call — Call — Chat",
-    "Zishan M invited you: Zishan - OOO - 31/08",
+    "Missed call from Alex Kumar — Teams call — Call — Chat",
+    "Tatum M invited you: Tatum - OOO - 31/08",
 ])
 def test_the_feed_still_delivers_what_only_it_can_see(row, monkeypatch):
     """These two are interesting unconditionally, so this holds on any machine."""
@@ -253,4 +253,4 @@ def test_with_the_chat_reader_off_the_feed_keeps_everything(monkeypatch):
     """Deduplicating against a reader that is not running would lose the message."""
     monkeypatch.delenv("ASTA_CHATWATCH", raising=False)
     assert not teams_bridge.duplicates_chat_watch(
-        "Abhijit Mohapatra mentioned you — hi Arunkumar K — In chat with you")
+        "Glen Hart mentioned you — hi Arunkumar K — In chat with you")

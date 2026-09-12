@@ -330,6 +330,20 @@ class World:
                 self._env_undo.append((key, os.environ.get(key)))
                 os.environ[key] = value
             p.set(copilot_cli, "mcp_cli_enabled", lambda: False)
+            # The brain is real, and so is every flag it was run with: record them
+            # on the way through, so a live scenario can assert the gate and the
+            # tier exactly as a scripted one does.
+            for mod in (claude_cli, copilot_cli):
+                real = mod.one_shot
+
+                async def recorded(prompt, _real=real, _name=mod.__name__, **kw):
+                    self.brain_calls.append({"kind": "task", "prompt": prompt or "",
+                                             "at": time.time(), "brain": _name.split(".")[-1],
+                                             "effort": kw.get("effort", ""),
+                                             "model": kw.get("model", ""),
+                                             "plan_only": bool(kw.get("plan_only"))})
+                    return await _real(prompt, **kw)
+                p.set(mod, "one_shot", recorded)
         if not live_brains:
             chat = chat_brain or ScriptedBrain([], self, "chat")
             task = task_brain or ScriptedBrain([], self, "task")

@@ -46,7 +46,7 @@ class FakePage:
 
     async def evaluate(self, js, *args):
         if "innerText" in js and "document.body" in js:
-            return "Vinish\nYou are connected"
+            return "Alex\nYou are connected"
         return False
 
     async def query_selector(self, sel):
@@ -62,7 +62,7 @@ def in_call(monkeypatch):
     # A call somebody ANSWERED, which is what these tests are about. Without
     # `answered_at` this is a phone still ringing, and `say_in_call` now
     # correctly refuses to talk into one.
-    meetings._CALL.update(page=FakePage(), answered_at=1.0, speaks=True, who="Vinish")
+    meetings._CALL.update(page=FakePage(), answered_at=1.0, speaks=True, who="Alex")
     yield
     store.kv_set("teams_in_call", "")
     meetings._CALL.clear()
@@ -277,7 +277,7 @@ def test_things_aimed_at_him_are_collected_for_afterwards():
 @pytest.mark.asyncio
 async def test_the_offer_goes_to_him_and_is_never_spoken(monkeypatch):
     """If this ever reached say_in_call, he would hear his assistant
-    negotiating with him in front of Vinish."""
+    negotiating with him in front of Alex."""
     spoke = []
     told = {}
 

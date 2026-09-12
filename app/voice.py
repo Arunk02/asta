@@ -90,7 +90,7 @@ def voice_settings(voice: str) -> tuple[str, str]:
 def strip_voice_instruction(text: str) -> str:
     """The words to SAY, with the 'talk like me' instruction removed.
 
-    Without this the instruction is spoken aloud — Vinish hears "talk like me,
+    Without this the instruction is spoken aloud — Alex hears "talk like me,
     tell him the build passed", which is both wrong and revealing.
     """
     out = _SAY_AS_ASSISTANT.sub(" ", _SAY_AS_MINE.sub(" ", text or ""))
@@ -367,7 +367,7 @@ CLONE_SCRIPTS: dict[str, str] = {
 #: answers each out loud for fifteen or twenty seconds, in whatever words come.
 CLONE_PROMPTS: dict[str, str] = {
     "1-status": "Give this morning's update out loud — build, tests, what is pending.",
-    "2-one-to-one": "Tell Vinish where you got to on the ETA ticket and what you want his view on.",
+    "2-one-to-one": "Tell Alex where you got to on the ETA ticket and what you want his view on.",
     "3-quick": "Answer ten things quickly — yes, no, go ahead, on it, done, hold on.",
     "4-question": "Ask six things you genuinely need answers to today.",
     "5-technical": "Say the ticket id, the class it fails in, the PR number and the error rate.",
@@ -634,7 +634,7 @@ def can_speak() -> bool:
     BOTH halves, and the second one is the one this was missing. A virtual
     microphone that exists is not a voice: on 2026-09-07 this returned True with
     nothing listening on Voicebox's port at all, so `discuss_in_call` would have
-    rung Vinish and sat there mute. `voice_check` caught it — measuring what
+    rung Alex and sat there mute. `voice_check` caught it — measuring what
     ARRIVES rather than what was configured — and that is the same lesson this
     module already learned once, when macOS answered a microphone request with a
     valid, correctly-labelled track full of digital silence.
@@ -684,7 +684,7 @@ async def self_test() -> dict:
     """Can Asta actually BE HEARD from this process? Measured, not assumed.
 
     The one check that would have saved four calls. `say_in_call` measured audio
-    PLAYED and reported success; Vinish heard silence every time. macOS denies
+    PLAYED and reported success; Alex heard silence every time. macOS denies
     microphone access by handing the app a valid, correctly-labelled track that
     produces digital silence — no exception, no prompt — so every layer looked
     healthy and nothing was transmitted.

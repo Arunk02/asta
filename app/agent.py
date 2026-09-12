@@ -1663,7 +1663,7 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     if not cid:
         return "No active conversation — cannot stage a send."
     # Links are repaired here rather than asked for in a prompt. A full stop
-    # welded to the end of a URL is what turned a PR link Vinish was meant to
+    # welded to the end of a URL is what turned a PR link Alex was meant to
     # click into either a 404 or plain text, and "remember not to do that" is
     # not a fix — every future draft would be one slip away from it again.
     # Applied BEFORE staging, so what Arun approves is exactly what goes out.
@@ -1731,7 +1731,7 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
                 "done, or say so and I'll propose it properly.")
     # He asked for a person, not for code. Spawning here is a SUBSTITUTION: the act
     # he wanted does not happen, a different and irreversible one does, and he finds
-    # out afterwards. This is the 27 August failure — "call Vinish and discuss the
+    # out afterwards. This is the 27 August failure — "call Alex and discuss the
     # comments" answered with seven unreviewed edits heading for a branch.
     instead = consent.substitution(capabilities.TURN_TEXT.get(), kind)
     if instead:
@@ -1975,7 +1975,7 @@ async def reject_task(task_id: int, why: str = "") -> str:
 
 
 async def teams_read_chat(chat: str, limit: int = 15) -> str:
-    """Read the last messages of a Teams chat by person/group name (e.g. 'Vinish').
+    """Read the last messages of a Teams chat by person/group name (e.g. 'Alex').
     Uses Arun's logged-in Teams web session — deterministic browser automation, ~10-20s."""
     from . import teams_bridge
     if not teams_bridge.enabled():
@@ -2018,8 +2018,8 @@ def teams_search(query: str, limit: int = 12) -> str:
 
 
 async def teams_history(chat: str, when: str = "last night", limit: int = 60) -> str:
-    """Read a Teams chat for a TIME WINDOW — 'what did Vinish say last night',
-    'anything from Suraj yesterday', 'messages from the triage group this morning'.
+    """Read a Teams chat for a TIME WINDOW — 'what did Alex say last night',
+    'anything from Casey yesterday', 'messages from the triage group this morning'.
     `when` is plain English: last night, yesterday, this morning, today, last week,
     'last 3 hours', or 'while I was away'. Use this instead of teams_read_chat
     whenever the question has a WHEN in it; teams_read_chat only sees what is
@@ -2065,7 +2065,7 @@ async def teams_history(chat: str, when: str = "last night", limit: int = 60) ->
 
 async def teams_activity(limit: int = 25) -> str:
     """Read Arun's Teams Activity feed — who mentioned him, replies, missed calls, invites.
-    Use whenever he asks anything like 'any messages for me', 'anything from Vinish',
+    Use whenever he asks anything like 'any messages for me', 'anything from Alex',
     'what did I miss', 'any mentions'. Reads Teams directly (not macOS notifications),
     so muted chats and silenced notifications are still covered. Takes ~15-25s."""
     from . import teams_bridge
@@ -2244,7 +2244,7 @@ async def draft_teams_reply(chat: str, question: str = "") -> str:
 async def teams_send_message(chat: str, text: str, to_group: bool = False) -> str:
     """Send a Teams message as Arun, to a PERSON's 1:1 chat.
 
-    "ping Vinish" ALWAYS means Vinish's personal one-to-one chat — never a group or
+    "ping Alex" ALWAYS means Alex's personal one-to-one chat — never a group or
     channel that happens to have his name in it. Only set to_group=True when Arun
     named the group/channel himself. Only send when he explicitly asked; confirm the
     wording first unless he dictated it. Returns the chat the message landed in."""

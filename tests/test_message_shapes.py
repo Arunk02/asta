@@ -43,13 +43,13 @@ WITH_URL = "raised it here https://github.com/example/repo/pull/42 please review
 REACTION_TAIL = "shipped the fix\n\n1 Like reaction with medium dark skin tone."
 
 #: A reply: quote first, blank line, then what they typed. 21 of 22 in his data.
-REPLY_12H = ("Ashwin Kumar\n20/07/2026 5:23 PM\nwhat is the IP integration here\n\n"
+REPLY_12H = ("Oakley Kumar\n20/07/2026 5:23 PM\nwhat is the IP integration here\n\n"
              "IP is the EDI channel, Seeburger sends the invoice details")
-REPLY_24H = ("Ashwin Kumar\n20/07/2026 11:14\nwhat is the IP integration here\n\n"
+REPLY_24H = ("Oakley Kumar\n20/07/2026 11:14\nwhat is the IP integration here\n\n"
              "IP is the EDI channel, Seeburger sends the invoice details")
 #: A forward: what they typed, then the quoted body. 1 of 22.
-FORWARD = ("Bro, can you check once?\n\nRajendra Kumar\n8/10/2026 5:23 PM\n\n"
-           "Hi Vinish, there is an issue with the booking below")
+FORWARD = ("Bro, can you check once?\n\nSasha Kumar\n8/10/2026 5:23 PM\n\n"
+           "Hi Alex, there is an issue with the booking below")
 #: A quote whose reply body did not survive the capture — Arun's own case.
 QUOTE_ONLY = ("Arunkumar K\n28/08/2026 18:38\nlets analyse on some idea and see how "
               "it going on weekend sunday and Monday")
@@ -169,29 +169,29 @@ def test_the_corpus_check_is_actually_reaching_his_data():
 #
 #     Harini S                                      <- who is quoted
 #     28/08/2026 12:39                                  <- when
-#     Swamy in vinish and urs team..                    <- HER words
+#     Brooks in alex and urs team..                    <- HER words
 #     Arrey I'm in multiple teams for Background support <- his reply
 #
 # Nothing in the text says where one ends and the other begins. But a quoted line
 # is by definition a message that already exists in the thread, so the thread
 # itself identifies it.
 
-TIGHT_QUOTE = ("Harini S\n28/08/2026 12:39\nSwamy in vinish and urs team..\n"
+TIGHT_QUOTE = ("Harini S\n28/08/2026 12:39\nBrooks in alex and urs team..\n"
                "Arrey I'm in multiple teams for Background support")
 
 
 def test_the_thread_identifies_the_quote_when_spacing_does_not():
     out = chat_watch.clean_message(
-        TIGHT_QUOTE, known={"Swamy in vinish and urs team.."})
+        TIGHT_QUOTE, known={"Brooks in alex and urs team.."})
     assert out == "Arrey I'm in multiple teams for Background support"
 
 
 def test_a_multi_line_reply_survives_when_the_thread_is_known():
     """The reason the lookup is preferred over "keep the last paragraph": that
     fallback would throw away everything but the final line."""
-    raw = ("Harini S\n28/08/2026 12:39\nSwamy in vinish and urs team..\n"
+    raw = ("Harini S\n28/08/2026 12:39\nBrooks in alex and urs team..\n"
            "first point\nsecond point")
-    out = chat_watch.clean_message(raw, known={"Swamy in vinish and urs team.."})
+    out = chat_watch.clean_message(raw, known={"Brooks in alex and urs team.."})
     assert "first point" in out and "second point" in out
 
 
@@ -199,7 +199,7 @@ def test_without_the_thread_it_still_refuses_to_misattribute():
     """Degrades to the last paragraph rather than showing the quoted line — losing
     a sentence is recoverable, attributing one is not."""
     out = chat_watch.clean_message(TIGHT_QUOTE)
-    assert "Swamy in vinish" not in out
+    assert "Brooks in alex" not in out
     assert out == "Arrey I'm in multiple teams for Background support"
 
 

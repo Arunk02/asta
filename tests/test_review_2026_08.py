@@ -2,7 +2,7 @@
 
 Each block below is one numbered finding from docs/REVIEW-FINDINGS-2026-08.md.
 The cases are built from the situations that actually produced the finding —
-Arun asking what Vinish said last night, a workspace whose repos are not git
+Arun asking what Alex said last night, a workspace whose repos are not git
 checkouts — rather than from the shape of the code, so they keep meaning
 something if the implementation is rewritten.
 """
@@ -22,7 +22,7 @@ from app import agent as agent_mod, store
 # --- 1. One cached message must not hide the rest ----------------------------
 #
 # The report that produced this: "if i ask to check on last night msg from
-# vinish to check one bug i couldn't able to fetch it exactly". One message from
+# alex to check one bug i couldn't able to fetch it exactly". One message from
 # that evening was already stored, `if not rows` saw a non-empty list, the
 # scrollback never ran, and the partial thread came back labelled "from stored
 # history" as though it were the whole conversation.
@@ -31,7 +31,7 @@ HOUR = 3600.0
 
 
 def _store_msg(chat: str, text: str, sent_at: float, seen_at: float | None = None,
-               sender: str = "Vinish Kumar") -> None:
+               sender: str = "Alex Kumar") -> None:
     store.save_teams_messages([{
         "key": f"{chat}:{sent_at}:{text[:20]}", "chat": chat, "sender": sender,
         "text": text, "sent_at": sent_at, "stamp": "", "seen_at": seen_at,
@@ -56,58 +56,58 @@ def last_night():
 def test_one_cached_message_does_not_count_as_history(last_night):
     """THE finding. A single stored message inside the window is not the window."""
     since, until, now = last_night
-    _store_msg("Vinish Kumar", "did you see the NPE in booking?",
+    _store_msg("Alex Kumar", "did you see the NPE in booking?",
                sent_at=since + 2 * HOUR, seen_at=since + 2 * HOUR)
-    assert store.teams_history_covers("Vinish Kumar", since, until) is False, \
+    assert store.teams_history_covers("Alex Kumar", since, until) is False, \
         "one message inside the window was treated as the whole window"
 
 
 def test_history_counts_when_both_edges_are_covered(last_night):
     """Read back past the start, and read again after the window closed."""
     since, until, now = last_night
-    _store_msg("Vinish Kumar", "older context", sent_at=since - 3 * HOUR)
-    _store_msg("Vinish Kumar", "the NPE again", sent_at=since + 2 * HOUR,
+    _store_msg("Alex Kumar", "older context", sent_at=since - 3 * HOUR)
+    _store_msg("Alex Kumar", "the NPE again", sent_at=since + 2 * HOUR,
                seen_at=until + 1 * HOUR)
-    assert store.teams_history_covers("Vinish Kumar", since, until) is True
+    assert store.teams_history_covers("Alex Kumar", since, until) is True
 
 
 def test_a_cache_that_starts_inside_the_window_is_not_covered(last_night):
     """Missing the beginning of the evening is exactly the reported symptom."""
     since, until, now = last_night
-    _store_msg("Vinish Kumar", "first thing we have", sent_at=since + 1 * HOUR,
+    _store_msg("Alex Kumar", "first thing we have", sent_at=since + 1 * HOUR,
                seen_at=until + 1 * HOUR)
-    assert store.teams_history_covers("Vinish Kumar", since, until) is False
+    assert store.teams_history_covers("Alex Kumar", since, until) is False
 
 
 def test_a_stale_read_is_not_covered(last_night):
     """Reached back far enough, but last read BEFORE the window closed — so
     anything sent afterwards was never seen."""
     since, until, now = last_night
-    _store_msg("Vinish Kumar", "older context", sent_at=since - 3 * HOUR)
-    _store_msg("Vinish Kumar", "early message", sent_at=since + 1 * HOUR,
+    _store_msg("Alex Kumar", "older context", sent_at=since - 3 * HOUR)
+    _store_msg("Alex Kumar", "early message", sent_at=since + 1 * HOUR,
                seen_at=since + 1 * HOUR)          # read mid-window, not after
-    assert store.teams_history_covers("Vinish Kumar", since, until) is False
+    assert store.teams_history_covers("Alex Kumar", since, until) is False
 
 
 def test_an_empty_cache_is_never_covered(last_night):
     since, until, now = last_night
-    assert store.teams_history_covers("Vinish Kumar", since, until) is False
+    assert store.teams_history_covers("Alex Kumar", since, until) is False
 
 
 def test_coverage_is_per_chat(last_night):
     """A well-covered chat must not vouch for a different one."""
     since, until, now = last_night
-    _store_msg("Suraj", "older", sent_at=since - 3 * HOUR)
-    _store_msg("Suraj", "in window", sent_at=since + 1 * HOUR, seen_at=until + HOUR)
-    assert store.teams_history_covers("Suraj", since, until) is True
-    assert store.teams_history_covers("Vinish Kumar", since, until) is False
+    _store_msg("Casey", "older", sent_at=since - 3 * HOUR)
+    _store_msg("Casey", "in window", sent_at=since + 1 * HOUR, seen_at=until + HOUR)
+    assert store.teams_history_covers("Casey", since, until) is True
+    assert store.teams_history_covers("Alex Kumar", since, until) is False
 
 
 def test_untimed_messages_cannot_establish_coverage(last_night):
     """A message with no timestamp cannot honestly place itself in a window."""
     since, until, now = last_night
-    _store_msg("Vinish Kumar", "no timestamp", sent_at=None, seen_at=until + HOUR)
-    assert store.teams_history_covers("Vinish Kumar", since, until) is False
+    _store_msg("Alex Kumar", "no timestamp", sent_at=None, seen_at=until + HOUR)
+    assert store.teams_history_covers("Alex Kumar", since, until) is False
 
 
 @pytest.mark.asyncio
@@ -118,11 +118,11 @@ async def test_the_real_case_partial_cache_still_scrolls_teams(monkeypatch, last
     and come back with all ten.
     """
     since, until, now = last_night
-    _store_msg("Vinish Kumar", "did you see the NPE?", sent_at=since + 2 * HOUR,
+    _store_msg("Alex Kumar", "did you see the NPE?", sent_at=since + 2 * HOUR,
                seen_at=since + 2 * HOUR)
 
     scrolled = []
-    server = [{"key": f"k{i}", "chat": "Vinish Kumar", "sender": "Vinish Kumar",
+    server = [{"key": f"k{i}", "chat": "Alex Kumar", "sender": "Alex Kumar",
                "text": f"message {i}", "sent_at": since + i * 0.5 * HOUR, "stamp": ""}
               for i in range(10)]
 
@@ -136,8 +136,8 @@ async def test_the_real_case_partial_cache_still_scrolls_teams(monkeypatch, last
     monkeypatch.setattr(teams_bridge, "read_history", fake_read_history)
     monkeypatch.setattr(when_mod, "parse", lambda w: (since, until, "last night"))
 
-    out = await agent_mod.teams_history("Vinish Kumar", "last night")
-    assert scrolled == ["Vinish Kumar"], "it answered from a partial cache again"
+    out = await agent_mod.teams_history("Alex Kumar", "last night")
+    assert scrolled == ["Alex Kumar"], "it answered from a partial cache again"
     assert "scrolled back" in out, f"reported the wrong source: {out[-120:]}"
 
 
@@ -146,8 +146,8 @@ async def test_a_fully_covered_window_still_answers_without_a_browser(monkeypatc
     """The optimisation must survive the fix — asking twice about the same
     evening should not re-open Teams."""
     since, until, now = last_night
-    _store_msg("Vinish Kumar", "older context", sent_at=since - 3 * HOUR)
-    _store_msg("Vinish Kumar", "the NPE again", sent_at=since + 2 * HOUR,
+    _store_msg("Alex Kumar", "older context", sent_at=since - 3 * HOUR)
+    _store_msg("Alex Kumar", "the NPE again", sent_at=since + 2 * HOUR,
                seen_at=until + 1 * HOUR)
 
     async def must_not_run(chat, since=None, limit=60):
@@ -159,7 +159,7 @@ async def test_a_fully_covered_window_still_answers_without_a_browser(monkeypatc
     monkeypatch.setattr(teams_bridge, "read_history", must_not_run)
     monkeypatch.setattr(when_mod, "parse", lambda w: (since, until, "last night"))
 
-    out = await agent_mod.teams_history("Vinish Kumar", "last night")
+    out = await agent_mod.teams_history("Alex Kumar", "last night")
     assert "stored history" in out
 
 
@@ -391,7 +391,7 @@ async def test_a_caller_that_already_asked_is_not_asked_twice(pushes, ledger_on)
     ledger themselves. Without it their own approved push is re-keyed here, reads
     as already-notified, and is suppressed — the push their check just allowed."""
     from app import notify as notify_mod
-    text = "Vinish mentioned you in Team Booking"
+    text = "Alex mentioned you in Team Booking"
     out = await notify_mod.notify(text, "teams", considered=True)
     again = await notify_mod.notify(text, "teams", considered=True)
     assert out["whatsapp"] is True and again["whatsapp"] is True, \
@@ -1514,8 +1514,8 @@ def test_a_long_conversation_does_not_grow_to_every_tool():
     conv = _fresh_conv("bounded-test")
     total = len(capabilities.registry())
     sizes = []
-    for q in ["what did vinish say last night", "fix BEPTELIKOS-1 in booking",
-              "any PR waiting on me", "call vinish about the release",
+    for q in ["what did alex say last night", "fix BEPTELIKOS-1 in booking",
+              "any PR waiting on me", "call alex about the release",
               "how does the ATA fallback work", "draft a mail to priya",
               "check the CI", "what is on my calendar tomorrow"]:
         sel = tool_index.select_sticky(conv, q)
@@ -1533,11 +1533,11 @@ def test_a_long_conversation_does_not_grow_to_every_tool():
 def test_the_most_recent_turn_is_always_represented():
     """Stickiness must never evict what this turn actually asked for."""
     conv = _fresh_conv("recency-test")
-    for q in ["what did vinish say last night", "any PR waiting on me",
+    for q in ["what did alex say last night", "any PR waiting on me",
               "check the CI", "what is on my calendar tomorrow"]:
         tool_index.select_sticky(conv, q)
-    picked = tool_index.select("send vinish a message saying the build is green", 8)
-    sel = tool_index.select_sticky(conv, "send vinish a message saying the build is green")
+    picked = tool_index.select("send alex a message saying the build is green", 8)
+    sel = tool_index.select_sticky(conv, "send alex a message saying the build is green")
     assert sel is not None
     for name in (picked or []):
         assert name in sel, f"{name} was picked for this turn and then evicted"
@@ -1546,7 +1546,7 @@ def test_the_most_recent_turn_is_always_represented():
 def test_a_follow_up_with_no_keywords_still_has_its_tools():
     """Why stickiness exists at all — "do that again" has nothing to rank on."""
     conv = _fresh_conv("followup-test")
-    first = tool_index.select_sticky(conv, "what did vinish say last night")
+    first = tool_index.select_sticky(conv, "what did alex say last night")
     second = tool_index.select_sticky(conv, "do that again")
     assert second is None or "teams_history" in second, \
         "the follow-up lost the tool the previous turn established"
@@ -1571,7 +1571,7 @@ def test_narrowing_actually_saves_the_tokens_it_claims():
         return sum(len(f.__doc__ or "") for f in fns) + len(capabilities.notes_block(names))
 
     conv = _fresh_conv("cost-test")
-    for q in ["what did vinish say last night", "any PR waiting on me", "check the CI"]:
+    for q in ["what did alex say last night", "any PR waiting on me", "check the CI"]:
         sel = tool_index.select_sticky(conv, q)
     assert sel is not None, "narrowing gave up"
     full, narrow = cost(None), cost(sel)
@@ -1739,12 +1739,12 @@ async def test_it_finds_a_callable_chat_without_being_told_who(monkeypatch):
     """No name in .env. It opens conversations until the call button renders."""
     page = _RailPage(
         rail=["Quick views", "Mentions", "Drafts", "Arunkumar K (You)",
-              "Chats", "Vinish Kumar", "Team Booking and Execution"],
-        has_call={"Vinish Kumar", "Team Booking and Execution"},
-        has_messages={"Arunkumar K (You)", "Vinish Kumar"})
+              "Chats", "Alex Kumar", "Team Booking and Execution"],
+        has_call={"Alex Kumar", "Team Booking and Execution"},
+        has_messages={"Arunkumar K (You)", "Alex Kumar"})
     _bridge_opening(page, monkeypatch)
     found = await selector_health._find_a_chat(page, want_call=True)
-    assert found == "Vinish Kumar"
+    assert found == "Alex Kumar"
     assert "Arunkumar K (You)" not in page.opened, \
         "it tried to check a call button in a self-chat"
 
@@ -1754,18 +1754,18 @@ async def test_navigation_entries_are_not_mistaken_for_chats(monkeypatch):
     """The rail opens with Quick views, Mentions, Discover, Drafts, Saved — the
     same trap `_find_chat`'s docstring warns about."""
     page = _RailPage(rail=["Quick views", "Mentions", "Discover", "Drafts",
-                           "Saved", "Favorites", "Vinish Kumar"],
-                     has_call={"Vinish Kumar"}, has_messages={"Vinish Kumar"})
+                           "Saved", "Favorites", "Alex Kumar"],
+                     has_call={"Alex Kumar"}, has_messages={"Alex Kumar"})
     _bridge_opening(page, monkeypatch)
     await selector_health._find_a_chat(page, want_call=True)
-    assert page.opened == ["Vinish Kumar"], f"opened navigation: {page.opened}"
+    assert page.opened == ["Alex Kumar"], f"opened navigation: {page.opened}"
 
 
 @pytest.mark.asyncio
 async def test_his_own_thread_is_preferred_when_only_reading(monkeypatch):
     """Checking message markup should open nobody else's conversation."""
-    page = _RailPage(rail=["Vinish Kumar", "Arunkumar K (You)"],
-                     has_messages={"Vinish Kumar", "Arunkumar K (You)"})
+    page = _RailPage(rail=["Alex Kumar", "Arunkumar K (You)"],
+                     has_messages={"Alex Kumar", "Arunkumar K (You)"})
     _bridge_opening(page, monkeypatch)
     found = await selector_health._find_a_chat(page, want_call=False)
     assert found == "Arunkumar K (You)"
@@ -1776,16 +1776,16 @@ async def test_his_own_thread_is_preferred_when_only_reading(monkeypatch):
 async def test_without_a_self_chat_it_still_checks_something(monkeypatch):
     """A rail with no "(You)" entry is a reason to read someone else's message
     list, not a reason to stop checking whether reading works at all."""
-    page = _RailPage(rail=["Vinish Kumar"], has_messages={"Vinish Kumar"})
+    page = _RailPage(rail=["Alex Kumar"], has_messages={"Alex Kumar"})
     _bridge_opening(page, monkeypatch)
-    assert await selector_health._find_a_chat(page, want_call=False) == "Vinish Kumar"
+    assert await selector_health._find_a_chat(page, want_call=False) == "Alex Kumar"
 
 
 def test_the_rendered_name_is_not_the_searchable_name():
     """"Arunkumar K (You)" finds nothing; "Arunkumar K" resolves to it. The suffix
     is display decoration and exists nowhere in the directory."""
     assert selector_health._searchable("Arunkumar K (You)") == "Arunkumar K"
-    assert selector_health._searchable("Vinish Kumar") == "Vinish Kumar"
+    assert selector_health._searchable("Alex Kumar") == "Alex Kumar"
 
 
 def test_no_selector_check_settings_remain():
@@ -2150,7 +2150,7 @@ def test_a_turn_gets_the_servers_it_needs(query, expected):
 
 
 @pytest.mark.parametrize("query", [
-    "what did vinish say last night",
+    "what did alex say last night",
     "how does the ATA fallback pick the transport order",
     "draft a mail to priya about the release",
 ])
@@ -2204,9 +2204,9 @@ def test_a_window_that_has_not_closed_yet_can_still_be_covered():
     now = time.time()
     since = now - 4 * HOUR
     until = now + 5 * HOUR                       # the window is still open
-    _store_msg("Vinish Kumar", "older", sent_at=since - HOUR)
-    _store_msg("Vinish Kumar", "in window", sent_at=since + HOUR, seen_at=now - 60)
-    assert store.teams_history_covers("Vinish Kumar", since, until) is True
+    _store_msg("Alex Kumar", "older", sent_at=since - HOUR)
+    _store_msg("Alex Kumar", "in window", sent_at=since + HOUR, seen_at=now - 60)
+    assert store.teams_history_covers("Alex Kumar", since, until) is True
 
 
 def test_an_open_window_still_needs_a_recent_read():
@@ -2214,10 +2214,10 @@ def test_an_open_window_still_needs_a_recent_read():
     ago says nothing about what arrived since."""
     now = time.time()
     since, until = now - 4 * HOUR, now + 5 * HOUR
-    _store_msg("Suraj", "older", sent_at=since - HOUR)
-    _store_msg("Suraj", "in window", sent_at=since + HOUR,
+    _store_msg("Casey", "older", sent_at=since - HOUR)
+    _store_msg("Casey", "in window", sent_at=since + HOUR,
                seen_at=now - store.HISTORY_FRESH_SECONDS - 600)
-    assert store.teams_history_covers("Suraj", since, until) is False
+    assert store.teams_history_covers("Casey", since, until) is False
 
 
 def test_a_window_ending_right_now_does_not_demand_an_instant_read():
@@ -2226,9 +2226,9 @@ def test_a_window_ending_right_now_does_not_demand_an_instant_read():
     nothing can satisfy — so every such question re-opened a browser."""
     now = time.time()
     since, until = now - 6 * HOUR, now          # the window closes exactly now
-    _store_msg("Vinish Kumar", "older", sent_at=since - HOUR)
-    _store_msg("Vinish Kumar", "in window", sent_at=since + HOUR, seen_at=now - 30)
-    assert store.teams_history_covers("Vinish Kumar", since, until) is True
+    _store_msg("Alex Kumar", "older", sent_at=since - HOUR)
+    _store_msg("Alex Kumar", "in window", sent_at=since + HOUR, seen_at=now - 30)
+    assert store.teams_history_covers("Alex Kumar", since, until) is True
 
 
 def test_a_window_that_closed_yesterday_still_needs_a_read_after_it():
@@ -2236,9 +2236,9 @@ def test_a_window_that_closed_yesterday_still_needs_a_read_after_it():
     closed cannot have seen what arrived at the end of it."""
     now = time.time()
     since, until = now - 30 * HOUR, now - 24 * HOUR
-    _store_msg("Suraj", "older", sent_at=since - HOUR)
-    _store_msg("Suraj", "in window", sent_at=since + HOUR, seen_at=until - 2 * HOUR)
-    assert store.teams_history_covers("Suraj", since, until) is False
+    _store_msg("Casey", "older", sent_at=since - HOUR)
+    _store_msg("Casey", "in window", sent_at=since + HOUR, seen_at=until - 2 * HOUR)
+    assert store.teams_history_covers("Casey", since, until) is False
 
 
 # --- Retrieval: what vectors would and would not buy --------------------------
@@ -2257,10 +2257,10 @@ def test_teams_history_is_searchable_by_topic():
     """`LIKE '%ata%'` matches letters, not words: it finds "ata" inside "data",
     ranks nothing, and misses a thread that said "transport order" instead."""
     store.save_teams_messages([
-        {"key": "s1", "chat": "Vinish Kumar", "sender": "Vinish",
+        {"key": "s1", "chat": "Alex Kumar", "sender": "Alex",
          "text": "the ATA fallback picks the transport order from the service plan",
          "sent_at": time.time() - HOUR, "stamp": ""},
-        {"key": "s2", "chat": "Team Booking", "sender": "Divya",
+        {"key": "s2", "chat": "Team Booking", "sender": "Blake",
          "text": "lunch at 1?", "sent_at": time.time() - HOUR, "stamp": ""},
     ])
     with store._connect() as c:
@@ -2301,8 +2301,8 @@ def test_nothing_found_is_reported_as_no_record_not_as_never_said():
 
 def test_the_index_keeps_up_with_new_messages():
     """A search index that needs a manual rebuild is an index that is wrong."""
-    store.save_teams_messages([{"key": "live1", "chat": "Vinish Kumar",
-                                "sender": "Vinish", "text": "quokka migration plan",
+    store.save_teams_messages([{"key": "live1", "chat": "Alex Kumar",
+                                "sender": "Alex", "text": "quokka migration plan",
                                 "sent_at": time.time(), "stamp": ""}])
     assert any("quokka" in h["text"] for h in store.teams_search("quokka", 5)), \
         "a message inserted after startup is not searchable"
@@ -2329,8 +2329,8 @@ def test_a_follow_up_does_not_evict_the_previous_turns_tools():
     """
     conv = "no-evict"
     tool_index.forget(conv)
-    first = set(tool_index.select_sticky(conv, "any messages from Vinish?") or ())
-    second = set(tool_index.select_sticky(conv, "anything else from Vinish?") or ())
+    first = set(tool_index.select_sticky(conv, "any messages from Alex?") or ())
+    second = set(tool_index.select_sticky(conv, "anything else from Alex?") or ())
     assert first, "nothing was selected at all"
     evicted = first - second
     assert not evicted, f"a follow-up evicted {sorted(evicted)} to make room"

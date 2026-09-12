@@ -66,3 +66,31 @@ scenarios:
       - push_contains: "draft for Teams"
       - push_lacks: "Dear |Best regards|Kind regards|Hope you are|I hope this"
       - no_send: true
+
+  - id: live-the-graph-builds-a-small-change-end-to-end
+    title: On the graph engine with routing, a real brain plans read-only, then builds at the plan's tier
+    why: >
+      P2 and P3 proven with a real brain, not a script: the plan leg cannot write,
+      the plan stops at the gate, his yes builds it, and a one-file change is
+      built on low effort. Runs in the scratch tree, so nothing of his is touched.
+    setup:
+      env: {ASTA_GRAPH: "1", ASTA_ROUTING: "1"}
+    steps:
+      - spawn:
+          title: "add a greet helper"
+          prompt: >
+            use claude. In this directory (a scratch folder), add one file
+            greet.py with a function greet(name) returning "hello, " + name.
+            Plan first: STRUCTURE with that one file, then PLAN READY.
+          kind: code
+          workspace: booking
+          as: job
+      - approve: job
+    checks:
+      - task_status: {task: job, is: done}
+      - push_contains: "PLAN #"
+      - push_contains: "✅ DONE"
+      - brain_flags: {kind: task, leg: 0, plan_only: true, effort: medium}
+      - brain_flags: {kind: task, leg: 1, plan_only: false, effort: low}
+      - scratch_file: {path: greet.py, text: "def greet"}
+

@@ -35,7 +35,7 @@ This preamble explains the file and is never sent.
 - Push without being told to ship.
 
 ## Weekend Mode
-- Reply only to Vinish.
+- Reply only to Alex.
 """
 
 
@@ -69,8 +69,8 @@ def test_each_section_goes_where_it_belongs(rules):
 
 
 def test_a_section_he_invents_reaches_chat_where_he_can_see_it_work(rules):
-    assert "Reply only to Vinish" in guardrails.block("chat")
-    assert "Reply only to Vinish" not in guardrails.block("code")
+    assert "Reply only to Alex" in guardrails.block("chat")
+    assert "Reply only to Alex" not in guardrails.block("code")
 
 
 def test_the_block_says_it_is_his_and_that_it_wins(rules):
@@ -167,7 +167,7 @@ def test_the_in_process_brain_gets_the_chat_block(rules):
 
 def test_the_cli_brains_get_the_same_block(rules):
     text = copilot_cli._first_turn_context({"id": "c-guard"}, via="Claude Code CLI")
-    assert "120 words" in text and "Reply only to Vinish" in text
+    assert "120 words" in text and "Reply only to Alex" in text
 
 
 def test_the_persona_points_at_the_file_for_workspace_facts():

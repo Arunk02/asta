@@ -1,6 +1,6 @@
 """Drafts that read like Arun, and links that survive being sent.
 
-Both faults come from one real message he shared, sent to Vinish:
+Both faults come from one real message he shared, sent to Alex:
 
     Raised the fix for BEPTELIKOS-10159 — PR #1371: https://…/pull/1371.
     CANCELLED bookings (regardless of timeout flag) and bookings with
@@ -88,7 +88,7 @@ def test_empty_input_is_safe():
 
 def _seed(texts, sender="Arunkumar K"):
     store.save_teams_messages([
-        {"key": f"k{i}-{sender}", "chat": "Vinish Kumar", "sender": sender,
+        {"key": f"k{i}-{sender}", "chat": "Alex Kumar", "sender": sender,
          "text": t, "sent_at": 1_786_000_000.0 + i, "stamp": ""}
         for i, t in enumerate(texts)])
 
@@ -145,7 +145,7 @@ def test_messages_from_other_people_are_not_counted_as_his():
     """Otherwise the 'voice' is the average of the chat, not of Arun."""
     _seed(HIS)
     _seed(["Bro, assigned this defect to you. Please update the team and story points."] * 30,
-          sender="Vinish Kumar")
+          sender="Alex Kumar")
     p = writing.profile()
     assert p["samples"] == len(HIS)
     assert p["median_chars"] < 40, "another person's long messages leaked in"
@@ -211,6 +211,6 @@ async def test_staging_a_draft_repairs_the_link_before_arun_sees_it(monkeypatch)
                         lambda cid, what, to, channel, to_group=False:
                         staged.update(what=what, to=to))
 
-    agent.prepare_to_send(REAL_MESSAGE, to="Vinish", channel="teams")
+    agent.prepare_to_send(REAL_MESSAGE, to="Alex", channel="teams")
     assert f"{PR_URL}." not in staged["what"]
     assert any(line.strip() == PR_URL for line in staged["what"].splitlines())

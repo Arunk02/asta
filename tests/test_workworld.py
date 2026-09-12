@@ -63,7 +63,7 @@ def test_the_twin_changes_his_phrasing():
 def test_the_twin_never_changes_what_he_asked_for():
     """The one rule: a phrasing variant that drops a negation or a task
     reference would fail scenarios for the wrong reason."""
-    for text in ("do not investigate incidents, only the ones vinish sends",
+    for text in ("do not investigate incidents, only the ones alex sends",
                  "new task please create the topics",
                  "#14 also cover the amend path", "stop 15", "yes"):
         for seed in range(1, 4):

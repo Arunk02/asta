@@ -126,12 +126,12 @@ def test_the_fresh_session_is_handed_a_recap_once():
 
 def test_a_brain_switch_still_recaps_as_before():
     conv = store.create_conversation("copilot", None)
-    store.add_ui_message(conv["id"], "user", "what did vinish say")
+    store.add_ui_message(conv["id"], "user", "what did alex say")
     store.add_ui_message(conv["id"], "assistant", "He asked about the retry fix.")
     store.add_ui_message(conv["id"], "user", "and now?")      # the current turn, dropped
     store.kv_set(f"copilot_session:{conv['id']}", "live-elsewhere")
     recap = copilot_cli._switch_recap(conv, "Claude Code CLI")
-    assert "model switch" in recap and "what did vinish say" in recap
+    assert "model switch" in recap and "what did alex say" in recap
     assert "and now?" not in recap
 
 

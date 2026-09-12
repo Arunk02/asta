@@ -44,9 +44,11 @@ def enabled() -> bool:
 
 _TICKET = re.compile(r"\b[A-Z][A-Z0-9]{1,15}-\d{1,6}\b")
 #: A change to a contract other code depends on: always worth the best model.
+#: Deliberately not "contract" or "kafka topic" on their own: every change in his
+#: services touches a topic, and a word that matches everything tiers nothing.
 _CONTRACT = re.compile(
-    r"\b(schema|migration|migrate|avro|dto|api contract|contract|protobuf|proto|"
-    r"liquibase|flyway|ddl|alter table|breaking change|kafka topic|topic schema)\b", re.I)
+    r"\b(schema|migration|migrate|avro|dto|api contract|protobuf|"
+    r"liquibase|flyway|ddl|alter table|breaking change)\b", re.I)
 _PROD_DOWN = re.compile(r"\b(prod(uction)? (is )?(down|broken|on fire)|outage|sev ?[12]|p1 incident)\b",
                         re.I)
 _SMALL = re.compile(r"\b(typo|rename|one[- ]line|single line|log line|comment|bump|"

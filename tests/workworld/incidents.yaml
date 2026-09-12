@@ -356,7 +356,7 @@ scenarios:
     may_send: true
     setup:
       tasks:
-        - {as: draft, title: "reply about the schema", kind: teams_draft, status: awaiting_approval, result: "the schema is merged in 2.2.4", teams_chat: "Vinish Kumar"}
+        - {as: draft, title: "reply about the schema", kind: teams_draft, status: awaiting_approval, result: "the schema is merged in 2.2.4", teams_chat: "Alex Kumar"}
     brains:
       chat:
         - text: "Sent it."
@@ -377,7 +377,7 @@ scenarios:
       it was approving waited for a subscription window to reopen.
     setup:
       tasks:
-        - {as: draft, title: "reply about the schema", kind: teams_draft, status: awaiting_approval, result: "the schema is merged", teams_chat: "Vinish Kumar"}
+        - {as: draft, title: "reply about the schema", kind: teams_draft, status: awaiting_approval, result: "the schema is merged", teams_chat: "Alex Kumar"}
     may_send: true
     steps:
       - say: "approve task 1"

@@ -194,7 +194,7 @@ def test_is_conversational_is_deliberately_tight():
                 "compare the two approaches", "help me understand this",
                 "what's the difference", "tldr", "what do you think about that"):
         assert tool_index.is_conversational(yes), yes
-    for no in ("send a message to vinish", "any teams messages for me",
+    for no in ("send a message to alex", "any teams messages for me",
                "create a task to fix the bug", "what's in my sprint",
                "raise a PR for the fix", "check CI status"):
         assert not tool_index.is_conversational(no), no
@@ -286,7 +286,7 @@ def test_prepare_to_send_works_across_the_mcp_hop(client):
             r = await c.post("/api/_invoke", json={
                 "tool": "prepare_to_send",
                 "args": {"what": "fixes are pushed and CI is green",
-                         "to": "Vinish", "channel": "teams"},
+                         "to": "Alex", "channel": "teams"},
                 "conv_id": "conv-abc"})
             assert r.status_code == 200
             assert "No active conversation" not in r.json()["result"]
@@ -315,13 +315,13 @@ def test_a_send_really_is_staged_for_that_conversation(client):
         async with client as c:
             await c.post("/api/_invoke", json={
                 "tool": "prepare_to_send",
-                "args": {"what": "the draft", "to": "Vinish", "channel": "teams"},
+                "args": {"what": "the draft", "to": "Alex", "channel": "teams"},
                 "conv_id": "conv-xyz"})
         pending = loop.take("conv-xyz")
         assert pending, "nothing was staged for the conversation"
         assert pending["kind"] == "send"
         assert pending["what"] == "the draft"
-        assert pending["to"] == "Vinish"
+        assert pending["to"] == "Alex"
     asyncio.run(go())
 
 
@@ -332,7 +332,7 @@ def test_no_conversation_still_refuses_rather_than_guessing(client):
         async with client as c:
             r = await c.post("/api/_invoke", json={
                 "tool": "prepare_to_send",
-                "args": {"what": "x", "to": "Vinish", "channel": "teams"}})
+                "args": {"what": "x", "to": "Alex", "channel": "teams"}})
             assert r.status_code == 200
             assert "No active conversation" in r.json()["result"]
     asyncio.run(go())
@@ -406,7 +406,7 @@ def test_the_binding_does_not_outlive_the_call(client):
         async with client as c:
             await c.post("/api/_invoke", json={
                 "tool": "prepare_to_send",
-                "args": {"what": "x", "to": "Vinish", "channel": "teams"},
+                "args": {"what": "x", "to": "Alex", "channel": "teams"},
                 "conv_id": "conv-leak"})
             # A second call with no conversation must NOT inherit the first's.
             r = await c.post("/api/_invoke", json={

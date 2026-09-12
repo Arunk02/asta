@@ -207,6 +207,30 @@ CREATE TABLE IF NOT EXISTS outcomes (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_outcomes_kind ON outcomes(kind, created_at);
+CREATE TABLE IF NOT EXISTS rules (
+    -- His standing instructions as data the code checks, not prose a brain may
+    -- read. Written only with his yes (app/instructions.py); read by app/policy.py.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,            -- mute | never | prefer | note
+    act TEXT NOT NULL DEFAULT '',  -- what it governs: investigate, send, call, push, workspace…
+    target TEXT NOT NULL DEFAULT '',
+    value TEXT NOT NULL DEFAULT '',
+    unless_asked INTEGER NOT NULL DEFAULT 0,
+    words TEXT NOT NULL DEFAULT '', -- what he actually said
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS people_systems (
+    -- Who owns what, how a person works, which repo does what. Every fact
+    -- carries where it came from and when, so a stale one can be recognised.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'fact',   -- person | repo | service | env | ticket | fact
+    fact TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_people_systems ON people_systems(subject);
 CREATE TABLE IF NOT EXISTS task_events (
     -- One timeline per task: every status change, route decision and gate
     -- answer, in order. The task row says where a task IS; this says how it

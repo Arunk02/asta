@@ -1658,10 +1658,16 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     `to` on Teams means a PERSON's 1:1 chat. Set to_group=True ONLY when Arun named a
     group or channel himself ("post it in the prod issue group") — never because a
     group happens to share a word with the name he used."""
-    from . import tasks, loop, writing
+    from . import capabilities, loop, policy, tasks, writing
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
+    # His standing rules, before anything is even drafted for him to approve.
+    # "Unless I ask" holds when the person is named in what he said this turn.
+    said = capabilities.said_this_turn().lower()
+    ruled = policy.check("send", to, asked=bool(to) and to.lower() in said)
+    if not ruled.ok:
+        return f"Not staged — {ruled.why}. Tell Arun, in one line, that this rule stopped it."
     # Links are repaired here rather than asked for in a prompt. A full stop
     # welded to the end of a URL is what turned a PR link Alex was meant to
     # click into either a 404 or plain text, and "remember not to do that" is
@@ -1686,6 +1692,26 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
         if overrun:
             staged += f"\n⚠ Length: {overrun} Consider redrafting shorter before he sees it."
     return staged
+
+
+def note_fact(subject: str, fact: str, kind: str = "fact", source: str = "") -> str:
+    """Record one durable fact about a person or system — who owns a service, which
+    repo does what, how someone likes to be asked, which env a topic lives in.
+
+    subject: the person or system ("booking-service", "the release channel").
+    kind: person | repo | service | env | ticket | fact. source: where you learned it
+    (a PR, a ticket, his message) — every fact carries its source and date, so a stale
+    one can be recognised. Facts about what a job names reach every later job's context."""
+    from . import people
+    fid = people.add(subject, fact, kind, source)
+    return f"Noted (fact {fid}) about {subject}."
+
+
+def facts_about(subject: str) -> str:
+    """What is recorded about a person or system, newest first, each with its source and date."""
+    from . import people
+    rows = people.facts(subject)
+    return "\n".join(people.line(r) for r in rows) or f"Nothing recorded about {subject}."
 
 
 def report_outcome(task_id: int, kind: str, summary: str = "",
@@ -1733,7 +1759,7 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     # he wanted does not happen, a different and irreversible one does, and he finds
     # out afterwards. This is the 27 August failure — "call Alex and discuss the
     # comments" answered with seven unreviewed edits heading for a branch.
-    instead = consent.substitution(capabilities.TURN_TEXT.get(), kind)
+    instead = consent.substitution(capabilities.said_this_turn(), kind)
     if instead:
         return instead
     # A question is not a request to go do work. If this turn was opened by a
@@ -2328,7 +2354,7 @@ async def teams_call(who: str, video: bool = False) -> str:
     if not teams_bridge.enabled():
         return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
     kind = "video call" if video else "call"
-    if consent.asked_to_call(capabilities.TURN_TEXT.get()):
+    if consent.asked_to_call(capabilities.said_this_turn()):
         # The same recorded call an approval would run — one execution path, so a
         # dialled call and an approved call cannot drift apart.
         try:

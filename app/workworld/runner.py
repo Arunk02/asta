@@ -83,9 +83,16 @@ def summarise(results: list[S.Result], k: int, live: bool, day_summary: dict | N
     }
 
 
-def save(summary: dict, baseline: bool = False) -> Path:
+LAST_REPLAYS = OUT_DIR / "last-replays.json"   # his own corrections, replayed
+
+
+def save(summary: dict, baseline: bool = False, replays: bool = False) -> Path:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     live = summary.get("tier") == "live"
+    if replays:
+        # A run of a few replays must not stand in for the whole bench.
+        LAST_REPLAYS.write_text(json.dumps(summary, indent=1))
+        return LAST_REPLAYS
     target = LAST_LIVE if live else LAST
     target.write_text(json.dumps(summary, indent=1))
     if not live:
@@ -132,7 +139,7 @@ def report(summary: dict) -> str:
 def main(argv: list[str]) -> int:
     import argparse
     ap = argparse.ArgumentParser(prog="python -m app.workworld")
-    ap.add_argument("command", choices=["run", "twin", "day", "baseline"])
+    ap.add_argument("command", choices=["run", "twin", "day", "baseline", "replays"])
     ap.add_argument("--set", action="append", dest="sets")
     ap.add_argument("--k", type=int, default=1)
     ap.add_argument("--live", action="store_true")
@@ -153,6 +160,13 @@ def main(argv: list[str]) -> int:
         from . import day
         print(day.report(asyncio.run(day.run())))
         return 0
+    if args.command == "replays":
+        from . import replays
+        written = replays.from_history(days=60)
+        print(f"{len(written)} standing instruction(s) from the last 60 days compiled into replays")
+        for line in written:
+            print("  " + line)
+        args.sets = ["replays"]
 
     async def everything():
         from . import day as day_mod
@@ -164,7 +178,7 @@ def main(argv: list[str]) -> int:
 
     results, day_summary = asyncio.run(everything())
     summary = summarise(results, k=args.k, live=args.live, day_summary=day_summary)
-    save(summary, baseline=args.command == "baseline")
+    save(summary, baseline=args.command == "baseline", replays=args.command == "replays")
     if not args.quiet:
         print(report(summary))
     return 0 if not [f for f in summary["failures"] if not f["gap"]] else 1

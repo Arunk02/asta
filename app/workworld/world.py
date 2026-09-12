@@ -219,6 +219,13 @@ class World:
         # Every working tree a scenario may touch lives here; see the git guard.
         self.scratch = self.db_path.parent / "workspace"
         (self.scratch / "repo").mkdir(parents=True, exist_ok=True)
+        # His guardrails file is real configuration, and a rule adopted in a
+        # scenario appends to it. The world gets its own copy of the shipped one.
+        from app import guardrails
+        rails = self.db_path.parent / "guardrails.md"
+        rails.write_text(guardrails.EXAMPLE_PATH.read_text() if guardrails.EXAMPLE_PATH.exists() else "")
+        self._rails_undo = os.environ.get("ASTA_GUARDRAILS")
+        os.environ["ASTA_GUARDRAILS"] = str(rails)
 
         # 2. His phone. notify's own ledger/dedup logic still runs; only the
         #    delivery at the end of it is a recorder.
@@ -388,6 +395,11 @@ class World:
             raise SandboxBreach("the scenario would have written to the live database")
 
     def uninstall(self) -> None:
+        if hasattr(self, "_rails_undo"):
+            if self._rails_undo is None:
+                os.environ.pop("ASTA_GUARDRAILS", None)
+            else:
+                os.environ["ASTA_GUARDRAILS"] = self._rails_undo
         for key, old in getattr(self, "_env_undo", []):
             if old is None:
                 os.environ.pop(key, None)

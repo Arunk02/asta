@@ -80,7 +80,11 @@ _DONE_KEY = "responder_done"
 
 #: Production is misbehaving. "check the production temporal bookings struck".
 _INCIDENT = re.compile(
-    r"\b(prod|production|live)\b.{0,40}\b(stuck|struck|down|failing|failed|broken|"
+    # A ServiceNow incident number IS an incident, whatever words surround it —
+    # "INC0012345 is open, can you check?" read as a debug ask, so muting
+    # incidents did not cover the commonest way one reaches him.
+    r"\bINC\d{5,}\b"
+    r"|\b(prod|production|live)\b.{0,40}\b(stuck|struck|down|failing|failed|broken|"
     r"hung|stale|not\s+(?:moving|working|processing|running)|piling|backlog)\b"
     r"|\b(stuck|struck|hung|stale|backlog|piling\s+up)\b.{0,40}\b(booking|workflow|"
     r"activity|queue|job|task|order|shipment|message)s?\b"
@@ -420,6 +424,10 @@ def should_respond(kind: str, priority: int | None, key: str,
         return "nothing checkable in it"
     if muted(kind):
         return f"he asked me not to investigate {kind} asks"
+    from . import policy
+    ruled = policy.check("investigate", kind)
+    if not ruled.ok:
+        return ruled.why
     if broadcast:
         return "addressed to a room, not to him"
     if too_old(sent_at, now):

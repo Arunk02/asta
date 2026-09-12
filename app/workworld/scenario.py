@@ -84,6 +84,21 @@ def load(sets: list[str] | None = None, directory: Path | None = None) -> list[S
         data = yaml.safe_load(path.read_text()) or {}
         for raw in data.get("scenarios", []):
             out.append(Scenario(set=name, **raw))
+    if directory is None and (not sets or "replays" in sets):
+        out += load_replays()
+    return out
+
+
+def load_replays() -> list[Scenario]:
+    """His own corrections, replayed (app/instructions.py writes them). They live
+    beside his database — data/, gitignored — because they quote what he said."""
+    from app import instructions
+    out: list[Scenario] = []
+    folder = instructions.replay_dir()
+    for path in sorted(folder.glob("*.yaml")) if folder.exists() else ():
+        data = yaml.safe_load(path.read_text()) or {}
+        for raw in data.get("scenarios", []):
+            out.append(Scenario(set="replays", **raw))
     return out
 
 
@@ -193,6 +208,11 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
         world.use_jira(s.get("jira") or {})
     if s.get("intent_guess"):
         world.intent_guess(s["intent_guess"])
+    for r in s.get("rules", []) or []:
+        # Rules he has already approved, as the world finds them.
+        from app import policy
+        policy.add(r["kind"], r.get("act", ""), r.get("target", ""), r.get("value", ""),
+                   bool(r.get("unless_asked")), r.get("words", ""))
 
 
 async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) -> None:

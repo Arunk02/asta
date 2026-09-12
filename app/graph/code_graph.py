@@ -97,7 +97,9 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
         prompt = (resume_prompt if resume_prompt is not None else fresh_prompt) \
             + outcome.rider(tid, fresh=False)
     else:
-        prompt = fresh_prompt + notes.block(tid) + outcome.rider(tid, fresh=True)
+        from app import context_pack
+        prompt = (fresh_prompt + context_pack.build(tid, "plan" if stage == "plan" else "implement")
+                  + outcome.rider(tid, fresh=True))
     store.kv_set(mark, stage)
     since = time.time()
     async with tasks._ws_lock(t["workspace"]):

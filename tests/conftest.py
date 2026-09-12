@@ -107,6 +107,22 @@ def _no_machine_side_effects(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _own_guardrails_file(tmp_path, monkeypatch):
+    """Every test reads — and may write — a temp copy of the shipped example.
+
+    His `guardrails.md` is real configuration, and the instruction compiler
+    APPENDS to it on his yes. A test that exercised that path against the real
+    file would edit his rules; one that merely read it would pass on his laptop
+    and fail on a runner that only has the example.
+    """
+    from app import guardrails
+    copy = tmp_path / "guardrails.md"
+    copy.write_text(guardrails.EXAMPLE_PATH.read_text() if guardrails.EXAMPLE_PATH.exists() else "")
+    monkeypatch.setenv("ASTA_GUARDRAILS", str(copy))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_wall_clock_dependence(monkeypatch):
     for name in _TIME_DEPENDENT_ENV + _FIXTURE_SHAPING_ENV + _MACHINE_PINNED_ENV:
         monkeypatch.delenv(name, raising=False)

@@ -2052,6 +2052,9 @@ async def _worker(task_id: int) -> None:
         # itself (plus lessons + pins) — injecting a second copy just costs tokens.
         if agent:
             prompt += ANALYSIS_RIDER
+    if t["kind"] in ("analysis", "teams_draft"):
+        from . import context_pack
+        prompt += context_pack.build(task_id, "analysis" if t["kind"] == "analysis" else "draft")
     elif t["kind"] == "code":
         prompt = first_code_prompt(task_id, t)
     try:
@@ -2157,6 +2160,9 @@ def reply(task_id: int, text: str) -> str:
     if approved:
         from . import routing, task_spec
         task_spec.capture(task_id, t.get("result") or "")
+        # Always kept: a later FRESH leg (a brain switch, an escalation, a lost
+        # session) is handed this in its context pack as the definition of done.
+        store.kv_set(f"task_plan:{task_id}", (t.get("result") or "")[:6000])
         if routing.enabled():
             # Two-stage routing: the plan he approved says how big the change
             # really is, and the implementation runs at that tier.

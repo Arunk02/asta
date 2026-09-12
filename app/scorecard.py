@@ -244,6 +244,17 @@ def task_tiers(since: float, until: float) -> dict:
     return {"counts": counts, "max_on_small": int(max_on_small)}
 
 
+def rules_holding() -> dict:
+    """His standing rules, and whether his own corrections still hold in replay."""
+    from . import policy
+    try:
+        card = json.loads((WORKWORLD_LAST.parent / "last-replays.json").read_text())
+    except (OSError, ValueError):
+        card = {}
+    return {"rules": len(policy.rules()), "replayed": card.get("total"),
+            "held": card.get("passed"), "at": card.get("at", "")}
+
+
 def sessions_rotated(since: float, until: float) -> int:
     return int(_one("SELECT COUNT(*) FROM outcomes WHERE kind='session' AND outcome='rotated' "
                     "AND created_at >= ? AND created_at < ?", (since, until)) or 0)
@@ -323,6 +334,7 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
     health = health_now()
     fd = front_desk(since, until)
     tt = task_tiers(since, until)
+    rh = rules_holding()
 
     rows = [
         Row("reply_p50", "WhatsApp reply time, typical", r["p50_s"], _fmt_s(r["p50_s"]),
@@ -358,6 +370,11 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
             _fmt_pct(p["duplicate_share"]), "≤ 5%", _judge(p["duplicate_share"], 0.05, 0.15)),
         Row("ignored", "Tracked items you ignored", a["ignored_share"], _fmt_pct(a["ignored_share"]),
             "≤ 10%", _judge(a["ignored_share"], 0.10, 0.25)),
+        Row("rules_hold", "Your corrections that still hold in replay", rh["held"],
+            "—" if rh["replayed"] is None else f"{rh['held']} of {rh['replayed']}",
+            "all of them", "na" if not rh["replayed"] else
+            ("good" if rh["held"] == rh["replayed"] else "bad"),
+            f"{rh['rules']} standing rule(s) enforced · replayed {rh['at']}"),
         Row("false_done", "Plans announced as done", t["false_done"], str(t["false_done"]),
             "0", "good" if t["false_done"] == 0 else "bad"),
         Row("limit_failures", "Usage limits that became failures", t["limit_failures"],

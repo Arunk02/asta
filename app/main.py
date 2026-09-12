@@ -35,7 +35,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, followup, frontdesk, health, jira, learn, llm_meter, logsetup, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, quiet, router, quality, scorecard, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, followup, frontdesk, health, instructions, jira, learn, llm_meter, logsetup, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, policy, refresh, reminders, relevance, resume, quiet, router, quality, scorecard, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
 
 from .workworld import nightly as workworld_nightly
 
@@ -175,6 +175,9 @@ async def startup() -> None:
     # here, because a fresh process is the only place that can tell an
     # interrupted task from a running one.
     daemon.once("recover-orphans", tasks.recover_orphans())
+    # Mutes he gave before standing rules existed, shown and enforced as rules.
+    with contextlib.suppress(Exception):
+        policy.adopt_legacy()
     # Follows shipped work until the PR merges or closes. Without it a task
     # ended at "PR raised" and everything after — CI, review, the merge — landed
     # with nothing that knew which task it belonged to.
@@ -1189,6 +1192,27 @@ async def api_reply_task(task_id: int, request: Request):
         return {"ok": True, "detail": tasks.reply(task_id, b["text"])}
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/facts", dependencies=[Depends(require_auth)])
+async def api_note_fact(request: Request):
+    b = await request.json()
+    try:
+        return {"ok": True, "detail": agent_mod.note_fact(b.get("subject", ""), b.get("fact", ""),
+                                                          b.get("kind", "fact"), b.get("source", ""))}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/facts", dependencies=[Depends(require_auth)])
+def api_facts(subject: str = ""):
+    from . import people
+    return {"facts": people.facts(subject)}
+
+
+@app.get("/api/rules", dependencies=[Depends(require_auth)])
+def api_rules():
+    return {"rules": [r.__dict__ for r in policy.rules()], "summary": policy.summary()}
 
 
 @app.get("/api/tasks/{task_id}/events", dependencies=[Depends(require_auth)])
@@ -2975,6 +2999,20 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                 await sink.send({"type": "done", "tools": []})
             return None
 
+    # A STANDING instruction — "don't check incidents going forward", "my
+    # favourite workspace is booking" — is proposed as a rule the code enforces,
+    # once, with a one-tap yes. Said on its own, that proposal IS the reply: no
+    # brain, and nothing folded into whatever task happens to be live.
+    if frontdesk.enabled():
+        proposal = frontdesk.standing_instruction(user_text)
+        if proposal:
+            frontdesk.record("rule", proposal.kind)
+            await sink.send({"type": "note", "text": instructions.propose(user_text, proposal)})
+            if frontdesk.instruction_only(user_text, proposal):
+                if channel == "web":
+                    await sink.send({"type": "done", "tools": []})
+                return None
+
     # A live background CODE task owns the conversation's attention: augment it
     # (delivered at its next gate — no session restart) or redirect it (cancel).
     live = tasks.live_tasks_for(cid)
@@ -3013,11 +3051,14 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     #
     # Only when a workspace is known: `tasks.code_cwd` refuses to run code work
     # without one, and routing into a refusal would be worse than not routing.
-    if (not live and (conv.get("workspace") or "").strip()
-            and work_intent.is_work_assignment(user_text, _workspace_repos(conv["workspace"]))):
+    # His stated default ("my favourite workspace is booking") stands in for a
+    # chat that never picked one — the phone chat, mostly.
+    work_ws = (conv.get("workspace") or "").strip() or policy.prefer("workspace")
+    if (not live and work_ws
+            and work_intent.is_work_assignment(user_text, _workspace_repos(work_ws))):
         try:
             t = tasks.spawn(work_intent.title_for(user_text), user_text,
-                            "code", conv["workspace"])
+                            "code", work_ws)
         except Exception as exc:                       # noqa: BLE001
             # Never swallow the message: if the lane will not take it, the chat
             # turn still answers, which is exactly the old behaviour.
@@ -3027,7 +3068,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             frontdesk.record("work", f"#{t['id']}")
             await sink.send({"type": "note", "text":
                              f"🛠 Task #{t['id']} — {t['title']}\n"
-                             f"Planning it in {conv['workspace']} now; you'll get the "
+                             f"Planning it in {work_ws} now; you'll get the "
                              f"plan to approve before anything is written. "
                              f"Say “stop {t['id']}” to drop it."})
             if channel == "web":

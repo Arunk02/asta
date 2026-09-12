@@ -124,11 +124,24 @@ def prs_now() -> str:
     return agent.task_pr_status(0)
 
 
+_RULES = re.compile(_LEAD + r"(?:(?:what\s+are\s+)?my\s+(?:standing\s+)?rules|"
+                    r"(?:list|show)\s+(?:my\s+)?(?:standing\s+)?rules|standing\s+rules)" + _END, re.I)
+_DROP_RULE = re.compile(_LEAD + r"(?:drop|forget|remove|delete|lift)\s+rule\s*#?(\d{1,4})" + _END, re.I)
+
+
 def answer_from_state(text: str) -> str:
     """The reply, when the message is a question the task table answers. '' otherwise."""
     t = (text or "").strip()
     if not t or len(t) > 120:
         return ""
+    from . import policy
+    if _RULES.match(t):
+        return policy.summary()
+    m = _DROP_RULE.match(t)
+    if m:
+        rid = int(m.group(1))
+        return (f"Rule {rid} dropped — it no longer applies." if policy.drop(rid)
+                else f"There's no standing rule {rid}. Say “my rules” to list them.")
     m = _TASK_STATUS.match(t)
     if m:
         return task_card(int(m.group(1) or m.group(2)))
@@ -160,3 +173,44 @@ def interjection(text: str, named: bool) -> str:
     if verdict == "ambiguous" and named:
         return "augment"
     return verdict
+
+
+# --- standing instructions -----------------------------------------------------------------
+
+#: An instruction, not a question or a remark: it opens with the imperative.
+_IMPERATIVE = re.compile(
+    r"^\s*(?:ok(?:ay)?[,\s]+|and\s+|also\s+|pls\s+|please\s+)*"
+    r"(always|never|don'?t|dont|do not|from now on|going forward|stop|no more|remember|my\s+"
+    r"(?:favou?rite|default|preferred))\b", re.I)
+
+
+def standing_instruction(text: str):
+    """The rule a standing instruction states — once per distinct instruction.
+
+    Two ways in: a message that OPENS with the imperative ("don't…", "always…",
+    "from now on…"), or one that states a default anywhere in it ("…and remember
+    my favourite workspace is booking"). A question is never an instruction.
+    """
+    from . import instructions
+    t = (text or "").replace("’", "'").strip()
+    if not t or t.endswith("?"):
+        return None
+    if not (_IMPERATIVE.search(t) or instructions.states_a_default(t)):
+        return None
+    cand = instructions.compile(t)
+    if cand is None:
+        return None
+    key = f"rule_proposed:{cand.kind}:{cand.act}:{cand.target.lower()}:{cand.value}"
+    if cand.kind == "note":
+        key += ":" + re.sub(r"\W+", "", t.lower())[:60]
+    if store.kv_get(key):
+        return None
+    store.kv_set(key, "1")
+    return cand
+
+
+def instruction_only(text: str, cand) -> bool:
+    """Was the message JUST the instruction? Then the proposal answers it. A longer
+    message with a request in it still goes on to be handled."""
+    return cand.kind != "note" and len((text or "").strip()) <= 200 and "?" not in text
+

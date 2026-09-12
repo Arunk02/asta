@@ -140,6 +140,34 @@ def block(audience: str) -> str:
             "these override any default above)\n\n" + "\n\n".join(parts))
 
 
+STANDING = "Standing instructions"
+
+
+def append_standing(line: str) -> Path:
+    """Add one dated line under `## Standing instructions` — his yes to a rule the
+    instruction compiler proposed. The shipped example is never written: with no
+    file of his own yet, his file is created from it first."""
+    target = path()
+    if target == EXAMPLE_PATH:
+        target = DEFAULT_PATH
+        target.write_text(EXAMPLE_PATH.read_text() if EXAMPLE_PATH.exists() else "")
+    text = target.read_text() if target.exists() else ""
+    bullet = f"- {' '.join((line or '').split())}"
+    if bullet in text:
+        return target
+    marks = list(_HEADING.finditer(text))
+    here = next((i for i, m in enumerate(marks)
+                 if m.group(1).strip().lower() == STANDING.lower()), None)
+    if here is None:
+        text = text.rstrip() + f"\n\n## {STANDING}\n{bullet}\n"
+    else:
+        end = marks[here + 1].start() if here + 1 < len(marks) else len(text)
+        head, tail = text[:end].rstrip(), text[end:]
+        text = head + "\n" + bullet + "\n" + ("\n" + tail.lstrip("\n") if tail else "")
+    target.write_text(text)
+    return target
+
+
 def problems() -> dict[str, str]:
     """What the health check should tell him: a section over the cap (its tail is
     not being sent), an override path that points at nothing, or a file with

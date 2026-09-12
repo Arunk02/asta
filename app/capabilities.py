@@ -79,6 +79,11 @@ _TABLE: tuple[Capability, ...] = (
                note="Durable memory across ALL conversations. kind: fact | preference "
                     "| gotcha | fix. Save corrections and preferences, not chatter."),
     Capability("search_memory", "memory", http="GET /api/memory/search?q={query}"),
+    Capability("note_fact", "memory",
+               http='POST /api/facts {"subject":"…","fact":"…","kind":"person|repo|service|env","source":"…"}',
+               note="Facts about people and systems, with a source — who owns what, which "
+                    "repo does what. Not for his instructions: those become rules."),
+    Capability("facts_about", "memory", http="GET /api/facts?subject={subject}"),
     Capability("load_skill", "memory", http="GET /api/skills/{name}"),
     # --- asking -------------------------------------------------------------
     Capability("ask_user", "ask", http="POST /api/ask",
@@ -438,6 +443,31 @@ READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=Fal
 #: route it does not control. Same ContextVar mechanism as READ_ONLY_TURN: set
 #: once at the turn boundary, copied into everything the turn awaits.
 TURN_TEXT: ContextVar[str] = ContextVar("asta_turn_text", default="")
+
+
+def said_this_turn() -> str:
+    """What he typed this turn, on EVERY brain path.
+
+    TURN_TEXT is set where the in-process brain runs. A CLI brain reaches Asta's
+    tools over MCP — a different request, a different context — where it is
+    always empty, so a check that relied on it alone quietly checked nothing on
+    the brains he actually uses. The conversation's newest message of his is the
+    same fact, stored before the turn starts.
+    """
+    said = TURN_TEXT.get()
+    if said:
+        return said
+    from . import store, tasks
+    cid = tasks.current_conversation()
+    if not cid:
+        return ""
+    try:
+        for m in reversed(store.list_ui_messages(cid) or []):
+            if m.get("role") == "user":
+                return m.get("content") or ""
+    except Exception:                                       # noqa: BLE001
+        return ""
+    return ""
 
 
 def chat_may_write() -> bool:

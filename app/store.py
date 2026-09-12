@@ -207,6 +207,17 @@ CREATE TABLE IF NOT EXISTS outcomes (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_outcomes_kind ON outcomes(kind, created_at);
+CREATE TABLE IF NOT EXISTS task_events (
+    -- One timeline per task: every status change, route decision and gate
+    -- answer, in order. The task row says where a task IS; this says how it
+    -- got there, which eighteen kv keys and fifteen statuses never could.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_events ON task_events(task_id, id);
 CREATE TABLE IF NOT EXISTS traces (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conv_id TEXT NOT NULL,
@@ -532,6 +543,8 @@ def create_task(title: str, kind: str, prompt: str, workspace: str | None,
             (title, kind, prompt, workspace, teams_chat, time.time()),
         )
         tid = cur.lastrowid
+        conn.execute("INSERT INTO task_events (task_id, kind, detail, created_at) "
+                     "VALUES (?,?,?,?)", (tid, "created", kind, time.time()))
     return get_task(tid)
 
 
@@ -552,7 +565,31 @@ def update_task(task_id: int, **fields) -> None:
         return
     keys = ", ".join(f"{k}=?" for k in fields)
     with _connect() as conn:
+        before = None
+        if "status" in fields:
+            row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            before = row["status"] if row else None
         conn.execute(f"UPDATE tasks SET {keys} WHERE id=?", (*fields.values(), task_id))
+        # Every status change lands in the timeline here, in the one place all
+        # of them pass through — so no caller can move a task without it showing.
+        if before is not None and before != fields["status"]:
+            conn.execute("INSERT INTO task_events (task_id, kind, detail, created_at) "
+                         "VALUES (?,?,?,?)",
+                         (task_id, "status", f"{before} → {fields['status']}", time.time()))
+
+
+def add_task_event(task_id: int, kind: str, detail: str = "") -> None:
+    with _connect() as conn:
+        conn.execute("INSERT INTO task_events (task_id, kind, detail, created_at) "
+                     "VALUES (?,?,?,?)", (task_id, kind, (detail or "")[:500], time.time()))
+
+
+def task_events(task_id: int, limit: int = 100) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT kind, detail, created_at FROM task_events "
+                            "WHERE task_id=? ORDER BY id DESC LIMIT ?",
+                            (task_id, limit)).fetchall()
+    return [dict(r) for r in reversed(rows)]
 
 
 # --- reminders ---------------------------------------------------------------

@@ -67,7 +67,8 @@ _PLAN_DENY = ("Write", "Edit", "NotebookEdit",
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent_file: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
-                   on_progress=None, mcp_config: str = "", plan_only: bool = False) -> str:
+                   on_progress=None, mcp_config: str = "", plan_only: bool = False,
+                   model: str = "") -> str:
     """Headless claude run with the same contract as copilot_cli.one_shot.
 
     agent_file — a .github/agents/*.agent.md whose CONTENT becomes the appended
@@ -100,7 +101,8 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     if effort and effort != "default":
         cmd += ["--effort", effort]
     from . import agent as agent_mod
-    model = agent_mod.tier_of("claude_cli")
+    # A per-leg model (app/routing.py) wins over the brain's standing tier.
+    model = model or agent_mod.tier_of("claude_cli")
     if model:
         cmd += ["--model", model]
     proc = await asyncio.create_subprocess_exec(

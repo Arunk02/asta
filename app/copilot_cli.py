@@ -603,7 +603,8 @@ _PLAN_DENY = ("write", "shell(git commit)", "shell(git push)", "shell(gh pr crea
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
-                   on_progress=None, mcp_config: str = "", plan_only: bool = False) -> str:
+                   on_progress=None, mcp_config: str = "", plan_only: bool = False,
+                   model: str = "") -> str:
     """Headless one-off prompt.
 
     agent      — a workspace .github/agents/*.agent.md pipeline (e.g.
@@ -628,6 +629,8 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
         cmd += ["--additional-mcp-config", mcp_config]
     if agent:
         cmd += ["--agent", agent]
+    if model:
+        cmd += ["--model", model]
     if plan_only:
         # The plan gate, made structural. Told to plan and stop, a brain
         # sometimes implements anyway — and for an ad-hoc ("micro") task nothing

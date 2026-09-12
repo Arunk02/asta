@@ -35,7 +35,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, followup, health, jira, learn, llm_meter, logsetup, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, quiet, router, quality, scorecard, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, followup, frontdesk, health, jira, learn, llm_meter, logsetup, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, quiet, router, quality, scorecard, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
 
 from .workworld import nightly as workworld_nightly
 
@@ -1191,6 +1191,14 @@ async def api_reply_task(task_id: int, request: Request):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/tasks/{task_id}/events", dependencies=[Depends(require_auth)])
+def api_task_events(task_id: int):
+    """One task's timeline: status changes, route decisions, gate answers, in order."""
+    if not store.get_task(task_id):
+        raise HTTPException(404, f"no task #{task_id}")
+    return {"task_id": task_id, "events": store.task_events(task_id, 200)}
+
+
 @app.post("/api/tasks/{task_id}/outcome", dependencies=[Depends(require_auth)])
 async def api_task_outcome(task_id: int, request: Request):
     """A task run saying what state it left the work in (see app/graph/outcome.py)."""
@@ -2063,6 +2071,7 @@ def _workspace_repos(workspace: str) -> tuple[str, ...]:
 
 
 def _start_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task:
+    frontdesk.record("brain", channel)
     job = asyncio.create_task(_conducted_turn(conv, user_text, sink, channel))
     _inflight[conv["id"]] = job
     job.add_done_callback(lambda j: _clear_inflight(j, conv["id"]))
@@ -2100,6 +2109,7 @@ def _start_side_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.
         return None
     token = capabilities.READ_ONLY_TURN.set(True)
     try:
+        frontdesk.record("brain", f"{channel} side")
         job = asyncio.create_task(_conducted_turn(conv, user_text, sink, channel))
     finally:
         # The task kept the read-only context; this turn's caller must not.
@@ -2561,8 +2571,18 @@ def _pending_summary(cid: str) -> str:
         lines.append(f"{len(lines) + 1}. ❓ {q['text'][:100]}")
     live = tasks.live_tasks_for(cid)
     for tid in live:
-        title = (store.get_task(tid) or {}).get("title", "")[:45]
-        lines.append(f"{len(lines) + 1}. ⚙️ task #{tid} running — {title}")
+        row = store.get_task(tid) or {}
+        state = ("waiting for you" if row.get("status") == "awaiting_approval"
+                 else (row.get("status") or "running").replace("_", " "))
+        lines.append(f"{len(lines) + 1}. ⚙️ task #{tid} {state} — {row.get('title', '')[:45]}")
+    # Gates from anywhere else — a plan raised from the web UI waits on him just
+    # the same, and this list is the only place he asks where things stand.
+    for t in store.list_tasks(limit=100):
+        if t["status"] != "awaiting_approval" or t["id"] in live:
+            continue
+        gate = store.kv_get(f"task_gate:{t['id']}") or (
+            "draft" if t["kind"] == "teams_draft" else "plan")
+        lines.append(f"{len(lines) + 1}. 📋 #{t['id']} {t['title'][:45]} — {gate}")
     if not lines:
         return "Nothing is waiting on you."
     return ("Waiting on you (a bare “yes” answers the first one):\n"
@@ -2795,6 +2815,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             await sink.send({"type": "done", "tools": []})
         return None
     if _PENDING_ASK.match(user_text or ""):
+        frontdesk.record("state", "pending")
         await sink.send({"type": "note", "text": _pending_summary(cid)})
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
@@ -2935,6 +2956,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         wanted = int(cmd.group(2)) if cmd.group(2) else None
         note = await _run_task_command(verb, wanted, cid)
         if note:
+            frontdesk.record("command", verb)
             await sink.send({"type": "note", "text": note})
             if channel == "web":
                 await sink.send({"type": "done", "tools": []})
@@ -2942,13 +2964,24 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         # Names nothing actionable — fall through and treat it as an ordinary
         # message rather than answering "there is nothing to approve".
 
+    # A question the task table answers is answered from it — status, what's
+    # pending, "status of 117", open PRs. No brain, no tokens, a second or less.
+    if frontdesk.enabled():
+        answer = frontdesk.answer_from_state(user_text)
+        if answer:
+            frontdesk.record("state")
+            await sink.send({"type": "delta" if channel == "web" else "note", "text": answer})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+
     # A live background CODE task owns the conversation's attention: augment it
     # (delivered at its next gate — no session restart) or redirect it (cancel).
     live = tasks.live_tasks_for(cid)
     named = _named_task(user_text, live)
     if named is not None:
         if await _route_to_task(named, _strip_task_ref(user_text), sink, channel,
-                                conv.get("model", "")):
+                                conv.get("model", ""), named=True):
             return None
     elif len(live) > 1:
         # Several tasks live and none named. Guessing (it used to take the
@@ -2991,6 +3024,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             quiet.note("dispatch.route_code_work", exc)
         else:
             tasks.link_task(cid, t["id"])
+            frontdesk.record("work", f"#{t['id']}")
             await sink.send({"type": "note", "text":
                              f"🛠 Task #{t['id']} — {t['title']}\n"
                              f"Planning it in {conv['workspace']} now; you'll get the "
@@ -3012,7 +3046,10 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             # Unnamed: only treat it as feedback if it actually reads like a
             # follow-up. A genuinely new request must not be swallowed into the
             # last thing that happened to finish.
-            intent = await activity.resolve_interjection(user_text, conv.get("model", ""))
+            # Rules only when the front desk is on: a brain's guess that this is
+            # "more of the same" is how a new ask gets folded into finished work.
+            intent = (activity.classify_interjection(user_text) if frontdesk.enabled()
+                      else await activity.resolve_interjection(user_text, conv.get("model", "")))
             if intent == "augment":
                 target = recent[-1]
         if target is not None:
@@ -3024,6 +3061,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             except ValueError:
                 pass          # not continuable after all — answer it normally
             else:
+                frontdesk.record("job", f"refine #{target}")
                 await sink.send({"type": "note", "text": note})
                 return None
 
@@ -3221,14 +3259,17 @@ def _strip_task_ref(text: str) -> str:
 
 
 async def _route_to_task(task_id: int, user_text: str, sink, channel: str,
-                         model_name: str = "") -> bool:
+                         model_name: str = "", named: bool = False) -> bool:
     """A follow-up arrived while a background code task is live. Fold it in at the
     task's next gate, or cancel the task if it's a redirect.
 
     False means "this wasn't about the task" — the caller answers it normally
     rather than burying an unrelated message in the task's instructions.
     """
-    intent = await activity.resolve_interjection(user_text, model_name)
+    intent = (frontdesk.interjection(user_text, named) if frontdesk.enabled()
+              else await activity.resolve_interjection(user_text, model_name))
+    if intent in ("status", "redirect", "augment"):
+        frontdesk.record("job", f"{intent} #{task_id}")
     if intent == "status":
         summary = await asyncio.to_thread(activity.summary)
         await sink.send({"type": "note" if channel != "web" else "delta", "text": summary})

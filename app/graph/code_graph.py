@@ -366,6 +366,9 @@ async def stronger(state: JobState) -> dict:
     better = tasks._stronger_executor(tid)
     store.kv_set(f"task_verify_escbrain:{tid}", "1")
     store.kv_set(f"task_executor:{tid}", better)
+    from app import routing
+    if routing.enabled():
+        routing.escalate(tid, "the same failure twice")
     store.kv_set(f"task_escalated:{tid}", "1")
     store.kv_set(f"task_verify_rounds:{tid}", str(tasks._verify_rounds(tid) + 1))
     for ex in tasks._executor_names():

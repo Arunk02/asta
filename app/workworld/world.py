@@ -73,9 +73,15 @@ class ScriptedBrain:
                 return self.replies.pop(i)
         return None
 
-    async def answer(self, prompt: str, conv_id: str = "") -> str:
+    async def answer(self, prompt: str, conv_id: str = "", flags: dict | None = None) -> str:
+        flags = flags or {}
+        # How the leg was asked to run, not only what it was asked: effort, model
+        # and the plan-only gate are what the routing scenarios assert on.
         self.world.brain_calls.append({"kind": self.kind, "prompt": prompt or "",
-                                       "at": time.time()})
+                                       "at": time.time(),
+                                       "effort": flags.get("effort", ""),
+                                       "model": flags.get("model", ""),
+                                       "plan_only": bool(flags.get("plan_only"))})
         reply = self._pick(prompt or "")
         if reply is None:
             self.last_context = 0
@@ -163,6 +169,16 @@ class World:
                 tasks.unbind_conversation(token)
         self.tool_results.append({"tool": name, "text": str(out)[:2000]})
         return out
+
+    def intent_guess(self, verdict: str) -> None:
+        """What the brain's intent classifier WOULD say, if anyone asked it — so a
+        scenario can prove a routing decision does not rest on its guess."""
+        from app import agent
+
+        async def guess(text, model_name=""):
+            self.brain_calls.append({"kind": "intent", "prompt": text or "", "at": time.time()})
+            return verdict
+        self._patch.set(agent, "quick_intent", guess)
 
     def use_jira(self, issues: dict) -> None:
         """Jira reads over a transport double. The real client runs — its status
@@ -329,7 +345,7 @@ class World:
                 return out
 
             async def one_shot(prompt, **kw):
-                return await task.answer(prompt)
+                return await task.answer(prompt, flags=kw)
 
             for mod in (claude_cli, copilot_cli):
                 p.set(mod, "run_turn", run_turn)

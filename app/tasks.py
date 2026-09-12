@@ -864,6 +864,13 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
         # the more annoying failure.
         return same
     t = store.create_task(title, kind, prompt, workspace or None, teams_chat)
+    from . import routing
+    if routing.enabled():
+        # "use claude" in the ask itself names the brain; "cheap"/"max" the tier.
+        asked = routing.on_spawn(t["id"], title, prompt) if kind == "code" \
+            else routing.overrides(f"{title}\n{prompt}").get("brain", "")
+        if asked in _executor_names() and not executor:
+            executor = asked
     if executor:
         store.kv_set(f"task_executor:{t['id']}", executor)
     if kind == "code":
@@ -1271,13 +1278,20 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
     # The rule was a sentence in a prompt; the micro pipeline's own instructions
     # said "make the edit", and an instruction a model may ignore is not a gate.
     plan_only = not plan_approved(task_id)
+    # Which model at what effort: by the size of the work, not the stage alone.
+    model = ""
+    from . import routing
+    if routing.enabled():
+        choice = routing.choose(task_id, ex, "plan" if plan_only else "implement")
+        model, effort = choice.model, choice.effort or effort
+        routing.record(task_id, "plan" if plan_only else "implement", ex, choice)
     if ex == "claude":
         try:
             out = await claude_cli.one_shot(
                 prompt, cwd=cwd, timeout=code_timeout(workspace),
                 agent_file=_agent_file("code", _pipeline_for(task_id)),
                 effort=effort, session_id=sid, resume=resume, on_progress=watcher,
-                mcp_config=dev_cfg, plan_only=plan_only)
+                mcp_config=dev_cfg, plan_only=plan_only, model=model)
             agent_mod.mark_quota_ok("claude_cli")
             return out
         except RuntimeError as exc:
@@ -1295,7 +1309,7 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         out = await copilot_cli.one_shot(
             _with_pipeline(pipeline, prompt), cwd=cwd, timeout=code_timeout(workspace),
             effort=effort, session_id=sid, resume=resume, on_progress=watcher,
-            mcp_config=dev_cfg, plan_only=plan_only)
+            mcp_config=dev_cfg, plan_only=plan_only, model=model)
         agent_mod.mark_quota_ok("copilot")
         return out
     except RuntimeError as exc:
@@ -1460,6 +1474,9 @@ async def _escalate_brain_and_retry(task_id: int, t: dict, outcome, hops: int,
     from . import notify, verify
     store.kv_set(f"task_verify_escbrain:{task_id}", "1")
     store.kv_set(f"task_executor:{task_id}", stronger)
+    from . import routing
+    if routing.enabled():
+        routing.escalate(task_id, "the same failure twice")
     store.kv_set(f"task_escalated:{task_id}", "1")
     store.kv_set(f"task_verify_rounds:{task_id}", str(_verify_rounds(task_id) + 1))
     for ex in _executor_names():
@@ -2138,8 +2155,14 @@ def reply(task_id: int, text: str) -> str:
     # The plan he just approved is the definition of done — keep it (no-op unless
     # ASTA_TASK_SPEC is on) so a later compacted leg can re-anchor to it.
     if approved:
-        from . import task_spec
+        from . import routing, task_spec
         task_spec.capture(task_id, t.get("result") or "")
+        if routing.enabled():
+            # Two-stage routing: the plan he approved says how big the change
+            # really is, and the implementation runs at that tier.
+            from .graph import outcome as _outcome
+            routing.on_plan(task_id, t.get("result") or "", _outcome.reported(task_id, 0))
+    store.add_task_event(task_id, "gate", ("approved: " if approved else "answer: ") + text[:200])
     # Anything buffered by augment() while the task ran rides in now, on the user's
     # gate action — so mid-flight additions land without a session restart.
     full_text = text + _drain_addenda(task_id)

@@ -187,6 +187,8 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
     world.teams_activity.extend(s.get("teams_activity", []) or [])
     if "jira" in s:
         world.use_jira(s.get("jira") or {})
+    if s.get("intent_guess"):
+        world.intent_guess(s["intent_guess"])
 
 
 async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) -> None:
@@ -466,6 +468,39 @@ def _check_tool_result(arg, world, state):
     return ""
 
 
+def _check_brain_flags(arg, world, state):
+    """How legs were run — `{kind: task, effort_not: [max, xhigh]}`, or one leg by
+    position: `{kind: task, leg: -1, effort: low, model: opus}`."""
+    calls = [b for b in world.brain_calls if not arg.get("kind") or b["kind"] == arg["kind"]]
+    if not calls:
+        return f"no {arg.get('kind') or ''} brain call was made"
+    for bad in arg.get("effort_not") or []:
+        hits = [c for c in calls if c.get("effort") == bad]
+        if hits:
+            return f"{len(hits)} leg(s) ran at effort {bad!r}"
+    if "leg" in arg:
+        try:
+            c = calls[int(arg["leg"])]
+        except IndexError:
+            return f"no leg {arg['leg']} (only {len(calls)})"
+        for field in ("effort", "model", "plan_only"):
+            if field in arg and c.get(field) != arg[field]:
+                return f"leg {arg['leg']} {field}={c.get(field)!r}, expected {arg[field]!r}"
+    return ""
+
+
+def _check_frontdesk(arg, world, state):
+    """How the front desk routed the scenario's messages — `{route: state, min: 1}`."""
+    from app import store
+    rows = [o for o in store.recent_outcomes(200) if o["kind"] == "frontdesk"
+            and (not arg.get("route") or o["outcome"] == arg["route"])]
+    if "count" in arg and len(rows) != arg["count"]:
+        return f"{len(rows)} {arg.get('route')} route(s), expected {arg['count']}"
+    if len(rows) < arg.get("min", 0):
+        return f"{len(rows)} {arg.get('route')} route(s), fewer than {arg['min']}"
+    return ""
+
+
 def _check_health(arg, world, state):
     problems = state.get("health") or {}
     text = " ".join(f"{k}: {v}" for k, v in problems.items())
@@ -500,6 +535,8 @@ CHECKS = {
     "kv": _check_kv,
     "brain_calls": _check_brain_calls,
     "tool_result_contains": _check_tool_result,
+    "brain_flags": _check_brain_flags,
+    "frontdesk": _check_frontdesk,
     "health_says": _check_health,
     "reply_max_chars": _check_reply_max,
 }

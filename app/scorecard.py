@@ -221,6 +221,29 @@ def tool_failures(since: float, until: float) -> dict:
             "top": [f"{r['subject']} ×{r['n']}" for r in rows[:3]]}
 
 
+def front_desk(since: float, until: float) -> dict:
+    """How his messages were routed — and how many never needed a brain."""
+    from .frontdesk import NO_BRAIN
+    rows = _rows("SELECT outcome, COUNT(*) n FROM outcomes WHERE kind='frontdesk' "
+                 "AND created_at >= ? AND created_at < ? GROUP BY outcome", (since, until))
+    counts = {r["outcome"]: r["n"] for r in rows}
+    total = sum(counts.values())
+    free = sum(n for k, n in counts.items() if k in NO_BRAIN)
+    return {"total": total, "no_brain_share": (free / total) if total else None,
+            "counts": counts}
+
+
+def task_tiers(since: float, until: float) -> dict:
+    """Which tier task legs ran at (app/routing.py), and how often a tier escalated."""
+    rows = _rows("SELECT outcome, COUNT(*) n FROM outcomes WHERE kind='route' "
+                 "AND created_at >= ? AND created_at < ? GROUP BY outcome", (since, until))
+    counts = {r["outcome"]: r["n"] for r in rows}
+    max_on_small = _one("SELECT COUNT(*) FROM outcomes WHERE kind='route' AND outcome='T1' "
+                        "AND (detail LIKE '%@ max%' OR detail LIKE '%@ xhigh%') "
+                        "AND created_at >= ? AND created_at < ?", (since, until)) or 0
+    return {"counts": counts, "max_on_small": int(max_on_small)}
+
+
 def sessions_rotated(since: float, until: float) -> int:
     return int(_one("SELECT COUNT(*) FROM outcomes WHERE kind='session' AND outcome='rotated' "
                     "AND created_at >= ? AND created_at < ?", (since, until)) or 0)
@@ -298,15 +321,26 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
     tf = tool_failures(since, until)
     ww = workworld_last()
     health = health_now()
+    fd = front_desk(since, until)
+    tt = task_tiers(since, until)
 
     rows = [
         Row("reply_p50", "WhatsApp reply time, typical", r["p50_s"], _fmt_s(r["p50_s"]),
-            "≤ 25 s (≤ 5 s once P3 answers status from state)", _judge(r["p50_s"], 25, 45),
+            "≤ 25 s (status answers come from state)", _judge(r["p50_s"], 25, 45),
             f"slow end {_fmt_s(r['p90_s'])} · first word {_fmt_s(r['first_word_p50_s'])}"),
         Row("context_per_call", "Largest session context in one call", r["context_per_call_max"],
             _fmt_k(r["context_per_call_max"]), "≤ 100k (sessions retire above it)",
             _judge(r["context_per_call_max"], 100_000, 150_000),
             "measured from 11 Sep; older turns did not record it"),
+        Row("no_brain", "Messages answered without waking a brain", fd["no_brain_share"],
+            _fmt_pct(fd["no_brain_share"]), "rising — status, commands, job replies",
+            "na" if fd["no_brain_share"] is None else
+            _judge(fd["no_brain_share"], 0.3, 0.1, lower_is_better=False),
+            " · ".join(f"{k} {n}" for k, n in sorted(fd["counts"].items())) or "counted from 12 Sep"),
+        Row("task_tiers", "Task legs by tier (one-file work at max effort)", tt["max_on_small"],
+            " · ".join(f"{k} {n}" for k, n in sorted(tt["counts"].items())) or "—",
+            "0 small changes at max effort", "good" if tt["max_on_small"] == 0 else "bad",
+            "recorded while ASTA_ROUTING is on"),
         Row("tokens_per_turn", "Tokens read per chat turn", r["tokens_per_turn_avg"],
             _fmt_k(r["tokens_per_turn_avg"]), "≤ 50k", _judge(r["tokens_per_turn_avg"], 50_000, 150_000)),
         Row("reply_length", "Asta's phone reply length", ln["avg_chars"],

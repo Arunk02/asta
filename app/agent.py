@@ -1688,6 +1688,22 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     return staged
 
 
+def report_outcome(task_id: int, kind: str, summary: str = "",
+                   repos: list[str] | None = None, questions: list[str] | None = None,
+                   notes: list[str] | None = None) -> str:
+    """Say what state THIS task run left the work in — call it as the last thing a
+    background task does, never from a chat turn.
+
+    kind: plan_ready (a plan is written and waiting for Arun) | needs_input (you need
+    an answer before going further — put the questions in `questions`) | escalate
+    (bigger than this pipeline allows — why, in `summary`) | done (implemented and
+    checked) | blocked (cannot continue — why) | failed. On a plan, list EVERY repo the
+    change touches in `repos`, so each gets a checkout before the first edit. `notes`
+    are decisions or facts worth keeping if the run is restarted."""
+    from .graph import outcome
+    return outcome.record(int(task_id), kind, summary, repos, questions, notes)
+
+
 def delegate_task(title: str, prompt: str, kind: str = "analysis",
                   workspace: str = "", teams_chat: str = "") -> str:
     """Spawn a background worker so the chat stays free; Arun gets a WhatsApp/Telegram

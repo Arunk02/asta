@@ -1191,6 +1191,19 @@ async def api_reply_task(task_id: int, request: Request):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/tasks/{task_id}/outcome", dependencies=[Depends(require_auth)])
+async def api_task_outcome(task_id: int, request: Request):
+    """A task run saying what state it left the work in (see app/graph/outcome.py)."""
+    from .graph import outcome
+    b = await request.json()
+    try:
+        return {"ok": True, "detail": outcome.record(
+            task_id, b.get("kind", ""), b.get("summary", ""), b.get("repos"),
+            b.get("questions"), b.get("notes"))}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/tasks/{task_id}/refine", dependencies=[Depends(require_auth)])
 async def api_refine_task(task_id: int, request: Request):
     """Continue a finished task with feedback, in the session it already has."""

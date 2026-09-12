@@ -70,8 +70,42 @@ scenarios:
     why: >
       15 jira_issue calls died as ASGI tracebacks on a comments 404; the model
       saw a dead tool rather than "no such ticket".
-    gap: "P2 — needs the typed-outcome path to assert what the brain was told"
+    setup:
+      jira: {}                       # a Jira that can see no tickets at all
+    brains:
+      chat:
+        - calls: [{tool: jira_issue, args: {key: BEPTELIKOS-10761}}]
+          text: "I can't see BEPTELIKOS-10761 — Jira has no issue by that key for this account."
     steps:
       - say: "what is BEPTELIKOS-10761 about"
     checks:
-      - said_contains: "404|cannot see|no issue"
+      # What the TOOL told the brain — the half that used to be a traceback.
+      - tool_result_contains: {tool: jira_issue, text: "no issue BEPTELIKOS-10761 that this account can see"}
+      - tool_result_contains: {tool: jira_issue, text: "^(?!.*Traceback)"}
+      - said_contains: "404|can't see|cannot see|no issue"
+
+  - id: a-job-killed-mid-build-resumes-from-its-checkpoint
+    title: A restart mid-implementation continues the build — no re-plan, no second copy
+    why: >
+      #117 sat "running" for a day after its process died. #88/#89 are what a
+      re-run costs when the new leg starts over: one change implemented twice.
+      On the graph engine the job resumes from its last checkpoint, and the leg
+      that was cut short is told it is continuing.
+    setup:
+      env: {ASTA_GRAPH: "1"}
+    brains:
+      task:
+        - {when: "Resume: this run stopped partway", text: "Finished the remaining two files. Tests: 12 passed."}
+        - {text: "STRUCTURE\n  Retention  30 → 90 days in two files\n\nPLAN READY"}
+        - {sleep: 3600, text: "never reached — the process died"}
+    steps:
+      - spawn: {title: "raise retention to 90 days", prompt: "bump the retention", kind: code, workspace: booking, as: job}
+      - approve_async: job
+      - restart:
+      - tick: resume_due_later
+    checks:
+      - task_status: {task: job, is: done}
+      - push_contains: "restarted"
+      - push_count: {matching: "PLAN #", count: 1}      # planned once, never again
+      - push_count: {matching: "✅ DONE", count: 1}
+      - brain_prompt_contains: "this run stopped partway"

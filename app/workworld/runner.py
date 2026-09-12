@@ -25,6 +25,7 @@ LAST_LIVE = OUT_DIR / "last-live.json"  # the live tier — its own file, so a
                                         # three-scenario night run cannot
                                         # overwrite the 38-scenario result
 HISTORY = OUT_DIR / "runs.jsonl"
+ENGINES = ("classic", "graph")          # tasks._worker, or app/graph (ASTA_GRAPH)
 BASELINE = OUT_DIR / "baseline.json"
 
 
@@ -38,6 +39,12 @@ async def run_all(sets: list[str] | None = None, k: int = 1, live: bool = False,
             continue            # live scenarios need a real brain; the rest never use one
         out.append(await S.run_scenario(sc, k=k, live=live))
     return out
+
+
+def engine() -> str:
+    """Which task engine this process runs code tasks on."""
+    from app.graph import runner as graph_runner
+    return "graph" if graph_runner.enabled() else "classic"
 
 
 def summarise(results: list[S.Result], k: int, live: bool, day_summary: dict | None = None) -> dict:
@@ -63,6 +70,7 @@ def summarise(results: list[S.Result], k: int, live: bool, day_summary: dict | N
         "at": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "epoch": time.time(),
         "tier": "live" if live else "deterministic",
+        "engine": engine(),
         "k": k,
         "total": total,
         "passed": passed,
@@ -80,6 +88,10 @@ def save(summary: dict, baseline: bool = False) -> Path:
     live = summary.get("tier") == "live"
     target = LAST_LIVE if live else LAST
     target.write_text(json.dumps(summary, indent=1))
+    if not live:
+        # Per engine as well, so the two can be read side by side while both exist.
+        (OUT_DIR / f"last-{summary.get('engine', 'classic')}.json").write_text(
+            json.dumps(summary, indent=1))
     with HISTORY.open("a") as fh:
         fh.write(json.dumps(summary) + "\n")
     # The baseline is the deterministic tier's: it is what every later phase
@@ -91,7 +103,8 @@ def save(summary: dict, baseline: bool = False) -> Path:
 
 def report(summary: dict) -> str:
     """One screen a person can read — what passed, what is a known gap, what broke."""
-    lines = [f"WorkWorld · {summary['tier']} · pass^{summary['k']} · {summary['at']}",
+    lines = [f"WorkWorld · {summary['tier']} · {summary.get('engine', 'classic')} engine "
+             f"· pass^{summary['k']} · {summary['at']}",
              f"{summary['passed']}/{summary['total']} scenarios "
              f"({summary['seconds']}s)"]
     for name, s in summary["sets"].items():
@@ -125,7 +138,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--only", default="")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--engine", choices=ENGINES, default="",
+                    help="run code tasks on this engine (default: whatever ASTA_GRAPH says)")
     args = ap.parse_args(argv)
+    if args.engine:
+        import os
+        os.environ["ASTA_GRAPH"] = "1" if args.engine == "graph" else ""
 
     if args.command == "twin":
         from . import twin

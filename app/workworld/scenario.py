@@ -36,7 +36,7 @@ CRISP_HARD_CHARS = 1800
 
 #: Steps that deliberately leave work in flight — the next step is meant to
 #: arrive WHILE Asta is busy, which is the only way to test an interjection.
-SKIP_SETTLE = {"say_async"}
+SKIP_SETTLE = {"say_async", "approve_async"}
 
 
 @dataclass
@@ -185,6 +185,8 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
                        person=f.get("person", "A colleague"),
                        due_at=time.time() + float(f.get("due_in_hours", -1)) * 3600)
     world.teams_activity.extend(s.get("teams_activity", []) or [])
+    if "jira" in s:
+        world.use_jira(s.get("jira") or {})
 
 
 async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) -> None:
@@ -217,6 +219,15 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
         tasks.link_task(state["conv"]["id"], t["id"])
     elif kind == "approve":
         await tasks.approve(_task_id(arg, state))
+    elif kind == "approve_async":
+        # Approve, and return once the next leg is IN FLIGHT rather than done —
+        # the moment a restart has to be survivable from.
+        before = len(world.brain_calls)
+        await tasks.approve(_task_id(arg, state))
+        for _ in range(500):
+            if len(world.brain_calls) > before:
+                break
+            await asyncio.sleep(0.01)
     elif kind == "reply_to_task":
         tasks.reply(_task_id(arg.get("task"), state), arg.get("text", ""))
     elif kind == "ship":
@@ -232,6 +243,12 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
         await _tick(arg, world, state)
     elif kind == "restart":
         # What a launchd restart leaves behind: the rows, none of the workers.
+        # A worker mid-leg dies with the process — cancelled here, without the
+        # status change `tasks.cancel` would make, because nothing got to make it.
+        for job in list(tasks._running.values()):
+            job.cancel()
+            with contextlib.suppress(BaseException):
+                await job
         main._inflight.clear()
         tasks._running.clear()
         await tasks.recover_orphans()
@@ -255,6 +272,9 @@ async def _tick(what: str, world: W.World, state: dict) -> None:
                 await notify.notify(note, "task", urgency="ambient")
     elif what == "resume_due":
         await tasks._resume_due()
+    elif what == "resume_due_later":
+        # The sweep, run once the restart grace period has passed.
+        await tasks._resume_due(time.time() + tasks.RESTART_RESUME_SECONDS + 1)
     elif what == "recover_orphans":
         await tasks.recover_orphans()
     elif what == "followup":
@@ -436,6 +456,16 @@ def _check_brain_calls(arg, world, state):
     return ""
 
 
+def _check_tool_result(arg, world, state):
+    """What a tool handed back to the brain — `{tool: jira_issue, text: "404"}`."""
+    rows = [r for r in world.tool_results if not arg.get("tool") or r["tool"] == arg["tool"]]
+    if not rows:
+        return f"no {arg.get('tool') or 'tool'} call was made"
+    if arg.get("text") and not any(re.search(arg["text"], r["text"], re.I | re.S) for r in rows):
+        return f"{arg.get('tool')} never answered {arg['text']!r}: {[r['text'][:120] for r in rows]}"
+    return ""
+
+
 def _check_health(arg, world, state):
     problems = state.get("health") or {}
     text = " ".join(f"{k}: {v}" for k, v in problems.items())
@@ -469,6 +499,7 @@ CHECKS = {
     "outcome": _check_outcome,
     "kv": _check_kv,
     "brain_calls": _check_brain_calls,
+    "tool_result_contains": _check_tool_result,
     "health_says": _check_health,
     "reply_max_chars": _check_reply_max,
 }

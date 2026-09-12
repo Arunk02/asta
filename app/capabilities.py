@@ -300,6 +300,10 @@ _TABLE: tuple[Capability, ...] = (
                note="STAGES a review under Arun's name; his yes posts it verbatim. Only "
                     "when he explicitly says to post/approve — an approval is visible to "
                     "the whole team and cannot be taken back quietly."),
+    Capability("report_outcome", "tasks",
+               http='POST /api/tasks/{id}/outcome {"kind":"plan_ready","repos":["…"],"summary":"…"}',
+               note="Task runs only: the last call a background task makes. How Asta "
+                    "knows a plan from a result — never inferred from your wording."),
     Capability("list_background_tasks", "tasks", http="GET /api/tasks"),
     Capability("task_result", "tasks", http="GET /api/tasks/{id}"),
     Capability("approve_task", "tasks", http="POST /api/tasks/{id}/approve", write=True,

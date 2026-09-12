@@ -124,6 +124,9 @@ class World:
     verify: list[dict] = field(default_factory=list)          # scripted check runs
     teams_activity: list[str] = field(default_factory=list)
     breaches: list[str] = field(default_factory=list)
+    #: What each tool call handed BACK to the brain — the only way to assert what
+    #: a model was told, as opposed to what it then chose to say.
+    tool_results: list[dict] = field(default_factory=list)
     db_path: Path | None = None
     _patch: Patcher = field(default_factory=Patcher)
 
@@ -151,10 +154,36 @@ class World:
             out = cap.fn(**args)
             if inspect.isawaitable(out):
                 out = await out
-            return out
+        except Exception as exc:                               # noqa: BLE001
+            # What the MCP server does with a tool that raises: the brain gets
+            # the error as the tool's answer, and the turn carries on.
+            out = f"Error: {exc}"
         finally:
             if token is not None:
                 tasks.unbind_conversation(token)
+        self.tool_results.append({"tool": name, "text": str(out)[:2000]})
+        return out
+
+    def use_jira(self, issues: dict) -> None:
+        """Jira reads over a transport double. The real client runs — its status
+        handling, its 404 translation — and nothing leaves the house. A key that
+        is not in `issues` answers 404, the way a ticket he cannot see does."""
+        import httpx
+        from app import jira
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            key = path.split("/issue/")[-1].split("/")[0] if "/issue/" in path else ""
+            issue = issues.get(key)
+            if issue is None:
+                return httpx.Response(404, json={"errorMessages": ["Issue does not exist"]})
+            if path.endswith("/comment"):
+                return httpx.Response(200, json={"comments": [], "total": 0})
+            return httpx.Response(200, json={"key": key, **issue})
+
+        self._patch.set(jira, "configured", lambda: True)
+        self._patch.set(jira, "_client", lambda: httpx.AsyncClient(
+            base_url="https://jira.invalid", transport=httpx.MockTransport(respond)))
 
     # --- the sandbox ------------------------------------------------------
 

@@ -66,8 +66,11 @@ _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 #: they observed — three failures whose messages were all about the ledger and
 #: none about the responder. A behaviour switched on for one machine is not a
 #: behaviour the suite should be silently exercising.
+#:
+#: `ASTA_GRAPH` chooses the task engine. Inherited, it would move every old-engine
+#: task test onto the graph without saying so; the graph's own tests set it.
 _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND",
-                       "ASTA_CHATWATCH", "ASTA_INCOMING")
+                       "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_GRAPH")
 
 
 #: What this machine's .env said, captured before it is cleared. A handful of

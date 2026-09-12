@@ -877,10 +877,19 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
             # Link both ways so a follow-up in this chat can steer the task, and
             # so completion can clear the link.
             link_task(cid, t["id"])
+        if _agent_for(t) and _graph().enabled():
+            _graph().start(t["id"])
+            return t
     job = asyncio.create_task(_worker(t["id"]))
     _running[t["id"]] = job
     job.add_done_callback(lambda _j, tid=t["id"]: _running.pop(tid, None))
     return t
+
+
+def _graph():
+    """The LangGraph engine (app/graph). A task started there finishes there."""
+    from .graph import runner
+    return runner
 
 
 def is_running(task_id: int) -> bool:
@@ -1691,16 +1700,28 @@ async def _self_review(task_id: int, t: dict, result: str) -> str:
                 diffs.append((repo.name, out.strip(), full))
     if not diffs:
         return ""
+    other = _second_reviewer(task_id)
     try:
         notes = await review.review_own_diff(
             "\n\n".join(f"### {name}\n{full[:20000]}" for name, _stat, full in diffs),
-            t.get("workspace") or "")
+            t.get("workspace") or "", reviewer=other, cwd=str(root))
     except Exception:
         return ""
     if not notes:
         return ""
     stat = " · ".join(f"{name}: {s.splitlines()[-1].strip()}" for name, s, _ in diffs)
-    return f"\n\n🔍 I read my own diff ({stat}):\n{clip.clip(notes, 900)}"
+    who = f"{other} read the diff" if other else "I read my own diff"
+    return f"\n\n🔍 {who} ({stat}):\n{clip.clip(notes, 900)}"
+
+
+def _second_reviewer(task_id: int) -> str:
+    """A brain other than the one that wrote the change, if one is up — else ''.
+
+    ASTA_CROSS_REVIEW=0 keeps the old single-model self-review."""
+    if os.environ.get("ASTA_CROSS_REVIEW", "1").strip().lower() in ("0", "false", "no", "off"):
+        return ""
+    writer = _resolve_executor(task_id)
+    return next((b for b in _SIMPLE_BRAINS if b != writer and _can_take_over(b)), "")
 
 
 def _is_gate(tail: str) -> bool:
@@ -1749,13 +1770,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         await _finish_code(task_id, t, result2, hops)
         return
     if _CONTEXT_MARK in tail:
-        # Cheap early gate — intent unclear, asked before any discovery spend.
-        store.kv_set(f"task_gate:{task_id}", "context")
-        store.update_task(task_id, status="awaiting_approval", result=result)
-        await notify.notify(
-            f"❓ #{task_id} {t['title']} — quick context check before I dig in:\n\n"
-            f"{_phone_text(result, 900)}\n\n"
-            f"Reply with the answer, or 'reject task {task_id}'.", "task")
+        await announce_context_check(task_id, t, result)
         return
     # A code task cannot finish before he has approved it. The brain saying
     # "PLAN READY" is one way to reach this gate; NOT having been approved is
@@ -1764,19 +1779,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     # told it to do ("make the edit"). Its legs cannot write either (see
     # `_run_code_leg`), so whatever it produced here IS a plan.
     if _is_gate(tail) or not plan_approved(task_id):
-        store.kv_set(f"task_gate:{task_id}", "plan")
-        # The brain signs off with its own "Reply 'PLAN APPROVED' to proceed",
-        # and the push below adds the real buttons underneath it. Two asks in a
-        # row, the first one unactionable, is exactly the clutter he pointed at.
-        result = _ASK_LINE.sub("", result).rstrip()
-        store.update_task(task_id, status="awaiting_approval", result=result)
-        await notify.notify(
-            f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
-            f"{_phone_text(result, 1100)}\n\n"
-            f"— — —\n"
-            f"👍 *approve task {task_id}*\n"
-            f"👎 *reject task {task_id}*\n"
-            f"✏️ …or just reply with the changes", "task")
+        await announce_plan(task_id, t, result)
         return
     unfinished = _repos_still_needed(task_id, t, tail)
     if unfinished and hops < _MAX_REPO_HOPS:
@@ -1835,6 +1838,44 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         await _finish_code(task_id, t, result2, hops + 1)
         return
     if await _verify_gate(task_id, t, result, hops):
+        return
+    await complete(task_id, t, result)
+
+
+async def announce_context_check(task_id: int, t: dict, result: str) -> None:
+    """The cheap early gate — intent unclear, asked before any discovery spend.
+    Shared by both task engines, so the question reads the same either way."""
+    from . import notify
+    store.kv_set(f"task_gate:{task_id}", "context")
+    store.update_task(task_id, status="awaiting_approval", result=result)
+    await notify.notify(
+        f"❓ #{task_id} {t['title']} — quick context check before I dig in:\n\n"
+        f"{_phone_text(result, 900)}\n\n"
+        f"Reply with the answer, or 'reject task {task_id}'.", "task")
+
+
+async def announce_plan(task_id: int, t: dict, result: str) -> None:
+    """Park the task at its plan gate and put the plan on his phone."""
+    from . import notify
+    store.kv_set(f"task_gate:{task_id}", "plan")
+    # The brain signs off with its own "Reply 'PLAN APPROVED' to proceed",
+    # and the push below adds the real buttons underneath it. Two asks in a
+    # row, the first one unactionable, is exactly the clutter he pointed at.
+    result = _ASK_LINE.sub("", result).rstrip()
+    store.update_task(task_id, status="awaiting_approval", result=result)
+    await notify.notify(
+        f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
+        f"{_phone_text(result, 1100)}\n\n"
+        f"— — —\n"
+        f"👍 *approve task {task_id}*\n"
+        f"👎 *reject task {task_id}*\n"
+        f"✏️ …or just reply with the changes", "task")
+
+
+async def complete(task_id: int, t: dict, result: str) -> None:
+    """The one way a code task is marked done and announced — both engines."""
+    from . import notify
+    if (store.get_task(task_id) or {}).get("status") in _ALREADY_REPORTED:
         return
     # The branch the work is ACTUALLY on, read from git rather than from the name
     # Asta chose. Both were unpushed for #88/#89 while the pushed branch —
@@ -1956,6 +1997,29 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     return results
 
 
+def first_code_prompt(task_id: int, t: dict) -> str:
+    """The opening prompt of a code task — one definition for both engines."""
+    prompt = t["prompt"]
+    if _agent_for(t):
+        # micro's agent file is self-contained; the rider is solo-only.
+        if _pipeline_for(task_id) == "full":
+            prompt += CODE_OVERRIDES
+    else:
+        prompt += repo_ops.playbook_block(Path(_cwd(t["workspace"])))
+    # How far the context map has fallen behind the code it describes — on
+    # EVERY pipeline, because micro is the tier most likely to answer from
+    # the map alone. Empty for a workspace whose context is current, so a
+    # healthy run's prompt is unchanged.
+    # Three advisory blocks. Each is a note for the run, so a failure in any
+    # of them must cost a paragraph, never the task.
+    with contextlib.suppress(Exception):
+        from . import refresh as _refresh
+        prompt += (_refresh.trust_note(t["workspace"] or "")
+                   + _branch_note(task_id, t) + _done_note(task_id, t)
+                   + _context_note())
+    return prompt
+
+
 async def _worker(task_id: int) -> None:
     from . import notify
     t = store.get_task(task_id)
@@ -1972,23 +2036,7 @@ async def _worker(task_id: int) -> None:
         if agent:
             prompt += ANALYSIS_RIDER
     elif t["kind"] == "code":
-        if agent:
-            # micro's agent file is self-contained; the rider is solo-only.
-            if _pipeline_for(task_id) == "full":
-                prompt += CODE_OVERRIDES
-        else:
-            prompt += repo_ops.playbook_block(Path(_cwd(t["workspace"])))
-        # How far the context map has fallen behind the code it describes — on
-        # EVERY pipeline, because micro is the tier most likely to answer from
-        # the map alone. Empty for a workspace whose context is current, so a
-        # healthy run's prompt is unchanged.
-        # Three advisory blocks. Each is a note for the run, so a failure in any
-        # of them must cost a paragraph, never the task.
-        with contextlib.suppress(Exception):
-            from . import refresh as _refresh
-            prompt += (_refresh.trust_note(t["workspace"] or "")
-                       + _branch_note(task_id, t) + _done_note(task_id, t)
-                       + _context_note())
+        prompt = first_code_prompt(task_id, t)
     try:
         if t["kind"] == "code":
             async with _ws_lock(t["workspace"]):
@@ -2096,9 +2144,12 @@ def reply(task_id: int, text: str) -> str:
     # gate action — so mid-flight additions land without a session restart.
     full_text = text + _drain_addenda(task_id)
     store.update_task(task_id, status="running")
-    job = asyncio.create_task(_resume_worker(task_id, full_text, approved=approved))
-    _running[task_id] = job
-    job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
+    if _graph().manages(task_id):
+        _graph().answer(task_id, {"approved": approved, "text": full_text})
+    else:
+        job = asyncio.create_task(_resume_worker(task_id, full_text, approved=approved))
+        _running[task_id] = job
+        job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
     return (f"Task #{task_id}: plan approved — implementing now."
             if approved
             else f"Task #{task_id}: feedback sent to the pipeline — it will re-plan.")
@@ -2243,6 +2294,11 @@ async def resume_task(task_id: int, switch_to: str = "") -> str:
         _running[task_id] = job
         job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
         return f"Task #{task_id}: running it again{note}."
+    if _graph().manages(task_id):
+        # The checkpoint knows where it stopped; the leg that was cut short
+        # knows to continue rather than start again (code_graph._leg).
+        _graph().carry_on(task_id)
+        return f"Task #{task_id}: resuming{note} from its last checkpoint."
     prompt = ("Resume: your session was paused mid-task when the brain hit a usage "
               "limit — this is the same task continuing, not a new one. Check "
               "`git log --oneline -5` and `git status` first so you don't redo "
@@ -2718,9 +2774,12 @@ async def refine(task_id: int, feedback: str) -> str:
         + ("\nThe branch is already pushed — commit on top of it so the open PR "
            "picks the change up.\n" if was_shipped else "")
     )
-    job = asyncio.create_task(_resume_worker(task_id, prompt, approved=True))
-    _running[task_id] = job
-    job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
+    if _graph().manages(task_id):
+        _graph().revisit(task_id, prompt)
+    else:
+        job = asyncio.create_task(_resume_worker(task_id, prompt, approved=True))
+        _running[task_id] = job
+        job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
     where = "the open PR" if was_shipped else "the existing diff"
     return f"Task #{task_id}: continuing {where} with your feedback (same session, full context)."
 

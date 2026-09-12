@@ -882,13 +882,16 @@ async def test_asta_reads_its_own_diff_before_handing_it_over(tmp_path, monkeypa
 
     seen = {}
 
-    async def fake_review(diff, workspace=""):
+    async def fake_review(diff, workspace="", **kw):
         seen["diff"] = diff
         seen["workspace"] = workspace
         return "- cancel() swallows the exception instead of rethrowing"
 
     from app import review
     monkeypatch.setattr(review, "review_own_diff", fake_review)
+    # No second brain up: the writer reviews its own diff. Pinned, because which
+    # CLIs are installed is a fact about the machine, not the code.
+    monkeypatch.setattr(tasks, "_second_reviewer", lambda tid: "")
     note = await tasks._self_review(4246, {"workspace": "booking"}, "done")
     assert "I read my own diff" in note
     assert "swallows the exception" in note
@@ -906,7 +909,7 @@ async def test_a_clean_review_adds_nothing_to_the_message(tmp_path, monkeypatch)
     (repo / "Service.java").write_text("class Service { int x = 1; }\n")
     run("git", "add", "-A"); run("git", "commit", "-qm", "tweak")
 
-    async def clean(diff, workspace=""):
+    async def clean(diff, workspace="", **kw):
         return ""
 
     from app import review
@@ -950,8 +953,11 @@ def test_the_reviewer_asks_for_problems_not_a_summary():
 # written, tested, and reachable from nowhere for months.
 
 def test_finishing_a_code_task_reads_its_own_diff():
+    """The done path moved into `tasks.complete` on 12 Sep so both task engines
+    (the old one and the LangGraph core) finish through ONE function."""
     import inspect
-    src = inspect.getsource(tasks._finish_code)
+    assert "complete(" in inspect.getsource(tasks._finish_code)
+    src = inspect.getsource(tasks.complete)
     assert "_self_review(" in src, "the done path does not review its own work"
     assert "{own}" in src or "own" in src.split("notify.notify")[1][:200], \
         "the review was produced and then not said"
@@ -986,7 +992,7 @@ async def test_the_done_message_carries_the_review(tmp_path, monkeypatch):
     async def spy(text, level="info", urgency="direct", priority=None, **kw):
         said.append(text)
 
-    async def notes(diff, workspace=""):
+    async def notes(diff, workspace="", **kw):
         return "- cancel() swallows the exception"
 
     from app import notify, review

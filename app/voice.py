@@ -25,7 +25,11 @@ import re
 
 import httpx
 
-BASE = os.environ.get("VOICEBOX_URL", "http://127.0.0.1:17493")
+#: Where Voicebox is configured to listen. Kept apart from BASE, which is what
+#: calls actually use — tests point BASE at nothing so no test can reach the
+#: real service, and a test ABOUT the configuration reads this instead.
+CONFIGURED_BASE = os.environ.get("VOICEBOX_URL", "http://127.0.0.1:17493")
+BASE = CONFIGURED_BASE
 DEFAULT_ENGINE = os.environ.get("VOICEBOX_ENGINE", "kokoro")
 DEFAULT_PROFILE = os.environ.get("VOICEBOX_PROFILE", "")
 HINDI_PROFILE = os.environ.get("VOICEBOX_PROFILE_HI", "Asta (Hindi)")

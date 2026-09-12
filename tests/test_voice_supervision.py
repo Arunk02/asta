@@ -114,4 +114,4 @@ def test_the_agent_points_at_the_port_asta_speaks_to():
     """A supervisor for the wrong port is worse than none: it looks healthy."""
     plist = plistlib.loads(AGENT.read_bytes())
     port = plist["ProgramArguments"][plist["ProgramArguments"].index("--port") + 1]
-    assert port in voice.BASE
+    assert port in voice.CONFIGURED_BASE      # BASE is pointed at nothing in tests

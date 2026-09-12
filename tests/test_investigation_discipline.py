@@ -22,9 +22,16 @@ from app import responder
 
 SKILL = pathlib.Path(__file__).resolve().parent.parent / "skills" / "grafana-analyser.md"
 
+#: skills/*.md are machine-local (gitignored symlinks into his repos — see
+#: .gitignore), so a CI runner has none. The tests that read the skill are
+#: about ITS wording and skip where it does not exist; the tests that read
+#: the persona and the briefs run everywhere.
+needs_skill = pytest.mark.skipif(not SKILL.exists(), reason="skills/*.md are machine-local")
+
 
 # --- the skill knows about production ----------------------------------------
 
+@needs_skill
 def test_the_skill_names_the_prod_namespace():
     """The env map was nonprod only. A skill that cannot name production cannot
     investigate the production question a colleague actually asked."""
@@ -33,10 +40,12 @@ def test_the_skill_names_the_prod_namespace():
     assert "no hyphen" in text, "it does not follow the nonprod pattern; say so"
 
 
+@needs_skill
 def test_it_says_production_is_the_default():
     assert "unless an env is named" in SKILL.read_text().lower()
 
 
+@needs_skill
 def test_it_says_one_namespace_covers_every_service():
     """"the answer to 'did it send?' is usually in a DIFFERENT service from the
     one the question names"."""
@@ -44,18 +53,21 @@ def test_it_says_one_namespace_covers_every_service():
     assert "never query one service" in text
 
 
+@needs_skill
 def test_it_points_at_the_prod_helm_values():
     text = SKILL.read_text()
     assert "helm/prod-values.yml" in text
     assert "application.yml" in text, "an absent key means the default applies"
 
 
+@needs_skill
 def test_it_says_the_logs_decide_and_the_code_explains():
     text = SKILL.read_text()
     assert "The logs decide; the code explains." in text
     assert "hypothesis" in text
 
 
+@needs_skill
 def test_it_says_one_fetch_then_reason():
     """"since context already stays there" — re-querying for a detail already in
     the response costs a round trip and buys nothing."""
@@ -98,6 +110,7 @@ def test_staging_the_reply_is_still_the_last_word():
 
 # --- the fact that started it ------------------------------------------------
 
+@needs_skill
 def test_an_absent_helm_key_is_an_answer_not_an_unknown():
     """Pinned as the worked example, because the shape recurs: a config-based
     theory left open is a half-answer sent to a colleague who asked a direct

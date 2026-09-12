@@ -94,7 +94,8 @@ scenarios:
       "they gave tickets and details to check but it is not automatically going
       and debugging this the proactiveness what i wanted".
     setup:
-      kv: {ASTA_RESPOND: "1"}
+      # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
+      env: {ASTA_RESPOND: "1"}
     steps:
       - colleague:
           who: "Vinish Kumar"

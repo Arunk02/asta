@@ -272,6 +272,16 @@ def _fake_browser(monkeypatch, page):
 
     monkeypatch.setattr(teams_bridge, "_launch", launch)
     monkeypatch.setattr(teams_bridge, "_open_teams", open_teams)
+
+    # The pre-dial check plays a tone through the Voicebox service and listens
+    # for it in the browser. On Arun's laptop the service was running, so these
+    # tests synthesised real audio; CI has none. They are about the call's
+    # lifecycle, not the microphone — so the browser hears us, by declaration.
+    async def hears(page):
+        return {"peak": 0.5, "label": "BlackHole 2ch"}
+
+    from app import voice
+    monkeypatch.setattr(voice, "browser_hears_us", hears)
     return pw, ctx
 
 

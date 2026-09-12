@@ -80,6 +80,27 @@ _REAL_CONTEXT_DIRNAMES = {n: os.environ.get(n) for n in
 
 
 @pytest.fixture(autouse=True)
+def _no_machine_side_effects(monkeypatch):
+    """No test touches this Mac's audio devices or its voice server.
+
+    Found by CI on 12 September, and worse than a CI problem. Several call tests
+    patched `meetings.set_call_mic`, but the code had moved to
+    `call_audio.set_call_mic` — so on Arun's laptop the REAL one ran: the suite
+    switched his microphone input to BlackHole and back, and asked the local
+    Voicebox to synthesise speech, on every run. It passed here because the
+    devices exist and failed on a runner that has neither. A test that passes
+    only because it reached into the machine is not a test of the code.
+
+    So both doors are pointed at nothing, for every test. A test ABOUT them
+    patches the functions it needs, which states the dependency out loud.
+    """
+    from app import call_audio, voice
+    monkeypatch.setattr(call_audio, "SWITCH_AUDIO", "/nonexistent/SwitchAudioSource")
+    monkeypatch.setattr(voice, "BASE", "http://127.0.0.1:9")    # nothing listens on 9
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_wall_clock_dependence(monkeypatch):
     for name in _TIME_DEPENDENT_ENV + _FIXTURE_SHAPING_ENV + _MACHINE_PINNED_ENV:
         monkeypatch.delenv(name, raising=False)

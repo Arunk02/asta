@@ -87,6 +87,10 @@ def call(monkeypatch):
     meetings.clear_noticed()
 
 
+async def _restored(page=None):
+    return True
+
+
 @pytest.fixture
 def spoke(monkeypatch):
     """Everything Asta actually said out loud, in order."""
@@ -99,7 +103,10 @@ def spoke(monkeypatch):
         return True
 
     monkeypatch.setattr(voice, "speak", gen)
-    monkeypatch.setattr(meetings, "set_call_mic", mic)
+    # call_audio, not meetings: the code calls `call_audio.set_call_mic`, and a
+    # patch on the old name let the REAL one switch his microphone.
+    monkeypatch.setattr(meetings.call_audio, "set_call_mic", mic)
+    monkeypatch.setattr(meetings.call_audio, "_restore_mic", _restored)
     monkeypatch.setattr(voice, "play_to_device",
                         lambda w, d="": said.append(w) or 0.05)
     monkeypatch.setattr(meetings, "_spoken_log", said, raising=False)
@@ -380,7 +387,10 @@ async def test_warming_up_caches_the_words_that_are_actually_said(call, monkeypa
         return True
 
     monkeypatch.setattr(voice, "speak", gen)
-    monkeypatch.setattr(meetings, "set_call_mic", mic)
+    # call_audio, not meetings: the code calls `call_audio.set_call_mic`, and a
+    # patch on the old name let the REAL one switch his microphone.
+    monkeypatch.setattr(meetings.call_audio, "set_call_mic", mic)
+    monkeypatch.setattr(meetings.call_audio, "_restore_mic", _restored)
     monkeypatch.setattr(voice, "play_to_device", lambda w, d="": 0.05)
     call["page"] = FakePage(CONNECTED, connected_marker=True)
 

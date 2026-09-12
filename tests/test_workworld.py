@@ -84,7 +84,15 @@ def test_short_commands_are_typed_exactly():
 
 @pytest.fixture(scope="module")
 def bench():
-    results = asyncio.run(runner.run_all())
+    """Module-scoped, so it runs BEFORE conftest's function-scoped guards —
+    which is how it quietly ran with his .env here and without it on CI. It
+    clears the same machine-pinned settings itself."""
+    import conftest
+    with pytest.MonkeyPatch.context() as mp:
+        for name in (conftest._MACHINE_PINNED_ENV + conftest._TIME_DEPENDENT_ENV
+                     + conftest._FIXTURE_SHAPING_ENV):
+            mp.delenv(name, raising=False)
+        results = asyncio.run(runner.run_all())
     return {r.scenario.id: r for r in results}
 
 
@@ -118,6 +126,11 @@ def test_the_nightly_bench_stays_out_of_his_way(monkeypatch):
     from app import store
     from app.workworld import nightly
     monkeypatch.setenv("ASTA_BENCH_NIGHTLY", "1")
+    # A brain must be up for the "was he working?" question to be reached at
+    # all — on CI no CLI is installed, so say one is.
+    from app import agent
+    monkeypatch.setattr(agent, "available", lambda name: name == "claude_cli")
+    monkeypatch.setattr(agent, "quota_down", lambda name: False)
     night = dt.datetime.now().replace(hour=2, minute=0)
     store.kv_set("last_user_message_at", str(__import__("time").time()))
     assert "within the hour" in nightly.why_not(night)

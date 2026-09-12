@@ -15,6 +15,11 @@ data/
 *.sqlite
 *.sqlite3
 
+# ─── His standing instructions ───────────────────────────────────────────────
+# guardrails.md names his colleagues, his accounts and his systems; the repo is
+# public. guardrails.example.md ships the defaults and IS tracked.
+guardrails.md
+
 # ─── Learned memory ──────────────────────────────────────────────────────────
 # Facts and episode digests reference internal tickets, services and colleagues.
 memory/

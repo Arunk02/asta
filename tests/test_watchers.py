@@ -144,7 +144,7 @@ def test_teams_push_splits_asks_from_mentions_with_no_ask():
 
     What changed on 28 August is the URGENCY of the second one. This test used to
     assert that a mention with no ask verb rides the ambient path — and ambient is
-    held while he is at the laptop, so on that morning Komal, Nakka Harika and
+    held while he is at the laptop, so on that morning three colleagues and
     Abhijit (twice) all used his name between 11:58 and 13:04 and not one reached
     his phone. He found them by opening the screen.
 

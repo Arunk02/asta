@@ -43,6 +43,14 @@ SEEN_KEY = "outlook_seen_mail"
 _BULK_SENDER = re.compile(
     r"(no[-_]?reply|donotreply|notification|alerts?@|mailer|newsletter|automated|"
     r"jira@|confluence@|github\.com|servicenow|workplace|benefits|communications|"
+    # A TICKETING SYSTEM, however human its display name reads. "IT Service Desk"
+    # sends "Incident INC… has been assigned to group OH - TELIKOS" all day, and
+    # because the name looked like a person it was treated as a colleague HANDING
+    # OVER an incident to investigate. Six agentic analyses were spawned from
+    # these in 24 hours on 9-10 September; every one failed on his Claude session
+    # limit, so they cost the quota and returned nothing.
+    r"service[\s_-]*desk|helpdesk|help[\s_-]*desk|itsm|snow@|"
+    r"ticket(?:ing)?[\s_-]*system|incident[\s_-]*manage\w*|"
     # Social/announcement traffic Arun never actions from a notification.
     r"viva|yammer|engage|sharepoint|onedrive|forms@|bookings@|planner|"
     r"teams@|microsoft|survey|events?@|learning|training)", re.I)
@@ -558,6 +566,17 @@ async def _todays_events() -> list[dict]:
             await ctx.close()
             await pw.stop()
 
+    return _events_from(labels)
+
+
+def _events_from(labels: list[str]) -> list[dict]:
+    """Calendar rows -> events. Pure, so the judgement in it can be tested.
+
+    Split out of the scrape for the same reason the rest of the meeting logic
+    lives in pure functions: the browser half cannot be tested, and the half that
+    decides what he is told about must be. The cancellation filter below is
+    exactly that kind of decision.
+    """
     seen: set[str] = set()
     events: list[tuple[str, str]] = []
     for raw in labels:
@@ -572,6 +591,14 @@ async def _todays_events() -> list[dict]:
             continue
         organizer = re.search(r"\bBy ([^,]+)", tail)
         status = re.search(r"\b(Busy|Free|Tentative|Out of office)\b", tail)
+        # A cancelled meeting is still ON the calendar until it is deleted, and
+        # Outlook says so by prefixing the subject. Nothing here read that, so a
+        # cancelled meeting was an ordinary one: Asta offered to prep for it and
+        # offered to join it. "meeting is cancelled cancelled for that u dont
+        # have to ask do i have to prepare anything". Both spellings, because
+        # Outlook uses the US one and invitations forwarded from elsewhere do not.
+        if _CANCELLED.match(title.strip()):
+            continue
         line = f"{start}–{end}  {title.strip()}"
         if organizer:
             line += f" (by {organizer.group(1).strip()})"
@@ -594,6 +621,15 @@ async def _todays_events() -> list[dict]:
             })
 
     return sorted(events, key=lambda e: e["minutes"])
+
+
+#: How Outlook marks a meeting the organiser called off — the subject itself.
+_CANCELLED = re.compile(r"^\s*cancell?ed\s*:", re.I)
+
+
+def is_cancelled(title: str) -> bool:
+    """Did the organiser call this off? Read from the subject, as Outlook writes it."""
+    return bool(_CANCELLED.match((title or "").strip()))
 
 
 # The link that actually joins a Teams meeting. `meetings.join()` has always

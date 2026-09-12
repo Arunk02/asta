@@ -88,14 +88,16 @@ def config_for(project: str, base: dict | None = None) -> dict | None:
     `base` lets this compose with Asta's own server config if a caller already has
     one; the dev servers are merged on top under their own names.
     """
-    if not enabled() or not project:
-        return None
-    devs = servers(project)
-    if not devs:
-        return None
     merged = dict((base or {}).get("mcpServers", {}))
-    merged.update(devs)
-    return {"mcpServers": merged}
+    # The dev servers are an ADDITION. Returning None whenever they are absent
+    # threw the base away with them, which is how task runs ended up with no
+    # Asta tools at all: `tasks` asked for "dev servers over Asta's own", this
+    # feature was off, and the answer was "nothing" rather than "just Asta's".
+    # Task #86 then reported it had no Jira, no Teams and no prepare_to_send,
+    # and task #88 wrote the code Arun asked for and could not tell anyone.
+    if enabled() and project:
+        merged.update(servers(project) or {})
+    return {"mcpServers": merged} if merged else None
 
 
 def config_json(project: str, base: dict | None = None) -> str:

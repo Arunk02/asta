@@ -49,9 +49,16 @@ async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> s
     about the send instead of performing it. All four look identical to Arun,
     because all four end with the message not arriving.
     """
-    from . import teams_bridge
+    from . import attention, teams_bridge
     where = await teams_bridge.send_message(to, text, allow_group=to_group)
-    return f"✅ Sent to {where}."
+    # A reply IS the answer. Without this, Asta sent the message he approved and
+    # then went on chasing him at end of day about the very question it had just
+    # answered on his behalf — "Retry fix merged?" was still listed as waiting on him
+    # after the reply had gone out. Settled under the name Teams actually opened,
+    # which is the one the ledger stored, not the shorter one he typed.
+    settled = attention.settle_with(where) or attention.settle_with(to)
+    tail = f" ({settled} cleared from your list)" if settled else ""
+    return f"✅ Sent to {where}.{tail}"
 
 
 @op("teams_call", lambda a: f"Call {a.get('who', '?')} on Teams")

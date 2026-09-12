@@ -21,6 +21,11 @@ def wired(tmp_path, monkeypatch):
     (its background extraction would try to reach a brain), and the code leg faked."""
     monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
     t = store.create_task("verify me", "code", "do the thing", "tw")
+    # The verify gate only ever runs on an IMPLEMENTED task, and implementing
+    # only happens after Arun approves the plan — which since 11 September is
+    # enforced rather than instructed (`tasks.plan_approved`). Without this the
+    # fixture describes a task that cannot exist.
+    tasks.mark_approved(t["id"])
 
     notes: list[str] = []
 

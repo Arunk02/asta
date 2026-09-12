@@ -750,12 +750,36 @@ def test_analysis_tasks_keep_the_old_lenient_behaviour(monkeypatch):
     assert tasks._cwd(None) == str(tasks.ROOT)
 
 
-def test_booking_is_the_only_workspace_registered(live_workspaces):
-    """Arun removed iom-workspace on 2026-08-19. With exactly one registered,
-    a workspace-less code task resolves rather than refuses — so this is load
-    bearing for the case above, not decoration."""
-    from app.workspace import registry
-    assert list(registry.all_workspaces()) == ["booking"]
+def test_a_workspace_less_code_task_refuses_rather_than_guesses(monkeypatch):
+    """This used to assert `booking` was the ONLY workspace registered, because
+    with exactly one a workspace-less code task resolves instead of refusing.
+
+    `empv3` was registered on 2026-09-10 for the Kafka topic work — the repo sat
+    at ~/Projects with no workspace, which is why an earlier attempt at that task
+    had nowhere to run. So the one-workspace shortcut is gone on his machine, and
+    what matters is the behaviour it stood in for.
+
+    Asserted by CONSTRUCTION rather than off his live config: conftest stubs
+    `WORKSPACES` to a single temp workspace for every test, so the live registry
+    could never exercise the multi-workspace branch here anyway — and a test that
+    breaks whenever he registers a repo is testing his setup, not the code."""
+    from app import tasks, workspace_tools
+    one = dict(workspace_tools.WORKSPACES)
+    assert len(one) == 1 and tasks.code_cwd(None), "one workspace still resolves"
+
+    two = {**one, "another": next(iter(one.values()))}
+    monkeypatch.setattr(workspace_tools, "WORKSPACES", two)
+    with pytest.raises(RuntimeError, match="more than one"):
+        tasks.code_cwd(None)
+
+
+def test_it_never_falls_back_to_astas_own_repository(monkeypatch):
+    """The failure that put this guard here: a task with no workspace moved a
+    branch in Asta's own repo that had five unpushed commits on it."""
+    from app import tasks, workspace_tools
+    monkeypatch.setattr(workspace_tools, "WORKSPACES", {})
+    with pytest.raises(RuntimeError, match="refusing to run it against"):
+        tasks.code_cwd(None)
 
 
 # --- 7 & 8. Reading its own work, and being able to undo it ------------------
@@ -950,6 +974,9 @@ async def test_the_done_message_carries_the_review(tmp_path, monkeypatch):
     repo, run = _git_repo(ws / "telikos-booking-service")
     monkeypatch.setattr(workspace_tools, "WORKSPACES", {"booking": ws})
     t = store.create_task("BEPTELIKOS-9: fix cancel", "code", "do it", "booking")
+    # A diff exists, so the plan was approved — the completion path this test
+    # walks is only reachable after that (see tasks.plan_approved).
+    tasks.mark_approved(t["id"])
     await tasks.mark_rollback_point(t["id"], "booking")
     (repo / "Service.java").write_text("class Service { void cancel() {} }\n")
     run("git", "add", "-A"); run("git", "commit", "-qm", "cancel")

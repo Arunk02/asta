@@ -1,7 +1,7 @@
 """Being tagged by name must reach him, even while he is at the laptop.
 
 On 28 August four people used his name in Teams between 11:58 and 13:04 —
-Komal, Nakka Harika, and Abhijit twice, once in a 1:1 and once in a channel —
+three colleagues twice, once in a 1:1 and once in a channel —
 and not one reached his phone. He found them by opening the screen:
 
     "Abhijit pinged me in multiple places one to one as well group chat ,

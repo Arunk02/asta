@@ -242,7 +242,10 @@ CREATE TABLE IF NOT EXISTS traces (
 _ADDED_COLUMNS = {
     "traces": (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
                ("cost_usd", "REAL NOT NULL DEFAULT 0"),
-               ("measured", "INTEGER NOT NULL DEFAULT 0")),
+               ("measured", "INTEGER NOT NULL DEFAULT 0"),
+               # The largest context ONE model call carried — how big the session
+               # has grown, which the sums above cannot say. See llm_meter.Usage.
+               ("context_tokens", "INTEGER NOT NULL DEFAULT 0")),
     "usage": (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),),
     # Added after the ledger shipped. Any machine that already ran the server
     # once has the table without it, and CREATE TABLE IF NOT EXISTS would leave
@@ -387,7 +390,12 @@ def add_ui_message(conv_id: str, role: str, content: str, meta: dict | None = No
             "INSERT INTO ui_messages (conv_id, role, content, meta, created_at) VALUES (?,?,?,?,?)",
             (conv_id, role, content, json.dumps(meta or {}), time.time()),
         )
-        conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (time.time(), conv_id))
+        # A new message un-digests the conversation. `digested` was set once and
+        # never cleared, so the permanent WhatsApp thread was digested exactly
+        # once in its life and its CLI session then grew for weeks — 232k tokens
+        # per call by 11 September, and a 48-second wait for the first word.
+        conn.execute("UPDATE conversations SET updated_at=?, digested=0 WHERE id=?",
+                     (time.time(), conv_id))
 
 
 def list_ui_messages(conv_id: str) -> list[dict]:
@@ -434,15 +442,15 @@ def add_trace(conv_id: str, model: str, channel: str, first_token_ms: int | None
               total_ms: int, input_tokens: int, output_tokens: int, cached_tokens: int,
               instructions_chars: int, prompt_chars: int, tools: list, error: str = "",
               cache_write_tokens: int = 0, cost_usd: float = 0.0,
-              measured: bool = False) -> None:
+              measured: bool = False, context_tokens: int = 0) -> None:
     with _connect() as conn:
         conn.execute(
             "INSERT INTO traces (conv_id, model, channel, first_token_ms, total_ms, input_tokens, "
-            "output_tokens, cached_tokens, cache_write_tokens, cost_usd, measured, "
+            "output_tokens, cached_tokens, cache_write_tokens, cost_usd, measured, context_tokens, "
             "instructions_chars, prompt_chars, tools, error, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (conv_id, model, channel, first_token_ms, total_ms, input_tokens, output_tokens,
-             cached_tokens, cache_write_tokens, cost_usd, int(measured),
+             cached_tokens, cache_write_tokens, cost_usd, int(measured), int(context_tokens),
              instructions_chars, prompt_chars, json.dumps(tools), error[:500], time.time()),
         )
         conn.execute(  # keep the table bounded
@@ -678,6 +686,22 @@ def attention_open(limit: int = 50, max_priority: int = 3) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM attention WHERE state IN ('new','notified') AND priority<=?"
             " ORDER BY priority ASC, first_seen ASC LIMIT ?", (max_priority, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def attention_open_from(who: str, limit: int = 200) -> list[dict]:
+    """Open rows raised by one person — how "he answered them" settles a thread.
+
+    Matched case-insensitively on the stored name, because the same colleague
+    arrives as "Vinish Kumar" from the chat rail and "Vinish" from a draft.
+    """
+    if not (who or "").strip():
+        return []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM attention WHERE state IN ('new','notified')"
+            " AND lower(who)=lower(?) ORDER BY id DESC LIMIT ?",
+            (who.strip(), limit)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -956,6 +980,20 @@ def teams_messages(chat: str = "", since: float | None = None,
     args.append(max(1, limit))
     with _connect() as conn:
         rows = conn.execute(" ".join(sql), args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def teams_senders_known(limit: int = 400) -> list[dict]:
+    """Distinct people who have spoken in any stored thread, busiest first.
+
+    Separate from `teams_chats_known` because a colleague can be all over the
+    group chats and never be a thread of his own — which is exactly how a message
+    addressed to one by name read as an ordinary sentence.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT sender, COUNT(*) n FROM teams_messages WHERE sender<>'' "
+            "GROUP BY sender ORDER BY n DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
 
 

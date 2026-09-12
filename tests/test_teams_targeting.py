@@ -119,7 +119,7 @@ def test_two_people_he_talks_to_is_still_a_refusal_and_says_why():
 def test_a_stranger_is_reachable_by_full_name():
     """His stated workflow: new person, full name. That must not be blocked by
     everyone he DOES talk to ranking above them."""
-    rows = [_p(1, "Nakka Harika", top=True, chat=True), _p(2, "Harika Reddy")]
+    rows = [_p(1, "Harini S", top=True, chat=True), _p(2, "Harika Reddy")]
     picked = teams_bridge._one_of(rows, "Harika Reddy", "people", {"nakka harika"})
     assert teams_bridge._display_name(picked) == "Harika Reddy"
 

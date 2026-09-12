@@ -161,26 +161,11 @@ _DEBUG = re.compile(
 #: "incident" inside a repository name.
 _URL_IN_TEXT = re.compile(r"https?://\S+")
 
-#: Broadcasts. "Everyone please review PR for the fix of …" is addressed to a
-#: channel, and "Action Required: Review Confluence & Jira Space Permissions"
-#: went to the whole company — neither is somebody waiting on Arun, and each one
-#: queues an approval he then has to dismiss. Three of these had stacked up
-#: unanswered, which is how a queue of questions teaches him to ignore the queue.
-_BROADCAST = re.compile(
-    r"\b(everyone|all|team|folks|guys|hi all|dear (colleagues?|all|team))\b"
-    r"\s*(please|,|:|-)|\baction required\b|\bdo not reply\b|\bno[- ]reply\b",
-    re.I)
-
-#: Senders that broadcast by nature. Reuses the list the mail path already keeps,
-#: so a name added there is understood here too.
-def from_bulk_sender(who: str) -> bool:
-    from . import outlook
-    return bool(who) and bool(outlook._BULK_SENDER.search(who))
-
-
-def is_broadcast(who: str, text: str) -> bool:
-    """Addressed to a room rather than to him."""
-    return from_bulk_sender(who) or bool(_BROADCAST.search(text or ""))
+#: One definition, in the ranking policy — see `attention.is_broadcast`. These
+#: names stay because callers and tests already use them, and because "is this a
+#: broadcast" must give the same answer to the investigator and to the ranker.
+from_bulk_sender = attention.from_bulk_sender
+is_broadcast = attention.is_broadcast
 
 
 def what_it_asks(text: str) -> str:
@@ -226,7 +211,34 @@ def pr_number(text: str) -> str:
 #: The worker has no chat context — `delegate_task` says so and means it. Every
 #: prompt below therefore restates the message verbatim rather than referring to
 #: "the above", and every one ends the same way: report, stage, never send.
-_CLOSING = (
+#: The query discipline lives in a skill, and the HARD RULE that loads it lives
+#: in the CHAT persona — which a spawned worker never sees. So every rule Arun
+#: had already written was invisible to the investigations that needed it most:
+#: task #96 queried a single service instead of the namespace, and left "is the
+#: country in disable-countries-to-billing?" open as out of scope when the answer
+#: was one grep of a prod-values.yml already in its own worktree.
+_HOW = (
+    "\n\nBEFORE touching Grafana or Temporal, call load_skill('grafana-analyser') "
+    "and follow it exactly — namespace-wide first (the prod namespace is in your "
+    "guardrails), ONE wide call for an identifier — namespace ONLY, never a "
+    "container matcher — then "
+    "reason from what came back instead of "
+    "querying again. Production unless an env is named.\n"
+    "EVERY service in that namespace is in scope, not just the one the question "
+    "names — reading logs changes nothing, so 'that service is outside this "
+    "read-only pass' is never a reason to stop. The evidence for 'did it "
+    "actually land?' is almost always in the service DOWNSTREAM of the one "
+    "being asked about.\n"
+    "The logs decide and the code explains: establish from the trail what "
+    "actually happened, then use the code to say why. A cause read out of the "
+    "code and never confirmed in logs is a hypothesis — label it as one.\n"
+    "Runtime behaviour is in the prod Helm values file your guardrails name, "
+    "which is already in the worktree. A key absent from it means the default in "
+    "application.yml applies (`${{VAR:default}}`) — that is an answer, not an "
+    "unknown, so never leave a config question open without opening the file."
+)
+
+_CLOSING = _HOW + (
     "\n\nWhen you have an answer: report what you FOUND, with the evidence you "
     "based it on. If a reply to {who} is warranted, draft it and stage it with "
     "prepare_to_send — never send anything yourself. If you could not determine "
@@ -363,6 +375,34 @@ def too_old(sent_at: float | None, now: float | None = None) -> bool:
     return ((now or time.time()) - sent_at) > MAX_AGE_MINUTES * 60
 
 
+#: Kinds he has told Asta to leave alone. A standing instruction, kept in the
+#: database rather than in a prompt, because "don't look into incidents" said
+#: once in chat has to still be true tomorrow — and it was not. He said it, the
+#: incidents kept being investigated, and his only recourse was to say it again.
+_MUTE_KEY = "responder_muted_kinds"
+
+
+def muted_kinds() -> set[str]:
+    return {k for k in (store.kv_get(_MUTE_KEY) or "").split(",") if k}
+
+
+def muted(kind: str) -> bool:
+    return (kind or "") in muted_kinds()
+
+
+def mute(kind: str) -> str:
+    """Stop investigating a kind of ask until he says otherwise."""
+    kinds = muted_kinds() | {kind}
+    store.kv_set(_MUTE_KEY, ",".join(sorted(kinds)))
+    return f"I'll stop investigating {kind} asks. Say 'investigate {kind}s again' to undo."
+
+
+def unmute(kind: str) -> str:
+    kinds = muted_kinds() - {kind}
+    store.kv_set(_MUTE_KEY, ",".join(sorted(kinds)))
+    return f"Investigating {kind} asks again."
+
+
 def should_respond(kind: str, priority: int | None, key: str,
                    now: float | None = None, broadcast: bool = False,
                    sent_at: float | None = None) -> str:
@@ -378,6 +418,8 @@ def should_respond(kind: str, priority: int | None, key: str,
         return "responder is off (ASTA_RESPOND)"
     if not kind:
         return "nothing checkable in it"
+    if muted(kind):
+        return f"he asked me not to investigate {kind} asks"
     if broadcast:
         return "addressed to a room, not to him"
     if too_old(sent_at, now):
@@ -403,6 +445,38 @@ def should_respond(kind: str, priority: int | None, key: str,
 # of work, and starting one unasked is the substitution failure in another costume.
 
 _IDENT = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
+
+
+#: A handle somebody has HANDED OVER — a concrete thing Asta can go and look up.
+#: Deliberately narrow: a ticket number, a link into one of his systems, a Jira
+#: key. Not a bare alphanumeric blob, which would fire on half of ordinary chat.
+_HANDLE = re.compile(
+    r"\b(?:INC|CHG|REQ|RITM|TASK)\d{4,}\b"                     # ServiceNow
+    r"|\bhttps?://[\w.-]*(?:maersk|github)[\w.-]*/\S{4,}"      # a real link
+    # An internal host and a path, however Teams chose to render the gap between
+    # them — its link previews turn "host/path" into "host: path", which is what
+    # Vinish's booking link actually arrived as.
+    r"|\b[\w.-]*maersk[\w.-]*\.(?:net|io|com|dev)\b[\s:]{0,3}\S*/\S{3,}"
+    r"|\b[A-Z][A-Z0-9]{1,9}-\d+\b", re.I)                       # Jira key
+
+
+def handed_over(text: str) -> str:
+    """The concrete thing this message points at, or ''.
+
+    The reason this exists: `familiar` asks "has Asta worked on this before?",
+    which is the right question for deciding whether to spend a turn on a vague
+    remark — and the wrong one when a colleague has just pasted the exact thing
+    to look at. A colleague sent a booking link and "can you check why STF is not
+    done?", and because that booking id was new ground Asta asked Arun for
+    permission to look instead of looking. His words: "they gave tickets and
+    details to check but it is not automatically going and debugging".
+
+    A handle IS the permission. It is somebody saying "here, this one" — and the
+    work it unlocks is read-only, so the cost of being wrong is one wasted
+    analysis rather than anything that touches production.
+    """
+    m = _HANDLE.search(text or "")
+    return m.group(0)[:80] if m else ""
 
 
 def _identifiers(text: str) -> set[str]:
@@ -448,7 +522,8 @@ def familiar(text: str) -> tuple[bool, str]:
 # --- the act ------------------------------------------------------------------
 
 def respond(source: str, who: str, text: str, priority: int | None = None,
-            key: str = "", workspace: str = "", sent_at: float | None = None) -> dict | None:
+            key: str = "", workspace: str = "", sent_at: float | None = None,
+            context: str = "") -> dict | None:
     """Start the investigation this message deserves. The spawned task, or None.
 
     Deliberately synchronous and tiny: it decides and delegates. Everything slow
@@ -463,7 +538,26 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
                              broadcast=is_broadcast(who, text), sent_at=sent_at)
     if why_not:
         return None
-    known, why = familiar(text)
+    # The ASK is judged on the message itself — context must not be able to
+    # invent a question nobody asked. Everything else reads the surrounding
+    # lines, because people paste the link and then ask about it in the next
+    # breath: Vinish's booking id was in the message BEFORE "can you check why
+    # STF not done?", so the one line handed over here had a question and
+    # nothing to check it against.
+    grounds = f"{context}\n{text}".strip() if context else text
+    known, why = familiar(grounds)
+    if not known:
+        # A handle is permission only when a PERSON handed it over. "IT Service
+        # Desk" mails "Incident INC… has been assigned to group OH - TELIKOS" all
+        # day; every one carries a ticket number, and reading that as somebody
+        # saying "here, this one" turned a ticket feed into a queue of agentic
+        # investigations — six in 24 hours, every one of them burning his Claude
+        # session limit and failing. Nobody asked for any of them.
+        #
+        # `handed_over` still means what it meant: the difference is WHO said it.
+        handle = "" if is_broadcast(who, grounds) else handed_over(grounds)
+        if handle:
+            known, why = True, f"they handed over {handle}"
     _note_started(time.time())
     _note_handled(key)
     if not known:
@@ -473,14 +567,14 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         from . import offers
         offers.propose(
             subject=f"🔎 {who or 'Someone'} asked about something new",
-            context=f"{who or 'Someone'}: {message_of(text)[:400]}",
+            context=f"{who or 'Someone'}: {message_of(grounds)[:400]}",
             question=f"Want me to look into it?",
             action=brief_for(kind, who, text),
             kind="investigate",
             payload={"who": who, "source": source, "responder_kind": kind})
         return None
     t = tasks.spawn(title_for(kind, who, text),
-                    brief_for(kind, who, text),
+                    brief_for(kind, who, grounds),
                     "analysis",                     # read-only. never code.
                     workspace or None)
     store.kv_set(f"responder_task:{t['id']}",

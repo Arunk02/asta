@@ -40,7 +40,9 @@ from . import store
 
 #: How often to compare the rail. Cheaper than the activity poll: one DOM read,
 #: and no chat is opened unless something moved.
-POLL_SECONDS = float(os.environ.get("ASTA_CHATWATCH_SECONDS", "180"))
+#: How often to look. 180 put the modal message 1-3 minutes behind before the
+#: sweep even started; 60 is the difference between "he told me" and "I saw it".
+POLL_SECONDS = float(os.environ.get("ASTA_CHATWATCH_SECONDS", "60"))
 
 #: Conversations at the head of the list, read on EVERY sweep. These are the ones
 #: with recent activity, so this is where a new message almost always is.
@@ -110,22 +112,35 @@ def _seen_key(chat: str) -> str:
     return f"chatwatch_seen:{chat.strip().lower()[:60]}"
 
 
-def pick(current: list[str], cursor: int) -> tuple[list[str], int]:
+def pick(current: list[str], cursor: int,
+         previous: list[str] | None = None) -> tuple[list[str], int]:
     """Which conversations to open this sweep, and where the rotation got to.
 
-    The head of the list every time — that is where a new message lands — plus a
-    moving window through the tail so nothing is permanently unread. No dependence
-    on Teams reordering anything, on unread styling, or on the Activity feed.
+    Three tiers, in this order: anything that MOVED UP since last sweep, then the
+    head of the list, then a moving window through the tail so nothing is
+    permanently unread.
+
+    The first tier is the fix for how late he heard about things. `moved_up` has
+    always existed — a chat with a new message jumps toward the top, and a rise
+    is the signal — and `pick` never asked it. So a message in a thread below the
+    head waited for the rotation to come round: with ROTATE=2 over twenty
+    threads, up to nine sweeps. Measured over a week of real traffic, 433 of
+    2,743 messages arrived more than fifteen minutes late and 24% took more than
+    five. Opening what just changed is what that number was waiting for.
+
+    Still bounded by MAX_OPENS, and the head still always gets a look, so a burst
+    of activity in one room cannot starve the rest.
     """
     if not current:
         return [], cursor
+    active = [c for c in moved_up(previous or [], current) if c in current]
     top = current[:ALWAYS_TOP]
-    tail = current[ALWAYS_TOP:]
+    tail = [c for c in current[ALWAYS_TOP:] if c not in active]
     if not tail:
-        return top[:MAX_OPENS], 0
+        return list(dict.fromkeys(active + top))[:MAX_OPENS], 0
     start = cursor % len(tail)
     window = [tail[(start + i) % len(tail)] for i in range(min(ROTATE, len(tail)))]
-    return list(dict.fromkeys(top + window))[:MAX_OPENS], start + len(window)
+    return list(dict.fromkeys(active + top + window))[:MAX_OPENS], start + len(window)
 
 
 def moved_up(previous: list[str], current: list[str]) -> list[str]:
@@ -297,7 +312,7 @@ def clean_message(text: str, known: set[str] | None = None) -> str:
     The hard case is a leading quote with NO blank line before the reply, which is
     the common shape:
 
-        Nakka Harika              <- who is quoted
+        Harini S              <- who is quoted
         28/08/2026 12:39          <- when
         Swamy in vinish and urs team..     <- HER words
         Arrey I'm in multiple teams for Background support   <- his reply
@@ -373,7 +388,8 @@ def summarise(text: str, limit: int = 160, known: set[str] | None = None) -> str
 def render(chat: str, who: str, text: str, priority: int | None = None,
            known: set[str] | None = None) -> str:
     """The line on his phone. Names the person once."""
-    mark = "🔴" if (priority is not None and priority <= 1) else "·"
+    from . import attention
+    mark = attention.marker(priority)
     where = "" if (chat or "").strip().lower() == (who or "").strip().lower() \
         else f" in {chat}"
     return f"{mark} {who}{where}: {summarise(text, known=known)}"
@@ -394,10 +410,46 @@ def names_someone_else(text: str, sender: str) -> bool:
     # missed in prod" opens with a capitalised noun and is not addressed to
     # anybody, and reading it as a name would have silenced a real report.
     m = re.match(r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s*[,:]?\s+\w", lead)
-    if not m:
+    if m:
+        named = m.group(1).strip().lower()
+        return named != (sender or "").strip().lower()
+    # A SINGLE capitalised word, but only when it is a person Asta has actually
+    # seen him talk to. Grammar alone is far too loose here — "Activity getting
+    # missed in prod" opens with a capitalised noun and is addressed to nobody —
+    # so this asks the evidence instead: is that a colleague's name?
+    #
+    # "Priya Nair: Rahul lets take the billtoparty change tomorrow" reached his
+    # chase list because the two-word rule could not see a one-word address, and
+    # Rahul is unmistakably who that sentence is for.
+    one = re.match(r"^([A-Z][a-z]{2,20})\b[,:]?\s+\w", lead)
+    if not one:
         return False
-    named = m.group(1).strip().lower()
-    return named != (sender or "").strip().lower()
+    first = one.group(1).strip().lower()
+    if first == (sender or "").strip().lower().split(" ")[0]:
+        return False
+    return any(first == n.strip().lower().split(" ")[0]
+               for n in _people_he_talks_to() if n)
+
+
+def _people_he_talks_to() -> list[str]:
+    """Every person Asta has seen — thread names AND senders inside them.
+
+    Senders matter as much as threads: "Rahul Verma" has never been a 1:1 in
+    his rail, he only ever speaks inside group chats. Thread names alone could
+    not see him, so "Rahul lets take the billtoparty change tomorrow" read as a
+    sentence rather than as a message for Rahul.
+    """
+    from . import contacts, store as _store
+    names: list[str] = []
+    try:
+        names += contacts.known_threads()
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
+        names += [r["sender"] for r in _store.teams_senders_known()]
+    except Exception:                                          # noqa: BLE001
+        pass
+    return names
 
 
 def answered_by_him(chat: str, message: dict) -> bool:
@@ -411,7 +463,14 @@ def answered_by_him(chat: str, message: dict) -> bool:
     if not when:
         return False
     try:
-        rows = store.teams_messages(chat=chat, limit=200)
+        # WINDOWED, not "the first 200". `teams_messages` orders oldest-first and
+        # then applies the limit, so an unwindowed call on a long thread returns
+        # the oldest 200 messages — and his reply, which is by definition the
+        # newest thing in it, is never in the window. The Vinish thread has 200+
+        # stored messages, so this returned False for every question in it no
+        # matter how promptly he answered, and the ledger kept chasing him about
+        # conversations he had finished.
+        rows = store.teams_messages(chat=chat, since=when, limit=200)
     except Exception:                                          # noqa: BLE001
         return False
     return any(r.get("sent_at") and r["sent_at"] > when
@@ -470,12 +529,17 @@ async def candidates() -> list[str]:
     current = [r.strip() for r in (rows or [])
                if r.strip() and r.strip().lower() not in teams_bridge._NOT_A_CHAT
                and not is_furniture(r)]
+    # Read BEFORE it is overwritten: the comparison is the whole activity signal.
+    try:
+        previous = json.loads(store.kv_get(_RAIL_KEY) or "[]")
+    except (ValueError, TypeError):
+        previous = []
     store.kv_set(_RAIL_KEY, json.dumps(current[:60]))
     try:
         cursor = int(store.kv_get(_CURSOR_KEY) or "0")
     except ValueError:
         cursor = 0
-    chosen, cursor = pick(current, cursor)
+    chosen, cursor = pick(current, cursor, previous)
     store.kv_set(_CURSOR_KEY, str(cursor))
     return chosen
 
@@ -540,7 +604,7 @@ async def sweep(notify=None) -> list[dict]:
         except Exception:                                      # noqa: BLE001
             failed += 1
             continue                # one unreadable thread must not end the sweep
-        for m in fresh:
+        for i, m in enumerate(fresh):
             who = (m.get("sender") or chat).strip()
             text = (m.get("text") or "").strip()
             # 1:1 always; a group once he is tagged, and for a window after —
@@ -560,18 +624,45 @@ async def sweep(notify=None) -> list[dict]:
             # group discussion between other people, none of it his, delivered to
             # his phone. `direct` was computed here and then never used.
             if not direct:
+                # Recorded, and explicitly NOT owed by him. `consider` has already
+                # stamped this row `notified` — that is what it does when it
+                # decides to push — so leaving it there made it chaseable, and the
+                # hourly chase has no idea this second gate exists. That is how
+                # "Still waiting on you (5)" came to list a deployment
+                # announcement and two people talking to each other: "im not even
+                # in the contest but it still asking it waiting for me".
+                #
+                # Dropped without a label: he neither engaged nor ignored it, and
+                # scoring it either way would teach the filter from a message it
+                # was right not to show him.
+                attention.mark_dropped(key)
                 continue
-            handled.append({"chat": chat, "who": who, "text": text, "priority": pri})
-            lines.append(render(chat, who, text, pri, known=known))
             # He has already dealt with it. "i have already shared na the
             # analysis then why again it doing" — Vinish's list of production
             # issues was investigated by a background task while Arun's own answer
             # was already sitting in the thread above it. A reply of his, later
             # than the ask, is the clearest possible signal that it is handled.
+            #
+            # This used to sit two lines lower, which suppressed the INVESTIGATION
+            # and forwarded the message anyway — so an answered question still
+            # reached his phone, and still sat in "still waiting on you" after
+            # that. Settled and silent is the whole point.
             if answered_by_him(chat, m):
+                attention.mark_acted(key, why="he replied")
+                attention.settle_with(who)
                 continue
+            handled.append({"chat": chat, "who": who, "text": text, "priority": pri})
+            lines.append(render(chat, who, text, pri, known=known))
+            # The few lines BEFORE this one, from the same person. People paste
+            # the link and ask about it in the next breath — Vinish's booking id
+            # was one message above "can you check why STF is not done?", so
+            # the responder got a question with nothing to check it against and
+            # asked Arun for permission instead of just looking.
+            before = "\n".join(
+                (x.get("text") or "").strip() for x in fresh[max(0, i - 3):i]
+                if (x.get("sender") or chat).strip() == who)
             task = responder.respond("teams-chat", who, text, priority=pri, key=key,
-                                     sent_at=m.get("sent_at"))
+                                     sent_at=m.get("sent_at"), context=before)
             if task:
                 started.append(responder.line_for(task, who,
                                                   responder.what_it_asks(text)))
@@ -593,11 +684,28 @@ async def sweep(notify=None) -> list[dict]:
     return handled
 
 
+def in_a_call() -> bool:
+    """Is a call live? One definition, in the bridge that owns the browser."""
+    from . import teams_bridge
+    return teams_bridge.in_a_call()
+
+
 async def watch_loop() -> None:
     """Poll the rail forever. Quiet when nothing moved."""
     from . import notify, teams_bridge, wake
     while True:
         await wake.sleep(POLL_SECONDS)
+        # A call OWNS the browser. Chromium tolerates one writer per profile, so
+        # a sweep during a call is not a slow read — it is a second instance
+        # contending for the tree the call is holding, and with real Chrome the
+        # loser hands off and exits silently rather than erroring.
+        #
+        # That is what ended three calls in a row: dialled, then eleven seconds
+        # later "TargetClosedError: Keyboard.press" while still searching for the
+        # person's name. `incoming.watch_loop` already stands down for exactly
+        # this reason; this loop never learned to.
+        if in_a_call():
+            continue
         if not (enabled() and teams_bridge.enabled() and teams_bridge.logged_in_once()
                 and store.kv_get("teams_session_ok") != "0"):
             continue

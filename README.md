@@ -90,6 +90,24 @@ damage is that nothing publishes, ships or sends without your approval.
 
 ## Work: task → plan → your approval → implement → you say ship
 
+**One change is one task, wherever its repos are.** A task gets a private
+worktree with its branch already checked out — and until 2026-09-07 the *first*
+leg ran in the shared checkout while every later leg (escalation, repo hop,
+verify retry) ran in the worktree. Two different trees on two different branches.
+Task #89's micro leg worked in the shared checkout, cut its own branch, committed
+there, escalated, opened its empty worktree, and implemented the whole change a
+second time — two divergent commits of one change, neither on the branch Asta was
+tracking, and Arun's own checkout moved underneath his editor. Every leg now runs
+in the same place, the run is told which branch it is on, and each leg is shown
+what earlier legs already committed (read from `git log`, which survives a
+compaction where the run's own memory does not).
+
+A repo the change reaches but the task has no checkout for gets one prepared, and
+the same task continues into it — that is what turned one field spanning two
+services into tasks #88 and #89. And a task reports completion **once**: `FINAL`
+means *called off*, never *finished*, so the done branch had no guard and #88
+pushed four identical "✅ DONE" messages between 12:42 and 13:07.
+
 ```mermaid
 flowchart TB
     A["“implement ABC-123 in booking”"] --> C{"Is the goal<br/>unambiguous?"}
@@ -200,11 +218,25 @@ of two signals instead:
 **A stopped turn says which of three things happened.** "Timed out after 300s" is
 true and answers none of the questions you actually have: did it finish, is it
 still going, is it stuck. `app/turn_budget.py` separates them — **done**, **idle**
-(silent for `ASTA_TURN_IDLE`, 120s: wedged, and more time will not help), and
-**ceiling** (still producing output when the budget ran out: a long job, where
+(nothing happening for `ASTA_TURN_IDLE`, 120s: wedged, and more time will not
+help), and **ceiling** (still working when the budget ran out: a long job, where
 resuming continues it and retrying starts from nothing). Whatever the brain got
 through travels with the report, because the old path accumulated every step it
 narrated and then discarded all of it to raise one sentence.
+
+**"Nothing happening" is not "nothing printed".** Copilot prints prose and
+nothing else, so a turn deep in tool calls is silent by construction — and the
+watchdog read stdout alone, which made the rule in force *any job needing more
+than two minutes of tools is stuck*. On 2026-09-07 a turn made ten tool calls,
+found the topic files it was sent for, recorded what it learned and staged the
+message — and was killed thirteen seconds later as *"stuck, more time would not
+have helped"*, having printed 0 characters. The harder the request, the more
+certain it was to die. So a brain may offer a second signal in whatever shape it
+has one — Copilot its own session event log, Claude Code its stream-json tool
+events — consulted only once the byte stream goes quiet. A probe that never
+moves, is missing, or raises leaves the old rule exactly as it was, which is what
+keeps a genuinely wedged turn caught. One ceiling now covers all three brains,
+the local model included; it used to keep a hardcoded 120s of its own.
 
 That split is also what let the code-task ceiling go up. It was 30 minutes against
 a measured p90 of 32 (n=46), so the slowest tenth of code tasks were killed by
@@ -344,6 +376,25 @@ embeds the generated graph pages.
 Drift is watched for free: a 10-minute git fingerprint, zero tokens. Only
 *material* change counts — adding test fixtures or data files won't flag your
 context as stale. Re-enrichment costs tokens and is always your call.
+
+**And every code task is told how far behind the map is.** That last sentence —
+re-enrichment is always your call — has a consequence nobody was measuring: on
+2026-09-07 the booking-service mini-skills were stamped against `6ee7d83b` and
+develop had moved **143 commits**. Everything else tells the agent to route
+through that map and never scan a repo blind, so it answered confidently from a
+description of code that no longer existed, and *"verified true — zero references
+anywhere in this repo"* turned out to be a claim about the map rather than about
+the repo. `refresh.context_gap` counts the gap in **commits, not days** — days
+measure how long nobody ran a script, commits measure how much the agent does not
+know — and `trust_note` puts it in the prompt: use the map to find *where* to
+look, never as proof of what exists. A workspace whose context is current adds
+nothing.
+
+Worth being clear about what regenerating the index does and does not do: the
+deterministic pass rebuilds links, scenarios and symbols from the mini-skills,
+and re-running it on a 143-commit gap produced **byte-identical output**. The
+mini-skills are the knowledge; the index is a view of them. That is why the
+answer here is a trust boundary rather than a nightly refresh.
 
 ## Models
 
@@ -623,6 +674,17 @@ directly instead of being taught a curl line for it:
 
 The config is printed, not installed — pointing your Copilot or Claude CLI at it is
 a change to *your* tools, and yours to make.
+
+**Task runs get the same tools as chat.** They did not, and the gap was invisible
+because it looked like a shy model rather than a missing flag: `--additional-mcp-
+config` was attached on the chat path only, and a task run got `dev_mcp` alone —
+which is off by default, so the answer was an empty string and the flag was never
+passed. Every background task therefore ran with **no Jira, no Teams, no memory and
+no `prepare_to_send`**. Task #86 reported exactly that. Task #88 implemented a
+missing avro mapping across eleven files with a green build and finished with *"I
+can't message Vinish directly"* — the work done and nobody told. `tasks.task_tools`
+now composes Asta's own server with the dev servers, bound to the conversation that
+spawned the task so an approval lands in the chat you asked from.
 
 ## Jira
 
@@ -909,6 +971,12 @@ required them:
   ringing call already is; the buttons are then found by their labels, because a
   data-tid guess looks correct in review and fails silently on the one call that
   mattered.
+- **No name, no alert.** "Someone is calling" is the question without the one fact
+  needed to answer it. The detector also matched *"N others are in this call"* —
+  which is what a call already **in progress** renders — so any Teams window
+  sitting on a joined call read as an incoming ring: nine alerts in three days, one
+  at 00:21, and not one with a caller, because there was no caller. A ring that
+  cannot be attributed is now recorded for calibration and never pushed.
 - **A meeting that is starting asks whether to go.** The prep ping runs 15-30
   minutes out, which is the wrong moment for that question; a second ping at start
   time carries the join as a recorded operation, so your yes joins the meeting you
@@ -954,7 +1022,7 @@ browser profile, so keep FileVault on.
 ### How Asta learns you were pinged — it reads your chats
 
 **The chat reader** (`app/chat_watch.py`, `ASTA_CHATWATCH=1`,
-`ASTA_CHATWATCH_SECONDS=180`) opens your conversations and reads them. That is the
+`ASTA_CHATWATCH_SECONDS=60`) opens your conversations and reads them. That is the
 primary source, and the reason is structural: Teams' Activity feed lists mentions,
 replies, reactions and invites, and **never an ordinary message**. So a 1:1 — where
 every message is addressed to you by definition — was invisible unless somebody
@@ -972,9 +1040,37 @@ Three decisions in it, each checked against a live Teams rather than assumed:
   you in* — being tagged into a thread is not subscribing to a room. Everything else
   is recorded in the ledger, so "what did I miss in that channel" still has an
   answer; it just doesn't interrupt you.
-- **Bounded cost.** The head of the rail every sweep plus a rotating window through
-  the tail, capped at `ASTA_CHATWATCH_MAX_OPENS` — each open is a real navigation on
-  a profile that tolerates one writer.
+- **What just changed, first.** Three tiers per sweep: chats that *moved up* the
+  rail since last time, then the head, then a rotating window through the tail so
+  nothing is permanently unread — capped at `ASTA_CHATWATCH_MAX_OPENS`, because
+  each open is a real navigation on a profile that tolerates one writer. The first
+  tier is why messages arrive promptly: `moved_up` existed from the start and the
+  selection never asked it, so a message below the head waited for the rotation.
+  Measured over a week of real traffic — 2,743 messages — **433 arrived more than
+  fifteen minutes late and 24% took more than five**.
+
+**Nothing stays owed once you have answered it.** An item enters the ledger when
+someone wants something; the only way out was `attention.mark_acted`, and until
+2026-09-07 **the only caller of it in the whole product was the bench**. So the
+ledger held **1,779 rows in `notified` against 90 `acted`**, and "⏳ Still waiting
+on you" listed questions answered hours earlier — including ones Asta had sent the
+reply to itself. Three things settle an item now: a message of yours in that
+thread later than the ask, a reply going out on your behalf, and the repair pass
+(`attention.reconcile`) that clears what the old behaviour left behind. Settling is
+per *person*, not per sentence — three questions in four minutes are answered by
+one "yes".
+
+**Being in the room is not being asked.** A room-wide announcement lands in the
+same group you were talking in five minutes ago, so the engaged-window rule said
+yes to it. `attention.is_broadcast` is now part of the ranking policy rather than
+only the investigator's, and a broadcast is never floored up to "today". Separately,
+a message that is recorded but *withheld* from you is marked dropped rather than
+left `notified` — otherwise the hourly chase, which knows nothing about that second
+gate, picks it up at end of day and asks you about a conversation you are not in.
+
+**Four ranks, four marks.** 🚨 now · 🔴 today · 🟡 FYI · · muted. The line on your
+phone used to render `🔴 if priority <= 1 else ·`, and P_TODAY is by far the biggest
+bucket, so 365 of the last 571 Teams pushes carried the same mark.
 
 **The Activity poll** (`teams_bridge.activity_watch_loop`, `TEAMS_ACTIVITY_POLL=60`)
 still runs, for the things that are not messages in any thread: missed calls,

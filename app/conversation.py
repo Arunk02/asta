@@ -77,6 +77,11 @@ async def converse(who: str, topic: str, workspace: str = "") -> str:
       talking to nothing for forty seconds.
     """
     started = asyncio.get_event_loop().time()
+    # Why he rang. Stashed rather than threaded through, because the thing that
+    # needs it — the voice note left when nobody picks up — is decided several
+    # frames away in `call_watch`, which only ever knew WHO was called.
+    from . import store
+    store.kv_set("call_topic", (topic or "")[:400])
 
     def elapsed() -> float:
         return asyncio.get_event_loop().time() - started

@@ -165,9 +165,9 @@ def test_the_corpus_check_is_actually_reaching_his_data():
 
 # --- the quote with no blank line before the reply ---------------------------
 # The common shape, and the one that beat the first two attempts. Captured live
-# from his Nakka Harika thread:
+# from his Harini S thread:
 #
-#     Nakka Harika                                      <- who is quoted
+#     Harini S                                      <- who is quoted
 #     28/08/2026 12:39                                  <- when
 #     Swamy in vinish and urs team..                    <- HER words
 #     Arrey I'm in multiple teams for Background support <- his reply
@@ -176,7 +176,7 @@ def test_the_corpus_check_is_actually_reaching_his_data():
 # is by definition a message that already exists in the thread, so the thread
 # itself identifies it.
 
-TIGHT_QUOTE = ("Nakka Harika\n28/08/2026 12:39\nSwamy in vinish and urs team..\n"
+TIGHT_QUOTE = ("Harini S\n28/08/2026 12:39\nSwamy in vinish and urs team..\n"
                "Arrey I'm in multiple teams for Background support")
 
 
@@ -189,7 +189,7 @@ def test_the_thread_identifies_the_quote_when_spacing_does_not():
 def test_a_multi_line_reply_survives_when_the_thread_is_known():
     """The reason the lookup is preferred over "keep the last paragraph": that
     fallback would throw away everything but the final line."""
-    raw = ("Nakka Harika\n28/08/2026 12:39\nSwamy in vinish and urs team..\n"
+    raw = ("Harini S\n28/08/2026 12:39\nSwamy in vinish and urs team..\n"
            "first point\nsecond point")
     out = chat_watch.clean_message(raw, known={"Swamy in vinish and urs team.."})
     assert "first point" in out and "second point" in out

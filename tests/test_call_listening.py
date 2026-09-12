@@ -19,7 +19,7 @@ import wave
 
 import pytest
 
-from app import meetings, store, voice
+from app import call_audio, meetings, store, voice
 
 
 def _wav(seconds: float = 0.1, rate: int = 24000) -> bytes:
@@ -78,7 +78,7 @@ def mic(monkeypatch):
         switches.append(device)
         return True
 
-    monkeypatch.setattr(meetings, "set_call_mic", set_mic)
+    monkeypatch.setattr(call_audio, "set_call_mic", set_mic)
     return switches
 
 
@@ -127,7 +127,7 @@ async def test_it_does_not_speak_if_the_mic_will_not_switch(in_call, monkeypatch
     async def gen(text, profile="", engine="", voice=""):
         return _wav()
 
-    monkeypatch.setattr(meetings, "set_call_mic", refuse)
+    monkeypatch.setattr(call_audio, "set_call_mic", refuse)
     monkeypatch.setattr(voice, "speak", gen)
     monkeypatch.setattr(voice, "play_to_device", lambda w, d="": played.append(1))
 
@@ -153,8 +153,16 @@ async def test_a_failed_restore_shouts(in_call, monkeypatch):
     async def gen(text, profile="", engine="", voice=""):
         return _wav()
 
-    from app import notify
-    monkeypatch.setattr(meetings, "set_call_mic", switch)
+    from app import notify, store
+    monkeypatch.setattr(call_audio, "set_call_mic", switch)
+    # `_restore_mic` now RE-READS the input before shouting, because the verify
+    # inside set_call_mic races with Teams grabbing the device mid-call. On this
+    # machine the real mic is fine, so without stubbing the read the retry finds
+    # it correct and — rightly — says nothing.
+    async def stuck():
+        return "Microsoft Teams Audio"
+    monkeypatch.setattr(call_audio, "current_mic", stuck)
+    store.kv_set("mic_warned_for", "")
     monkeypatch.setattr(notify, "notify", spy)
     monkeypatch.setattr(voice, "speak", gen)
     monkeypatch.setattr(voice, "play_to_device", lambda w, d="": 0.1)
@@ -177,7 +185,7 @@ async def test_audio_is_generated_before_the_mic_is_borrowed(in_call, monkeypatc
         return True
 
     monkeypatch.setattr(voice, "speak", gen)
-    monkeypatch.setattr(meetings, "set_call_mic", switch)
+    monkeypatch.setattr(call_audio, "set_call_mic", switch)
     monkeypatch.setattr(voice, "play_to_device", lambda w, d="": 0.1)
 
     await meetings.say_in_call("tell him")
@@ -327,7 +335,7 @@ async def test_a_switch_is_verified_not_assumed(monkeypatch):
 
     monkeypatch.setattr(meetings.asyncio, "create_subprocess_exec", fake_exec)
     # asked for BlackHole, the system still reports the built-in mic
-    assert await meetings.set_call_mic(None, "BlackHole 2ch") is False
+    assert await call_audio.set_call_mic(None, "BlackHole 2ch") is False
 
 
 @pytest.mark.asyncio
@@ -340,7 +348,7 @@ async def test_a_switch_that_took_returns_true(monkeypatch):
         return P()
 
     monkeypatch.setattr(meetings.asyncio, "create_subprocess_exec", fake_exec)
-    assert await meetings.set_call_mic(None, "BlackHole 2ch") is True
+    assert await call_audio.set_call_mic(None, "BlackHole 2ch") is True
 
 
 @pytest.mark.asyncio
@@ -349,10 +357,10 @@ async def test_a_missing_switcher_is_not_a_crash(monkeypatch):
         raise FileNotFoundError("SwitchAudioSource")
 
     monkeypatch.setattr(meetings.asyncio, "create_subprocess_exec", explode)
-    assert await meetings.set_call_mic(None, "BlackHole 2ch") is False
+    assert await call_audio.set_call_mic(None, "BlackHole 2ch") is False
     assert await meetings.current_mic() == ""
 
 
 @pytest.mark.asyncio
 async def test_no_device_named_means_no_switch():
-    assert await meetings.set_call_mic(None, "") is False
+    assert await call_audio.set_call_mic(None, "") is False

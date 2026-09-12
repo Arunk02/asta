@@ -272,6 +272,79 @@ def is_reaction(text: str) -> bool:
     return bool(_REACTION.search(text or ""))
 
 
+#: Broadcasts. "Everyone please review PR for the fix of …" is addressed to a
+#: channel, and "Action Required: Review Confluence & Jira Space Permissions"
+#: went to the whole company — neither is somebody waiting on Arun.
+_BROADCAST = re.compile(
+    r"\b(everyone|all|team|folks|guys|hi all|dear (colleagues?|all|team))\b"
+    r"\s*(please|,|:|-)|\baction required\b|\bdo not reply\b|\bno[- ]reply\b",
+    re.I)
+
+#: A message that OPENS by addressing the room. The clause above needed the room
+#: word to be followed by punctuation or "please", which "Everyone all the new
+#: development and bug fixes are getting deployed to MDP" is not — and that one
+#: reached his chase list. Anchored to the start, because "we told everyone" in
+#: the middle of a sentence is somebody talking TO him about a room.
+_ROOM_OPENER = re.compile(
+    r"^\s*(hi|hello|hey)?\s*(everyone|all|team|folks|guys|channel|"
+    r"dear (colleagues?|all|team))\b", re.I)
+
+#: Senders that address a room by their nature — a meeting bot, a reminder feed.
+#: Narrow on purpose: over-filtering costs him a real message, which is the worse
+#: failure. "Facilitator" is the one that actually reached him.
+_ROOM_SENDER = re.compile(r"^(facilitator|moderator|reminders?|announcements?|"
+                          r"notifications?|bot|polls?|surveys?|forms?)\b", re.I)
+
+#: A poll or survey posted to a room. "Poll: Do you plan to attend the OHP AL
+#: Days event from office tomorrow?" is a question, so every ask-detector says
+#: yes, and it is addressed to a room of forty people. It reached his chase list
+#: as something he personally owed an answer to.
+_POLL = re.compile(r"^\s*(poll|survey)\b\s*[:\-]|\bnames not recorded\b|"
+                   r"\bresults shared\b", re.I)
+
+
+def from_bulk_sender(who: str) -> bool:
+    """Senders that broadcast by nature — the list the mail path already keeps,
+    so a name added there is understood here too."""
+    from . import outlook
+    return bool(who) and bool(outlook._BULK_SENDER.search(who))
+
+
+def addressed_to_a_room(who: str, text: str) -> bool:
+    """The RANKING half of "is this a broadcast" — what they wrote, not who sent it.
+
+    Deliberately not `is_broadcast`. That one also asks `from_bulk_sender`, and
+    the bulk-sender list contains `servicenow` — so ranking on it demoted an
+    assigned incident ("INC4471 booking service down") to FYI and it stopped
+    reaching him. That exact bug is already recorded a few lines below, in the
+    comment about ServiceNow's exemption not surviving to the ranking layer;
+    this is the version that does not re-create it.
+    """
+    return (bool(_ROOM_SENDER.search((who or "").strip()))
+            or bool(_POLL.search(text or ""))
+            or bool(_ROOM_OPENER.search(text or ""))
+            or bool(_BROADCAST.search(text or "")))
+
+
+def is_broadcast(who: str, text: str) -> bool:
+    """Addressed to a room rather than to him.
+
+    Lived in `responder`, where it decided whether to spend a turn investigating
+    — and nothing else ever asked. So a deployment announcement ("Everyone all
+    the new development and bug fixes are getting deployed to MDP only so please
+    use the MDP server") was not investigated, and was still ranked as something
+    he personally owed an answer to, and still appeared under "Still waiting on
+    you". He is not even in that conversation: "im not even in the contest but it
+    still asking it waiting for me".
+
+    A ranking signal belongs in the ranking policy, where every source gets it.
+    """
+    return (from_bulk_sender(who)
+            or bool(_ROOM_SENDER.search((who or "").strip()))
+            or bool(_ROOM_OPENER.search(text or ""))
+            or bool(_BROADCAST.search(text or "")))
+
+
 def rank(action: bool, text: str, *, addressed: bool = False, key: str = "",
          who: str = "", now: float | None = None) -> tuple[int, str, float | None]:
     """The WHOLE per-arrival ranking: criticality, score, chase escalation.
@@ -298,6 +371,17 @@ def rank(action: bool, text: str, *, addressed: bool = False, key: str = "",
         # layer, which is the same shape as every other per-layer drift here.
         pri = min(pri, P_TODAY)
         why = f"assigned to your group · {why}"
+    elif addressed_to_a_room(who, text) and not looks_critical(text):
+        # Never floored up to "today". A room-wide announcement lands in the same
+        # group he was talking in five minutes ago, so the engaged-window half of
+        # `addressed` says yes to it — which is exactly how these reached the
+        # chase list. Being in the room is not being asked.
+        #
+        # An outage announced to a room is still an outage, so criticality wins:
+        # the cost of being wrong here is him not hearing that production is
+        # down, against the cost of one more line on his phone.
+        pri = max(pri, P_FYI)
+        why = f"announcement to the room · {why}"
     elif addressed and not is_reaction(text):
         # Somebody used his name. That IS the ask, whether or not the sentence
         # parses as one — "hi Arunkumar K" contains no ask verb and is
@@ -330,6 +414,23 @@ def escalate_for_chase(priority: int, key: str, now: float | None = None) -> tup
 
 
 LABELS = {P_NOW: "now", P_TODAY: "today", P_FYI: "FYI", P_MUTE: "muted"}
+
+#: One mark per level, and the ONLY place a priority becomes a symbol.
+#:
+#: The ledger has always ranked four ways. The message on his phone showed two:
+#: `"🔴" if priority <= 1 else "·"`. P_TODAY is the biggest bucket by far — 1,211
+#: rows against 239 P_NOW — so almost everything arrived red, and 365 of the last
+#: 571 Teams pushes carried the same mark. "same red tag for all image can u
+#: prioritise does it on priority or not". A ladder that cannot tell an outage
+#: from a question is not a priority, it is decoration.
+MARKS = {P_NOW: "🚨", P_TODAY: "🔴", P_FYI: "🟡", P_MUTE: "·"}
+
+
+def marker(priority: int | None) -> str:
+    """The symbol for a rank — "·" for unranked, which claims nothing."""
+    if priority is None:
+        return "·"
+    return MARKS.get(max(P_NOW, min(P_MUTE, int(priority))), "·")
 
 
 # --- the one decision --------------------------------------------------------
@@ -410,6 +511,80 @@ def mark_acted(key: str, now: float | None = None, why: str = "acted") -> None:
         # Only a thing he was actually TOLD about can score the telling. Something
         # settled before it was ever announced says nothing about the filter.
         _label(row, why)
+
+
+def settle_with(who: str, why: str = "he replied", now: float | None = None) -> int:
+    """Everything this person was owed is settled — he has now answered them.
+
+    The gap this closes is the one Arun hit hardest. Nothing in the live product
+    ever called `mark_acted`: the only caller was the bench. So an item entered
+    the ledger as `notified` and stayed there for ever, and "⏳ Still waiting on
+    you" listed questions he had answered hours earlier — including ones Asta had
+    itself sent the reply to. 1,779 rows sat in `notified` against 90 `acted`.
+
+    Settling by PERSON rather than by key is deliberate. A reply in a thread
+    answers the conversation, not one sentence of it: Vinish asked three things
+    in four minutes and one "yes" covers all three. Settling only the exact key
+    would have left the other two chasing him at end of day.
+
+    Returns how many it settled, so a caller can say so rather than guess.
+    """
+    n = 0
+    for row in store.attention_open_from(who):
+        if self_originated(row):
+            continue
+        mark_acted(row["key"], now=now, why=why)
+        n += 1
+    return n
+
+
+def reconcile(now: float | None = None) -> int:
+    """Settle everything he has demonstrably already answered. Returns the count.
+
+    A repair, not a policy. Nothing in the live product had ever called
+    `mark_acted`, so the ledger accumulated 1,779 rows in `notified` against 90
+    `acted` — every question anyone had ever asked him, permanently owed. The
+    rules above stop it happening again; this clears what the old behaviour left
+    behind, using the same evidence: a message of his, in that thread, later than
+    the ask.
+    """
+    from . import chat_watch, store as _store
+    settled = 0
+    for row in _store.attention_open(limit=2000, max_priority=P_MUTE):
+        if self_originated(row):
+            mark_dropped(row["key"])          # Asta's own notice, never his to answer
+            settled += 1
+            continue
+        who = (row.get("who") or "").strip()
+        # Today's rules applied to yesterday's rows — the point of a repair. A
+        # room-wide announcement was never his to answer, whenever it arrived.
+        #
+        # The stored summary is "<sender>: <message>", and the room-opener rule is
+        # anchored to the start of what they WROTE — so the prefix has to come off
+        # or "Yogesh Kumar Singh: Everyone all the new development…" reads as an
+        # ordinary sentence. Only the row's own sender is stripped, never an
+        # arbitrary prefix.
+        said = row.get("what") or ""
+        if who and said.lower().startswith(f"{who.lower()}:"):
+            said = said[len(who) + 1:].lstrip()
+        if addressed_to_a_room(who, said):
+            mark_dropped(row["key"])
+            settled += 1
+            continue
+        if not who:
+            continue
+        seen_at = row.get("first_seen") or 0
+        try:
+            # Windowed on the row's own timestamp — see `answered_by_him` for why
+            # an unwindowed read of a long thread can never contain his reply.
+            msgs = _store.teams_messages(chat=who, since=seen_at, limit=100)
+        except Exception:                                      # noqa: BLE001
+            continue
+        if any(chat_watch.is_from_him(m.get("sender", "")) and m.get("sent_at")
+               and m["sent_at"] > seen_at for m in msgs):
+            mark_acted(row["key"], now=now, why="he replied")
+            settled += 1
+    return settled
 
 
 def mark_dropped(key: str, why: str = "") -> None:

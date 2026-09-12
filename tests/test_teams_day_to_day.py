@@ -154,7 +154,7 @@ def test_he_can_see_it_is_a_group_before_he_says_yes():
 
 def test_reading_a_colleagues_thread_returns_the_messages(monkeypatch):
     async def thread(chat, limit=15):
-        return ["Nakka Harika: I have added the crowdStrike fix, please approve",
+        return ["Harini S: I have added the crowdStrike fix, please approve",
                 "Arunkumar K: will merge after standup"]
 
     monkeypatch.setattr(teams_bridge, "read_chat", thread)

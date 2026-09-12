@@ -150,7 +150,7 @@ async def _fetch_comments(c: httpx.AsyncClient, key: str, limit: int) -> dict:
     """
     r = await c.get(f"/rest/api/3/issue/{key}/comment",
                     params={"orderBy": "-created", "maxResults": max(1, limit)})
-    r.raise_for_status()
+    _raise_clean(r, key)
     data = r.json()
     items = [_fmt_comment(cm) for cm in data.get("comments", [])]
     items.reverse()
@@ -175,8 +175,16 @@ async def get_issue(key: str, comment_limit: int = COMMENT_LIMIT) -> dict:
             "fields": "summary,status,assignee,priority,updated,issuetype,"
                       "description,labels,components",
         })
-        r, thread = await asyncio.gather(issue_req, _fetch_comments(c, key, comment_limit))
-        r.raise_for_status()
+        # return_exceptions: the thread is the SECOND half of the answer, and
+        # its failure used to sink the first. Fifteen jira_issue calls died as
+        # ASGI tracebacks on a comments 404 — the model saw a dead tool, not
+        # "no such ticket" — while asyncio.gather raised whichever half failed
+        # first, so even a good issue never came back.
+        r, thread = await asyncio.gather(
+            issue_req, _fetch_comments(c, key, comment_limit), return_exceptions=True)
+        if isinstance(r, BaseException):
+            raise _clean(r, key)
+        _raise_clean(r, key)
         data = r.json()
     issue = _fmt_issue(data)
     f = data.get("fields", {})
@@ -187,9 +195,41 @@ async def get_issue(key: str, comment_limit: int = COMMENT_LIMIT) -> dict:
     # criteria live in the Q&A between reporter and dev, not in the one-line
     # description. `comment_total` travels with them so a caller can tell a
     # complete thread from a truncated one instead of assuming it saw everything.
+    if isinstance(thread, BaseException):
+        # Said, not swallowed: an empty list would read as "nobody commented",
+        # which is a claim about the ticket, not about what could be read.
+        issue["comments"] = []
+        issue["comment_total"] = 0
+        issue["comments_unavailable"] = f"comments could not be read: {thread}"[:200]
+        return issue
     issue["comments"] = thread["items"]
     issue["comment_total"] = thread["total"]
     return issue
+
+
+def _not_visible(key: str) -> str:
+    """What a Jira 404 actually means, in words a model can act on."""
+    return (f"Jira has no issue {key} that this account can see (404) — check the "
+            "key, or it is in a project/security level you cannot read")
+
+
+def _clean(exc: BaseException, key: str) -> BaseException:
+    """A 404 from Jira, turned into an answer. Anything else passes through.
+
+    Read through `raise_for_status` rather than off `.status_code`, because that
+    is the one thing every response object here implements — the real httpx one
+    and the doubles in the tests alike.
+    """
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
+        return ValueError(_not_visible(key))
+    return exc
+
+
+def _raise_clean(r, key: str) -> None:
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise _clean(exc, key) from exc
 
 
 async def latest_comment(key: str) -> dict | None:

@@ -128,10 +128,21 @@ def _pinned_command(root: Path) -> str | None:
     return None
 
 
+def _ours() -> str:
+    """Asta's context directory name — one answer, from one place."""
+    from .workspace.providers.indexed import DEFAULT_CONTEXT_DIR
+    import os
+    return os.environ.get("ASTA_CONTEXT_DIRNAME", "").strip() or DEFAULT_CONTEXT_DIR
+
+
 def _pins_files(root: Path) -> list[Path]:
     """`_pins.yml` for this repo, wherever its workspace keeps context."""
     out = []
-    for ctx in (".contmark", ".context", ".asta-context"):
+    # Asta's own directory FIRST, and it is the one that wins when both exist.
+    # His instruction: "dont use contmark anywhere even the existing contmark
+    # stuff in the repo ignore it use ours". The others stay in the list only so
+    # a workspace that has not been migrated still finds its pins.
+    for ctx in (_ours(), ".contmark", ".context"):
         # The repo may BE the workspace, or sit inside one.
         for base in (root, root.parent):
             candidate = base / ctx / "repos" / root.name / PINS

@@ -57,10 +57,17 @@ def _subprocess_env() -> dict:
     return env
 
 
+#: What a PLANNING leg may not do — the same ban as _CHAT_DENY, for the same
+#: reason in a different place: a leg that has not been approved yet may read
+#: anything and change nothing.
+_PLAN_DENY = ("Write", "Edit", "NotebookEdit",
+              "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh pr create:*)")
+
+
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent_file: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
-                   on_progress=None, mcp_config: str = "") -> str:
+                   on_progress=None, mcp_config: str = "", plan_only: bool = False) -> str:
     """Headless claude run with the same contract as copilot_cli.one_shot.
 
     agent_file — a .github/agents/*.agent.md whose CONTENT becomes the appended
@@ -86,6 +93,10 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     if agent_file:
         with contextlib.suppress(OSError):
             cmd += ["--append-system-prompt", Path(agent_file).read_text()]
+    if plan_only:
+        # The plan gate, made structural: an unapproved leg cannot write, commit,
+        # push or open a PR even if it decides to.
+        cmd += ["--disallowed-tools", ",".join(_PLAN_DENY)]
     if effort and effort != "default":
         cmd += ["--effort", effort]
     from . import agent as agent_mod
@@ -294,6 +305,17 @@ async def run_turn(conv: dict, user_text: str,
                 t = e.get("type")
                 if t == "stream_event":
                     ev = e.get("event") or {}
+                    if (ev.get("type") == "content_block_start" and chunks
+                            and (ev.get("content_block") or {}).get("type") == "text"
+                            and not "".join(chunks[-2:]).endswith((" ", "\n"))):
+                        # Consecutive content blocks are separate paragraphs and
+                        # the stream carries nothing between them, so they
+                        # arrived welded together: "…what's really there.Task #94
+                        # (transportAssetPriority → …". Emitted to on_delta too,
+                        # so the live stream and the returned text agree.
+                        chunks.append("\n\n")
+                        if on_delta:
+                            await on_delta("\n\n")
                     if ev.get("type") == "content_block_delta":
                         d = ev.get("delta") or {}
                         if d.get("type") == "text_delta":
@@ -364,6 +386,13 @@ async def run_turn(conv: dict, user_text: str,
                     detail=f"{stop.elapsed:.0f}s, silent {stop.silent_for:.0f}s, "
                            f"{len(stop.partial)} chars")
                 return stop.partial
+            # Read here and not above: `answered()` returns on the line before,
+            # and that is a SUCCESS path — waiting on stderr there would delay
+            # every good answer to explain a failure that did not happen.
+            # After the kill, because reading to EOF on a live process blocks.
+            note = await turn_budget.tail_stderr(proc)
+            store.record_outcome("turn", f"stopped_{stop.reason}", subject="claude",
+                                 detail=stop.detail(note))
             raise turn_budget.TurnStopped(stop, already_shown=on_delta is not None)
         # Same reason as copilot_cli: end-of-output is not end-of-process, and an
         # unbounded wait here holds a finished turn open indefinitely.
@@ -392,7 +421,7 @@ async def run_turn(conv: dict, user_text: str,
         # consult agent.quota_down("claude_cli") (i.e. "claude_cli_quota_down"),
         # so the interactive rate-limit signal was silently dropped.
         from . import agent as agent_mod
-        agent_mod.mark_quota_down("claude_cli")
+        agent_mod.mark_quota_down("claude_cli", err_msg or out)
     if rc != 0 or (err_msg and not out):
         stderr = (await proc.stderr.read()).decode(errors="replace")[-500:] if proc.stderr else ""
         # A dead --resume session (cleaned store / expired) gets one fresh retry.

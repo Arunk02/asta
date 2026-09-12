@@ -124,6 +124,75 @@ def stale_days(workspace: str, now: float | None = None) -> float:
     return ((now or time.time()) - float(raw)) / 86400
 
 
+def context_gap(workspace: str) -> list[dict]:
+    """Per repo: how far the context map has fallen behind the code it describes.
+
+    `[{repo, verified, behind}]`, newest gap first. `behind` is -1 when it cannot
+    be counted — no recorded `verified_against`, or git could not answer.
+
+    This is the number that explains "it already has whole repo knowledge and it
+    still lacks". The map is not a little old: on 2026-09-07 the booking-service
+    mini-skills were stamped against `6ee7d83b` and develop had moved **105
+    commits**. Meanwhile both pipelines tell the agent to route every search
+    through that map and never scan a repo blind — so it answers confidently from
+    a description of code that no longer exists, and "zero references anywhere in
+    this repo" is a claim about the map, not about the repo.
+
+    Deliberately counted in COMMITS, not days. Days measure how long nobody ran a
+    script; commits measure how much the agent does not know.
+    """
+    from . import worktrees as _wt
+    ws = ws_mod.get(workspace)
+    if ws is None or not ws.exists():
+        return []
+    # The workspace's own context directory, resolved the way everything else
+    # resolves it. Reading a fresh env var here would have invented a second
+    # answer to a question the provider already answers — and his booking
+    # workspace uses `.contmark`, not the default, so a hardcoded guess is wrong
+    # on the only workspace that exists.
+    from .workspace.providers.indexed import context_dirname
+    ctx = ws.path / context_dirname(ws.path)
+    out: list[dict] = []
+    for repo in _wt.repos_in(ws.path):
+        idx = ctx / "repos" / repo.name / "_index.json"
+        verified = ""
+        try:
+            verified = (json.loads(idx.read_text()).get("verified_against") or "").strip()
+        except (OSError, ValueError):
+            pass
+        behind = -1
+        if verified:
+            counted = _git(repo, "rev-list", "--count", f"{verified}..origin/develop")
+            if counted.strip().isdigit():
+                behind = int(counted.strip())
+        out.append({"repo": repo.name, "verified": verified[:12], "behind": behind})
+    return sorted(out, key=lambda r: r["behind"], reverse=True)
+
+
+def trust_note(workspace: str, min_behind: int = 25) -> str:
+    """What a code task must be told before it trusts the context map, or "".
+
+    Only the repos far enough behind to matter, so a healthy workspace adds
+    nothing to the prompt. The instruction is the important half: the agent is
+    told everywhere else to route through the map and never scan blind, so
+    without an explicit exception it treats a silent map as an authoritative "no".
+    """
+    bad = [r for r in context_gap(workspace)
+           if r["behind"] < 0 or r["behind"] >= min_behind]
+    if not bad:
+        return ""
+    lines = []
+    for r in bad:
+        how = "never verified" if r["behind"] < 0 else f"{r['behind']} commits behind"
+        lines.append(f"  - {r['repo']}: context {how}")
+    return ("\n\n[CONTEXT TRUST — read this before believing the resolver]\n"
+            + "\n".join(lines) +
+            "\nFor these repos the map describes older code. Use it to find WHERE to "
+            "look, never as proof of what exists. Before concluding a field, class or "
+            "mapping is absent, grep the source and say which you checked. "
+            "'Not in the index' is not 'not in the repo'.")
+
+
 def note_enriched(workspace: str, now: float | None = None) -> None:
     """Stamp that the context was actually brought up to date — not merely checked.
 

@@ -23,11 +23,13 @@ import datetime as _dt
 import json as _json
 import os
 import re
+import subprocess
 import time
 import uuid
 from pathlib import Path
 
-from . import agents, claude_cli, clip, copilot_cli, repo_ops, store, workspace_tools
+from . import (agents, claude_cli, clip, copilot_cli, guardrails, repo_ops, store,
+               wa_format, workspace_tools)
 
 
 class _LimitPaused(Exception):
@@ -160,20 +162,42 @@ CODE_OVERRIDES = """
   idea you have afterwards. If implementing reveals the plan was wrong, stop
   and say so; do not quietly build something else.
 - THE PLAN MUST BE READABLE IN THIRTY SECONDS, ON A PHONE. He approves these
-  from WhatsApp, standing up. Open it with a `STRUCTURE` block — the classes and
-  files that change and how they relate, as an indented tree, one line each,
-  saying what happens to that thing:
+  from WhatsApp, standing up. Open it with TWO blocks and nothing before them.
+
+  `STRUCTURE` — the classes and files that change, as an indented tree, one line
+  each. After each name, say in TWO TO FOUR WORDS what happens IN that class —
+  what it gains, not that it changed. "new record, 2 fields", "adds the priority
+  object", "unchanged, MapStruct handles it". Never a sentence, never the word
+  NEW on its own (Asta already marks that), never a restatement of the filename.
+
+  `FLOW` — the run of events the change sits in, one actor per line in the order
+  they happen, with two to six words on what that actor does with the data. Mark
+  the step where the change actually lands with a trailing `<- change`. This is
+  the half the tree cannot show: that a service in the MIDDLE needs no change is
+  the fact a reviewer most needs and the easiest one to get wrong.
 
       STRUCTURE
-        EtaValidator                     NEW  · rejects an import ETA at/after gate-in
-          └─ called by BookingService.applyVesselEta()   ~10 lines changed
-               └─ reads ServicePlanLeg.portGateIn (LATEST)
-        BookingServiceTest               +3 cases (before / at / after gate-in)
+        EtaValidator                  NEW · rejects ETA at/after gate-in
+          └─ BookingService.applyVesselEta()   calls it before persist
+        BookingServiceTest            +3 cases, before/at/after
 
+      FLOW
+        vessel feed        sends the ETA
+        BookingService     validates it now   <- change
+        ServicePlanLeg     stores portGateIn
+
+  END THE PLAN WITH A LINE THAT SAYS ONLY `PLAN READY`. Asta needs one
+  unambiguous mark to tell a plan apart from finished work — without it a plan
+  is reported to him as "✅ DONE", with a file list it has not written.
   Then the numbered steps, then a one-line RISK. No prose paragraph before the
-  tree: the tree is the part he actually reads, and a plan built on a misread
-  shows up there in seconds where three paragraphs hide it. Keep it under about
-  twelve lines — this is a shape, not a specification.
+  blocks: they are the part he actually reads, and a plan built on a misread
+  shows up there in seconds where three paragraphs hide it. Under about twelve
+  lines each — this is a shape, not a specification.
+  Everything else in the plan is a short bullet, never a sentence past about
+  fifteen words. Repos that DON'T change are one bullet each, not a paragraph
+  explaining why. Asta reflows both blocks to fit his screen, but it can only
+  shorten a line by cutting it — what you leave out of a note is lost, and what
+  you pack in gets truncated.
 - Skip Stage 1.5 and never run Stage 6: no push, no PR, and no Jira writes of
   any kind (no subtasks, no comments, no transitions). Stage 5 Evolution SHOULD
   still run — lessons and skill patches are wanted. After the Stage 4 (and 4b)
@@ -205,30 +229,11 @@ CODE_OVERRIDES = """
 - Branch: Asta has already put every repo on the task's feature branch, cut
   fresh from develop. Do NOT create another branch, do not switch branches, and
   do not rebase onto anything. If `git status` shows an unexpected branch, stop
-  and say so rather than fixing it yourself.
-
-[How Arun expects the code to read — he reviews every diff]
-- Small, named, single-purpose functions. A function that needs a comment to
-  explain WHAT it does should be two functions with better names. He has to
-  debug this at 11pm; a forty-line branch-heavy method is where that goes wrong.
-- Prefer a functional shape: take arguments, return a value, no hidden state.
-  Pure helpers where the logic is real (mapping, filtering, deciding), effects
-  pushed to the edges. Avoid mutating a parameter to communicate a result.
-- Name things after the domain, not the mechanism: `cancelledBookingsSkipTms`,
-  not `processFlag2`. Method names say what is true after they run.
-- Comments explain WHY — the constraint, the bug that forced it, the thing the
-  next reader would otherwise undo. Never restate the code in English.
-- SIMPLIFY. The smallest change that fully solves it wins. No layer, interface,
-  factory, config switch or generalisation that this task does not need — do not
-  build for a second caller that does not exist. If you find yourself adding
-  indirection "for later", stop: he would rather change simple code twice.
-- Delete what you replace. A dead branch left behind is a future bug.
-- Guard clauses over nesting; early return over an else-tree three deep.
-- If the same logic already exists in the repo, call it. Do not write a second
-  copy with a different name — that is how the two drift apart.
-- Tests are part of the change, not a follow-up: cover the new behaviour AND the
-  case that used to work and must still work. A test that cannot fail is worse
-  than no test."""
+  and say so rather than fixing it yourself."""
+# How Arun expects the code to READ — the quality bar he reviews every diff
+# against — used to be a block here. It is now the `## Coding` section of his
+# guardrails.md, so he edits it himself, and every fresh code leg receives it
+# (micro pipeline included — this block only ever reached the full one).
 
 # Analysis rides the same pipeline in inquiry mode: full Boot 0 (resolver,
 # lessons, pins) but read-only and gate-free.
@@ -241,7 +246,20 @@ ANALYSIS_RIDER = """
 
 # How a paused run is recognised from its tail. Deliberately matches the solo
 # agent's own gate wording, nothing looser.
-_GATE_MARKS = ("PLAN APPROVED", "Which repo applies?", "Re-implement, modify, or cancel?")
+#: A run that is WAITING, not finished. Matched loosely on purpose, because the
+#: prompt asks for a plan and never dictated a sentinel — so the brain ends the
+#: plan however reads naturally, and only one of those phrasings was listed.
+#:
+#: Task #121 ended "PLAN READY" plus "AUTO-PROCEED gate: … requires your
+#: go-ahead", matched nothing, and was reported to Arun as "✅ DONE" with 18
+#: files it had not written. He had to be told the plan was waiting, by hand.
+#: A plan announced as done is the most misleading push this system can send.
+_GATE_MARKS = ("PLAN APPROVED", "PLAN READY", "Which repo applies?",
+               "Re-implement, modify, or cancel?", "requires your go-ahead",
+               "awaiting your approval", "waiting for your approval",
+               "your go-ahead", "approve task")
+#: The brain's own sign-off line, replaced by the push's own buttons.
+_ASK_LINE = re.compile(r"(?im)^\s*(?:reply|respond)\b[^\n]*plan approved[^\n]*$\n?")
 # The cheap early gate: intent/scope unclear, asked BEFORE code discovery.
 _CONTEXT_MARK = "CONTEXT CHECK:"
 _HANDOFF_MARKS = ("handoff.md", "re-run me for")
@@ -258,6 +276,16 @@ _running: dict[int, asyncio.Task] = {}
 # Statuses that mean "Arun has already decided" — a finishing worker must never
 # overwrite them with its own result.
 FINAL = ("rejected", "cancelled")
+
+#: States that mean this task has already had its say. FINAL deliberately does
+#: NOT include "done" — a finished task can still be steered ("reply with
+#: changes and I'll continue THIS task"), and the checks that use FINAL are
+#: asking "was this called off?", not "is it over?".
+#:
+#: `_finish_code` needs the other question. It re-enters itself on escalation and
+#: on a repo handoff, and its done branch has no memory, so #88 finished four
+#: times and pushed four identical completion messages to his phone.
+_ALREADY_REPORTED = FINAL + ("done",)
 
 # A task is "live" (owns the conversation's attention) while it runs or waits at
 # a gate — that's the window in which a follow-up should augment or redirect it.
@@ -320,11 +348,71 @@ def link_task(conv_id: str, task_id: int) -> None:
     — one permanent conversation each — every later "also do X" or "stop that"
     hit whichever task happened to be newest, with no way to reach the other.
     """
+    # The reverse key too: a task run needs to know WHICH chat to stage a draft
+    # into, and the forward list only answers the other direction.
+    store.kv_set(f"task_conv:{task_id}", conv_id)
     ids = _linked_ids(conv_id)
     if task_id not in ids:
         ids.append(task_id)
     store.kv_set(f"conv_tasks:{conv_id}", _json.dumps(ids[-10:]))
     store.kv_set(f"task_conv:{task_id}", conv_id)
+
+
+def conversation_of(task_id: int) -> str:
+    """The conversation this task was spawned from, or "".
+
+    Written by `link_task`. A task that predates the reverse key falls back to a
+    scan, because the alternative — staging a reply into no conversation — is the
+    failure that made `prepare_to_send` useless over MCP in the first place.
+    """
+    direct = (store.kv_get(f"task_conv:{task_id}") or "").strip()
+    if direct:
+        return direct
+    for row in store.list_conversations(limit=50) or []:
+        if task_id in _linked_ids(row.get("id") or ""):
+            return row["id"]
+    # NOTHING spawned it from a chat — the responder's investigations, and every
+    # other task a background loop starts. Those are the ones that most need to
+    # hand something back, and they were the ones that could not: task #96 read
+    # prod, found why STF never ran, wrote the reply to Vinish, and then said
+    # "Teams send tool isn't available in this environment, so please send
+    # manually". The work done and nobody told.
+    #
+    # Safe to fall back, where guessing a Teams RECIPIENT would not be: this
+    # conversation only decides where Arun SEES the approval, not who the
+    # message goes to. The recipient is named separately and is never guessed.
+    latest = (store.list_conversations(limit=1) or [{}])[0].get("id") or ""
+    return latest
+    return ""
+
+
+#: Kinds whose work is reading code, and so the only ones the symbol-nav and
+#: docs servers earn their startup cost for. Asta's OWN tools go to every kind.
+_DEV_MCP_KINDS = ("analysis", "code")
+
+
+def task_tools(task_id: int, cwd: str, kind: str = "") -> str:
+    """The MCP servers a task run gets: Asta's own, plus the dev ones if enabled.
+
+    Task subprocesses used to get `dev_mcp.config_json(cwd)` and nothing else —
+    and that feature is off by default, so they got an empty string. Asta's own
+    server was attached on the CHAT path only, which meant every task ran with no
+    Jira, no Teams, no memory and no `prepare_to_send`.
+
+    That is not a missing nicety. It is the last step of the loop Arun actually
+    asked for: task #88 implemented `transportAssetPriority` across eleven files
+    with a green build, then finished with "I can't message Vinish directly" —
+    the work done and nobody told.
+
+    Bound to the spawning conversation so an approval lands in the chat he asked
+    from, rather than in no conversation at all.
+    """
+    from . import copilot_cli, dev_mcp, mcp_server
+    base = None
+    if copilot_cli.mcp_cli_enabled():
+        base = mcp_server.config_entry(conv_id=conversation_of(task_id))
+    project = cwd if (not kind or kind in _DEV_MCP_KINDS) else ""
+    return dev_mcp.config_json(project, base)
 
 
 def _linked_ids(conv_id: str) -> list[int]:
@@ -358,8 +446,37 @@ def live_tasks_for(conv_id: str) -> list[int]:
             if (store.get_task(i) or {}).get("status") not in CLOSED_STATUSES]
     if keep != ids:
         store.kv_set(f"conv_tasks:{conv_id}", _json.dumps(keep))
+    now = time.time()
     return [i for i in keep
-            if (store.get_task(i) or {}).get("status") in LIVE_STATUSES]
+            if (store.get_task(i) or {}).get("status") in LIVE_STATUSES
+            and not _gate_gone_stale(store.get_task(i) or {}, now)]
+
+
+#: How long a task may sit at a gate before it stops CLAIMING the conversation.
+#: It stays open and approvable — it just no longer swallows unrelated messages.
+GATE_STALE_SECONDS = float(os.environ.get("ASTA_GATE_STALE_HOURS", "3")) * 3600
+
+
+def _gate_gone_stale(t: dict, now: float) -> bool:
+    """A task waiting at a gate long enough that it is no longer "what we are
+    doing right now".
+
+    A live task owns the conversation's attention, which is right while the work
+    is in flight and wrong once it has been sitting unanswered for hours. Task
+    #117 asked for approval at 09:31; its PR was merged by mid-morning and it
+    still sat there, and because it was the only "live" task every unrelated
+    message Arun sent for the rest of the day was routed into it — a topic
+    request, a PR ask, an instruction about a different repo entirely. He put it
+    plainly: "why still 117 is running doesn't makes sense it confusing with
+    other things".
+
+    Deliberately NOT auto-closing it: he may still want to approve it. It just
+    stops being the default owner of whatever he says next.
+    """
+    if t.get("status") != "awaiting_approval":
+        return False                       # actually running: it owns attention
+    since = t.get("finished_at") or t.get("started_at") or t.get("created_at") or 0
+    return bool(since) and (now - float(since)) >= GATE_STALE_SECONDS
 
 
 def refinable_for(conv_id: str, now: float | None = None) -> list[int]:
@@ -398,6 +515,16 @@ def augment(task_id: int, text: str) -> str:
     It's buffered and delivered as part of the instructions the moment Arun acts
     on the task's next gate — the mandatory approval stays intact and there's no
     expensive Claude/Copilot session re-cache."""
+    from . import activity
+    if activity.classify_interjection(text) == "new_task":
+        # He said it is a separate piece of work. Absorbing it anyway is how
+        # task #117 — the BookingEquipment equals/hashCode fix — ended up
+        # holding clarifying questions about Kafka topics in another repo, and
+        # then pushed a DONE and a PLAN that mixed the two.
+        raise ValueError(
+            f"that reads as a new task, not an addition to #{task_id} — "
+            f"start it separately")
+
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
@@ -452,6 +579,149 @@ def _cwd(workspace: str | None) -> str:
     return str(ROOT)
 
 
+#: Words that mean a repo was NAMED as still to do, rather than merely mentioned.
+_UNFINISHED = re.compile(
+    r"\b(outstanding|blocked|remaining|still (?:to|needs?|outstanding|pending)|"
+    r"pending|not (?:yet )?(?:done|implemented|applied)|next repo|todo|to do|"
+    r"second half|other half|waiting on you)\b", re.I)
+
+
+def _repos_still_needed(task_id: int, t: dict, result: str) -> list[str]:
+    """Repos this run said were left over and has no checkout for.
+
+    Both halves are required. A repo NAMED in the result is not enough — a run
+    legitimately mentions the repo it just finished, and the one upstream of it.
+    An unfinished word is not enough either. Together they are the shape of #88's
+    ending: "telikos-activityplanworkflow-service (TMS-facing side): … still
+    outstanding — blocked, no feature branch cut for this repo yet under this
+    task."
+
+    A repo the task already has a checkout for is never returned: if it could
+    work there and did not, that is a decision, not a missing tree.
+    """
+    if not (result or "").strip() or not t.get("workspace"):
+        return []
+    from . import worktrees as _wt
+    try:
+        root = Path(code_cwd(t.get("workspace")))
+        have = {r.name for r in _wt.repos_in(Path(task_cwd(task_id, t.get("workspace"))))}
+        every = {r.name for r in _wt.repos_in(root)}
+    except Exception:                                          # noqa: BLE001
+        # `code_cwd` refuses an unregistered workspace by raising, which is a
+        # state a finishing task is legitimately in. Continuing to the next repo
+        # is a nicety; reporting the one it did is not.
+        return []
+    missing = [name for name in sorted(every - have) if name in result]
+    if not missing or not _UNFINISHED.search(result):
+        return []
+    return missing
+
+
+def committed_so_far(task_id: int, t: dict) -> list[dict]:
+    """What THIS task has already committed, per repo, read from git.
+
+    The run's own memory is the wrong source — a compaction loses it, and a fresh
+    leg never had it. Git is the record that survives both.
+    """
+    from . import worktrees as _wt
+    out: list[dict] = []
+    try:
+        where = Path(task_cwd(task_id, t.get("workspace")))
+        repos = _wt.repos_in(where)
+    except Exception:                                          # noqa: BLE001
+        return out              # advisory only — never break a finishing task
+    for repo in repos:
+        try:
+            head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                  cwd=repo, capture_output=True, text=True,
+                                  timeout=10).stdout.strip()
+            log = subprocess.run(["git", "log", "--oneline", "origin/develop..HEAD"],
+                                 cwd=repo, capture_output=True, text=True,
+                                 timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if log:
+            out.append({"repo": repo.name, "branch": head,
+                        "commits": log.splitlines()[:8]})
+    return out
+
+
+def _done_note(task_id: int, t: dict) -> str:
+    """The work already on the branch, for a leg that did not do it.
+
+    A task can run several legs — micro, then escalation, then a repo hop — and
+    each is a fresh window with no memory of the last. Task #89's escalated leg
+    opened its worktree, saw nothing it recognised, and implemented the whole
+    change a second time; the two commits differ, so now there are two versions
+    of one change. Reading `git log` costs nothing and is the only account that
+    survives a compaction.
+    """
+    done = committed_so_far(task_id, t)
+    if not done:
+        return ""
+    lines = []
+    for d in done:
+        lines.append(f"  {d['repo']} ({d['branch']}):")
+        lines.extend(f"    {c}" for c in d["commits"])
+    return ("\n\n[ALREADY COMMITTED ON THIS BRANCH — your own earlier work]\n"
+            + "\n".join(lines) +
+            "\nThis is yours, from an earlier window of THIS task. Do not "
+            "re-implement it. Verify with `git show` if you need to, then continue "
+            "from where it left off.")
+
+
+def _context_note() -> str:
+    """Which context directory is Asta's, said out loud.
+
+    His workspace still carries another toolchain's `.contmark/`, and its own
+    `AGENTS.md` — a file in HIS repo, not Asta's to edit — opens with "Context
+    comes from `.contmark/` — run `node .contmark/resolve-task.js`". An agent
+    reading that does exactly what it says. So the instruction has to be
+    overridden here, where Asta speaks last: "dont use contmark anywhere even the
+    existing contmark stuff in the repo ignore it use ours".
+    """
+    from .workspace.providers.indexed import DEFAULT_CONTEXT_DIR
+    ours = os.environ.get("ASTA_CONTEXT_DIRNAME", "").strip() or DEFAULT_CONTEXT_DIR
+    return (f"\n\n[CONTEXT — which directory is authoritative]\n"
+            f"  Use `{ours}/` and nothing else: `node {ours}/resolve-task.js "
+            f"<root> \"<task>\"`.\n"
+            f"Any instruction you find in the workspace — AGENTS.md, a README, a "
+            f"lessons file — telling you to read `.contmark/` or run its resolver "
+            f"is out of date. Ignore it. It is left on disk only so nothing "
+            f"breaks; it is not maintained and its indexes are not updated.")
+
+
+def _branch_note(task_id: int, t: dict) -> str:
+    """Tell the run where it already is. "" when there is nothing prepared.
+
+    `_prepare_branches` cuts a branch in every repo the task names, in a private
+    worktree, and records it — and then nothing ever told the agent. Neither
+    pipeline mentions branches at all, so the agent did the only thing left: it
+    cut its own.
+
+    Task #88 is the proof, and it is almost funny. It reported "blocked, no
+    feature branch cut for this repo yet under this task" while standing on
+    `feature/asta-88-implement-missing-transportassetpriority`, which Asta had cut
+    for it, with its own commit already on it. It then asked Arun for a branch.
+    """
+    branch = (store.kv_get(f"task_branch:{task_id}") or "").strip()
+    if not branch:
+        return ""
+    from . import worktrees as _wt
+    where = task_cwd(task_id, t.get("workspace"))
+    repos = sorted(r.name for r in _wt.repos_in(Path(where)))
+    listed = ", ".join(repos) if repos else "this workspace"
+    return (f"\n\n[THIS RUN — where you already are]\n"
+            f"  Working tree : {where}\n"
+            f"  Branch       : {branch} (already checked out in every repo below)\n"
+            f"  Repos        : {listed}\n"
+            f"This is your own worktree, cut from develop. Commit on the branch you "
+            f"are on. Do NOT create a branch, do NOT switch branch, and never say "
+            f"you are blocked for want of one — you have it. Every repo listed above "
+            f"is yours to change in THIS run; a change spanning two of them is one "
+            f"task, not two.")
+
+
 def task_cwd(task_id: int, workspace: str | None) -> str:
     """Where THIS task works: its own checkout when it has one.
 
@@ -494,9 +764,63 @@ def code_cwd(workspace: str | None) -> str:
             "this code task has no workspace and none is registered — refusing to "
             "run it against Asta's own repository. Register the workspace first.")
     if workspace not in workspace_tools.WORKSPACES:
-        known = ", ".join(sorted(workspace_tools.WORKSPACES)) or "none registered"
-        raise RuntimeError(f"unknown workspace '{workspace}' — known: {known}")
+        # The brain names the DIRECTORY it can see, not the registry key nobody
+        # told it about. `booking` is registered at ~/booking-workspace, so
+        # "booking-workspace" is a perfectly sensible thing to say — and it
+        # failed a whole code task on the difference. Resolve it when exactly one
+        # workspace can be meant; refuse only when the name is genuinely unknown
+        # or genuinely ambiguous.
+        hit = resolve_workspace(workspace)
+        if hit:
+            workspace = hit
+        else:
+            known = ", ".join(sorted(workspace_tools.WORKSPACES)) or "none registered"
+            raise RuntimeError(f"unknown workspace '{workspace}' — known: {known}")
     return str(workspace_tools.WORKSPACES[workspace])
+
+
+def resolve_workspace(name: str) -> str:
+    """The registered workspace `name` unambiguously means, or "".
+
+    Matched three ways, each requiring exactly ONE hit: the registered key, the
+    basename of its root directory, and a unique prefix. Anything matching two
+    workspaces resolves to nothing — guessing between repos is the failure this
+    whole area exists to prevent.
+    """
+    want = (name or "").strip().lower()
+    if not want:
+        return ""
+    if want in workspace_tools.WORKSPACES:
+        return want
+    for candidates in (
+        {k for k, v in workspace_tools.WORKSPACES.items()
+         if Path(str(v)).name.lower() == want},
+        {k for k in workspace_tools.WORKSPACES
+         if want.startswith(k.lower()) or k.lower().startswith(want)},
+    ):
+        if len(candidates) == 1:
+            return candidates.pop()
+    return ""
+
+
+def _already_live(title: str, prompt: str, workspace: str | None) -> dict | None:
+    """A task doing this exact thing that has not finished yet, or None.
+
+    Matched on the PROMPT, not the title: the prompt is the instruction, and two
+    spawns of the same work can be titled differently by whatever summarised it.
+    """
+    want = (prompt or "").strip()
+    if not want:
+        return None
+    for row in store.list_tasks(limit=40):
+        if row.get("status") not in LIVE_STATUSES:
+            continue
+        if (row.get("prompt") or "").strip() != want:
+            continue
+        if (row.get("workspace") or None) != (workspace or None):
+            continue
+        return row
+    return None
 
 
 def spawn(title: str, prompt: str, kind: str = "analysis",
@@ -526,6 +850,19 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
             prompt += (f"\n\n[Prior investigation (task #{context_from}) — trust "
                        "these anchors, do NOT re-discover them]\n"
                        + prev["result"][-2500:])
+    same = _already_live(title, prompt, workspace)
+    if same:
+        # TWO LIVE TASKS DOING THE IDENTICAL THING is never what anyone meant. It
+        # happened often enough for Arun to call it out — "many times it creating
+        # duplicate tasks and running" — and it is pure waste twice over: the
+        # second run bills a whole agentic pipeline to reach the same answer, and
+        # then both report, so he reviews the same work twice and cannot tell
+        # which diff is which.
+        #
+        # Only against LIVE tasks. Re-running something that has FINISHED is a
+        # perfectly ordinary request ("do that again"), and refusing it would be
+        # the more annoying failure.
+        return same
     t = store.create_task(title, kind, prompt, workspace or None, teams_chat)
     if executor:
         store.kv_set(f"task_executor:{t['id']}", executor)
@@ -599,17 +936,22 @@ def learn_from_stop(task_id: int, t: dict, status: str, why: str = "") -> None:
 _STRUCTURE_HEAD = re.compile(r"^[#*\s]*(structure|class diagram|shape)\b\s*:?[#*\s]*$", re.I)
 
 
-def _structure_span(lines: list[str]) -> tuple[int, int]:
-    """(start, end) of the structure block in `lines`, or (-1, -1).
+#: "FLOW", "## Sequence", "Event flow:" — the run of events the change sits in.
+_FLOW_HEAD = re.compile(r"^[#*\s]*(flow|sequence|event flow|call flow)\b\s*:?[#*\s]*$", re.I)
+
+
+def _block_span(lines: list[str], head: re.Pattern) -> tuple[int, int]:
+    """(start, end) of the block `head` opens, or (-1, -1).
 
     Ends at the first blank line followed by something that is not part of the
-    tree — a heading, a numbered step — so the block keeps its internal blank
-    lines without swallowing the rest of the plan.
+    block — a heading, a numbered step — so it keeps its internal blank lines
+    without swallowing the rest of the plan.
     """
-    start = next((i for i, ln in enumerate(lines) if _STRUCTURE_HEAD.match(ln)), -1)
+    start = next((i for i, ln in enumerate(lines) if head.match(ln)), -1)
     if start < 0:
         return -1, -1
     end = start + 1
+    indented = False
     for i in range(start + 1, len(lines)):
         nxt = lines[i]
         if not nxt.strip():
@@ -617,8 +959,27 @@ def _structure_span(lines: list[str]) -> tuple[int, int]:
             if following and not following.startswith((" ", "\t")):
                 break
             continue
+        if _STRUCTURE_HEAD.match(nxt) or _FLOW_HEAD.match(nxt):
+            break        # the other pinned block starts here
+        if indented and not nxt.startswith((" ", "\t")):
+            # An unindented line after the block's own indented rows is the plan
+            # resuming — "RISK: low", a prose aside. Without this the block only
+            # ended on a blank line, so a plan that ran STRUCTURE straight into
+            # RISK reflowed the risk line as if it were a file.
+            break
+        indented = indented or nxt.startswith((" ", "\t"))
         end = i + 1
     return start, end
+
+
+def _structure_span(lines: list[str]) -> tuple[int, int]:
+    """(start, end) of the structure block in `lines`, or (-1, -1).
+
+    Ends at the first blank line followed by something that is not part of the
+    tree — a heading, a numbered step — so the block keeps its internal blank
+    lines without swallowing the rest of the plan.
+    """
+    return _block_span(lines, _STRUCTURE_HEAD)
 
 
 def _phone_text(result: str, limit: int = 1100) -> str:
@@ -658,9 +1019,25 @@ def _phone_text(result: str, limit: int = 1100) -> str:
         if s.startswith("|") or set(s) <= set("-=_|+ "):   # table rows / rules
             continue
         keep.append(line)
-    start, end = _structure_span(keep)
-    shape = keep[start:end] if start >= 0 else []
-    rest = keep[:start] + keep[end:] if start >= 0 else keep
+    # Two blocks are PINNED, in this order: the shape of the change, then the run
+    # of events it sits in. Both are written column-aligned, which is unreadable
+    # on the phone they are written for — the padding lands mid-line once the
+    # bubble wraps, and six files become a paragraph. Reflowed here rather than
+    # asked for in the prompt, because the brain cannot know the width and the
+    # terminal copy of the same plan is better off aligned.
+    spans = [(_structure_span(keep), "tree"), (_block_span(keep, _FLOW_HEAD), "flow")]
+    spans = sorted(((sp, kind) for sp, kind in spans if sp[0] >= 0), key=lambda x: x[0])
+    shape: list[str] = []
+    for (start, end), kind in spans:
+        block = keep[start:end]
+        head = "*" + block[0].strip("*# ") + "*"
+        if kind == "tree":
+            shape += [head] + wa_format.reflow_tree(block[1:]) + [wa_format.LEGEND, ""]
+        else:
+            shape += ["🔄 " + head] + wa_format.reflow_flow(block[1:]) + [""]
+    shape = shape[:-1] if shape else shape
+    cut = {i for (st, en), _ in spans for i in range(st, en)}
+    rest = [ln for i, ln in enumerate(keep) if i not in cut]
     budget = limit - sum(len(ln) + 1 for ln in shape)
     # Prefer the tail (the plan + the ask), but start on a real heading/bullet.
     out: list[str] = []
@@ -671,12 +1048,18 @@ def _phone_text(result: str, limit: int = 1100) -> str:
         out.append(line)
         total += len(line) + 1
     out.reverse()
-    while out and not (out[0].lstrip().startswith(("#", "-", "*", "•"))
-                       or out[0].lstrip()[:2].rstrip(".").isdigit()):
+    # Don't start mid-sentence — but only while there is something to spare. The
+    # guard used to pop FIRST and check after, so a `rest` of one line ("RISK:
+    # low — additive nullable field") was emptied by the very trim meant to tidy
+    # its opening, and the risk line vanished from the plan.
+    while len(out) > 3 and not (out[0].lstrip().startswith(("#", "-", "*", "•"))
+                                or out[0].lstrip()[:2].rstrip(".").isdigit()):
         out.pop(0)
-        if len(out) <= 3:
-            break
     body = "\n".join((shape + [""] + out) if shape and out else (shape or out)).strip()
+    # One blank line between things, never three. Dropped lines (the brain's own
+    # sign-off, a stripped fence) leave their blanks behind, and a phone bubble
+    # shows every one of them as empty screen.
+    body = re.sub(r"\n{3,}", "\n\n", body)
     return body or (result or "").strip()[-limit:]
 
 
@@ -836,6 +1219,20 @@ def _progress_watcher(task_id: int, title: str):
     return on_progress
 
 
+def plan_approved(task_id: int) -> bool:
+    """Has Arun approved this task's plan yet?
+
+    The one fact that decides whether a leg may write. Set by `reply()` at the
+    gate, by `resume_task` (the work was already approved when it paused) and by
+    `refine` (feedback on a diff he has seen). Absent means: plan only.
+    """
+    return (store.kv_get(f"task_approved:{task_id}") or "") == "1"
+
+
+def mark_approved(task_id: int) -> None:
+    store.kv_set(f"task_approved:{task_id}", "1")
+
+
 async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
                         resume: bool, effort: str, workspace: str | None = None) -> str:
     """One executor leg of a code task, pinned to the task's session so gates
@@ -851,20 +1248,29 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
     if not sid:
         sid, resume = str(uuid.uuid4()), False
         store.kv_set(sid_key, sid)
+    if not resume:
+        # His standing instructions ride ONCE, on the fresh session. A resumed
+        # leg already carries them, and re-sending a rule the session holds is
+        # the token bleed the guardrails file exists to end.
+        prompt += guardrails.block("code")
     watcher = _progress_watcher(task_id, (store.get_task(task_id) or {}).get("title", ""))
     pipeline = _pipeline_name("code", _pipeline_for(task_id))
-    from . import agent as agent_mod, dev_mcp
-    # Serena + Context7, when ASTA_DEV_MCP is on: symbol-level nav/edit and live
-    # docs for this repo. Empty string when disabled or nothing's installed, so
-    # the default command is unchanged.
-    dev_cfg = dev_mcp.config_json(cwd)
+    from . import agent as agent_mod
+    # Asta's own tools, plus Serena + Context7 when ASTA_DEV_MCP is on.
+    dev_cfg = task_tools(task_id, cwd, "code")
+    # Before his approval, a code leg may read everything and change nothing.
+    # The rule was a sentence in a prompt; the micro pipeline's own instructions
+    # said "make the edit", and an instruction a model may ignore is not a gate.
+    plan_only = not plan_approved(task_id)
     if ex == "claude":
         try:
-            return await claude_cli.one_shot(
+            out = await claude_cli.one_shot(
                 prompt, cwd=cwd, timeout=code_timeout(workspace),
                 agent_file=_agent_file("code", _pipeline_for(task_id)),
                 effort=effort, session_id=sid, resume=resume, on_progress=watcher,
-                mcp_config=dev_cfg)
+                mcp_config=dev_cfg, plan_only=plan_only)
+            agent_mod.mark_quota_ok("claude_cli")
+            return out
         except RuntimeError as exc:
             # Claude's session (the pinned --resume thread) can't move to another
             # brain, so a limit here is always a pause — the wait is cheap because
@@ -877,14 +1283,16 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         # Copilot's --agent resolves a name from the workspace's own agent
         # directory. Asta owns the pipeline now, so the body rides in the
         # prompt instead and nothing is installed into the user's repo.
-        return await copilot_cli.one_shot(
+        out = await copilot_cli.one_shot(
             _with_pipeline(pipeline, prompt), cwd=cwd, timeout=code_timeout(workspace),
             effort=effort, session_id=sid, resume=resume, on_progress=watcher,
-            mcp_config=dev_cfg)
+            mcp_config=dev_cfg, plan_only=plan_only)
+        agent_mod.mark_quota_ok("copilot")
+        return out
     except RuntimeError as exc:
         if not agent_mod.transient_limit(str(exc)):
             raise
-        agent_mod.mark_quota_down("copilot")
+        agent_mod.mark_quota_down("copilot", str(exc))
         # A FRESH leg with claude up can fail over transparently — no session
         # context exists yet to lose. Mid-pipeline (resume) or with nothing to
         # switch to, the run PAUSES and waits instead of dying: the old
@@ -898,38 +1306,80 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
                            str(exc)) from exc
 
 
+#: Which guardrails sections a non-pipeline run receives — see guardrails.AUDIENCES.
+_GUARDRAIL_AUDIENCE = {"analysis": "analysis", "teams_draft": "draft", "code": "code"}
+
+
 async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
     """Non-pipeline kinds (analysis, teams_draft, agent-less code): one leg,
     executor-aware, with transparent claude failover when copilot's quota dies."""
     ex = _resolve_executor(task_id)
     cwd = _cwd(t["workspace"])
+    # One fresh session per simple run, so his guardrails ride exactly once —
+    # the Investigation rules to an analysis, the Communication rules to a draft.
+    prompt += guardrails.block(_GUARDRAIL_AUDIENCE.get(t["kind"], "chat"))
     tout = (code_timeout(t["workspace"]) if t["kind"] == "code"
             else TASK_TIMEOUT[t["kind"]])
     agent = _agent_for(t)
     eff = _effort_for(t["kind"], ex)
     pipeline = _pipeline_name(t["kind"]) if agent else ""
     agent_file = _agent_file(t["kind"]) if agent else ""
-    # Analysis walks the code read-only, so Serena's symbol nav pays off here too;
-    # teams_draft and other non-code kinds get nothing. "" when disabled.
-    from . import dev_mcp
-    dev_cfg = dev_mcp.config_json(cwd) if t["kind"] in ("analysis", "code") else ""
-    if ex == "claude":
-        return await claude_cli.one_shot(prompt, cwd=cwd, timeout=tout,
-                                         agent_file=agent_file, effort=eff,
-                                         mcp_config=dev_cfg)
-    try:
-        return await copilot_cli.one_shot(_with_pipeline(pipeline, prompt),
-                                          cwd=cwd, timeout=tout, effort=eff,
-                                          mcp_config=dev_cfg)
-    except RuntimeError as exc:
-        from . import agent as agent_mod
-        if not agent_mod.transient_limit(str(exc)) or not claude_cli.available():
-            raise
-        agent_mod.mark_quota_down("copilot")
-        store.kv_set(f"task_executor:{task_id}", "claude")
-        return await claude_cli.one_shot(prompt, cwd=cwd, timeout=tout,
-                                         agent_file=agent_file, effort=eff,
-                                         mcp_config=dev_cfg)
+    # Asta's own tools for every kind — a teams_draft task that cannot reach
+    # `prepare_to_send` is the one that most obviously needs them. The dev
+    # servers stay with the kinds that read code.
+    dev_cfg = task_tools(task_id, cwd, t["kind"])
+    from . import agent as agent_mod
+    # Every brain that could take this run, the task's own first. A usage limit
+    # hands the run to the next one that is up; when none is, the run PAUSES and
+    # auto-resumes — it is never reported as failed.
+    #
+    # This path used to try Claude with no handling at all: eight analyses
+    # between 9 and 10 September died as "claude exited 1: You've hit your
+    # session limit", while the same limit on a code task paused and resumed.
+    # One rule for every kind of task, not one per call site.
+    order = [ex] + [b for b in _SIMPLE_BRAINS if b != ex]
+    limited: list[tuple[str, float | None, str]] = []
+    for i, brain in enumerate(order):
+        if i and not _can_take_over(brain):
+            continue
+        effort = eff if brain == ex else _effort_for(t["kind"], brain)
+        try:
+            if brain == "claude":
+                result = await claude_cli.one_shot(prompt, cwd=cwd, timeout=tout,
+                                                   agent_file=agent_file, effort=effort,
+                                                   mcp_config=dev_cfg)
+            else:
+                result = await copilot_cli.one_shot(_with_pipeline(pipeline, prompt),
+                                                    cwd=cwd, timeout=tout, effort=effort,
+                                                    mcp_config=dev_cfg)
+        except RuntimeError as exc:
+            if not agent_mod.transient_limit(str(exc)):
+                raise
+            agent_mod.mark_quota_down(_QUOTA_NAME[brain], str(exc))
+            limited.append((brain, agent_mod.limit_reset_at(str(exc)), str(exc)))
+            continue
+        agent_mod.mark_quota_ok(_QUOTA_NAME[brain])
+        if brain != ex:
+            store.kv_set(f"task_executor:{task_id}", brain)
+        return result
+    # Nobody could take it. Resume on whichever brain said it comes back first;
+    # a limit that named no time sorts last.
+    brain, reset_at, raw = min(limited, key=lambda x: x[1] if x[1] else float("inf"))
+    store.kv_set(f"task_executor:{task_id}", brain)
+    raise _LimitPaused(brain, reset_at, raw)
+
+
+#: The executors a simple run can move between, and the quota flag each one sets.
+_SIMPLE_BRAINS = ("copilot", "claude")
+_QUOTA_NAME = {"copilot": "copilot", "claude": "claude_cli"}
+
+
+def _can_take_over(brain: str) -> bool:
+    """Installed, and not known to be out of quota right now."""
+    from . import agent as agent_mod
+    if brain == "claude":
+        return claude_cli.available() and not agent_mod.quota_down("claude_cli")
+    return copilot_cli.available() and not agent_mod.quota_down("copilot")
 
 
 def _rounds(task_id: int) -> int:
@@ -1253,10 +1703,28 @@ async def _self_review(task_id: int, t: dict, result: str) -> str:
     return f"\n\n🔍 I read my own diff ({stat}):\n{clip.clip(notes, 900)}"
 
 
+def _is_gate(tail: str) -> bool:
+    """Is this run WAITING rather than finished?
+
+    Case-insensitive: the brain writes "Waiting for your approval" or "waiting
+    for your approval" depending on where in a sentence it lands, and its
+    capitalisation must not be what decides whether Arun is told the work is
+    done.
+    """
+    low = (tail or "").lower()
+    return any(m.lower() in low for m in _GATE_MARKS)
+
+
 async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     """Route a finished code leg: paused at a gate → ask Arun; handoff → next
     repo in a fresh window; otherwise done with the diff."""
     from . import notify
+    # Already finished. `_finish_code` re-enters itself on escalation and on a
+    # repo handoff, and the done branch below has no memory — so task #88
+    # "finished" four times and pushed four identical "✅ DONE" messages to his
+    # phone at 12:42, 12:53, 12:59 and 13:07. One completion, one message.
+    if (store.get_task(task_id) or {}).get("status") in _ALREADY_REPORTED:
+        return
     tail = result[-2500:]
     if "ESCALATE:" in tail and _pipeline_for(task_id) == "micro":
         # Discovery proved the change is bigger than micro — rerun through the
@@ -1289,14 +1757,63 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
             f"{_phone_text(result, 900)}\n\n"
             f"Reply with the answer, or 'reject task {task_id}'.", "task")
         return
-    if any(m in tail for m in _GATE_MARKS):
+    # A code task cannot finish before he has approved it. The brain saying
+    # "PLAN READY" is one way to reach this gate; NOT having been approved is
+    # the other, and it is the one that holds when the brain ignores the
+    # instruction — which is exactly what the micro pipeline's own agent file
+    # told it to do ("make the edit"). Its legs cannot write either (see
+    # `_run_code_leg`), so whatever it produced here IS a plan.
+    if _is_gate(tail) or not plan_approved(task_id):
         store.kv_set(f"task_gate:{task_id}", "plan")
+        # The brain signs off with its own "Reply 'PLAN APPROVED' to proceed",
+        # and the push below adds the real buttons underneath it. Two asks in a
+        # row, the first one unactionable, is exactly the clutter he pointed at.
+        result = _ASK_LINE.sub("", result).rstrip()
         store.update_task(task_id, status="awaiting_approval", result=result)
         await notify.notify(
-            f"📋 PLAN — #{task_id} {t['title']}\n\n"
+            f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
             f"{_phone_text(result, 1100)}\n\n"
-            f"👍 'approve task {task_id}' to implement · 'reject task {task_id}' to drop "
-            f"· or just reply with changes.", "task")
+            f"— — —\n"
+            f"👍 *approve task {task_id}*\n"
+            f"👎 *reject task {task_id}*\n"
+            f"✏️ …or just reply with the changes", "task")
+        return
+    unfinished = _repos_still_needed(task_id, t, tail)
+    if unfinished and hops < _MAX_REPO_HOPS:
+        # The run talked about a repo it had no checkout for. Prepare it and keep
+        # going in THIS task, rather than closing and letting the other half
+        # become somebody's second task.
+        #
+        # `worktrees.create` picks repos from the task's own words, which is right
+        # for cost and wrong for discovery: #88 named only booking-service, got
+        # one worktree, then found the AP side mattered — and had nowhere to put
+        # it. So it said "blocked… waiting on you for the AP-repo branch" and
+        # stopped. One change across two repos became tasks #88 and #89, and #89
+        # then re-implemented the first half.
+        branch = store.kv_get(f"task_branch:{task_id}") or task_branch(t, task_id)
+        root = Path(code_cwd(t["workspace"]))
+        from . import worktrees as _wt
+        with contextlib.suppress(Exception):
+            await _wt.create(root, task_id, branch, *unfinished)
+        ex = store.kv_get(f"task_executor:{task_id}") or "copilot"
+        store.kv_del(f"task_session:{task_id}:{ex}")
+        await notify.notify(
+            f"🔁 Task #{task_id}: same change reaches {', '.join(unfinished)} — "
+            f"checkout prepared, continuing in this task (window "
+            f"{hops + 1}/{_MAX_REPO_HOPS}).", "task")
+        result2 = await _run_code_leg(
+            task_id,
+            "Continue THIS change in the repo(s) you said were still outstanding: "
+            + ", ".join(unfinished) +
+            ". A checkout is now prepared for them on your branch — see THIS RUN "
+            "below. Do NOT redo anything already committed; check `git log` first."
+            + CODE_OVERRIDES + _branch_note(task_id, t) + _done_note(task_id, t),
+            task_cwd(task_id, t["workspace"]), resume=False,
+            effort=_impl_effort(_resolve_executor(task_id)),
+            workspace=t["workspace"])
+        if (store.get_task(task_id) or {}).get("status") in FINAL:
+            return
+        await _finish_code(task_id, t, result2, hops + 1)
         return
     if any(m in tail for m in _HANDOFF_MARKS) and hops < _MAX_REPO_HOPS:
         # Multi-repo change: the agent finished one repo and asked for a fresh
@@ -1319,6 +1836,20 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         return
     if await _verify_gate(task_id, t, result, hops):
         return
+    # The branch the work is ACTUALLY on, read from git rather than from the name
+    # Asta chose. Both were unpushed for #88/#89 while the pushed branch —
+    # `hotpriority/booking-equipment-mapping` — was one the agent cut itself, with
+    # no upstream and unknown to Asta. `pr_urls` stayed empty on both tasks, so
+    # nothing watched a PR or reported CI.
+    landed = committed_so_far(task_id, t)
+    if landed:
+        store.kv_set(f"task_landed:{task_id}", _json.dumps(landed))
+        expected = (store.kv_get(f"task_branch:{task_id}") or "").strip()
+        strayed = [d for d in landed if expected and d["branch"] != expected]
+        if strayed:
+            result += ("\n\n⚠️ Committed on a branch Asta did not prepare: "
+                       + ", ".join(f"{d['repo']} → {d['branch']}" for d in strayed)
+                       + f" (expected {expected}). Shipping will use what is above.")
     store.update_task(task_id, status="done", result=result, finished_at=time.time())
     _learn_from(task_id, t["title"], result)
     waste = _audit_note(task_id)
@@ -1447,6 +1978,17 @@ async def _worker(task_id: int) -> None:
                 prompt += CODE_OVERRIDES
         else:
             prompt += repo_ops.playbook_block(Path(_cwd(t["workspace"])))
+        # How far the context map has fallen behind the code it describes — on
+        # EVERY pipeline, because micro is the tier most likely to answer from
+        # the map alone. Empty for a workspace whose context is current, so a
+        # healthy run's prompt is unchanged.
+        # Three advisory blocks. Each is a note for the run, so a failure in any
+        # of them must cost a paragraph, never the task.
+        with contextlib.suppress(Exception):
+            from . import refresh as _refresh
+            prompt += (_refresh.trust_note(t["workspace"] or "")
+                       + _branch_note(task_id, t) + _done_note(task_id, t)
+                       + _context_note())
     try:
         if t["kind"] == "code":
             async with _ws_lock(t["workspace"]):
@@ -1457,8 +1999,23 @@ async def _worker(task_id: int) -> None:
                 # same working tree.
                 await _prepare_branches(task_id, t)
                 if agent:
+                    # `task_cwd`, NOT `_cwd`. The branches above are prepared in a
+                    # private worktree per task, and every OTHER leg — escalation,
+                    # repo handoff, verify retry — already runs there. This first
+                    # leg ran in the SHARED checkout, and the two are different
+                    # trees on different branches.
+                    #
+                    # Task #89 is what that costs. Its micro leg worked in the
+                    # shared tree, cut `hotpriority/booking-equipment-mapping`
+                    # itself and committed there; it then escalated, and the
+                    # escalated leg opened the worktree, found nothing, and
+                    # implemented the whole change again. Two divergent commits of
+                    # one change, in two trees, on two branches, neither of them
+                    # the one Asta was tracking — and Arun's own checkout moved
+                    # underneath his editor, which is the thing worktrees exist to
+                    # prevent.
                     result = await _run_code_leg(
-                        task_id, prompt, _cwd(t["workspace"]),
+                        task_id, prompt, task_cwd(task_id, t["workspace"]),
                         resume=False, effort=_effort_for("code", _resolve_executor(task_id)),
                         workspace=t["workspace"])
                 else:
@@ -1512,10 +2069,24 @@ def reply(task_id: int, text: str) -> str:
     if t["kind"] != "code" or t["status"] != "awaiting_approval":
         raise ValueError(f"task #{task_id} is not a code task awaiting approval "
                          f"(kind={t['kind']}, status={t['status']})")
-    approved = text.strip().upper() == "PLAN APPROVED"
+    # A plan approved WITH amendments is still an approval. Exact-match meant
+    # "PLAN APPROVED — but hold the PDF half" was scored as a rejection, run at
+    # planning effort, and sent back for a whole extra planning round before it
+    # would write a line. Narrowing scope at the gate is the normal case.
+    approved = text.strip().upper().startswith("PLAN APPROVED")
     # Did the plan hold? The cheapest honest measure of planning quality: a plan
     # Arun approves as-is versus one he sends back.
-    store.record_outcome("plan", "approved" if approved else "replanned", subject=str(task_id))
+    # Three states, not two. "Approved" and "approved but cut in half" are both
+    # approvals to the pipeline and very different answers to the only question
+    # this metric exists to ask — did the plan hold? Folding them together would
+    # make planning look better every time he had to correct the scope.
+    verdict = ("approved" if text.strip().upper() == "PLAN APPROVED"
+               else "approved_amended" if approved else "replanned")
+    store.record_outcome("plan", verdict, subject=str(task_id))
+    if approved:
+        # From here the legs may write. Before it, they could not — see
+        # `_run_code_leg`.
+        mark_approved(task_id)
     # The plan he just approved is the definition of done — keep it (no-op unless
     # ASTA_TASK_SPEC is on) so a later compacted leg can re-anchor to it.
     if approved:
@@ -1622,10 +2193,18 @@ async def _pause_task(task_id: int, t: dict, exc: _LimitPaused) -> None:
     switch_line = (f"\nOr reply “task {task_id} use {alts[0]}” to switch brains and carry "
                    f"on now (a fresh session on {alts[0]} — it rebuilds context from the "
                    f"repo)." if alts else "")
-    lead = (f"Nothing is lost. I'll auto-resume on {exc.brain} at ~{when} and pick up "
-            f"exactly where it stopped. Say “resume task {task_id}” to try sooner." if when
-            else f"Nothing is lost — the pinned session is kept. Say “resume task {task_id}” "
-                 f"when {exc.brain} is back and I'll pick up exactly where it stopped.")
+    if t.get("kind") != "code":
+        # Nothing pinned to pick up: an analysis or a draft simply runs again.
+        switch_line = ""
+        lead = (f"I'll run it again on {exc.brain} at ~{when}. Say “resume task {task_id}” "
+                f"to try sooner." if when
+                else f"Say “resume task {task_id}” when {exc.brain} is back and I'll run it again.")
+    elif when:
+        lead = (f"Nothing is lost. I'll auto-resume on {exc.brain} at ~{when} and pick up "
+                f"exactly where it stopped. Say “resume task {task_id}” to try sooner.")
+    else:
+        lead = (f"Nothing is lost — the pinned session is kept. Say “resume task {task_id}” "
+                f"when {exc.brain} is back and I'll pick up exactly where it stopped.")
     await notify.notify(
         f"⏸ Task #{task_id} paused — {exc.brain} hit its usage limit"
         + (f" (renews ~{when})" if when else "") + ".\n" + lead + switch_line, "task")
@@ -1642,8 +2221,6 @@ async def resume_task(task_id: int, switch_to: str = "") -> str:
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
-    if t["kind"] != "code":
-        raise ValueError(f"task #{task_id} isn't a resumable code task ({t['kind']})")
     if t["status"] not in ("paused", "failed"):
         raise ValueError(f"task #{task_id} is {t['status']} — nothing to resume")
     if is_running(task_id):
@@ -1658,6 +2235,14 @@ async def resume_task(task_id: int, switch_to: str = "") -> str:
     store.kv_del(f"task_resume_at:{task_id}")
     store.kv_del(f"task_paused:{task_id}")
     store.update_task(task_id, status="running", error="")
+    if t["kind"] != "code":
+        # A read-only analysis or a draft holds no pinned session and no git
+        # state, so resuming it IS running it again — from its own prompt, with
+        # its guardrails, on whichever brain is now set for it.
+        job = asyncio.create_task(_worker(task_id))
+        _running[task_id] = job
+        job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
+        return f"Task #{task_id}: running it again{note}."
     prompt = ("Resume: your session was paused mid-task when the brain hit a usage "
               "limit — this is the same task continuing, not a new one. Check "
               "`git log --oneline -5` and `git status` first so you don't redo "
@@ -1691,6 +2276,47 @@ async def _resume_due(now: float | None = None) -> list[int]:
         with contextlib.suppress(Exception):
             await resume_task(t["id"])
     return kicked
+
+
+#: How long after a restart an interrupted task waits before it picks itself up.
+#: Long enough for the watchers and MCP probes to settle, short enough that he
+#: does not notice; the resume sweep's own interval decides the granularity.
+RESTART_RESUME_SECONDS = float(os.environ.get("ASTA_RESTART_RESUME_SECONDS", "90"))
+
+
+async def recover_orphans() -> list[int]:
+    """Tasks the database still calls running, in a process that owns no workers.
+
+    A fresh process has no `_running` entries, so anything still marked running
+    was interrupted — a restart, a crash, a laptop that slept. Nothing noticed:
+    the row said running for ever, `live_tasks_for` kept handing it every message
+    Arun sent, and no work was happening behind it. That is the shape of "why
+    still 117 is running doesn't makes sense".
+
+    Marked paused with a due time rather than resumed inline, so the existing
+    sweep does the resuming — one resume path, already tested, and a task whose
+    brain is out of quota waits instead of failing twice.
+    """
+    from . import notify
+    picked: list[int] = []
+    now = time.time()
+    for t in store.list_tasks(limit=200):
+        if t["status"] != "running" or is_running(t["id"]):
+            continue
+        brain = _resolve_executor(t["id"])
+        store.kv_set(f"task_paused:{t['id']}", _json.dumps(
+            {"brain": brain, "reset_at": None, "raw": "interrupted by a restart", "at": now}))
+        store.kv_set(f"task_resume_at:{t['id']}", str(now + RESTART_RESUME_SECONDS))
+        store.update_task(t["id"], status="paused", error="interrupted by a restart")
+        store.record_outcome("task", "orphaned", subject=str(t["id"]), detail=brain)
+        picked.append(t["id"])
+    if picked:
+        listing = ", ".join(f"#{i}" for i in picked)
+        await notify.notify(
+            f"♻️ Asta restarted while {listing} {'was' if len(picked) == 1 else 'were'} "
+            f"running — picking {'it' if len(picked) == 1 else 'them'} back up now.",
+            "task", urgency="ambient")
+    return picked
 
 
 async def resume_paused_loop(interval: int = 60) -> None:
@@ -1750,7 +2376,7 @@ async def ship(task_id: int) -> str:
     if t["kind"] != "code" or t["status"] != "done":
         raise ValueError(f"task #{task_id} is not a finished code task "
                          f"(kind={t['kind']}, status={t['status']})")
-    root = Path(_cwd(t["workspace"]))
+    root = Path(task_cwd(task_id, t["workspace"]))
     # Same rule, same place. This copy mattered most: with the old shortcut,
     # shipping looked for the task's branch in the generated-context repo and
     # would have raised no PR at all for the services the work was actually in.
@@ -1769,9 +2395,11 @@ async def ship(task_id: int) -> str:
             rc, out = await repo_ops.git(repo, "git", "commit", "-m", t["title"])
             if rc != 0:
                 raise RuntimeError(f"{repo.name}: commit failed: {out[:200]}")
-        rc, ahead = await repo_ops.git(repo, "git", "log", "--oneline", f"origin/{cur}..HEAD")
+        base = await _wt._base_branch(repo)
+        rc, ahead = ((1, "") if not base else
+                     await repo_ops.git(repo, "git", "log", "--oneline", f"{base}..HEAD"))
         if rc == 0 and not ahead.strip():
-            continue   # branch exists remotely and has nothing new
+            continue   # nothing on this branch beyond its base — this repo's cut was unused
         rc, out = await repo_ops.git(repo, "git", "push", "-u", "origin", cur, timeout=300)
         if rc != 0:
             raise RuntimeError(f"{repo.name}: push failed: {out[:300]}")
@@ -2076,6 +2704,8 @@ async def refine(task_id: int, feedback: str) -> str:
         raise ValueError(f"task #{task_id} cannot be continued (status={t['status']})")
 
     store.record_outcome("task", "refined", subject=str(task_id))
+    # Feedback on a diff he has already seen is approval to keep working on it.
+    mark_approved(task_id)
     was_shipped = t["status"] in SHIPPED_STATUSES
     store.update_task(task_id, status="running")
     prompt = (

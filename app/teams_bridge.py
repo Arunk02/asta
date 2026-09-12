@@ -66,9 +66,73 @@ def status() -> dict:
 async def _launch(headless: bool = True):
     from playwright.async_api import async_playwright
     pw = await async_playwright().start()
-    ctx = await pw.chromium.launch_persistent_context(
+    # The INSTALLED Google Chrome, not Playwright's bundled "Chrome for Testing".
+    #
+    # macOS attributes microphone access per binary, and only lists an app in
+    # System Settings once that app has ASKED for the permission — there is no way
+    # to add one by hand. Chrome for Testing never asks in a way that registers,
+    # so it can never be granted, so every call it places is silent. The
+    # colleague answered on 2026-09-07, spoke, and heard nothing.
+    #
+    # Real Chrome is already granted. Same profile directory either way, so the
+    # Teams session carries over; ASTA_BROWSER_CHANNEL="" falls back to the
+    # bundled build if Chrome is ever missing.
+    channel = os.environ.get("ASTA_BROWSER_CHANNEL", "chrome").strip()
+    await _wait_profile_free()
+    ctx = await _launch_ctx(pw, channel, headless)
+    return pw, ctx
+
+
+async def _wait_profile_free(timeout: float = 8.0) -> None:
+    """Wait — without killing anything — for the profile's last browser to exit.
+
+    Real Chrome and Chrome for Testing differ here, and the difference is why
+    switching binaries broke every launch. Given a `--user-data-dir` somebody
+    still owns, Chrome for Testing fails loudly with "Failed to create a
+    ProcessSingleton". Real Chrome HANDS THE COMMAND OFF to the owning instance
+    and exits 0 — so Playwright is handed a context that is already closed, and
+    the next call dies with "TargetClosedError: BrowserContext.new_page".
+
+    From the outside that is a window appearing and vanishing: "Chrome getting
+    close while coming up only".
+
+    `close_pool` returns as soon as it has asked the browser to go; the process
+    is still exiting. So this waits for it. Deliberately no reaping — that kills
+    live work, which is a mistake already made once today.
+    """
+    import asyncio as _asyncio
+    deadline = _asyncio.get_event_loop().time() + timeout
+    while profile_processes() and _asyncio.get_event_loop().time() < deadline:
+        await _asyncio.sleep(0.25)
+
+
+async def _launch_ctx(pw, channel: str, headless: bool):
+    """Launch, and on a profile-lock failure free the profile and try once more.
+
+    Try-then-recover, NOT free-then-launch. `reap_orphans` kills every browser on
+    the profile, and its own docstring says to call it only when we hold no
+    pooled browser of our own — so doing it before every launch means a second
+    operation kills the first one's browser mid-use. It did: two consecutive
+    voice checks, the first fine, the second dead with TargetClosedError.
+
+    Recovering only from the error that names the problem keeps the reap rare and
+    keeps the invariant true: if the launch failed for the lock, nothing of ours
+    is successfully holding it.
+    """
+    try:
+        return await _open_ctx(pw, channel, headless)
+    except Exception as exc:                                   # noqa: BLE001
+        if "ProcessSingleton" not in str(exc):
+            raise
+        await free_profile()
+        return await _open_ctx(pw, channel, headless)
+
+
+async def _open_ctx(pw, channel: str, headless: bool):
+    return await pw.chromium.launch_persistent_context(
         str(PROFILE_DIR),
         headless=headless,
+        **({"channel": channel} if channel else {}),
         viewport={"width": 1440, "height": 900},
         # Teams cannot start a call without getUserMedia, and a fresh Playwright
         # context denies microphone access SILENTLY — the call button clicks
@@ -81,9 +145,14 @@ async def _launch(headless: bool = True):
             # Belt and braces: suppress the media picker Chromium would
             # otherwise raise, which nothing is there to click.
             "--use-fake-ui-for-media-stream",
+            # Kills the yellow "You are using an unsupported command-line flag"
+            # infobar. It appeared the moment Asta switched from Playwright's
+            # bundled build to the real Chrome — Chrome for Testing never showed
+            # it — and it sits over the Teams window Arun can see. `--test-type`
+            # is what suppresses it; `--disable-infobars` no longer does.
+            "--test-type",
         ],
     )
-    return pw, ctx
 
 
 # --- one browser, kept alive --------------------------------------------------
@@ -133,10 +202,30 @@ async def _discard_pool() -> None:
             await (closer.close() if hasattr(closer, "close") else closer.stop())
 
 
+def in_a_call() -> bool:
+    """Is a call live? Then the shared browser is not available."""
+    try:
+        from . import meetings
+        return bool(meetings._CALL)
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 async def _pooled_page():
     """A live, authenticated Teams page — reused when possible, rebuilt when not."""
     if await _pool_alive():
         return _POOL["page"]
+    # A call OWNS the profile, and Chromium tolerates one writer. Launching a
+    # second browser here is not a slow read — it contends with the call, and
+    # real Chrome resolves that by handing off and exiting silently, leaving a
+    # dead context on one side or the other.
+    #
+    # Three calls died this way: dialled, then eleven seconds later
+    # "TargetClosedError: Keyboard.press" while still searching for the person's
+    # name. One guard here rather than one per loop, because there are four
+    # background readers and the next one added would not know to ask.
+    if in_a_call():
+        raise RuntimeError("a call is in progress — the Teams browser is busy")
     await _discard_pool()
     pw, ctx = await _launch(headless=True)
     try:
@@ -227,6 +316,47 @@ def reap_orphans() -> int:
     return killed
 
 
+async def free_profile(timeout: float = 6.0) -> None:
+    """Make the profile launchable: reap holders, wait for them, drop stale locks.
+
+    Chromium tolerates exactly one writer per `--user-data-dir`, and enforces it
+    with `SingletonLock`/`SingletonSocket`/`SingletonCookie`. Two ways that
+    becomes a failed call:
+
+    * a browser from an earlier operation still holds it — `reap_orphans` SIGTERMs
+      those but does not WAIT, so a launch straight afterwards can still lose the
+      race; and
+    * the lock files outlive a browser that was killed rather than closed, so the
+      profile looks busy while nothing is using it.
+
+    Both were live on 2026-09-07: a test call died with "Failed to create a
+    ProcessSingleton for your profile directory" while nothing was running. The
+    workaround was to clear it by hand, which is not available to a call placed at
+    two in the morning.
+    """
+    import asyncio as _asyncio
+    # NEVER while a call is live. `reap_orphans` kills every browser on the
+    # profile, and a call's browser is on the profile — so the 60-second chat
+    # sweep, finding the profile locked BY the call, would recover by killing it.
+    # That is what ended the 18:42 test call: "TargetClosedError:
+    # Keyboard.press: Target page, context or browser has been closed", twelve
+    # seconds after dialling, while it was still searching for her name.
+    #
+    # A background poll must never be able to hang up on a colleague.
+    from . import meetings as _m
+    if getattr(_m, "_CALL", None):
+        return
+    reap_orphans()
+    deadline = _asyncio.get_event_loop().time() + timeout
+    while profile_processes() and _asyncio.get_event_loop().time() < deadline:
+        await _asyncio.sleep(0.25)
+    if profile_processes():
+        return                       # something is genuinely alive — do not unlock it
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        with contextlib.suppress(OSError):
+            (PROFILE_DIR / name).unlink(missing_ok=True)
+
+
 def _teams_leveldb() -> Path:
     """Teams' own IndexedDB store — the thing that gets wedged by co-writers."""
     return (PROFILE_DIR / "Default" / "IndexedDB"
@@ -290,7 +420,19 @@ async def _open_teams(ctx, timeout: float = 75.0):
         except Exception:
             pass  # navigation in flight — poll again once the new document is up
         await asyncio.sleep(1)
-    raise RuntimeError(f"Teams app did not load within {int(timeout)}s (url: {page.url[:100]})")
+    # Say WHAT is on screen, not just that the marker never appeared. The URL
+    # alone cannot tell a slow render from an account picker from a dialog, and
+    # a headed call window is the one place nobody is watching. Cheap, and only
+    # on the failure path.
+    seen = ""
+    with contextlib.suppress(Exception):
+        title = await page.title()
+        text = await page.evaluate(
+            "() => (document.body ? document.body.innerText : '').slice(0, 400)")
+        text = " ".join((text or "").split())
+        seen = f" · title={title[:60]!r} · on screen: {text[:220]!r}"
+    raise RuntimeError(
+        f"Teams app did not load within {int(timeout)}s (url: {page.url[:100]}){seen}")
 
 
 #: How long to wait for the thread header to catch up with the click (10 × 0.4s).
@@ -1525,3 +1667,95 @@ if __name__ == "__main__":
               "|send <person> <text> [--group]|resolve <name> [--group]|call <person> [--video]")
         print("NOTE: `send` targets a PERSON's 1:1 chat. Group/channel sends require --group.")
         print("      `resolve` says who a send WOULD reach and sends nothing.")
+
+
+# --- leaving a voice message --------------------------------------------------
+#
+# Teams records a voice message from the SYSTEM microphone. Asta already knows
+# how to point that at a virtual device and play speech into it — that is how it
+# talks in a call — so a voice note is the same trick pointed at the composer
+# instead of at a call.
+#
+# Built because a call nobody answers currently leaves nothing behind. "if they
+# not picked up send voice note and cut the call": the message is the point of
+# having rung at all.
+
+#: The composer's record control. Teams has reworded this more than once, so it
+#: is matched several ways — and if NONE of them hit, that is a hard failure and
+#: never a silent no-op. A voice note reported as sent and never recorded is
+#: worse than no voice note.
+_MIC_BUTTON = (
+    'button[data-tid="voice-message-button"]',
+    'button[aria-label*="Record a voice message" i]',
+    'button[aria-label*="voice message" i]',
+    'button[aria-label*="Record voice" i]',
+    'button[title*="voice message" i]',
+)
+
+#: Stop-and-keep, then send. Teams shows a review step: stop first, then send.
+_MIC_STOP = ('button[data-tid="voice-message-stop-button"]',
+             'button[aria-label*="Stop recording" i]',
+             'button[aria-label*="Stop" i]')
+_MIC_SEND = ('button[data-tid="voice-message-send-button"]',
+             'button[data-tid="sendMessageCommand"]',
+             'button[aria-label*="Send voice" i]',
+             'button[aria-label*="Send" i]')
+
+
+async def _click_any(page, selectors, timeout: int = 4000) -> bool:
+    for sel in selectors:
+        try:
+            btn = await page.wait_for_selector(sel, timeout=timeout)
+            if btn:
+                await btn.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def send_voice_note(chat: str, text: str, allow_group: bool = False) -> str:
+    """Leave `text` as a spoken voice message in someone's 1:1 chat.
+
+    Returns the chat it landed in. Raises with the specific step that failed —
+    never a partial success, because a half-recorded clip sent to a colleague is
+    the failure this whole path exists to avoid.
+
+    The microphone is borrowed exactly as `say_in_call` borrows it, and given
+    back in a `finally`: recording holds the system input, and leaving it on the
+    virtual device would mute Arun's own next call.
+    """
+    from . import call_audio, voice
+    audio = await voice.speak(text)
+    if not audio:
+        raise RuntimeError("speech synthesis produced nothing — no voice note sent")
+    seconds = voice.wav_seconds(audio) if hasattr(voice, "wav_seconds") else 0.0
+
+    async with teams_page() as page:
+        title = await _find_chat(page, chat, allow_group=allow_group)
+        if not await _click_any(page, _MIC_BUTTON):
+            raise RuntimeError(
+                f"no voice-message button in the chat with '{title}' — either "
+                f"Teams changed the composer or voice messages are off for this "
+                f"account. Nothing was recorded and nothing was sent.")
+        borrowed = await call_audio.set_call_mic(page, call_audio.AUDIO_DEVICE)
+        if not borrowed:
+            await page.keyboard.press("Escape")          # abandon the recording
+            raise RuntimeError(
+                f"could not point the mic at {call_audio.AUDIO_DEVICE} — the note "
+                f"would have been silence, so nothing was sent.")
+        try:
+            await asyncio.sleep(0.6)                     # let recording actually start
+            await asyncio.to_thread(voice.play_to_device, audio, call_audio.AUDIO_DEVICE)
+            await asyncio.sleep(0.6)                     # don't clip the last word
+            if not await _click_any(page, _MIC_STOP):
+                raise RuntimeError("recorded but found no stop control — not sent")
+            if not await _click_any(page, _MIC_SEND):
+                raise RuntimeError("recorded and stopped but found no send control "
+                                   "— not sent")
+        finally:
+            await call_audio._restore_mic(page)
+
+    await asyncio.sleep(2.0)
+    store.kv_set("teams_last_voice_note", f"{title}|{text[:200]}")
+    return f"{title} ({seconds:.0f}s)" if seconds else title

@@ -110,12 +110,20 @@ def test_code_leg_hands_dev_mcp_to_whichever_brain_runs(monkeypatch, executor, m
                                     "/work/contmark", resume=False, effort="medium"))
 
     cfg = json.loads(seen["mcp_config"])
-    assert set(cfg["mcpServers"]) == {"serena", "context7"}
+    assert {"serena", "context7"} <= set(cfg["mcpServers"])
     assert cfg["mcpServers"]["serena"]["args"][-1] == "/work/contmark"
 
 
-def test_code_leg_passes_empty_config_when_disabled(monkeypatch):
+def test_code_leg_passes_empty_config_when_everything_is_disabled(monkeypatch):
+    """The no-op contract, and it is about BOTH flags now.
+
+    This used to assert "" with only the dev servers off, which quietly asserted
+    something else as well: that a task run gets no Asta tools either. It was
+    true, and it was the bug — task #86 reported no Jira, no Teams and no
+    prepare_to_send, and task #88 wrote the code and could not tell Vinish.
+    """
     monkeypatch.delenv("ASTA_DEV_MCP", raising=False)
+    monkeypatch.setenv("ASTA_CLI_MCP", "0")
     seen = _capture_one_shot(monkeypatch, copilot_cli)
 
     t = store.create_task("small edit", "code", "tweak the log line", None)
@@ -125,8 +133,27 @@ def test_code_leg_passes_empty_config_when_disabled(monkeypatch):
     assert seen["mcp_config"] == ""                     # command byte-for-byte unchanged
 
 
-def test_analysis_leg_gets_dev_mcp_but_teams_draft_does_not(monkeypatch):
+def test_a_task_gets_astas_tools_even_with_the_dev_servers_off(monkeypatch):
+    """The fix, from the other side: dev_mcp is off by default, and that must no
+    longer mean a task run has no tools at all."""
+    monkeypatch.delenv("ASTA_DEV_MCP", raising=False)
+    monkeypatch.setenv("ASTA_CLI_MCP", "1")
+    seen = _capture_one_shot(monkeypatch, copilot_cli)
+
+    t = store.create_task("small edit", "code", "tweak the log line", None)
+    store.kv_set(f"task_executor:{t['id']}", "copilot")
+    asyncio.run(tasks._run_code_leg(t["id"], "tweak the log line",
+                                    "/work/contmark", resume=False, effort="medium"))
+    assert set(json.loads(seen["mcp_config"])["mcpServers"]) == {"asta"}
+
+
+def test_analysis_gets_the_dev_servers_and_a_draft_task_gets_astas(monkeypatch):
+    """Serena's symbol nav is for reading code, so it goes to analysis and not to
+    a drafting task. Asta's own tools go to both — a teams_draft task that cannot
+    reach `prepare_to_send` is the one kind that most obviously needs it, and it
+    was the kind that got nothing at all."""
     monkeypatch.setenv("ASTA_DEV_MCP", "1")
+    monkeypatch.setenv("ASTA_CLI_MCP", "1")
     monkeypatch.setattr(dev_mcp, "_on_path", lambda c: True)
 
     seen_analysis = _capture_one_shot(monkeypatch, copilot_cli)
@@ -141,4 +168,6 @@ def test_analysis_leg_gets_dev_mcp_but_teams_draft_does_not(monkeypatch):
     t2 = store.create_task("reply to Vinish", "teams_draft", "draft a reply", None)
     store.kv_set(f"task_executor:{t2['id']}", "copilot")
     asyncio.run(tasks._run_simple(t2["id"], store.get_task(t2["id"]), "draft a reply"))
-    assert seen_draft["mcp_config"] == ""               # non-code kinds get nothing
+    drafting = set(json.loads(seen_draft["mcp_config"])["mcpServers"])
+    assert "asta" in drafting                           # it can stage what it drafts
+    assert "serena" not in drafting                     # but not the code-reading kit

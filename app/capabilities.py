@@ -303,8 +303,40 @@ _TABLE: tuple[Capability, ...] = (
     Capability("list_background_tasks", "tasks", http="GET /api/tasks"),
     Capability("task_result", "tasks", http="GET /api/tasks/{id}"),
     Capability("approve_task", "tasks", http="POST /api/tasks/{id}/approve", write=True,
-               note="At a plan gate this means implement. Any other feedback goes to "
-                    'POST /api/tasks/{id}/reply {"text":"…"} and the pipeline re-plans.'),
+               note="At a plan gate this means implement the plan AS WRITTEN. It carries "
+                    "no words, so use it only for an unqualified yes — the moment he adds "
+                    "a condition, reply_to_task is the tool."),
+    Capability("reply_to_task", "tasks", http='POST /api/tasks/{id}/reply {"text":"…"}',
+               write=True,
+               note="Answers a task waiting at a gate, in his own words: an approval with "
+                    "conditions ('yes but leave the PDF side'), a scope cut, a correction, "
+                    "or the answer to a question it asked. Text starting 'PLAN APPROVED' "
+                    "implements with those changes; anything else re-plans. Approving and "
+                    "THEN sending the feedback builds the unamended plan first."),
+    Capability("track_until_done", "tasks",
+               http='POST /api/followups {"goal":"…","urls":["…"],"person":"…",'
+                    '"when":"2026-09-08T18:00"}', write=True,
+               note="Keeps chasing pull requests towards a deadline after this turn "
+                    "ends — polls each PR, names what is blocking it (CI red, no "
+                    "review, changes requested) BEFORE the deadline, and drafts a "
+                    "reminder to the reviewer when a PR stops moving. Drafts only; it "
+                    "never messages anyone by itself. Reach for it when he asks you to "
+                    "chase or follow up a PR with somebody by a given time."),
+    Capability("stop_investigating", "tasks",
+               http='POST /api/responder/mute {"kind":"incident"}', write=True,
+               note="THE tool for 'don't look into X', 'stop analysing X'. A standing "
+                    "instruction — recorded, so it is still true tomorrow. Kinds: "
+                    "incident | pr_review | debug | ask. Never just agree in chat and "
+                    "leave the behaviour running."),
+    Capability("resume_investigating", "tasks",
+               http='POST /api/responder/unmute {"kind":"incident"}', write=True,
+               note="Undoes stop_investigating for one kind."),
+    Capability("list_tracked", "tasks", http="GET /api/followups"),
+    Capability("stop_tracking", "tasks", http="POST /api/followups/{id}/stop",
+               write=True,
+               note="Stops the chasing — Asta forgets the deadline and stops drafting "
+                    "nudges. Only when he says to drop it or it landed another way; if "
+                    "he is merely asking where it stands, list_tracked answers that."),
     Capability("ship_task", "tasks", http="POST /api/tasks/{id}/ship", write=True,
                note="Pushes the branch and opens the PR. The pipeline NEVER does this "
                     "itself — only when Arun has seen the diff and said ship. The task "

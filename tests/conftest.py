@@ -200,6 +200,14 @@ def _no_live_brains(monkeypatch):
     for mod in ("copilot_cli", "claude_cli"):
         with contextlib.suppress(ImportError, AttributeError):
             monkeypatch.setattr(f"app.{mod}.one_shot", _no_cli, raising=False)
+    # The LOCAL model too, and it was the one gap in this rule. It costs nothing
+    # per call, so it never looked like something to seal — but LM Studio is up
+    # on this machine, so a test that reached it made a real HTTP request and
+    # waited on a real generation. When the completion budget briefly rose from
+    # 120s to 300s the whole suite wedged at 89% on one of them: no output, no
+    # CPU, no failure. A test that reaches a live model is unbounded whether or
+    # not anyone is billed for it.
+    monkeypatch.setattr("app.memory.local_llm_model", lambda: None, raising=False)
     yield
 
 

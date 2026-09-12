@@ -434,17 +434,15 @@ def test_pr_watching_only_follows_prs_from_his_own_tasks():
 
 # --- the quality bar ----------------------------------------------------------
 
-@pytest.mark.parametrize("rule", [
-    "Small, named, single-purpose functions",
-    "functional shape",
-    "SIMPLIFY",
-    "Guard clauses over nesting",
-    "Comments explain WHY",
-    "Delete what you replace",
-    "Tests are part of the change",
-])
-def test_the_quality_bar_is_stated_to_the_executor(rule):
-    assert rule in tasks.CODE_OVERRIDES
+def test_the_quality_bar_moved_to_his_guardrails_file():
+    """It was a block in CODE_OVERRIDES; now it is the `## Coding` section of
+    guardrails.md, his to edit, and every fresh code leg receives it — see
+    test_guardrails for the routing. This pins that it did not survive here as a
+    second copy the two could drift between."""
+    from app import guardrails
+    assert "Small, named, single-purpose" not in tasks.CODE_OVERRIDES
+    assert "guardrails.md" in Path("app/tasks.py").read_text()
+    assert "SIMPLIFY" in guardrails.parse(guardrails.EXAMPLE_PATH.read_text())["coding"]
 
 
 def test_the_executor_is_told_not_to_touch_the_branch():

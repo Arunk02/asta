@@ -20,7 +20,7 @@ from pathlib import Path
 
 import httpx
 
-from . import store
+from . import store, turn_budget
 
 ROOT = Path(__file__).resolve().parent.parent
 MEMORY_DIR = ROOT / "memory"
@@ -60,23 +60,164 @@ def local_llm_model() -> str | None:
         return None
 
 
+#: Extra room to let a reasoning model finish thinking and still answer.
+#:
+#: Local models are increasingly reasoning models, and they spend the WHOLE
+#: budget thinking before writing a word. Measured on qwen3.5-9b: asked for 200
+#: tokens it used 199 on reasoning and returned `content: ""`. `call_brain` asks
+#: for EIGHT — so every local-brain feature was getting an empty string and
+#: reading it as "the model had nothing to say", silently, forever.
+_THINK_HEADROOM = int(os.environ.get("ASTA_LOCAL_THINK_HEADROOM", "512"))
+
+
+def _completion(model: str, prompt: str, max_tokens: int, **extra) -> dict:
+    r = httpx.post(
+        f"{local_llm_base()}/chat/completions",
+        json={"model": model, "messages": [{"role": "user", "content": prompt}],
+              "max_tokens": max_tokens, "temperature": 0.2, **extra},
+        timeout=turn_budget.completion_seconds(),
+    )
+    return r.json()
+
+
+#: The smallest context Asta's own prompt fits in. Persona plus tool schemas
+#: measured at ~13k tokens, so anything under this cannot answer at all.
+LOCAL_MIN_CTX = int(os.environ.get("ASTA_LOCAL_MIN_CTX", "32768"))
+LMS_CLI = os.environ.get("ASTA_LMS_CLI", str(Path.home() / ".lmstudio" / "bin" / "lms"))
+
+
+#: Not a chat model. An embedding model is always loaded alongside and is listed
+#: first, so "the first loaded model" picked it — and reported ITS 2048-token
+#: context as the chat brain's.
+_NOT_A_BRAIN = ("embed", "embedding", "reranker", "rerank")
+
+
+def local_ctx() -> tuple[str, int]:
+    """(model id, the context it is CURRENTLY loaded with). ("", 0) if unknown.
+
+    `/v1/models` does not carry this; `/api/v0/models` does, and the distinction
+    matters — a model can advertise a 262144 maximum and be serving 4096.
+    """
+    try:
+        r = httpx.get(f"{local_llm_base().replace('/v1', '')}/api/v0/models", timeout=3)
+        for m in r.json().get("data", []):
+            mid = (m.get("id") or "")
+            if m.get("state") != "loaded" or m.get("type") == "embeddings":
+                continue
+            if any(w in mid.lower() for w in _NOT_A_BRAIN):
+                continue
+            return mid, int(m.get("loaded_context_length") or 0)
+    except Exception:                                           # noqa: BLE001
+        pass
+    return "", 0
+
+
+def _loaded_instances(model: str) -> list[str]:
+    """Every loaded instance id for `model` — LM Studio suffixes duplicates ":2"."""
+    try:
+        r = httpx.get(f"{local_llm_base().replace('/v1', '')}/api/v0/models", timeout=3)
+        base = model.split(":")[0]
+        return [m["id"] for m in r.json().get("data", [])
+                if m.get("state") == "loaded" and (m.get("id") or "").split(":")[0] == base]
+    except Exception:                                           # noqa: BLE001
+        return []
+
+
+def ensure_local_context(minimum: int = 0) -> str:
+    """Reload the local model with a context Asta's prompt actually fits in.
+
+    LM Studio's context length is a LOAD-TIME setting, and its JIT loader
+    re-loads an idle model at the MODEL's default — 4096 for qwen3.5-9b — not at
+    whatever it was last given. So raising it by hand lasts until the next
+    auto-unload, which is why the same error came back twice in one day:
+
+        APIError: n_keep: 13363 >= n_ctx: 4096
+
+    Per-model defaults are only writable from LM Studio's GUI, so the durable
+    fix is to stop depending on them and re-assert it here. Returns what it did,
+    for a health line; never raises.
+    """
+    import subprocess
+    import time as _t0
+    want = minimum or LOCAL_MIN_CTX
+    model, have = local_ctx()
+    if not model or have >= want:
+        return ""
+    try:
+        # UNLOAD EVERY INSTANCE FIRST, and wait for it. Two things bite here:
+        # `lms load` on an already-loaded model does not re-load it with the new
+        # setting, and if the unload has not settled it STACKS another instance
+        # — "qwen/qwen3.5-9b:2" — so a 10.45 GB model became 20 GB of a 32 GB
+        # machine while still serving 4096 from the first copy.
+        for _ in range(6):
+            names = _loaded_instances(model)
+            if not names:
+                break
+            for name in names:
+                subprocess.run([LMS_CLI, "unload", name], capture_output=True,
+                               timeout=120, check=False)
+            _t0.sleep(1.0)
+        subprocess.run([LMS_CLI, "load", model, "--context-length", str(want), "--yes"],
+                       capture_output=True, timeout=300, check=False)
+    except Exception as exc:                                    # noqa: BLE001
+        return f"local model is loaded at {have} tokens and could not be reloaded: {exc}"
+    # The load returns before the server reports the new context, so give it a
+    # moment rather than reading a stale (or empty) answer and calling it failed.
+    import time as _t
+    for _ in range(20):
+        _model, now = local_ctx()
+        if now >= want:
+            break
+        _t.sleep(1.5)
+    if now >= want:
+        store.record_outcome("local", "context_raised", subject=model,
+                             detail=f"{have} -> {now}")
+        return f"reloaded {model} at {now} tokens (was {have})"
+    return (f"{model} is loaded at {have} tokens; Asta's prompt needs ~{want}. "
+            f"Raise it in LM Studio, or the local brain cannot answer.")
+
+
 def local_llm_complete(prompt: str, max_tokens: int = 400) -> str | None:
+    """Ask the local model. None when it could not answer — never a bare "".
+
+    Two passes, because a reasoning model answers neither the way the old code
+    assumed nor reliably the same way twice:
+
+    1. `reasoning_effort: "none"` — thinking off, the whole budget spent on the
+       answer. Exact, and the only option that honours a small `max_tokens`.
+    2. If the server rejects that parameter, or obeys it and still thinks, retry
+       with `_THINK_HEADROOM` extra tokens so it can think AND answer.
+
+    An empty answer after both is a FAILURE and returns None. It used to return
+    "" — indistinguishable from a real empty answer, and the reason a working
+    model looked like a mute one.
+    """
     model = local_llm_model()
     if not model:
         return None
     try:
-        r = httpx.post(
-            f"{local_llm_base()}/chat/completions",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": 0.2,
-            },
-            timeout=120,
-        )
-        return r.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
+        d = _completion(model, prompt, max_tokens, reasoning_effort="none")
+        text = ((d.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        if not text.strip():
+            # Either the parameter was refused, or it was ignored and the model
+            # thought its whole budget away. Same remedy: pay for both.
+            d = _completion(model, prompt, max_tokens + _THINK_HEADROOM)
+            text = ((d.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        if not text.strip():
+            store.record_outcome(
+                "turn", "empty_local", subject="local",
+                detail=f"no content in {max_tokens + _THINK_HEADROOM} tokens "
+                       f"({d.get('error') or 'all budget spent reasoning'})")
+            return None
+        return text.strip()
+    except httpx.TimeoutException:
+        # A local model that stopped answering is the same event as a wedged CLI
+        # turn, and used to be the only one of the three that vanished without a
+        # word — nine background features read None as "produce nothing".
+        store.record_outcome("turn", "stopped_idle", subject="local",
+                             detail=f"no response in {turn_budget.completion_seconds()}s")
+        return None
+    except Exception:                                           # noqa: BLE001
         return None
 
 

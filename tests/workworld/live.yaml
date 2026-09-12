@@ -1,0 +1,68 @@
+# The live tier: a REAL brain, on his real prompts, judged on what only a real
+# brain can be judged on — is the answer crisp, is the plan shaped the way he
+# reads it, does a draft sound like him.
+#
+# These run at night, on subscription quota that would otherwise expire, and
+# each one costs one brain leg (see nightly.py for the budget). They are
+# deliberately tool-free: a live brain here gets no MCP config and no port, so
+# it cannot reach the running Asta. Tool-using live scenarios wait for P2, when
+# the sim world can be served to a brain safely.
+
+scenarios:
+  - id: live-crisp-on-whatsapp
+    title: A real brain answers a phone question in a phone-sized answer
+    why: >
+      Measured 11 Sep: his replies averaged 767 characters against his own
+      120-word rule, and the rule only reaches the brain through the prompt.
+    setup:
+      tasks:
+        - {as: running, title: "create the lower-env topics", kind: code, status: running}
+    steps:
+      - say: "what is running right now"
+    checks:
+      - reply_max_chars: 900
+      - reply_lacks: "let me check|I'll go and|I will now"
+
+  - id: live-plan-is-shaped-for-his-phone
+    title: A real plan opens with STRUCTURE and FLOW and stops at the gate
+    why: >
+      The plan render is the thing he approves from WhatsApp, standing up. It is
+      a prompt-quality property, so only a real brain can prove it.
+    setup:
+      workspace: booking
+    steps:
+      - spawn:
+          title: "BEPTELIKOS-1 add a retention field to the topic config"
+          prompt: >
+            In this scratch repo there is no code yet. Plan (do not implement) how you
+            would add a `retentionMs` field to a Kafka topic config record and its
+            mapper, with tests. Follow the plan format exactly.
+          kind: code
+          workspace: booking
+          as: plan
+    checks:
+      - task_status: {task: plan, is: awaiting_approval}
+      - push_contains: ["STRUCTURE", "FLOW"]
+      - push_lacks: "✅ DONE"
+
+  - id: live-a-draft-sounds-like-him
+    title: A drafted reply is short and in his voice, not a letter
+    why: >
+      "messages drafted for colleagues are in my voice: short, plain, no
+      ceremony" — a guardrail that only shows up in what a real brain writes.
+      The draft must also WAIT: nothing is sent until he approves it.
+    steps:
+      - spawn:
+          title: "reply about the uat topics"
+          prompt: >
+            Draft a Teams reply to a colleague telling them the uat topics are
+            created and the schema change is merged in release 2.2.4. Reply with
+            the message text only.
+          kind: teams_draft
+          teams_chat: "A colleague"
+          as: draft
+    checks:
+      - task_status: {task: draft, is: awaiting_approval}
+      - push_contains: "draft for Teams"
+      - push_lacks: "Dear |Best regards|Kind regards|Hope you are|I hope this"
+      - no_send: true

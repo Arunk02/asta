@@ -12,11 +12,13 @@ instead of launching a browser.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
 import time
 
-from . import quiet, attention, copilot_cli, daemon, diagnostics, memory, msnotify, store, teams_bridge, telegram
+from . import (quiet, attention, copilot_cli, daemon, diagnostics, guardrails, memory,
+               msnotify, store, teams_bridge, telegram)
 
 CHECK_SECONDS = 6 * 3600
 MIN_FREE_GB = 5
@@ -50,6 +52,37 @@ def stale_contexts(now: float | None = None) -> dict[str, float]:
         elif days >= CONTEXT_STALE_DAYS:
             out[name] = days
     return out
+
+
+def mcp_problems() -> dict[str, str]:
+    """An MCP server whose handshake failed at the last probe, with what to do.
+
+    `_probe_mcp` drops a failing server so one dead login cannot stall chat —
+    correct, and silent: the Atlassian tools were gone for weeks and the only
+    trace was "Token refresh failed: 404" in a log with no timestamps.
+    """
+    try:
+        failed = json.loads(store.kv_get("mcp_handshake_failed") or "{}")
+    except ValueError:
+        return {}
+    out: dict[str, str] = {}
+    for name, why in failed.items():
+        fix = ""
+        if "mcp_login" in why:
+            fix = ""                       # the reason already names the command
+        elif _is_oauth_server(name):
+            fix = f" — if it persists, log in again: .venv/bin/python -m app.mcp_login {name}"
+        out[f"mcp_{name}"] = f"MCP server '{name}' is off — {why}{fix}"
+    return out
+
+
+def _is_oauth_server(name: str) -> bool:
+    try:
+        from . import mcp_loader
+        spec = json.loads(mcp_loader.CONFIG.read_text()).get("mcpServers", {}).get(name, {})
+    except (OSError, ValueError):
+        return False
+    return spec.get("auth") == "oauth"
 
 
 async def checks() -> dict[str, str]:
@@ -107,6 +140,13 @@ async def checks() -> dict[str, str]:
         name, _, detail = line.partition(" ")
         problems[f"daemon_{name}"] = f"background loop {detail or 'is not running'}"
 
+    problems.update(mcp_problems())
+
+    # A rule of his that is not reaching a prompt — a section over the cap, a
+    # file with no headings, an override pointing at nothing — is him repeating
+    # himself next week without knowing why. Said here, not discovered there.
+    problems.update(guardrails.problems())
+
     if not copilot_cli.available():
         problems["copilot"] = "Copilot CLI missing/unauthenticated (run: copilot login)"
     if not memory.local_llm_model():
@@ -119,6 +159,17 @@ async def checks() -> dict[str, str]:
             "LM Studio not running — memory recall is keyword-only (no semantic "
             "re-ranking), Asta will not answer aloud in calls, and digests fall "
             "back to heuristics")
+    else:
+        # A model loaded with too small a context is WORSE than one not running:
+        # everything reports healthy and every local call dies with
+        # "n_keep: 13363 >= n_ctx: 4096". LM Studio's JIT loader re-loads an idle
+        # model at the MODEL's default, so raising it by hand lasts until the
+        # next auto-unload — Arun hit the same error twice in one day. Fixed
+        # here rather than reported, because the fix is one reload and the
+        # alternative is him doing it in the GUI every time.
+        raised = memory.ensure_local_context()
+        if raised and "reloaded" not in raised:
+            problems["lmstudio_context"] = raised
     free_gb = shutil.disk_usage("/").free / 1e9
     if free_gb < MIN_FREE_GB:
         problems["disk"] = f"only {free_gb:.1f} GB free"
@@ -134,6 +185,46 @@ async def checks() -> dict[str, str]:
                 "the API key is set but the provider REFUSED it — every paid call "
                 "fails. Replace or remove it in .env; this clears itself when the "
                 "key changes.")
+    # The CLI subscriptions, which are what actually runs tasks. Both were down
+    # at once on 2026-09-07 and nothing said so until a task tried: copilot out
+    # of monthly quota, claude's OAuth expired. Every task for the next four
+    # hours would have routed to a brain that cannot authenticate and died in two
+    # seconds each time. Each line names the fix, because one of these is a
+    # thirty-second job and the other is not.
+    for cli, label, remedy in (
+            ("copilot", "copilot", "it resets with the billing period"),
+            ("claude_cli", "claude CLI", "run: claude login")):
+        if agent.key_rejected(cli):
+            problems[f"{label}-login"] = (
+                f"its login was REFUSED — every task routed here fails "
+                f"immediately. {remedy}.")
+        elif agent.quota_exhausted(cli):
+            problems[f"{label}-quota"] = (
+                f"out of quota for the billing period, not for an hour — "
+                f"{remedy}.")
+    if all(agent.key_rejected(c) or agent.quota_down(c)
+           for c in ("copilot", "claude_cli")):
+        # SAY WHICH PROBLEM IT IS. This used to end "an expired claude login is
+        # one command" whatever the cause, and on 10 September that was simply
+        # false: the login was fine, `claude -p "say OK"` answered, and both
+        # brains were merely rate-limited — one of them until a time that had
+        # already passed. He was sent to fix something that was not broken.
+        import datetime as _dt
+        detail = []
+        for cli, label in (("copilot", "copilot"), ("claude_cli", "claude")):
+            if agent.key_rejected(cli):
+                detail.append(f"{label}: login refused — that one IS a re-login")
+            elif agent.quota_exhausted(cli):
+                detail.append(f"{label}: out of quota for the billing period")
+            elif agent.quota_down(cli):
+                until = store.kv_get(f"{cli}_quota_until")
+                when = ""
+                if until:
+                    with contextlib.suppress(Exception):
+                        when = (" until ~" + _dt.datetime.fromtimestamp(float(until))
+                                .strftime("%-I:%M%p").lower())
+                detail.append(f"{label}: rate-limited{when} — nothing to fix, it lifts on its own")
+        problems["no-brain"] = ("no task can run right now. " + "; ".join(detail))
     # A Temporal cert that EXISTS and cannot be used. The proxy checks only that
     # the file is there, so an empty one passes and dies inside TLS with "failed
     # to find any PEM data" — a sentence that names PEM parsing and not the empty

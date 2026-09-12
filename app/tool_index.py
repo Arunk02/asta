@@ -176,6 +176,20 @@ def rank(query: str) -> list[tuple[str, float]]:
 #:
 #: Ranking may be wrong about what a message is like. It must not be wrong about
 #: what the message literally says to do.
+#: A Jira issue key spelled out in the message — "ABC-123", "BEPTELIKOS-10247".
+#: Ranking alone could not be trusted with this: the scores across the middle of
+#: the pack sit inside their own noise, so a message naming an issue outright
+#: could still lose every Jira tool to whatever happened to score 0.007 higher.
+#: An identifier the user typed is not a guess, so it does not go through the
+#: ranker at all.
+#: Three letters minimum, because two-letter prefixes are overwhelmingly not
+#: project keys — "PR-665", "CI-1". The denylist catches the three-letter
+#: standards that are shaped exactly like one: "UTF-8", "ISO-8601", "RFC-7231".
+_JIRA_KEY = re.compile(r"\b([A-Z][A-Z0-9]{2,14})-\d+\b")
+_NOT_A_KEY = frozenset(
+    "UTF ISO RFC SHA MD5 AES RSA UTC GMT IPV JDK JVM SDK API URL HTTP HTTPS "
+    "JSON YAML XML CVE ARM X86 SLA SSO OAUTH".split())
+
 _REQUIRED = (
     ("asked_to_talk", ("discuss_in_call", "teams_call", "say_in_call",
                        "teams_send_message", "teams_resolve", "draft_voice")),
@@ -189,15 +203,27 @@ def required_for(query: str) -> list[str]:
     for test, names in _REQUIRED:
         if getattr(consent, test)(query or ""):
             out += list(names)
+    if any(m.group(1).upper() not in _NOT_A_KEY
+           for m in _JIRA_KEY.finditer(query or "")):
+        from . import capabilities
+        out += [n for n, c in capabilities.registry().items() if c.group == "jira"]
     return out
 
 
 def select(query: str, k: int = TOP_K) -> list[str] | None:
     """Capability names for this message, or None meaning 'expose everything'.
 
-    The whole group of the top hit comes along: half a group is a trap — a model
+    The whole group of the top hits comes along: half a group is a trap — a model
     that can read a Jira issue but cannot comment on it will improvise something
     worse than asking.
+
+    Only the TOP hit's group, though. Widening it to the top two fixed one
+    knife-edge and blew the sticky ceiling — a single turn could then protect 37
+    of 71 tools, so the accumulation guard had nothing left to trim. Scores in
+    the middle of the pack really do sit within noise of each other ("comment on
+    ABC-123 that it's done" ranked `morning_brief` 0.588 against `jira_comment`
+    0.581), but the answer to that is naming the thing outright — see
+    `required_for` — not paying for every group on every turn.
     """
     if not enabled() or not (query or "").strip():
         return None

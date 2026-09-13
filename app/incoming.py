@@ -6,7 +6,7 @@
 Everything Asta had was outbound. `call_state` reads the screen of a call ASTA
 placed, from `_CALL`, and there is no `_CALL` when the phone simply rings — so an
 incoming call was invisible until it turned up in the Activity feed afterwards as
-"Missed call from Vinish Kumar". By then the only honest thing to say is that it
+"Missed call from Alex Kumar". By then the only honest thing to say is that it
 was missed.
 
 **Detected on TEXT, not on a toast selector.** `meetings._RINGING` already works
@@ -42,14 +42,19 @@ def enabled() -> bool:
 POLL_SECONDS = float(os.environ.get("ASTA_INCOMING_SECONDS", "8"))
 
 #: The words Teams puts on an incoming call, across its wordings.
+#: A RING, and only a ring. The participants clause that used to live here —
+#: "N others are in this call" — is what a call already in progress renders, so
+#: any Teams window sitting on a joined call read as somebody phoning him. It
+#: fired nine times in three days, once at 00:21, and not one of those had a
+#: caller because there was no caller: "u telling someone calling , who calling u
+#: have to tell na without them how i can decide ?"
 _INCOMING = re.compile(
     r"\b(incoming (?:call|video call))\b"
     r"|\b(is|are) calling you\b"
-    r"|\bcalling you\b"
-    r"|\b(\d+ )?(participants?|others?) (?:are )?in (?:this|the) call\b",
+    r"|\bcalling you\b",
     re.I)
 
-#: "Vinish Kumar is calling you" / "Incoming call from Vinish Kumar".
+#: "Alex Kumar is calling you" / "Incoming call from Alex Kumar".
 _WHO = (re.compile(r"^\s*(.{2,60}?)\s+is calling you", re.I | re.M),
         re.compile(r"incoming (?:call|video call)\s+from\s+(.{2,60}?)\s*$", re.I | re.M))
 
@@ -160,6 +165,14 @@ async def look(page) -> dict | None:
     if not looks_incoming(head):
         return None
     who = who_is_calling(head)
+    if not who:
+        # No name, no alert. He cannot act on "Someone is calling" — it is the
+        # question without the one fact needed to answer it — and every nameless
+        # ring on record turned out to be a false positive. The text is kept so a
+        # real unnamed ring can be recognised later instead of guessed at now.
+        from . import quiet
+        quiet.note("incoming.no_caller", RuntimeError(head[:300]))
+        return None
     return {"who": who, "group": is_group(who, head), "seen_text": head[:200]}
 
 

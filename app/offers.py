@@ -132,7 +132,7 @@ def offer(kind: str, subject: str, context: str, prompt: str,
     offer overwrote — and four background daemons stage offers (`refresh`,
     `ci_watch`, and two in `meetings`). So the sequence Arun hit was:
 
-        12:59  "Ring Vinish on Teams?"        <- staged, shown to him
+        12:59  "Ring Alex on Teams?"        <- staged, shown to him
         ~13:00  a daemon offers something else <- silently takes the slot
         13:00  "Go ahead"                      <- lands on nothing, or worse,
                                                   on a question he never read
@@ -156,7 +156,7 @@ def offer(kind: str, subject: str, context: str, prompt: str,
         return o
     # Re-proposing the question already on screen is a no-op, not a queue entry.
     # This is the exact loop from the transcript: the brain staged the call to
-    # Vinish, Arun's yes did not reach it, and every following turn staged it
+    # Alex, Arun's yes did not reach it, and every following turn staged it
     # again. Without this the queue fills with copies of the very thing he is
     # being asked, and the id he was shown keeps changing underneath him.
     if _same_question(asdict(head), o):

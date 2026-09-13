@@ -44,7 +44,7 @@ def test_it_refuses_to_take_part_with_no_virtual_microphone(monkeypatch):
 
 
 def test_it_does_not_mute_itself_when_asked_to_take_part():
-    """Joining muted and then trying to speak is the silent-call failure Vinish sat
+    """Joining muted and then trying to speak is the silent-call failure Alex sat
     through four times."""
     src = inspect.getsource(meetings.join)
     assert "if muted and not speak:" in src

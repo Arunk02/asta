@@ -1,6 +1,6 @@
 """Reading a Teams thread with a WHEN in the question.
 
-The reported failure: "check last night's message from Vinish about a bug" came
+The reported failure: "check last night's message from Alex about a bug" came
 back with the wrong thing. It could not have come back with the right thing —
 `read_chat` ran one querySelectorAll over whatever Teams had rendered and
 returned "Sender: text" with no time attached. Nothing to filter on, no way to
@@ -22,7 +22,7 @@ from app import agent, store, teams_bridge
 
 # --- storage ------------------------------------------------------------------
 
-def _msg(text, sender="Vinish Kumar", at=None, chat="Vinish Kumar"):
+def _msg(text, sender="Alex Kumar", at=None, chat="Alex Kumar"):
     return {"key": teams_bridge._msg_key(chat, {"sender": sender, "text": text,
                                                 "iso": str(at)}),
             "chat": chat, "sender": sender, "text": text,
@@ -34,7 +34,7 @@ def test_a_thread_read_twice_is_not_stored_twice():
     rows = [_msg("build is red", at=1_786_500_000.0)]
     assert store.save_teams_messages(rows) == 1
     assert store.save_teams_messages(rows) == 0
-    assert len(store.teams_messages("Vinish")) == 1
+    assert len(store.teams_messages("Alex")) == 1
 
 
 def test_messages_come_back_oldest_first():
@@ -42,7 +42,7 @@ def test_messages_come_back_oldest_first():
         _msg("second", at=2000.0),
         _msg("first", at=1000.0),
     ])
-    got = [r["text"] for r in store.teams_messages("Vinish")]
+    got = [r["text"] for r in store.teams_messages("Alex")]
     assert got == ["first", "second"]
 
 
@@ -56,7 +56,7 @@ def test_a_window_selects_only_what_falls_inside_it():
     window_start = dt.datetime(2026, 8, 11, 18, 0).timestamp()
     window_end = dt.datetime(2026, 8, 12, 6, 0).timestamp()
 
-    got = store.teams_messages("Vinish", since=window_start, until=window_end)
+    got = store.teams_messages("Alex", since=window_start, until=window_end)
     assert [r["text"] for r in got] == ["the bug is in TmsServiceImpl"]
 
 
@@ -71,21 +71,21 @@ def test_an_untimed_message_is_never_claimed_to_be_from_last_night():
         _msg("no timestamp on this one", at=None),
         _msg("timed", at=1_786_500_000.0),
     ])
-    windowed = store.teams_messages("Vinish", since=0, until=9_999_999_999)
+    windowed = store.teams_messages("Alex", since=0, until=9_999_999_999)
     assert [r["text"] for r in windowed] == ["timed"]
     # …but it is still there when no window is asked for.
-    assert len(store.teams_messages("Vinish")) == 2
+    assert len(store.teams_messages("Alex")) == 2
 
 
 def test_untimed_messages_sort_last_rather_than_first():
     """NULL sorts first in SQLite; an untimed row must not pose as the oldest."""
     store.save_teams_messages([_msg("undated", at=None), _msg("dated", at=500.0)])
-    assert [r["text"] for r in store.teams_messages("Vinish")] == ["dated", "undated"]
+    assert [r["text"] for r in store.teams_messages("Alex")] == ["dated", "undated"]
 
 
-def test_he_asks_for_vinish_and_the_thread_was_stored_as_vinish_kumar():
-    store.save_teams_messages([_msg("hi", chat="Vinish Kumar")])
-    assert len(store.teams_messages("vinish")) == 1
+def test_he_asks_for_alex_and_the_thread_was_stored_as_alex_kumar():
+    store.save_teams_messages([_msg("hi", chat="Alex Kumar")])
+    assert len(store.teams_messages("alex")) == 1
 
 
 # --- extraction ---------------------------------------------------------------
@@ -105,27 +105,27 @@ def test_an_unparseable_time_yields_none_rather_than_a_guess():
 
 
 def test_the_same_message_keys_the_same_way_every_read():
-    a = {"sender": "Vinish", "text": "build is red", "iso": "2026-08-11T21:14:00Z"}
+    a = {"sender": "Alex", "text": "build is red", "iso": "2026-08-11T21:14:00Z"}
     assert teams_bridge._msg_key("chat", a) == teams_bridge._msg_key("chat", dict(a))
 
 
 def test_two_different_messages_do_not_collide():
-    a = {"sender": "Vinish", "text": "build is red", "iso": "2026-08-11T21:14:00Z"}
-    b = {"sender": "Vinish", "text": "build is green", "iso": "2026-08-11T21:14:00Z"}
+    a = {"sender": "Alex", "text": "build is red", "iso": "2026-08-11T21:14:00Z"}
+    b = {"sender": "Alex", "text": "build is green", "iso": "2026-08-11T21:14:00Z"}
     assert teams_bridge._msg_key("chat", a) != teams_bridge._msg_key("chat", b)
 
 
 def test_the_same_words_in_two_threads_are_two_messages():
-    m = {"sender": "Vinish", "text": "ok", "iso": "2026-08-11T21:14:00Z"}
-    assert teams_bridge._msg_key("Vinish Kumar", m) != teams_bridge._msg_key("Triage", m)
+    m = {"sender": "Alex", "text": "ok", "iso": "2026-08-11T21:14:00Z"}
+    assert teams_bridge._msg_key("Alex Kumar", m) != teams_bridge._msg_key("Triage", m)
 
 
 def test_a_formatted_line_leads_with_the_time():
     when = dt.datetime(2026, 8, 11, 21, 14).timestamp()
     line = teams_bridge.fmt_message(
-        {"sent_at": when, "sender": "Vinish Kumar", "text": "build is red"})
+        {"sent_at": when, "sender": "Alex Kumar", "text": "build is red"})
     assert line.startswith("[Tue 11 Aug 21:14] ")
-    assert "Vinish Kumar: build is red" in line
+    assert "Alex Kumar: build is red" in line
 
 
 def test_a_line_with_no_time_falls_back_to_what_teams_rendered():
@@ -191,7 +191,7 @@ def fake_teams(monkeypatch):
             return chat
 
         async def title(p):
-            return "Vinish Kumar"
+            return "Alex Kumar"
 
         monkeypatch.setattr(teams_bridge, "_launch", launch)
         monkeypatch.setattr(teams_bridge, "_open_teams", open_teams)
@@ -210,15 +210,15 @@ async def _no_wait(*a, **k):
 @pytest.mark.asyncio
 async def test_it_scrolls_back_until_it_reaches_last_night(fake_teams):
     """The actual reported bug: last night's message is not on screen."""
-    on_screen = [{"sender": "Vinish Kumar", "text": "morning", "iso": _iso(12, 9), "stamp": ""}]
+    on_screen = [{"sender": "Alex Kumar", "text": "morning", "iso": _iso(12, 9), "stamp": ""}]
     after_one_scroll = [
-        {"sender": "Vinish Kumar", "text": "the bug is in TmsServiceImpl",
+        {"sender": "Alex Kumar", "text": "the bug is in TmsServiceImpl",
          "iso": _iso(11, 21, 14), "stamp": ""},
     ] + on_screen
     page = fake_teams([on_screen, after_one_scroll])
 
     since = dt.datetime(2026, 8, 11, 18, 0).timestamp()
-    rows = await teams_bridge.read_history("Vinish", since=since)
+    rows = await teams_bridge.read_history("Alex", since=since)
 
     assert page.scrolls >= 1, "never scrolled — cannot have reached last night"
     assert any("TmsServiceImpl" in r["text"] for r in rows)
@@ -231,7 +231,7 @@ async def test_it_stops_scrolling_once_the_window_is_covered(fake_teams):
     page = fake_teams([covered, covered, covered])
 
     since = dt.datetime(2026, 8, 11, 18, 0).timestamp()
-    await teams_bridge.read_history("Vinish", since=since)
+    await teams_bridge.read_history("Alex", since=since)
     assert page.scrolls == 0, "scrolled past a window that was already covered"
 
 
@@ -242,7 +242,7 @@ async def test_it_gives_up_at_the_top_of_the_thread(fake_teams):
     page = fake_teams([same])
 
     since = dt.datetime(2020, 1, 1).timestamp()   # unreachably old
-    await teams_bridge.read_history("Vinish", since=since)
+    await teams_bridge.read_history("Alex", since=since)
     assert page.scrolls <= 2, f"spun against an unmoving pane ({page.scrolls} scrolls)"
 
 
@@ -251,27 +251,27 @@ async def test_a_plain_read_does_not_pay_for_scrollback(fake_teams):
     """"The last 15 messages" is already on screen."""
     on_screen = [{"sender": "V", "text": "hi", "iso": _iso(12, 9), "stamp": ""}]
     page = fake_teams([on_screen, on_screen])
-    await teams_bridge.read_chat("Vinish", limit=15)
+    await teams_bridge.read_chat("Alex", limit=15)
     assert page.scrolls == 0
 
 
 @pytest.mark.asyncio
 async def test_reading_a_thread_writes_it_to_history(fake_teams):
     """Which is what makes the second question about the same evening instant."""
-    on_screen = [{"sender": "Vinish Kumar", "text": "build is red",
+    on_screen = [{"sender": "Alex Kumar", "text": "build is red",
                   "iso": _iso(12, 9), "stamp": ""}]
     fake_teams([on_screen])
-    await teams_bridge.read_chat("Vinish", limit=15)
-    assert [r["text"] for r in store.teams_messages("Vinish")] == ["build is red"]
+    await teams_bridge.read_chat("Alex", limit=15)
+    assert [r["text"] for r in store.teams_messages("Alex")] == ["build is red"]
 
 
 @pytest.mark.asyncio
 async def test_read_chat_lines_now_carry_their_time(fake_teams):
     """The old return shape, with the thing that was missing added."""
-    fake_teams([[{"sender": "Vinish Kumar", "text": "build is red",
+    fake_teams([[{"sender": "Alex Kumar", "text": "build is red",
                   "iso": _iso(11, 21, 14), "stamp": ""}]])
-    lines = await teams_bridge.read_chat("Vinish", limit=5)
-    assert lines == ["[Tue 11 Aug 21:14] Vinish Kumar: build is red"]
+    lines = await teams_bridge.read_chat("Alex", limit=5)
+    assert lines == ["[Tue 11 Aug 21:14] Alex Kumar: build is red"]
 
 
 @pytest.mark.asyncio
@@ -282,7 +282,7 @@ async def test_history_survives_a_store_that_is_down(fake_teams, monkeypatch):
 
     monkeypatch.setattr(store, "save_teams_messages", explode)
     fake_teams([[{"sender": "V", "text": "still returned", "iso": _iso(12, 9), "stamp": ""}]])
-    lines = await teams_bridge.read_chat("Vinish", limit=5)
+    lines = await teams_bridge.read_chat("Alex", limit=5)
     assert any("still returned" in line for line in lines)
 
 
@@ -321,9 +321,9 @@ async def test_the_tool_answers_from_stored_history_without_a_browser(teams_on, 
     # Read after the window closed — this morning.
     with store._connect() as c:
         c.execute("UPDATE teams_messages SET seen_at=? WHERE chat=?",
-                  (now.timestamp(), "Vinish Kumar"))
+                  (now.timestamp(), "Alex Kumar"))
 
-    out = await agent.teams_history("Vinish", when="last night")
+    out = await agent.teams_history("Alex", when="last night")
     assert "TmsServiceImpl" in out
     assert "stored history" in out
 
@@ -334,7 +334,7 @@ async def test_the_tool_says_what_window_it_looked_at(teams_on, monkeypatch):
         return []
 
     monkeypatch.setattr(teams_bridge, "read_history", nothing)
-    out = await agent.teams_history("Vinish", when="last night")
+    out = await agent.teams_history("Alex", when="last night")
     assert "last night" in out
     assert "→" in out, "did not state the window it searched"
 
@@ -350,7 +350,7 @@ async def test_an_empty_window_says_so_instead_of_returning_todays_messages(
     now = dt.datetime.now().timestamp()
     store.save_teams_messages([_msg("todays chatter", at=now)])
 
-    out = await agent.teams_history("Vinish", when="last night")
+    out = await agent.teams_history("Alex", when="last night")
     assert "todays chatter" not in out
     assert "Nothing found" in out
 
@@ -361,12 +361,12 @@ async def test_an_expired_session_is_reported_as_itself(teams_on, monkeypatch):
         raise RuntimeError("SESSION_EXPIRED")
 
     monkeypatch.setattr(teams_bridge, "read_history", expired)
-    out = await agent.teams_history("Vinish", when="last night")
+    out = await agent.teams_history("Alex", when="last night")
     assert "session expired" in out.lower()
 
 
 @pytest.mark.asyncio
 async def test_the_tool_is_honest_when_the_bridge_is_off(monkeypatch):
     monkeypatch.setattr(teams_bridge, "enabled", lambda: False)
-    out = await agent.teams_history("Vinish")
+    out = await agent.teams_history("Alex")
     assert "off" in out.lower()

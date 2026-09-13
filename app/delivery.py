@@ -155,6 +155,14 @@ def render_batch(texts: list[str]) -> str:
 
 # --- chasing what he never answered ---------------------------------------------
 
+def chase_window_days() -> float:
+    """How old a thing may be and still be worth chasing him about."""
+    try:
+        return max(0.25, float(os.environ.get("ASTA_CHASE_WINDOW_DAYS", "1.5")))
+    except ValueError:
+        return 1.5
+
+
 def chase_due(now: float | None = None) -> list[dict]:
     """Things he was told about, still owed, and now past their moment.
 
@@ -174,6 +182,12 @@ def chase_due(now: float | None = None) -> list[dict]:
         # Asta says — so without this the loop chases its own last chase, and the
         # nesting grows by one every hour until the message is unreadable.
         if attention.self_originated(row):
+            continue
+        # Past a point it is not a chase, it is archaeology. He was shown a
+        # two-day-old "lets take billtoparty change tomorrow" under "Still
+        # waiting on you" — the tomorrow it names has already been and gone, and
+        # nothing he could do about it now is what the sentence asked for.
+        if now - float(row.get("first_seen") or now) > chase_window_days() * 86400:
             continue
         due = row.get("due_at")
         if due is not None and now >= float(due):

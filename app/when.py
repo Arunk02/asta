@@ -1,7 +1,7 @@
 """Turning "last night" into two timestamps.
 
 Arun does not ask for messages "between 1786510800 and 1786532400". He asks what
-Vinish said last night, or what came in yesterday, or what he missed this
+Alex said last night, or what came in yesterday, or what he missed this
 morning. Something has to turn that into a window, and it should not be an LLM
 call: the mapping is fixed, the cost of getting it wrong is a confidently wrong
 answer about the wrong evening, and a deterministic function can be tested.

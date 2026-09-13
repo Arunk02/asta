@@ -68,8 +68,40 @@ def oauth_logged_in(name: str) -> bool:
     return d.is_dir() and any(p.is_file() for p in d.rglob("*"))
 
 
-def build_oauth_toolset(name: str, url: str) -> MCPToolset:
-    """OAuth-authenticated HTTP toolset with tokens persisted across restarts."""
+class OAuthLoginRequired(RuntimeError):
+    """The stored token is dead and only a person at a browser can mint a new one."""
+
+
+def headless_oauth_class():
+    """FastMCP's OAuth, minus the part that opens a browser.
+
+    When a refresh fails (Atlassian answered "Token refresh failed: 404" at every
+    start), FastMCP falls back to the interactive flow: `webbrowser.open(...)`,
+    then a local callback server waiting for a person. Inside the launchd server
+    that means Asta opens an Atlassian login tab on its own at every restart,
+    waits twenty seconds for nobody, and the probe records a handshake failure
+    with an EMPTY reason — `str(TimeoutError())` is "". The server can never
+    finish that flow, so it must never start it: raise, and say which command
+    only Arun can run.
+    """
+    from fastmcp.client.auth.oauth import OAuth
+
+    class HeadlessOAuth(OAuth):
+        server_name = ""
+
+        async def redirect_handler(self, authorization_url: str) -> None:
+            raise OAuthLoginRequired(
+                f"login expired — run: .venv/bin/python -m app.mcp_login {self.server_name}")
+
+    return HeadlessOAuth
+
+
+def build_oauth_toolset(name: str, url: str, interactive: bool = False) -> MCPToolset:
+    """OAuth-authenticated HTTP toolset with tokens persisted across restarts.
+
+    `interactive` is for `app.mcp_login` only — the one caller with a person at
+    the keyboard. The server's own toolsets never open a browser (see
+    `headless_oauth_class`)."""
     from fastmcp.client import Client
     from fastmcp.client.auth.oauth import OAuth
     from fastmcp.client.transports import StreamableHttpTransport
@@ -82,12 +114,15 @@ def build_oauth_toolset(name: str, url: str) -> MCPToolset:
     url_as_dirs = url.replace("://", ":/").strip("/")
     for coll in ("mcp-oauth-token", "mcp-oauth-client-info", "mcp-oauth-token-expiry"):
         (storage_dir / coll / url_as_dirs).mkdir(parents=True, exist_ok=True)
-    oauth = OAuth(
+    cls = OAuth if interactive else headless_oauth_class()
+    oauth = cls(
         mcp_url=url,
         client_name="Asta",
         token_storage=FileTreeStore(data_directory=storage_dir),
         callback_port=OAUTH_CALLBACK_PORT,
     )
+    if not interactive:
+        oauth.server_name = name
     # pydantic_ai forbids timeout kwargs alongside a pre-built client — set them here.
     client = Client(StreamableHttpTransport(url), auth=oauth, init_timeout=30, timeout=120)
     return MCPToolset(client, id=name)

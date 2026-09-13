@@ -1,0 +1,111 @@
+# Things that go wrong around Asta rather than inside it. Every one of these
+# happened: a brain ran out mid-task, the laptop restarted, the browser died,
+# Jira answered 404, an MCP login expired.
+
+scenarios:
+  - id: limit-mid-analysis-pauses
+    title: A usage limit pauses the work and schedules its own return
+    why: >
+      9–10 Sep: eight analyses died with "You've hit your session limit" and
+      returned nothing, while the same limit on a code task paused and resumed.
+    setup:
+      # Copilot is out for the billing period, as it actually was that week.
+      kv: {copilot_quota_exhausted: "1", copilot_quota_down: 9999999999}
+    brains:
+      task:
+        - {raises: "claude exited 1: You've hit your session limit · resets 5:10pm (Asia/Calcutta)"}
+    steps:
+      - spawn: {title: "why is the booking stuck", prompt: "look at the prod logs", kind: analysis, as: probe}
+    checks:
+      - task_status: {task: probe, is: paused}
+      - kv: {key: "task_resume_at:1", set: true}
+      - push_contains: "paused"
+      - push_lacks: "failed"
+
+  - id: limit-then-the-other-brain
+    title: A limit on one brain hands the work to another that is up
+    why: One subscription carries everything; when it stops, the work should not.
+    brains:
+      task:
+        - {raises: "You've hit your session limit · resets 5:10pm"}
+        - {text: "the consumer lag explains it"}
+    steps:
+      - spawn: {title: "why is the booking stuck", prompt: "look at the logs", kind: analysis, as: probe}
+    checks:
+      - task_status: {task: probe, is: done}
+      - brain_calls: {kind: task, count: 2}
+
+  - id: restart-does-not-strand-work
+    title: A restart picks its work back up instead of leaving it "running" for ever
+    why: >
+      A task the database still calls running, with no worker behind it, keeps
+      claiming every message he sends. "why still 117 is running doesn't makes
+      senses it consufing with other things".
+    setup:
+      tasks:
+        - {as: midflight, title: "mapping change", kind: code, status: running}
+    steps:
+      - restart:
+    checks:
+      - task_status: {task: midflight, is: paused}
+      - kv: {key: "task_resume_at:1", set: true}
+      - push_contains: "restarted"
+
+  - id: a-dead-teams-session-is-said-not-swallowed
+    title: When a send fails, he is told it did not go
+    why: >
+      An outward act that quietly did not happen is worse than one that failed
+      loudly — he believes a colleague was told.
+    may_send: true
+    setup:
+      tasks:
+        - {as: draft, title: "reply to the review", kind: teams_draft, status: awaiting_approval, result: "will fix the mapping today", teams_chat: "A colleague"}
+    steps:
+      - approve: draft
+    checks:
+      - task_status: {task: draft, is: sent}
+
+  - id: a-jira-404-is-an-answer
+    title: A ticket nobody can see comes back as a sentence, not a traceback
+    why: >
+      15 jira_issue calls died as ASGI tracebacks on a comments 404; the model
+      saw a dead tool rather than "no such ticket".
+    setup:
+      jira: {}                       # a Jira that can see no tickets at all
+    brains:
+      chat:
+        - calls: [{tool: jira_issue, args: {key: BEPTELIKOS-10761}}]
+          text: "I can't see BEPTELIKOS-10761 — Jira has no issue by that key for this account."
+    steps:
+      - say: "what is BEPTELIKOS-10761 about"
+    checks:
+      # What the TOOL told the brain — the half that used to be a traceback.
+      - tool_result_contains: {tool: jira_issue, text: "no issue BEPTELIKOS-10761 that this account can see"}
+      - tool_result_contains: {tool: jira_issue, text: "^(?!.*Traceback)"}
+      - said_contains: "404|can't see|cannot see|no issue"
+
+  - id: a-job-killed-mid-build-resumes-from-its-checkpoint
+    title: A restart mid-implementation continues the build — no re-plan, no second copy
+    why: >
+      #117 sat "running" for a day after its process died. #88/#89 are what a
+      re-run costs when the new leg starts over: one change implemented twice.
+      On the graph engine the job resumes from its last checkpoint, and the leg
+      that was cut short is told it is continuing.
+    setup:
+      env: {ASTA_GRAPH: "1"}
+    brains:
+      task:
+        - {when: "Resume: this run stopped partway", text: "Finished the remaining two files. Tests: 12 passed."}
+        - {text: "STRUCTURE\n  Retention  30 → 90 days in two files\n\nPLAN READY"}
+        - {sleep: 3600, text: "never reached — the process died"}
+    steps:
+      - spawn: {title: "raise retention to 90 days", prompt: "bump the retention", kind: code, workspace: booking, as: job}
+      - approve_async: job
+      - restart:
+      - tick: resume_due_later
+    checks:
+      - task_status: {task: job, is: done}
+      - push_contains: "restarted"
+      - push_count: {matching: "PLAN #", count: 1}      # planned once, never again
+      - push_count: {matching: "✅ DONE", count: 1}
+      - brain_prompt_contains: "this run stopped partway"

@@ -32,7 +32,7 @@ async def login(name: str) -> int:
         return 1
     url = mcp_loader._expand(spec["url"])
     print(f"Connecting to {url} — your browser will open for login/consent…")
-    toolset = mcp_loader.build_oauth_toolset(name, url)
+    toolset = mcp_loader.build_oauth_toolset(name, url, interactive=True)
     async with toolset:
         tools = await toolset.list_tools()
     print(f"✅ Logged in. {len(tools)} tools available from '{name}':")

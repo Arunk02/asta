@@ -1,10 +1,10 @@
 """Being tagged by name must reach him, even while he is at the laptop.
 
 On 28 August four people used his name in Teams between 11:58 and 13:04 —
-Komal, Nakka Harika, and Abhijit twice, once in a 1:1 and once in a channel —
+three colleagues twice, once in a 1:1 and once in a channel —
 and not one reached his phone. He found them by opening the screen:
 
-    "Abhijit pinged me in multiple places one to one as well group chat ,
+    "Glen pinged me in multiple places one to one as well group chat ,
      I haven't get notificaiton in wgatsapp"
 
 Nothing was broken. Each step was reasonable and the composition was silence:
@@ -26,15 +26,15 @@ import pytest
 
 from app import attention
 
-TAGGED_DM = "Abhijit Mohapatra mentioned you — hi Arunkumar K — 13:04 — In chat with you"
-TAGGED_CHANNEL = ("Abhijit Mohapatra mentioned you — Arunkumar K is already taken in "
+TAGGED_DM = "Glen Hart mentioned you — hi Arunkumar K — 13:04 — In chat with you"
+TAGGED_CHANNEL = ("Glen Hart mentioned you — Arunkumar K is already taken in "
                   "our team 😄 — 12:47 — OHP Garage - Le'ts Build, Inspire, Learn Together")
-REACTION = ("Palikala Divya Maheswari reacted to your message — Just want to show — "
+REACTION = ("Stone Blake Rivers reacted to your message — Just want to show — "
             "14:01 — In chat with you")
 
 
 def _rank(line):
-    return attention.rank(False, line, addressed=True, key=line[:24], who="Abhijit")
+    return attention.rank(False, line, addressed=True, key=line[:24], who="Glen")
 
 
 def test_a_tagged_dm_is_pushed_not_filed():
@@ -66,8 +66,8 @@ def test_a_reaction_is_not_a_ping():
 
 
 @pytest.mark.parametrize("text", [
-    "Vinish Kumar reacted to your message — ok — In chat with you",
-    "Komal liked your message — thanks — In chat with you",
+    "Alex Kumar reacted to your message — ok — In chat with you",
+    "Dana liked your message — thanks — In chat with you",
 ])
 def test_the_shapes_a_reaction_takes(text):
     assert attention.is_reaction(text), text

@@ -9,7 +9,7 @@ import time
 
 import httpx
 
-from . import store, telegram
+from . import store, telegram, wa_format
 
 
 def bridge_url() -> str:
@@ -17,12 +17,18 @@ def bridge_url() -> str:
 
 
 async def wa_send(text: str) -> bool:
-    """Push a message through the WhatsApp bridge; False if bridge is down/unpaired."""
+    """Push a message through the WhatsApp bridge; False if bridge is down/unpaired.
+
+    Markup is converted at this boundary, not by callers. WhatsApp is the only
+    channel that needs it and every caller writes markdown, so doing it here is
+    the difference between one conversion and thirty missed ones — the plan
+    pushes had been arriving with `**bold**` spelled out in literal asterisks.
+    """
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.post(
                 f"{bridge_url()}/send",
-                json={"text": text},
+                json={"text": wa_format.for_whatsapp(text)},
                 headers={"Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")},
             )
             return r.status_code == 200

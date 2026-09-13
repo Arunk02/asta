@@ -107,11 +107,11 @@ _FIELDS = {
 
 def test_the_comment_thread_comes_back_with_the_issue(monkeypatch):
     c = _install(monkeypatch, _FakeClient(_FIELDS, [
-        _comment("Harika", "Which UOM codes exactly?", "2026-07-30T09:00:00.000+0530"),
+        _comment("Frankie", "Which UOM codes exactly?", "2026-07-30T09:00:00.000+0530"),
         _comment("Arun", "FTL and LTL only, skip PARCEL.", "2026-07-31T09:00:00.000+0530"),
     ]))
     issue = asyncio.run(jira.get_issue("PROJ-7"))
-    assert [x["author"] for x in issue["comments"]] == ["Harika", "Arun"]
+    assert [x["author"] for x in issue["comments"]] == ["Frankie", "Arun"]
     assert "skip PARCEL" in issue["comments"][-1]["text"]
     assert any(path.endswith("/comment") for path, _ in c.calls)
 
@@ -219,12 +219,12 @@ def test_the_public_comment_read_stands_on_its_own(monkeypatch):
 
 def test_the_rendered_issue_carries_the_conversation(monkeypatch):
     _install(monkeypatch, _FakeClient(_FIELDS, [
-        _comment("Harika", "Which UOM codes exactly?", "2026-07-30T09:00:00.000+0530"),
+        _comment("Frankie", "Which UOM codes exactly?", "2026-07-30T09:00:00.000+0530"),
         _comment("Arun", "FTL and LTL only, skip PARCEL.", "2026-07-31T09:00:00.000+0530"),
     ]))
     out = asyncio.run(agent.jira_issue("PROJ-7"))
     assert "skip PARCEL" in out
-    assert "Harika" in out
+    assert "Frankie" in out
     assert "2026-07-30" in out
 
 
@@ -243,7 +243,7 @@ def test_everything_from_the_tracker_stays_inside_the_fence(monkeypatch):
 def test_a_thin_description_is_called_out_rather_than_answered_from(monkeypatch):
     fields = dict(_FIELDS, description=_adf("see comments"))
     _install(monkeypatch, _FakeClient(fields, [
-        _comment("Harika", "We need the avro field added first.",
+        _comment("Frankie", "We need the avro field added first.",
                  "2026-07-30T09:00:00.000+0530")]))
     out = asyncio.run(agent.jira_issue("PROJ-7"))
     assert "does not stand on its own" in out

@@ -57,10 +57,18 @@ def _subprocess_env() -> dict:
     return env
 
 
+#: What a PLANNING leg may not do — the same ban as _CHAT_DENY, for the same
+#: reason in a different place: a leg that has not been approved yet may read
+#: anything and change nothing.
+_PLAN_DENY = ("Write", "Edit", "NotebookEdit",
+              "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh pr create:*)")
+
+
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent_file: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
-                   on_progress=None, mcp_config: str = "") -> str:
+                   on_progress=None, mcp_config: str = "", plan_only: bool = False,
+                   model: str = "") -> str:
     """Headless claude run with the same contract as copilot_cli.one_shot.
 
     agent_file — a .github/agents/*.agent.md whose CONTENT becomes the appended
@@ -86,10 +94,15 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     if agent_file:
         with contextlib.suppress(OSError):
             cmd += ["--append-system-prompt", Path(agent_file).read_text()]
+    if plan_only:
+        # The plan gate, made structural: an unapproved leg cannot write, commit,
+        # push or open a PR even if it decides to.
+        cmd += ["--disallowed-tools", ",".join(_PLAN_DENY)]
     if effort and effort != "default":
         cmd += ["--effort", effort]
     from . import agent as agent_mod
-    model = agent_mod.tier_of("claude_cli")
+    # A per-leg model (app/routing.py) wins over the brain's standing tier.
+    model = model or agent_mod.tier_of("claude_cli")
     if model:
         cmd += ["--model", model]
     proc = await asyncio.create_subprocess_exec(
@@ -165,6 +178,38 @@ _CHAT_DENY = ("Write", "Edit", "NotebookEdit",
               "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh pr create:*)")
 
 
+#: The built-in tools a chat turn gets. "default" hands back Claude Code's whole set.
+CHAT_TOOLS = "Bash,Read,Grep,Glob,WebFetch,WebSearch"
+
+#: What a chat turn may run, when it may not write. Anything else is REFUSED by
+#: the CLI itself (--permission-mode dontAsk), whatever the model decides.
+#:
+#: Why an allow-list and not a deny-list: on 13 Sep, driving the real Asta end to
+#: end, a chat brain was denied the Edit tool and wrote the file anyway through a
+#: `python3 - <<EOF` script in its shell. There is no end of ways to write a
+#: file from a shell; there is a short list of commands a chat answer needs. The
+#: CLI also refuses output redirection on an allowed command (`cat > f`,
+#: `echo x > f`) — measured, not assumed.
+CHAT_READ_ONLY = ",".join((
+    "Read", "Grep", "Glob", "WebFetch", "WebSearch", "ToolSearch", "mcp__asta", "mcp__grafana",
+    "Bash(cd:*)", "Bash(ls:*)", "Bash(grep:*)", "Bash(cat:*)", "Bash(head:*)",
+    "Bash(tail:*)", "Bash(wc:*)", "Bash(git log:*)", "Bash(git status:*)",
+    "Bash(git diff:*)", "Bash(git show:*)", "Bash(git blame:*)", "Bash(git grep:*)",
+    "Bash(gh pr view:*)", "Bash(gh pr list:*)", "Bash(gh pr checks:*)",
+    "Bash(gh pr diff:*)", "Bash(gh run view:*)", "Bash(gh run list:*)",
+    "Bash(kubectl get:*)", "Bash(kubectl logs:*)", "Bash(kubectl describe:*)"))
+
+
+def chat_allow() -> str:
+    raw = os.environ.get("ASTA_CHAT_ALLOW", "").strip()
+    return raw or CHAT_READ_ONLY
+
+
+def chat_tools() -> str:
+    raw = os.environ.get("ASTA_CLAUDE_CHAT_TOOLS", CHAT_TOOLS).strip()
+    return "" if raw.lower() in ("", "default", "all") else raw
+
+
 def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     from . import copilot_cli, memory
     import datetime as _dt
@@ -208,7 +253,21 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     # variadic — a bare list would swallow the flags that follow it.
     from . import capabilities
     if not capabilities.chat_may_write():
+        # The lock, not a request: only the allow-list below may run, and the CLI
+        # refuses the rest outright instead of asking a question nobody is there
+        # to answer. Replaces the bypassPermissions set above for this turn.
+        i = cmd.index("--permission-mode")
+        cmd[i + 1] = "dontAsk"
+        cmd += ["--allowed-tools", chat_allow()]
         cmd += ["--disallowed-tools", ",".join(_CHAT_DENY)]
+        # And only the built-in tools a chat turn reads with. Claude Code's full
+        # kit — sub-agents, todo lists, notebooks, plan mode — is ~12k tokens of
+        # schema re-read on EVERY call of every turn (measured 12 Sep: 29.8k →
+        # 17.5k for "reply ok"), for tools a chat answer never needs. Asta's own
+        # capabilities arrive over MCP and are unaffected.
+        lean = chat_tools()
+        if lean:
+            cmd += ["--tools", lean]
     # Native tools instead of curl, when enabled: Claude Code spawns Asta's MCP
     # server and calls capabilities as `mcp__asta__*` tools that forward to the
     # running server. Off by default — the curl path is the proven one, and this
@@ -294,6 +353,17 @@ async def run_turn(conv: dict, user_text: str,
                 t = e.get("type")
                 if t == "stream_event":
                     ev = e.get("event") or {}
+                    if (ev.get("type") == "content_block_start" and chunks
+                            and (ev.get("content_block") or {}).get("type") == "text"
+                            and not "".join(chunks[-2:]).endswith((" ", "\n"))):
+                        # Consecutive content blocks are separate paragraphs and
+                        # the stream carries nothing between them, so they
+                        # arrived welded together: "…what's really there.Task #94
+                        # (transportAssetPriority → …". Emitted to on_delta too,
+                        # so the live stream and the returned text agree.
+                        chunks.append("\n\n")
+                        if on_delta:
+                            await on_delta("\n\n")
                     if ev.get("type") == "content_block_delta":
                         d = ev.get("delta") or {}
                         if d.get("type") == "text_delta":
@@ -364,6 +434,13 @@ async def run_turn(conv: dict, user_text: str,
                     detail=f"{stop.elapsed:.0f}s, silent {stop.silent_for:.0f}s, "
                            f"{len(stop.partial)} chars")
                 return stop.partial
+            # Read here and not above: `answered()` returns on the line before,
+            # and that is a SUCCESS path — waiting on stderr there would delay
+            # every good answer to explain a failure that did not happen.
+            # After the kill, because reading to EOF on a live process blocks.
+            note = await turn_budget.tail_stderr(proc)
+            store.record_outcome("turn", f"stopped_{stop.reason}", subject="claude",
+                                 detail=stop.detail(note))
             raise turn_budget.TurnStopped(stop, already_shown=on_delta is not None)
         # Same reason as copilot_cli: end-of-output is not end-of-process, and an
         # unbounded wait here holds a finished turn open indefinitely.
@@ -392,7 +469,7 @@ async def run_turn(conv: dict, user_text: str,
         # consult agent.quota_down("claude_cli") (i.e. "claude_cli_quota_down"),
         # so the interactive rate-limit signal was silently dropped.
         from . import agent as agent_mod
-        agent_mod.mark_quota_down("claude_cli")
+        agent_mod.mark_quota_down("claude_cli", err_msg or out)
     if rc != 0 or (err_msg and not out):
         stderr = (await proc.stderr.read()).decode(errors="replace")[-500:] if proc.stderr else ""
         # A dead --resume session (cleaned store / expired) gets one fresh retry.

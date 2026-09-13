@@ -54,15 +54,11 @@ _CHAT_DENY = ("write", "shell(git commit)", "shell(git push)", "shell(gh pr crea
 def turn_timeout() -> int:
     """How long ONE CLI turn may run before it is abandoned.
 
-    Was a hard 10 minutes, which is most of why a reply could take twenty: a wedged
-    brain held the conversation for the full window before anyone found out. Five
-    minutes is longer than any turn that was ever going to succeed, so the only
-    thing the shorter ceiling costs is the waiting.
+    The number and the reasoning live in `turn_budget.ceiling_seconds` — one
+    ceiling for every brain, the local model included. Kept as a name here
+    because callers and `claude_cli` already reach for it.
     """
-    try:
-        return max(30, int(os.environ.get("ASTA_TURN_TIMEOUT", "300")))
-    except ValueError:
-        return 300
+    return turn_budget.ceiling_seconds()
 
 
 TURN_TIMEOUT = 10 * 60          # legacy constant; live callers use turn_timeout()
@@ -81,6 +77,54 @@ def _session_id(conv_id: str) -> tuple[str, bool]:
     sid = str(uuid.uuid4())
     store.kv_set(key, sid)
     return sid, True
+
+
+#: Copilot keeps a per-session event log and appends to it on every tool call.
+#: `~/.copilot/session-state/<session-id>/events.jsonl` — the layout the CLI has
+#: used since it gained resumable sessions.
+SESSION_STATE = Path.home() / ".copilot" / "session-state"
+
+
+def _current_session(conv_id: str) -> str:
+    """The session id already recorded for this conversation, without minting one.
+
+    Deliberately NOT `_session_id`, which writes a new id when it finds none —
+    calling that here would make `_build_cmd` believe the session already existed
+    and resume one that was never created, losing the first-turn orientation
+    block on every new conversation. Read after the command is built, when the
+    id is there either way.
+    """
+    return store.kv_get(f"copilot_session:{conv_id}") or ""
+
+
+def _session_progress(sid: str) -> Callable[[], object] | None:
+    """Copilot's own event log as a "still working" signal — see turn_budget.
+
+    Its stdout carries prose and nothing else, so a turn doing tool work is
+    silent on the only channel the watchdog could see. The event log is not: it
+    grows on every tool call, every result, every step. Size is enough — this
+    asks "did anything happen", never what.
+
+    Measured on the turn that prompted this rather than assumed: 52 events in the
+    window it was killed in, the longest gap between any two being 24.1s against
+    an idle limit of 120. The signal has a wide margin; it is not marginal.
+
+    Returns None when there is no session id to watch, which leaves the turn on
+    exactly the byte-stream-only rule it had before.
+    """
+    if not sid:
+        return None
+    path = SESSION_STATE / sid / "events.jsonl"
+
+    def probe() -> object:
+        try:
+            return path.stat().st_size
+        except OSError:
+            # Not there yet on a brand-new session, and gone if the store is
+            # cleaned mid-turn. Both mean "no signal", never "stopped".
+            return None
+
+    return probe
 
 
 def _cwd(conv: dict) -> str:
@@ -103,9 +147,17 @@ def _switch_recap(conv: dict, via: str) -> str:
     so this correctly stays silent then — there is nothing to continue, and the
     durable bits were already digested into memory and resurface via recall.
     """
+    # The second trigger: this conversation's own session was just retired for
+    # SIZE (main.retire_session_for_size). Both keys are gone then, so the
+    # switch check below cannot fire — but the thread is still the same thread,
+    # and a fresh session dropped in blind is exactly the failure this recaps.
+    flag = f"session_recap:{conv['id']}"
+    rotated = (store.kv_get(flag) or "") == "1"
     other = "claude_session" if "Copilot" in via else "copilot_session"
-    if not (store.kv_get(f"{other}:{conv['id']}") or "").strip():
+    if not rotated and not (store.kv_get(f"{other}:{conv['id']}") or "").strip():
         return ""
+    if rotated:
+        store.kv_del(flag)          # consumed: the new session now carries the recap
     msgs = store.list_ui_messages(conv["id"])
     if msgs and msgs[-1].get("role") == "user":
         msgs = msgs[:-1]                        # drop the current turn (already stored)
@@ -119,8 +171,11 @@ def _switch_recap(conv: dict, via: str) -> str:
             lines.append(f"{who}: {text}")
     if not lines:
         return ""
-    return ("Conversation so far (you're continuing it after a model switch — pick "
-            "up where it left off, don't restart):\n" + "\n".join(lines))
+    why = ("your previous session was retired to keep its context small — this is "
+           "the same conversation continuing" if rotated
+           else "you're continuing it after a model switch")
+    return (f"Conversation so far ({why} — pick up where it left off, don't restart):\n"
+            + "\n".join(lines))
 
 
 def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "") -> str:
@@ -144,11 +199,16 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     runs once per CLI session (the CLI remembers the rest), so the index tail is
     what keeps a later message in the same session reachable.
     """
-    from . import capabilities, skills, tool_index
+    from . import capabilities, guardrails, skills, tool_index
     name = os.environ.get("ASSISTANT_NAME", "Asta")
     parts = [
         f"You are acting as {name}, Arun's assistant, via {via}. Be concise and direct.",
     ]
+    # His standing instructions — the same block the in-process brain gets from
+    # agent.build_instructions, so a rule holds whichever brain took the turn.
+    rules = guardrails.block("chat")
+    if rules:
+        parts.append(rules)
     idx = memory.index_text().strip()
     if idx:
         parts.append("Arun's memory index (for orientation):\n" + idx[:1500])
@@ -412,8 +472,25 @@ async def run_turn(conv: dict, user_text: str,
     )
     limit = turn_timeout()
     assert proc.stdout
-    stop = await turn_budget.drain(proc.stdout, on_delta, total=limit)
-    chunks = stop.chunks
+    # Read AFTER _build_cmd, which is what creates the id on a new conversation.
+    beat = turn_budget.Heartbeat(_session_progress(_current_session(conv["id"])))
+    chunks: list[str] = []
+
+    async def _pump() -> None:
+        assert proc.stdout
+        while True:
+            block = await proc.stdout.read(512)
+            if not block:
+                return
+            beat.beat()
+            text = block.decode(errors="replace")
+            chunks.append(text)
+            if on_delta:
+                await on_delta(text)
+
+    stop = await turn_budget.guard(_pump(), beat, total=limit)
+    # `guard` reports timing only; the words belong to the caller either way.
+    stop.chunks[:] = chunks
     try:
         if stop.answered():
             # It said its piece and then went quiet waiting on something outside
@@ -431,6 +508,13 @@ async def run_turn(conv: dict, user_text: str,
             # branch discarded it for a one-line message, which is why "did it do
             # anything?" had no answer but to go and look at the repo.
             proc.kill()
+            # stderr is read AFTER the kill, not before: reading to EOF on a
+            # live process just blocks until it exits, so the "safer" order
+            # bought two seconds of waiting and an empty string every time.
+            # Killing closes the write end, so the buffered complaint arrives.
+            note = await turn_budget.tail_stderr(proc)
+            store.record_outcome("turn", f"stopped_{stop.reason}", subject="copilot",
+                                 detail=stop.detail(note))
             raise turn_budget.TurnStopped(stop, already_shown=on_delta is not None)
         # Closing stdout is not the same as exiting. A copilot that streamed its
         # answer and then hung on shutdown held this await forever, outside the
@@ -503,15 +587,24 @@ def last_turn_usage(conv: dict, reply_chars: int = 0):
         return llm_meter.Usage()
     if not current:
         return llm_meter.Usage()      # no snapshot yet → caller falls back to estimate
-    return llm_meter.Usage(input=int(current),
+    # currentTokens IS the context this session carries into its next call — the
+    # number the size-based retirement in main._run_turn_cli watches.
+    return llm_meter.Usage(input=int(current), context=int(current),
                            output=reply_chars // llm_meter.CHARS_PER_TOKEN,
                            measured=True)
+
+
+#: What a PLANNING leg may not do. Same spelling lesson as _CHAT_DENY above:
+#: `write` is the tool's real name and denying it alone is not enough, because
+#: copilot falls back to the shell.
+_PLAN_DENY = ("write", "shell(git commit)", "shell(git push)", "shell(gh pr create)")
 
 
 async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
-                   on_progress=None, mcp_config: str = "") -> str:
+                   on_progress=None, mcp_config: str = "", plan_only: bool = False,
+                   model: str = "") -> str:
     """Headless one-off prompt.
 
     agent      — a workspace .github/agents/*.agent.md pipeline (e.g.
@@ -536,6 +629,15 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
         cmd += ["--additional-mcp-config", mcp_config]
     if agent:
         cmd += ["--agent", agent]
+    if model:
+        cmd += ["--model", model]
+    if plan_only:
+        # The plan gate, made structural. Told to plan and stop, a brain
+        # sometimes implements anyway — and for an ad-hoc ("micro") task nothing
+        # stopped it, which broke his one unconditional rule. With writing
+        # denied it cannot, whatever it decides to do.
+        for tool in _PLAN_DENY:
+            cmd += ["--deny-tool", tool]
     # Headless workers are where the money goes — one ran 22 minutes
     # unchallenged. Their own effort/credit ceiling, separate from chat.
     cmd += _budget_flags(effort or os.environ.get("COPILOT_EFFORT_TASK", "medium"),

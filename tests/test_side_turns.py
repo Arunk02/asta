@@ -18,7 +18,7 @@ from app import activity, capabilities
 def test_a_read_only_question_is_independent():
     for text in ("What is the ci status of above PR",
                  "Does it passed",
-                 "what did vinish say",
+                 "what did alex say",
                  "which repo is that in?",
                  "how many tests are failing?"):
         assert activity.classify_interjection(text) == "independent", text
@@ -33,7 +33,7 @@ def test_anything_that_writes_is_never_independent():
     for text in ("can you push this to main?",
                  "implement the retry logic",
                  "could you merge that PR?",
-                 "should I send this to Vinish? send it",
+                 "should I send this to Alex? send it",
                  "delete that branch"):
         assert activity.classify_interjection(text) != "independent", text
 

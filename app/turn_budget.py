@@ -40,6 +40,7 @@ import contextlib
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 #: Output that actually ENDS — sentence punctuation at the very end, allowing the
@@ -47,6 +48,43 @@ from dataclasses import dataclass, field
 #: MIDDLE does not count: a turn killed mid-sentence, or one that answered and
 #: then began narrating a tool call, fails this. That is the whole point of it.
 _FINISHED = re.compile(r"[.!?\u2026][\"\'\u2019\u201d)\]`*_]*$")
+
+
+def ceiling_seconds() -> int:
+    """How long ONE turn may run, whichever brain is running it.
+
+    Was a hard 10 minutes, which is most of why a reply could take twenty: a
+    wedged brain held the conversation for the full window before anyone found
+    out. Five is longer than any turn that was ever going to succeed, so the only
+    thing the shorter ceiling costs is the waiting.
+
+    It lived in `copilot_cli` and was reached from `claude_cli` by importing the
+    other driver, while the local model kept a hardcoded 120 of its own — so "the
+    turn budget" meant two different numbers depending on who answered. Budgets
+    belong to the budget module; the drivers keep their names and delegate here.
+    """
+    try:
+        return max(30, int(os.environ.get("ASTA_TURN_TIMEOUT", "300")))
+    except ValueError:
+        return 300
+
+
+def completion_seconds() -> int:
+    """How long ONE short completion may take — not a whole turn.
+
+    A turn is an agent loop: many model calls, tool work, a build. A completion
+    is four hundred tokens from a local model. Giving them the same budget was a
+    mistake made while making the ceiling shared: it read as consistency and was
+    really a category error, and it raised the local model's bound from a
+    deliberate 120s to 300s.
+
+    What that cost: LM Studio is reachable on this machine, so a call that would
+    have given up after two minutes could now hold for five — and the test suite,
+    which does not seal the local model the way it seals the paid brains, wedged
+    on one at 89%. Bounded BY the shared ceiling so it can never exceed a turn,
+    but never longer than a completion is worth waiting for.
+    """
+    return min(ceiling_seconds(), 120)
 
 
 def idle_seconds() -> int:
@@ -113,6 +151,19 @@ class Stop:
         # anyway — mutation testing showed removing the walk changed nothing,
         # which is the only reason to know it was there for no reason.
         return len(body) >= min_chars and bool(_FINISHED.search(body))
+
+    def detail(self, note: str = "") -> str:
+        """One line for the outcomes ledger — why it stopped, and how far it got.
+
+        A stopped turn used to leave no record at all: no trace row, and the
+        stderr pipe was read only on a clean non-zero exit, so the kill path
+        threw it away. Answering "why did it stall?" for the 2026-09-07 turn
+        meant reading Copilot's own private session store. This is the cheap
+        version of that answer, written at the moment it is known.
+        """
+        line = (f"{self.reason}: {self.elapsed:.0f}s, silent {self.silent_for:.0f}s, "
+                f"{len(self.partial)} chars")
+        return f"{line} · {note}" if note else line
 
     def why(self) -> str:
         """One line Arun can act on, which is the whole point of the split."""
@@ -194,6 +245,23 @@ class TurnStopped(RuntimeError):
         super().__init__(message)
 
 
+async def tail_stderr(proc, limit: int = 400, timeout: float = 2.0) -> str:
+    """Whatever the process complained about, or "" — never raises, never hangs.
+
+    On the stop path stderr is the only thing that can distinguish "the CLI hit a
+    quota wall and said so" from "it was working fine and we killed it". Both
+    drivers killed the process without ever reading it. Bounded, because a turn
+    that already failed must not then hang reporting the failure.
+    """
+    if not getattr(proc, "stderr", None):
+        return ""
+    try:
+        data = await asyncio.wait_for(proc.stderr.read(), timeout=timeout)
+    except Exception:                                           # noqa: BLE001
+        return ""                       # includes the timeout — both mean "nothing to add"
+    return data.decode(errors="replace").strip()[-limit:]
+
+
 class Heartbeat:
     """A "still alive" marker for a pump that is not a plain byte stream.
 
@@ -202,11 +270,42 @@ class Heartbeat:
     signal the idle/ceiling split needs. Keeping the POLICY here and letting each
     driver report activity in its own shape is the difference between one rule and
     two implementations that agree until they quietly do not.
+
+    `liveness` is the second half of that idea, and it exists because silence on
+    stdout is not the same as doing nothing. Copilot prints prose and nothing
+    else: a turn deep in tool calls emits zero characters. On 2026-09-07 one made
+    ten tool calls, found the topic files, recorded what it learned and staged the
+    message Arun asked for — and wrote 0 characters in the two minutes before this
+    module killed it as "stuck, more time would not have helped". It was thirteen
+    seconds from delivering. The watchdog was reading the only channel that could
+    not see the work.
+
+    So a driver may hand over a second signal in whatever shape it has — a file
+    that grows, a counter, an event id. Any change to it counts as a beat. It is
+    consulted only when the byte stream has gone quiet, so the wedge this module
+    exists to catch is still caught: a probe that never moves, is missing, or
+    raises leaves the behaviour exactly as it was without one.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, liveness: Callable[[], object] | None = None) -> None:
         self.started = time.monotonic()
         self.last = self.started
+        self._liveness = liveness
+        self._mark = self._probe()
+
+    def _probe(self) -> object:
+        """The current progress token, or None if there is no signal to read.
+
+        Never raises. A liveness probe is a diagnostic aid; a turn that dies
+        because its optional stuck-detector hit an OSError is a worse failure
+        than the one it was added to prevent.
+        """
+        if self._liveness is None:
+            return None
+        try:
+            return self._liveness()
+        except Exception:                                       # noqa: BLE001
+            return None
 
     def beat(self) -> None:
         self.last = time.monotonic()
@@ -217,6 +316,16 @@ class Heartbeat:
 
     @property
     def silent_for(self) -> float:
+        """Seconds since anything happened — on the stream OR behind it.
+
+        Reading this is what samples the probe, so `guard` polling it once a
+        second is also what keeps the out-of-band signal current. No extra task,
+        and nothing to leak if the turn is cancelled.
+        """
+        mark = self._probe()
+        if mark is not None and mark != self._mark:
+            self._mark = mark
+            self.beat()
         return time.monotonic() - self.last
 
 
@@ -237,11 +346,14 @@ async def guard(pump, beat: Heartbeat, *, total: float,
                 return Stop("done", beat.elapsed, beat.silent_for)
             if beat.elapsed >= total:
                 return Stop("ceiling", beat.elapsed, beat.silent_for)
-            if beat.silent_for >= idle:
-                return Stop("idle", beat.elapsed, beat.silent_for)
+            # Sampled once: reading `silent_for` is also what polls the liveness
+            # probe, so asking twice could report a number that did not decide.
+            silent = beat.silent_for
+            if silent >= idle:
+                return Stop("idle", beat.elapsed, silent)
             # Wake at whichever limit lands first, never later than a second, so
             # a wedge is noticed promptly rather than at the end of the ceiling.
-            nap = min(1.0, max(0.05, total - beat.elapsed), max(0.05, idle - beat.silent_for))
+            nap = min(1.0, max(0.05, total - beat.elapsed), max(0.05, idle - silent))
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=nap)
             except (TimeoutError, asyncio.TimeoutError):

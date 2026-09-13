@@ -557,8 +557,8 @@ longer has to double as a liveness check. That was the job it was doing badly.
 ---
 
 ### 34 — his yes reached a question he had never read — CLOSED 2026-08-26
-From a WhatsApp transcript. Asta staged a Teams call to Vinish; Arun replied "Go
-ahead", then "Yes go ahead and call Vinish", then "Yes go ahead". Nothing rang.
+From a WhatsApp transcript. Asta staged a Teams call to Alex; Arun replied "Go
+ahead", then "Yes go ahead and call Alex", then "Yes go ahead". Nothing rang.
 The brain eventually concluded approval must live "through a separate
 confirmation channel" — a reasonable inference from what it could see, and wrong.
 

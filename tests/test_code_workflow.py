@@ -306,7 +306,7 @@ def _shipped(**kw):
 
 
 def test_a_human_review_comment_is_carried_through():
-    pr = {"reviews": [{"author": {"login": "vinish"}, "state": "CHANGES_REQUESTED",
+    pr = {"reviews": [{"author": {"login": "alex"}, "state": "CHANGES_REQUESTED",
                        "body": "handle the EXECUTED status too"}]}
     assert "handle the EXECUTED status too" in " ".join(tasks._review_notes(pr))
 
@@ -319,13 +319,13 @@ def test_bot_review_noise_is_dropped():
 
 
 def test_a_bare_approval_is_not_treated_as_an_ask():
-    pr = {"reviews": [{"author": {"login": "vinish"}, "state": "APPROVED", "body": "lgtm"}]}
+    pr = {"reviews": [{"author": {"login": "alex"}, "state": "APPROVED", "body": "lgtm"}]}
     assert tasks._review_notes(pr) == []
 
 
 def test_an_approval_with_real_content_is_kept():
     body = "approving, but please rename the flag before you merge it"
-    pr = {"reviews": [{"author": {"login": "vinish"}, "state": "APPROVED", "body": body}]}
+    pr = {"reviews": [{"author": {"login": "alex"}, "state": "APPROVED", "body": body}]}
     assert tasks._review_notes(pr)
 
 
@@ -340,16 +340,16 @@ def test_an_empty_comment_body_is_ignored():
 
 def test_a_comment_is_reported_once_not_every_poll():
     tid = _shipped()
-    notes = ["vinish: rename the flag"]
+    notes = ["alex: rename the flag"]
     assert tasks._new_review_notes(tid, notes) == notes
     assert tasks._new_review_notes(tid, notes) == []
 
 
 def test_a_second_comment_is_still_reported():
     tid = _shipped()
-    tasks._new_review_notes(tid, ["vinish: rename the flag"])
-    fresh = tasks._new_review_notes(tid, ["vinish: rename the flag", "sumith: add a test"])
-    assert fresh == ["sumith: add a test"]
+    tasks._new_review_notes(tid, ["alex: rename the flag"])
+    fresh = tasks._new_review_notes(tid, ["alex: rename the flag", "kendall: add a test"])
+    assert fresh == ["kendall: add a test"]
 
 
 @pytest.mark.asyncio
@@ -359,7 +359,7 @@ async def test_changes_requested_says_what_was_actually_requested(monkeypatch):
     async def pr(url):
         return {"state": "OPEN", "reviewDecision": "CHANGES_REQUESTED",
                 "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-                "reviews": [{"author": {"login": "vinish"},
+                "reviews": [{"author": {"login": "alex"},
                              "state": "CHANGES_REQUESTED",
                              "body": "handle the EXECUTED status too"}]}
 
@@ -378,7 +378,7 @@ async def test_a_plain_comment_is_noticed_even_though_no_field_changed(monkeypat
     async def pr(url):
         return {"state": "OPEN", "reviewDecision": "",
                 "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-                "comments": [{"author": {"login": "vinish"}, "body": body}]}
+                "comments": [{"author": {"login": "alex"}, "body": body}]}
 
     monkeypatch.setattr(tasks, "_pr_state", pr)
     await tasks.check_pr(tid)          # first poll settles the state
@@ -393,7 +393,7 @@ async def test_the_same_comment_does_not_nag_forever(monkeypatch):
     async def pr(url):
         return {"state": "OPEN", "reviewDecision": "",
                 "statusCheckRollup": [{"conclusion": "SUCCESS"}],
-                "comments": [{"author": {"login": "vinish"}, "body": "one thing"}]}
+                "comments": [{"author": {"login": "alex"}, "body": "one thing"}]}
 
     monkeypatch.setattr(tasks, "_pr_state", pr)
     for _ in range(3):
@@ -434,17 +434,15 @@ def test_pr_watching_only_follows_prs_from_his_own_tasks():
 
 # --- the quality bar ----------------------------------------------------------
 
-@pytest.mark.parametrize("rule", [
-    "Small, named, single-purpose functions",
-    "functional shape",
-    "SIMPLIFY",
-    "Guard clauses over nesting",
-    "Comments explain WHY",
-    "Delete what you replace",
-    "Tests are part of the change",
-])
-def test_the_quality_bar_is_stated_to_the_executor(rule):
-    assert rule in tasks.CODE_OVERRIDES
+def test_the_quality_bar_moved_to_his_guardrails_file():
+    """It was a block in CODE_OVERRIDES; now it is the `## Coding` section of
+    guardrails.md, his to edit, and every fresh code leg receives it — see
+    test_guardrails for the routing. This pins that it did not survive here as a
+    second copy the two could drift between."""
+    from app import guardrails
+    assert "Small, named, single-purpose" not in tasks.CODE_OVERRIDES
+    assert "guardrails.md" in Path("app/tasks.py").read_text()
+    assert "SIMPLIFY" in guardrails.parse(guardrails.EXAMPLE_PATH.read_text())["coding"]
 
 
 def test_the_executor_is_told_not_to_touch_the_branch():

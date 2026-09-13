@@ -37,6 +37,12 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 from . import quiet, store
+from . import call_audio, call_screen
+from .call_audio import (  # noqa: F401  (constants only — the FUNCTIONS are
+    AUDIO_DEVICE, HIS_MIC, SWITCH_AUDIO,   # called through `call_audio.` so the
+    current_mic, set_call_mic, _restore_mic)  # borrow and the restore share one
+#                                             binding and cannot be half-stubbed.
+from .call_screen import call_ended
 from .voice import (  # noqa: F401  (re-exported: callers and tests use these)
     can_speak, ensure_unmuted, mic_is_live, speaking_hint)
 from .call_brain import (  # noqa: F401  (re-exported: callers and tests use these)
@@ -62,8 +68,6 @@ def _now() -> float:
 
 #: The macOS virtual audio device Teams must be pointed at for Asta to be heard
 #: (BlackHole, Loopback, or similar). Empty = speaking is not available, and
-#: `say_in_call` says so rather than pretending.
-AUDIO_DEVICE = os.environ.get("ASTA_CALL_AUDIO_DEVICE", "").strip()
 
 #: A joined call is left after this long no matter what, so a meeting that
 #: overruns — or a bug — cannot leave Asta sitting in someone's call all day.
@@ -175,7 +179,7 @@ async def join(join_url: str, muted: bool = True, camera: bool = False,
                            "joining unmuted without one would broadcast your real "
                            "mic. " + speaking_hint())
     warm_the_voice()                  # cold start lands here, not in the meeting
-    await set_call_mic(device=AUDIO_DEVICE)   # before Teams binds a track
+    await call_audio.set_call_mic(device=AUDIO_DEVICE)   # before Teams binds a track
     await teams_bridge.close_pool()   # one writer per profile — see call_person
     pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
     joined = False
@@ -237,60 +241,35 @@ _CALL_BUTTONS = {
 _CALL_PLACED = ('[data-tid="calling-hangup-button"], [aria-label*="Hang up" i], '
                 '[data-tid="call-duration"], [data-tid="calling-screen"]')
 
-#: Still ringing. Matched on visible text because that is the part of a calling
-#: screen Teams has reworded least.
-_RINGING = re.compile(r"\bringing\b|\bcalling\b|waiting for (others|them)", re.I)
-
-#: Somebody answered. UNVERIFIED against a live connected call — nobody was rung
-#: to find out — so it is deliberately not the only evidence `connected` accepts.
-#: The reliable half is captions: a caption line existing means a human is talking,
-#: which cannot happen before the call connects. If these selectors turn out to be
-#: wrong the cost is a slower answer, not a wrong one.
-_CONNECTED = '[data-tid="call-duration"], [data-tid="calling-timer"]'
-
-#: A running m:ss timer with no children — Teams renders the call clock this way
-#: whatever it names the element that day.
-_TIMER_JS = """() => {
-    for (const n of document.querySelectorAll('span,div')) {
-        if (n.children.length) continue;
-        if (/^\\d{1,2}:\\d{2}(:\\d{2})?$/.test((n.innerText || '').trim())) return true;
-    }
-    return false;
-}"""
 
 
 async def call_state(page) -> str:
-    """Where the call is: 'ringing', 'connected', 'ended', or 'unknown'.
+    """Where THIS call is — `call_screen` does the reading; the captions it
+    weighs most heavily live in `_CALL`, so they are handed over here."""
+    return await call_screen.call_state(page, _CALL.get("captions"))
 
-    Four states rather than a bool because the honest answer is sometimes "I
-    cannot tell", and the two ways of being wrong are not equally bad. Reporting
-    a ringing call as connected makes Asta talk to a phone nobody has picked up.
-    Reporting a connected call as ringing costs a few seconds of silence. So
-    'connected' is only ever returned on positive evidence, and everything else
-    that is not clearly ringing or ended is admitted as 'unknown'.
+
+async def _follow_call_window(page):
+    """The window the call actually moved to, or `page` unchanged.
+
+    Teams opens a call in its own window and the readers kept the page the call
+    was STARTED from, so every detector was looking somewhere the call was not.
+    Re-resolved on each poll rather than once, because the window appears a
+    moment after the button is clicked and can be replaced mid-call.
+
+    Takes and returns the caller's page rather than reading `_CALL`: callers
+    pass the page they mean, and quietly swapping it for a different one is a
+    surprise no caller asked for.
     """
-    if page is None:
-        return "unknown"
-    try:
-        text = await page.evaluate("() => document.body.innerText || ''")
-    except Exception:
-        return "ended"                 # the page is gone; that counts as ended
-    if _ENDED.search(text[:4000]):
-        return "ended"
-    # A caption cannot exist before somebody is talking, and nobody talks into a
-    # phone that is still ringing. This is the one piece of connection evidence
-    # that runs on code already proven against live Teams.
-    if _CALL.get("captions"):
-        return "connected"
-    with contextlib.suppress(Exception):
-        if await page.query_selector(_CONNECTED):
-            return "connected"
-    if _RINGING.search(text[:4000]):
-        return "ringing"
-    with contextlib.suppress(Exception):
-        if await page.evaluate(_TIMER_JS):
-            return "connected"
-    return "unknown"
+    ctx = _CALL.get("ctx")
+    if ctx is None:
+        return page
+    found = await call_screen.call_page(ctx, page)
+    if found is not None and found is not page:
+        if _CALL.get("page") is page:
+            _CALL["page"] = found
+        return found
+    return page
 
 
 async def wait_for_answer(page, seconds: float = 0) -> str:
@@ -304,7 +283,16 @@ async def wait_for_answer(page, seconds: float = 0) -> str:
     deadline = _now() + (seconds or RING_SECONDS)
     state = "unknown"
     saw_ringing = False
+    lines = _CALL.setdefault("captions", [])
     while _now() < deadline:
+        page = await _follow_call_window(page)
+        # Captions are the ONE piece of connection evidence proven against live
+        # Teams — and nothing collected them until `watch` started, which is
+        # after this function has already returned. So the reliable signal was
+        # structurally unavailable at the only moment it mattered: `call_state`
+        # checked `_CALL["captions"]` and it was empty by construction.
+        with contextlib.suppress(Exception):
+            await poll_captions(page, lines)
         state = await call_state(page)
         if state in ("connected", "ended"):
             return state
@@ -314,11 +302,42 @@ async def wait_for_answer(page, seconds: float = 0) -> str:
             # Was ringing, is not now, has not ended: that transition IS the
             # answer, and it is the only evidence Teams cannot rename. _CONNECTED
             # shipped unverified and does not match; _TIMER_JS caught a clock on
-            # one call and nothing on the next. Vinish picked up, asked questions
+            # one call and nothing on the next. Alex picked up, asked questions
             # and heard silence while this reported "unknown" for forty seconds.
             return "connected"
         await asyncio.sleep(1.0)
+    if state != "ringing":
+        # "unknown" alone is unactionable — it says a reader failed without
+        # saying what it read, and three test calls were spent guessing at
+        # it. Whatever the window actually showed goes on the record.
+        _CALL["last_screen"] = await call_screen.describe(page)
     return "no answer" if state == "ringing" else state
+
+
+#: Ceiling on how long a call may sit with nobody detectably on it. An
+#: "unknown" call screen is deliberately left alone — cutting off a call that IS
+#: happening is worse — but that had no limit, so the 8 Sep test call
+#: sat from 11:02 until a speak attempt raised at 11:23: twenty-one minutes of
+#: her Teams showing a call from Arun that nobody was on.
+UNANSWERED_SECONDS = float(os.environ.get("ASTA_UNANSWERED_SECONDS", "120"))
+
+
+async def _never_answered() -> bool:
+    """No evidence anyone is on this call, for long enough to hang up.
+
+    Two signals must BOTH be absent. `answered_at` is set only when the screen
+    reads "connected", so alone it would drop a live call whose UI cannot be
+    parsed; captions only exist while somebody is speaking, so any caption at
+    all means a human is there whatever the page says.
+    """
+    if _CALL.get("answered_at") or _CALL.get("captions"):
+        return False
+    started = _CALL.get("joined_at") or 0
+    return bool(started) and (_now() - started) >= UNANSWERED_SECONDS
+
+
+# Markers that the call is over. Matched on visible text because Teams' post-call
+# screen has been restyled more often than it has been reworded.
 
 
 #: How long to let a headed Teams window finish painting its chat list.
@@ -353,8 +372,8 @@ _FIND_BACKOFF = 1.5
 async def _find_chat_settled(page, who: str) -> str:
     """Find the chat, retrying while the headed window is still settling.
 
-    Placing a real call to Vinish is what exposed this. Headless `resolve` finds
-    "Vinish Kumar" every time; the HEADED window opened a chat called 'Author' and
+    Placing a real call to Alex is what exposed this. Headless `resolve` finds
+    "Alex Kumar" every time; the HEADED window opened a chat called 'Author' and
     aborted — correctly, because opening the wrong conversation and dialling it
     would ring a stranger on Arun's behalf. But aborting on the FIRST mismatch
     made calling by name fail every time rather than merely be slow.
@@ -411,8 +430,8 @@ async def call_person(who: str, video: bool = False) -> str:
         raise RuntimeError("Teams bridge is off (set TEAMS_BRIDGE=1 in .env)")
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
-    # His rail beats Teams' search ranking. "divya" ranks a 1:1 titled "Divya"
-    # — a real chat with no messages in it — above "Palikala Divya Maheswari",
+    # His rail beats Teams' search ranking. "blake" ranks a 1:1 titled "Blake"
+    # — a real chat with no messages in it — above "Stone Blake Rivers",
     # who is the person he actually talks to. A message there reaches the wrong
     # person; a call RINGS them, and neither is undone by noticing afterwards.
     from . import contacts as _contacts
@@ -428,30 +447,68 @@ async def call_person(who: str, video: bool = False) -> str:
     # phone has not even rung. Measured: the first utterance after Voicebox starts
     # takes 11.4 seconds, every later one takes 1.05 — so the cost is a one-time
     # model load, not synthesis, and the only question is whether it lands in
-    # front of Vinish or in front of nobody. It was wired into join_by_phrase and
+    # front of Alex or in front of nobody. It was wired into join_by_phrase and
     # nowhere else, so every CALL paid it out loud.
     warm_the_voice()
     # Claim the mic BEFORE Teams binds its track on connect — switching after, as
     # say_in_call did, cannot move an open track. Measured: the browser handed
-    # Teams the built-in mic while BlackHole sat unselected, so Vinish heard the
+    # Teams the built-in mic while BlackHole sat unselected, so Alex heard the
     # laptop while Asta played into a device nobody listened to.
-    await set_call_mic(device=AUDIO_DEVICE)
+    await call_audio.set_call_mic(device=AUDIO_DEVICE)
+    # CLAIM the browser before touching it, not after the dial succeeds.
+    #
+    # `_CALL` is what tells every background reader to stand down, and it used to
+    # be set only once a call was placed — so the whole setup (launch, load
+    # Teams, check the microphone, find the person) ran with the flag clear and
+    # the 60-second pollers free to launch a competing browser into the same
+    # single-writer profile. Four calls died in that window, the last one inside
+    # the microphone check itself: "TargetClosedError: Page.evaluate".
+    #
+    # The claim covers setup as well as the call, and is dropped on any failure
+    # below — a stuck claim would silence the chat reader for ever.
+    _CALL["claiming"] = True
     # One writer per user-data-dir. The pool keeps its browser alive between
     # operations, so a headed launch on top of it corrupts the store both are
     # writing — what left Teams unable to boot for 14.5 hours on 26 August.
-    await teams_bridge.close_pool()
-    pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
+    try:
+        await teams_bridge.close_pool()
+        pw, ctx = await teams_bridge._launch(headless=False)  # a call needs a real window
+    except BaseException:
+        _CALL.clear()
+        raise
     placed = False
     try:
         page = await teams_bridge._open_teams(ctx)
         # A HEADED window paints far slower than the headless one every other
         # code path uses: _open_teams returns as soon as the app shell exists,
         # and searching that early found nothing at all — "no person match for
-        # 'Vinish' (saw: nothing)" on a name that resolves fine headless. Wait
+        # 'Alex' (saw: nothing)" on a name that resolves fine headless. Wait
         # for the chat rail to actually be populated, which is the condition
         # that makes search work, rather than sleeping a guessed number of
         # seconds and hoping.
         await _wait_for_chat_list(page)
+        # BEFORE the phone rings, not after it is answered. This check already
+        # existed in `say_in_call` — which runs once somebody has picked up, so
+        # the colleague answered on 2026-09-07, spoke for two seconds, and heard nothing.
+        # Refusing to speak into silence stopped Asta REPORTING a call it never
+        # made; it did not spare her the silent call. The only version of this
+        # that protects the person on the other end is a gate on dialling.
+        #
+        # Deliberately measured on THIS browser rather than trusting
+        # `voice_check`: macOS attributes microphone access to the responsible
+        # process, so a green reading from one launcher says nothing about the
+        # Chromium a call actually opens.
+        from . import voice as _v
+        # Plays a tone while listening — a bare mic read with nothing playing
+        # measures silence and blocks every call. See voice.browser_hears_us.
+        heard = await _v.browser_hears_us(page)
+        if heard and not heard.get("error") and float(heard.get("peak") or 0) <= 0.01:
+            raise RuntimeError(
+                f"not dialling {who} — this browser receives digital silence on "
+                f"{heard.get('label') or 'its mic'}, so they would answer and hear "
+                f"nothing. macOS has not granted microphone access to the browser "
+                f"Asta drives: System Settings → Privacy & Security → Microphone. "
+                f"Nobody was rung.")
         title = await _find_chat_settled(page, who)
         if not await _click_first(page, _CALL_BUTTONS[kind], timeout=5000):
             raise RuntimeError(
@@ -476,6 +533,10 @@ async def call_person(who: str, video: bool = False) -> str:
         return title
     finally:
         if not placed:
+            # Drop the claim with the browser. A claim that outlives a failed
+            # call would leave `in_a_call()` true for ever, and the chat reader
+            # would stand down permanently — silence that looks like a quiet day.
+            _CALL.clear()
             await ctx.close()
             await pw.stop()
 
@@ -530,93 +591,11 @@ async def _click_first(page, selectors, timeout: float = 3000) -> bool:
     return False
 
 
-# --- borrowing the microphone -----------------------------------------------
-#
-# Teams listens to ONE input at a time. While it is pointed at the virtual mic
-# Asta speaks through, it cannot hear Arun at all — so leaving it there after an
-# utterance would silently mute him for the rest of the call, and he would find
-# out when somebody asked why he had gone quiet.
-#
-# So the mic is BORROWED: switched immediately before speaking and given back in
-# a finally, whatever happened in between. The restore is the part that matters;
-# the switch merely fails to be heard, the missing restore fails to be heard FROM.
-
-#: His real microphone — restored after every utterance.
-HIS_MIC = os.environ.get("ASTA_HIS_MIC", "MacBook Pro Microphone")
-
-#: The macOS input switcher (brew install switchaudio-osx). Teams must have its
-#: microphone left on "Same as System" for this to reach it.
-SWITCH_AUDIO = os.environ.get("ASTA_SWITCH_AUDIO", "/opt/homebrew/bin/SwitchAudioSource")
-
-
-def can_switch_mic() -> bool:
-    """Whether the input device can be changed at all."""
-    from pathlib import Path as _P
-    return _P(SWITCH_AUDIO).is_file()
-
-
-async def set_call_mic(page=None, device: str = "") -> bool:
-    """Point the microphone at `device`. False when it could not be done.
-
-    This switches the SYSTEM default input rather than Teams' own setting.
-    Driving the Teams UI was the first attempt and it does not survive contact:
-    settings sit behind a React flyout off the "Settings and more" menu, the
-    picker has no stable data-tid, and a pre-flight against live Teams returned
-    False on every selector — meaning a call would have connected and then sat
-    silent. Teams follows the system default when its device is left on "Same as
-    System", so this is both simpler and one less thing to break when Teams
-    ships a UI change.
-
-    `page` is accepted and ignored so callers and tests keep the same shape.
-
-    Returns a bool rather than raising: the caller must tell "could not switch,
-    so do not speak" apart from "spoke and then could not restore", and those
-    two want very different reactions.
-    """
-    if not device:
-        return False
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            SWITCH_AUDIO, "-t", "input", "-s", device,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await asyncio.wait_for(proc.wait(), timeout=10)
-        if proc.returncode != 0:
-            return False
-    except Exception:
-        return False
-    # Verified, not assumed: the switcher exits 0 for a name it did not apply.
-    return (await current_mic()) == device
-
-
-async def current_mic() -> str:
-    """Whatever the system input is right now ('' if it cannot be read)."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            SWITCH_AUDIO, "-c", "-t", "input",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-        return out.decode(errors="replace").strip()
-    except Exception:
-        return ""
-
-
-async def _restore_mic(page) -> None:
-    """Give the microphone back. Shouts if it could not — being silently muted
-    for the rest of a call is the worst outcome this module can produce."""
-    from . import notify
-    if await set_call_mic(page, HIS_MIC):
-        return
-    await notify.notify(
-        f"🎙️ Could not switch the Teams mic back to {HIS_MIC} — you may be muted "
-        f"to the call. Set it manually in Teams → Settings → Devices.",
-        "warn", urgency="direct")
-
-
 def call_duration() -> float:
     """Seconds since somebody picked up. Zero if nobody did.
 
     Zero for an unanswered call is the honest number rather than a missing one —
-    "rang Vinish for 45 seconds" is not a 45-second call, and reporting it as one
+    "rang Alex for 45 seconds" is not a 45-second call, and reporting it as one
     would put a conversation in his day that never happened.
     """
     started = float(_CALL.get("answered_at") or 0)
@@ -777,7 +756,9 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
             raise RuntimeError("the call has ended — said nothing")
         if not _CALL.get("answered_at"):
             if state != "connected":
-                raise RuntimeError(f"nobody has picked up yet ({state}) — said nothing")
+                seen = _CALL.get("last_screen") or await call_screen.describe(page)
+                raise RuntimeError(f"nobody has picked up yet ({state}) — said "
+                                   f"nothing. The call window showed: {seen}")
             _CALL["answered_at"] = _now()
 
     words = voice.strip_voice_instruction(text)
@@ -808,7 +789,7 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
                 f"— macOS has not granted microphone access to Google Chrome for "
                 f"Testing. System Settings → Privacy & Security → Microphone. "
                 f"Said nothing rather than reporting speech nobody would hear.")
-        borrowed = await set_call_mic(page, AUDIO_DEVICE)
+        borrowed = await call_audio.set_call_mic(page, AUDIO_DEVICE)
         if not borrowed:
             raise RuntimeError(
                 f"could not point Teams at {AUDIO_DEVICE} — said nothing. "
@@ -822,7 +803,7 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
         # microphone back. This is the line that keeps him from going silently
         # mute for the rest of the call.
         if borrowed:
-            await _restore_mic(page)
+            await call_audio._restore_mic(page)
 
     store.kv_set("teams_last_spoken", words[:500])
     return f"said it in the call in {chosen} voice ({played:.1f}s): {words[:120]}"
@@ -870,20 +851,25 @@ async def leave() -> str:
             await (close.close() if hasattr(close, "close") else close.stop())
         except Exception:
             pass
+    # HANGING UP IS WHERE THE MICROPHONE COMES BACK. It used to come back in
+    # `say_in_call`'s finally and nowhere else, guarded by `if borrowed` — so the
+    # mic was returned only on calls where Asta actually SPOKE. `join` and
+    # `call_person` both switch the system input to the virtual device before
+    # dialling, so a call nobody answered, one that was declined, or a meeting
+    # Asta only listened to all ended with his input still on BlackHole.
+    #
+    # That is not untidy, it is the failure this module's own comment calls the
+    # worst it can produce: his next meeting has a microphone that is live,
+    # correctly labelled, and carries nothing. The test call on 8 Sep
+    # left it that way, and the docstring on `self_test` records it happening
+    # twice in one day before that.
+    #
+    # Here, not in the callers: `leave` is the ONE path every call and meeting
+    # ends through, which is exactly why the browser is closed here too.
+    await call_audio._restore_mic(None)
     return "left the call"
 
 
-# Markers that the call is over. Matched on visible text because Teams' post-call
-# screen has been restyled more often than it has been reworded.
-_ENDED = re.compile(r"call ended|meeting ended|you (have )?left|rejoin", re.I)
-
-
-async def call_ended(page) -> bool:
-    try:
-        text = await page.evaluate("() => document.body.innerText || ''")
-    except Exception:
-        return True          # the page is gone; that counts as ended
-    return bool(_ENDED.search(text[:4000]))
 
 
 def overran(now: float | None = None) -> bool:
@@ -1002,7 +988,7 @@ def transcript_text(lines: list[dict]) -> str:
 # --- noticing what the other person asked ------------------------------------
 #
 # Arun wanted this to feel natural: Asta listens while he talks, spots something
-# worth looking up, and asks HIM — "can I analyse this that Vinish asked?" — on
+# worth looking up, and asks HIM — "can I analyse this that Alex asked?" — on
 # his phone, never out loud in the call.
 #
 # The split below is the whole design. Some questions Asta can answer from the
@@ -1194,6 +1180,9 @@ async def watch(poll_seconds: float = 30) -> str:
         if page is not None and await call_ended(page):
             await leave()
             return "the call ended"
+        if await _never_answered():
+            await leave()
+            return f"no answer after {int(UNANSWERED_SECONDS)}s — hung up"
         for _ in range(ticks):
             if not _CALL:
                 break
@@ -1323,10 +1312,14 @@ async def call_watch(title: str = "") -> None:
     state = await wait_for_answer(page)
 
     if state in ("no answer", "ended"):
+        # HANG UP FIRST, then leave the message. The call has to be down before
+        # the composer can have the microphone — recording holds the system
+        # input, and a live call is already holding it.
         await leave()
         gone = "didn't pick up" if state == "no answer" else "ended before it connected"
+        note = await _leave_voice_note(who, store.kv_get("call_topic") or "")
         await notify.notify(f"📞 {who} {gone} — hung up after "
-                            f"{int(RING_SECONDS)}s.", "call", urgency="direct")
+                            f"{int(RING_SECONDS)}s.{note}", "call", urgency="direct")
         return
 
     if state == "connected":
@@ -1347,6 +1340,39 @@ async def call_watch(title: str = "") -> None:
             "call", urgency="direct")
 
     await watch_and_report(title or who)
+
+
+async def _leave_voice_note(who: str, topic: str = "") -> str:
+    """Say what he rang about, as a voice message, when nobody picked up.
+
+    A call nobody answers used to leave NOTHING behind — which makes the ringing
+    pointless: the person sees a missed call from Arun and has no idea what it
+    was about. "if they not picked up send voice note and cut the call".
+
+    Never raises. A voice note is the consolation prize; failing to leave one
+    must not turn an already-unanswered call into an error report as well. What
+    it could not do is appended to the push instead, so a broken composer is
+    visible rather than silent.
+    """
+    from . import teams_bridge
+    if not voice_notes_enabled():
+        return ""
+    said = (topic or "").strip()
+    body = (f"Hi {who.split()[0] if who else 'there'}, this is Arun's assistant. "
+            f"I tried to reach you on his behalf and missed you. "
+            + (f"It was about: {said[:300]}. " if said else "")
+            + "No need to call back — he'll follow up.")
+    try:
+        landed = await teams_bridge.send_voice_note(who, body)
+        return f"\n🎙️ Left a voice note in {landed}."
+    except Exception as exc:                                   # noqa: BLE001
+        return f"\n🎙️ Could not leave a voice note — {str(exc)[:160]}"
+
+
+def voice_notes_enabled() -> bool:
+    """Off unless asked for. It drives the Teams composer blind, and the thing it
+    gets wrong lands in a colleague's chat rather than in a log."""
+    return os.environ.get("ASTA_VOICE_NOTE", "").strip() not in ("", "0", "false", "no")
 
 
 async def recap(transcript: str, title: str = "") -> tuple[str, bool]:

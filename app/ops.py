@@ -45,13 +45,20 @@ async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> s
     handed BACK to a brain as a prompt saying "send this now" — which is the one
     thing the module docstring above says never to do. Everything that made a
     staged Jira comment trustworthy was absent here: the brain could reword it,
-    address it to a different Vinish, decide the tool call was optional, or answer
+    address it to a different Alex, decide the tool call was optional, or answer
     about the send instead of performing it. All four look identical to Arun,
     because all four end with the message not arriving.
     """
-    from . import teams_bridge
+    from . import attention, teams_bridge
     where = await teams_bridge.send_message(to, text, allow_group=to_group)
-    return f"✅ Sent to {where}."
+    # A reply IS the answer. Without this, Asta sent the message he approved and
+    # then went on chasing him at end of day about the very question it had just
+    # answered on his behalf — "Retry fix merged?" was still listed as waiting on him
+    # after the reply had gone out. Settled under the name Teams actually opened,
+    # which is the one the ledger stored, not the shorter one he typed.
+    settled = attention.settle_with(where) or attention.settle_with(to)
+    tail = f" ({settled} cleared from your list)" if settled else ""
+    return f"✅ Sent to {where}.{tail}"
 
 
 @op("teams_call", lambda a: f"Call {a.get('who', '?')} on Teams")
@@ -154,14 +161,41 @@ def describe(op_spec: dict) -> str:
         return op_spec.get("name", "?")
 
 
+@op("rule_add", lambda a: f"Keep a standing rule: {a.get('words', '')[:80]}")
+async def _rule_add(**args) -> str:
+    """His yes to a rule the instruction compiler proposed (app/instructions.py)."""
+    from . import instructions
+    return instructions.adopt(args)
+
+
+#: What each outward op DOES, in the words a standing rule is written in, and
+#: which argument names its target — so "never message X" stops a Teams send to X.
+_ACTS = {"teams_send": ("send", "to"), "teams_call": ("call", "who"),
+         "jira_comment": ("comment", "key"), "jira_transition": ("transition", "key"),
+         "pr_review": ("review", "pr"), "pr_merge": ("merge", "pr"),
+         "calendar_send": ("send", "summary")}
+
+
 async def run(op_spec: dict) -> str:
     """Execute a staged operation and return the line Arun reads.
 
     An unknown name is refused rather than ignored: a silent no-op after a yes is
     the worst of both — he believes it is done and nobody says otherwise.
+
+    His standing rules are checked first. His yes to THIS staged act counts as
+    asking, so a rule he gave "unless I ask" lets it through; a flat "never" does
+    not, and he is told which rule stopped it and how to lift it.
     """
     entry = REGISTRY.get(op_spec.get("name", ""))
     if entry is None:
         raise RuntimeError(f"unknown operation '{op_spec.get('name', '?')}' — "
                            f"nothing was done")
-    return await entry["run"](**(op_spec.get("args") or {}))
+    args = op_spec.get("args") or {}
+    act = _ACTS.get(op_spec.get("name", ""))
+    if act:
+        from . import policy
+        d = policy.check(act[0], str(args.get(act[1], "")), asked=True)
+        if not d.ok:
+            return (f"⛔ Not done — {d.why}. Say “drop rule {d.rule.id}” if that has "
+                    f"changed.")
+    return await entry["run"](**args)

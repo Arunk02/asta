@@ -1,6 +1,6 @@
 """His yes must land on the question he was shown.
 
-From a real WhatsApp transcript, 2026-08-26. Asta staged a Teams call to Vinish,
+From a real WhatsApp transcript, 2026-08-26. Asta staged a Teams call to Alex,
 Arun said "Go ahead", and nothing rang. He said it twice more. The brain then
 concluded that approval must happen "through a separate confirmation channel" —
 a reasonable inference from what it could see, and wrong.
@@ -27,9 +27,9 @@ def _clean():
 
 
 def _call():
-    return offers.staged_write("teams_call", {"who": "Vinish Kumar"},
-                               "📞 Call Vinish Kumar", "Teams call to Vinish Kumar.",
-                               "Ring Vinish on Teams?", kind="teams_write")
+    return offers.staged_write("teams_call", {"who": "Alex Kumar"},
+                               "📞 Call Alex Kumar", "Teams call to Alex Kumar.",
+                               "Ring Alex on Teams?", kind="teams_write")
 
 
 def _daemon_offer():
@@ -54,7 +54,7 @@ def test_his_yes_runs_the_call_he_read_not_the_daemons_proposal():
 
     accepted = offers.accept()
     assert accepted is not None and accepted.id == call.id
-    assert accepted.op["args"]["who"] == "Vinish Kumar", \
+    assert accepted.op["args"]["who"] == "Alex Kumar", \
         "the approved arguments must be the ones he was shown"
 
 
@@ -94,7 +94,7 @@ def test_a_queued_offer_does_not_invite_a_yes():
     queued = stale.render()
     assert "reply “yes” to go ahead" not in queued, "a queued offer asked for a yes"
     assert "Queued" in queued
-    assert "Call Vinish" in queued, "it must say what it is waiting behind"
+    assert "Call Alex" in queued, "it must say what it is waiting behind"
 
 
 def test_moving_on_drops_everything_not_just_the_head():

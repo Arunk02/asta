@@ -66,8 +66,15 @@ _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 #: they observed — three failures whose messages were all about the ledger and
 #: none about the responder. A behaviour switched on for one machine is not a
 #: behaviour the suite should be silently exercising.
+#:
+#: `ASTA_GRAPH` chooses the task engine. Inherited, it would move every old-engine
+#: task test onto the graph without saying so; the graph's own tests set it. The
+#: P3 switches are the same kind of thing — routing, the front desk, the second
+#: reviewer and the chat tool set are his machine's choices, not the code's.
 _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND",
-                       "ASTA_CHATWATCH", "ASTA_INCOMING")
+                       "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_GRAPH", "ASTA_ROUTING",
+                       "ASTA_FRONTDESK", "ASTA_CROSS_REVIEW", "ASTA_CLAUDE_CHAT_TOOLS",
+                       "ASTA_CHAT_ALLOW")
 
 
 #: What this machine's .env said, captured before it is cleared. A handful of
@@ -77,6 +84,43 @@ _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND"
 #: inherited, and so a test that forgets to ask gets the default like everyone else.
 _REAL_CONTEXT_DIRNAMES = {n: os.environ.get(n) for n in
                           ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")}
+
+
+@pytest.fixture(autouse=True)
+def _no_machine_side_effects(monkeypatch):
+    """No test touches this Mac's audio devices or its voice server.
+
+    Found by CI on 12 September, and worse than a CI problem. Several call tests
+    patched `meetings.set_call_mic`, but the code had moved to
+    `call_audio.set_call_mic` — so on Arun's laptop the REAL one ran: the suite
+    switched his microphone input to BlackHole and back, and asked the local
+    Voicebox to synthesise speech, on every run. It passed here because the
+    devices exist and failed on a runner that has neither. A test that passes
+    only because it reached into the machine is not a test of the code.
+
+    So both doors are pointed at nothing, for every test. A test ABOUT them
+    patches the functions it needs, which states the dependency out loud.
+    """
+    from app import call_audio, voice
+    monkeypatch.setattr(call_audio, "SWITCH_AUDIO", "/nonexistent/SwitchAudioSource")
+    monkeypatch.setattr(voice, "BASE", "http://127.0.0.1:9")    # nothing listens on 9
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _own_guardrails_file(tmp_path, monkeypatch):
+    """Every test reads — and may write — a temp copy of the shipped example.
+
+    His `guardrails.md` is real configuration, and the instruction compiler
+    APPENDS to it on his yes. A test that exercised that path against the real
+    file would edit his rules; one that merely read it would pass on his laptop
+    and fail on a runner that only has the example.
+    """
+    from app import guardrails
+    copy = tmp_path / "guardrails.md"
+    copy.write_text(guardrails.EXAMPLE_PATH.read_text() if guardrails.EXAMPLE_PATH.exists() else "")
+    monkeypatch.setenv("ASTA_GUARDRAILS", str(copy))
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -200,6 +244,14 @@ def _no_live_brains(monkeypatch):
     for mod in ("copilot_cli", "claude_cli"):
         with contextlib.suppress(ImportError, AttributeError):
             monkeypatch.setattr(f"app.{mod}.one_shot", _no_cli, raising=False)
+    # The LOCAL model too, and it was the one gap in this rule. It costs nothing
+    # per call, so it never looked like something to seal — but LM Studio is up
+    # on this machine, so a test that reached it made a real HTTP request and
+    # waited on a real generation. When the completion budget briefly rose from
+    # 120s to 300s the whole suite wedged at 89% on one of them: no output, no
+    # CPU, no failure. A test that reaches a live model is unbounded whether or
+    # not anyone is billed for it.
+    monkeypatch.setattr("app.memory.local_llm_model", lambda: None, raising=False)
     yield
 
 

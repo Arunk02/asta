@@ -79,6 +79,11 @@ _TABLE: tuple[Capability, ...] = (
                note="Durable memory across ALL conversations. kind: fact | preference "
                     "| gotcha | fix. Save corrections and preferences, not chatter."),
     Capability("search_memory", "memory", http="GET /api/memory/search?q={query}"),
+    Capability("note_fact", "memory",
+               http='POST /api/facts {"subject":"…","fact":"…","kind":"person|repo|service|env","source":"…"}',
+               note="Facts about people and systems, with a source — who owns what, which "
+                    "repo does what. Not for his instructions: those become rules."),
+    Capability("facts_about", "memory", http="GET /api/facts?subject={subject}"),
     Capability("load_skill", "memory", http="GET /api/skills/{name}"),
     # --- asking -------------------------------------------------------------
     Capability("ask_user", "ask", http="POST /api/ask",
@@ -300,11 +305,47 @@ _TABLE: tuple[Capability, ...] = (
                note="STAGES a review under Arun's name; his yes posts it verbatim. Only "
                     "when he explicitly says to post/approve — an approval is visible to "
                     "the whole team and cannot be taken back quietly."),
+    Capability("report_outcome", "tasks",
+               http='POST /api/tasks/{id}/outcome {"kind":"plan_ready","repos":["…"],"summary":"…"}',
+               note="Task runs only: the last call a background task makes. How Asta "
+                    "knows a plan from a result — never inferred from your wording."),
     Capability("list_background_tasks", "tasks", http="GET /api/tasks"),
     Capability("task_result", "tasks", http="GET /api/tasks/{id}"),
     Capability("approve_task", "tasks", http="POST /api/tasks/{id}/approve", write=True,
-               note="At a plan gate this means implement. Any other feedback goes to "
-                    'POST /api/tasks/{id}/reply {"text":"…"} and the pipeline re-plans.'),
+               note="At a plan gate this means implement the plan AS WRITTEN. It carries "
+                    "no words, so use it only for an unqualified yes — the moment he adds "
+                    "a condition, reply_to_task is the tool."),
+    Capability("reply_to_task", "tasks", http='POST /api/tasks/{id}/reply {"text":"…"}',
+               write=True,
+               note="Answers a task waiting at a gate, in his own words: an approval with "
+                    "conditions ('yes but leave the PDF side'), a scope cut, a correction, "
+                    "or the answer to a question it asked. Text starting 'PLAN APPROVED' "
+                    "implements with those changes; anything else re-plans. Approving and "
+                    "THEN sending the feedback builds the unamended plan first."),
+    Capability("track_until_done", "tasks",
+               http='POST /api/followups {"goal":"…","urls":["…"],"person":"…",'
+                    '"when":"2026-09-08T18:00"}', write=True,
+               note="Keeps chasing pull requests towards a deadline after this turn "
+                    "ends — polls each PR, names what is blocking it (CI red, no "
+                    "review, changes requested) BEFORE the deadline, and drafts a "
+                    "reminder to the reviewer when a PR stops moving. Drafts only; it "
+                    "never messages anyone by itself. Reach for it when he asks you to "
+                    "chase or follow up a PR with somebody by a given time."),
+    Capability("stop_investigating", "tasks",
+               http='POST /api/responder/mute {"kind":"incident"}', write=True,
+               note="THE tool for 'don't look into X', 'stop analysing X'. A standing "
+                    "instruction — recorded, so it is still true tomorrow. Kinds: "
+                    "incident | pr_review | debug | ask. Never just agree in chat and "
+                    "leave the behaviour running."),
+    Capability("resume_investigating", "tasks",
+               http='POST /api/responder/unmute {"kind":"incident"}', write=True,
+               note="Undoes stop_investigating for one kind."),
+    Capability("list_tracked", "tasks", http="GET /api/followups"),
+    Capability("stop_tracking", "tasks", http="POST /api/followups/{id}/stop",
+               write=True,
+               note="Stops the chasing — Asta forgets the deadline and stops drafting "
+                    "nudges. Only when he says to drop it or it landed another way; if "
+                    "he is merely asking where it stands, list_tracked answers that."),
     Capability("ship_task", "tasks", http="POST /api/tasks/{id}/ship", write=True,
                note="Pushes the branch and opens the PR. The pipeline NEVER does this "
                     "itself — only when Arun has seen the diff and said ship. The task "
@@ -374,7 +415,7 @@ def names() -> tuple[str, ...]:
 
 #: Set for the whole life of a turn that runs ALONGSIDE another one.
 #:
-#: A read-only question — "what's the CI status", "what did Vinish say" — has no
+#: A read-only question — "what's the CI status", "what did Alex say" — has no
 #: conflict with work already running, and queueing it behind a forty-minute
 #: implementation is why Arun got "still finishing the previous one" instead of an
 #: answer. So those are answered concurrently.
@@ -402,6 +443,31 @@ READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=Fal
 #: route it does not control. Same ContextVar mechanism as READ_ONLY_TURN: set
 #: once at the turn boundary, copied into everything the turn awaits.
 TURN_TEXT: ContextVar[str] = ContextVar("asta_turn_text", default="")
+
+
+def said_this_turn() -> str:
+    """What he typed this turn, on EVERY brain path.
+
+    TURN_TEXT is set where the in-process brain runs. A CLI brain reaches Asta's
+    tools over MCP — a different request, a different context — where it is
+    always empty, so a check that relied on it alone quietly checked nothing on
+    the brains he actually uses. The conversation's newest message of his is the
+    same fact, stored before the turn starts.
+    """
+    said = TURN_TEXT.get()
+    if said:
+        return said
+    from . import store, tasks
+    cid = tasks.current_conversation()
+    if not cid:
+        return ""
+    try:
+        for m in reversed(store.list_ui_messages(cid) or []):
+            if m.get("role") == "user":
+                return m.get("content") or ""
+    except Exception:                                       # noqa: BLE001
+        return ""
+    return ""
 
 
 def chat_may_write() -> bool:

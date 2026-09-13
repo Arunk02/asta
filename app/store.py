@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
--- Teams messages Asta has actually seen, kept so that "what did Vinish say last
+-- Teams messages Asta has actually seen, kept so that "what did Alex say last
 -- night" is answerable at all.
 --
 -- Reading a chat used to mean one querySelectorAll over whatever Teams happened
@@ -207,6 +207,41 @@ CREATE TABLE IF NOT EXISTS outcomes (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_outcomes_kind ON outcomes(kind, created_at);
+CREATE TABLE IF NOT EXISTS rules (
+    -- His standing instructions as data the code checks, not prose a brain may
+    -- read. Written only with his yes (app/instructions.py); read by app/policy.py.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,            -- mute | never | prefer | note
+    act TEXT NOT NULL DEFAULT '',  -- what it governs: investigate, send, call, push, workspace…
+    target TEXT NOT NULL DEFAULT '',
+    value TEXT NOT NULL DEFAULT '',
+    unless_asked INTEGER NOT NULL DEFAULT 0,
+    words TEXT NOT NULL DEFAULT '', -- what he actually said
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS people_systems (
+    -- Who owns what, how a person works, which repo does what. Every fact
+    -- carries where it came from and when, so a stale one can be recognised.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'fact',   -- person | repo | service | env | ticket | fact
+    fact TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_people_systems ON people_systems(subject);
+CREATE TABLE IF NOT EXISTS task_events (
+    -- One timeline per task: every status change, route decision and gate
+    -- answer, in order. The task row says where a task IS; this says how it
+    -- got there, which eighteen kv keys and fifteen statuses never could.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_events ON task_events(task_id, id);
 CREATE TABLE IF NOT EXISTS traces (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conv_id TEXT NOT NULL,
@@ -242,7 +277,10 @@ CREATE TABLE IF NOT EXISTS traces (
 _ADDED_COLUMNS = {
     "traces": (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
                ("cost_usd", "REAL NOT NULL DEFAULT 0"),
-               ("measured", "INTEGER NOT NULL DEFAULT 0")),
+               ("measured", "INTEGER NOT NULL DEFAULT 0"),
+               # The largest context ONE model call carried — how big the session
+               # has grown, which the sums above cannot say. See llm_meter.Usage.
+               ("context_tokens", "INTEGER NOT NULL DEFAULT 0")),
     "usage": (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),),
     # Added after the ledger shipped. Any machine that already ran the server
     # once has the table without it, and CREATE TABLE IF NOT EXISTS would leave
@@ -387,7 +425,12 @@ def add_ui_message(conv_id: str, role: str, content: str, meta: dict | None = No
             "INSERT INTO ui_messages (conv_id, role, content, meta, created_at) VALUES (?,?,?,?,?)",
             (conv_id, role, content, json.dumps(meta or {}), time.time()),
         )
-        conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (time.time(), conv_id))
+        # A new message un-digests the conversation. `digested` was set once and
+        # never cleared, so the permanent WhatsApp thread was digested exactly
+        # once in its life and its CLI session then grew for weeks — 232k tokens
+        # per call by 11 September, and a 48-second wait for the first word.
+        conn.execute("UPDATE conversations SET updated_at=?, digested=0 WHERE id=?",
+                     (time.time(), conv_id))
 
 
 def list_ui_messages(conv_id: str) -> list[dict]:
@@ -434,15 +477,15 @@ def add_trace(conv_id: str, model: str, channel: str, first_token_ms: int | None
               total_ms: int, input_tokens: int, output_tokens: int, cached_tokens: int,
               instructions_chars: int, prompt_chars: int, tools: list, error: str = "",
               cache_write_tokens: int = 0, cost_usd: float = 0.0,
-              measured: bool = False) -> None:
+              measured: bool = False, context_tokens: int = 0) -> None:
     with _connect() as conn:
         conn.execute(
             "INSERT INTO traces (conv_id, model, channel, first_token_ms, total_ms, input_tokens, "
-            "output_tokens, cached_tokens, cache_write_tokens, cost_usd, measured, "
+            "output_tokens, cached_tokens, cache_write_tokens, cost_usd, measured, context_tokens, "
             "instructions_chars, prompt_chars, tools, error, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (conv_id, model, channel, first_token_ms, total_ms, input_tokens, output_tokens,
-             cached_tokens, cache_write_tokens, cost_usd, int(measured),
+             cached_tokens, cache_write_tokens, cost_usd, int(measured), int(context_tokens),
              instructions_chars, prompt_chars, json.dumps(tools), error[:500], time.time()),
         )
         conn.execute(  # keep the table bounded
@@ -524,6 +567,8 @@ def create_task(title: str, kind: str, prompt: str, workspace: str | None,
             (title, kind, prompt, workspace, teams_chat, time.time()),
         )
         tid = cur.lastrowid
+        conn.execute("INSERT INTO task_events (task_id, kind, detail, created_at) "
+                     "VALUES (?,?,?,?)", (tid, "created", kind, time.time()))
     return get_task(tid)
 
 
@@ -544,7 +589,31 @@ def update_task(task_id: int, **fields) -> None:
         return
     keys = ", ".join(f"{k}=?" for k in fields)
     with _connect() as conn:
+        before = None
+        if "status" in fields:
+            row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            before = row["status"] if row else None
         conn.execute(f"UPDATE tasks SET {keys} WHERE id=?", (*fields.values(), task_id))
+        # Every status change lands in the timeline here, in the one place all
+        # of them pass through — so no caller can move a task without it showing.
+        if before is not None and before != fields["status"]:
+            conn.execute("INSERT INTO task_events (task_id, kind, detail, created_at) "
+                         "VALUES (?,?,?,?)",
+                         (task_id, "status", f"{before} → {fields['status']}", time.time()))
+
+
+def add_task_event(task_id: int, kind: str, detail: str = "") -> None:
+    with _connect() as conn:
+        conn.execute("INSERT INTO task_events (task_id, kind, detail, created_at) "
+                     "VALUES (?,?,?,?)", (task_id, kind, (detail or "")[:500], time.time()))
+
+
+def task_events(task_id: int, limit: int = 100) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT kind, detail, created_at FROM task_events "
+                            "WHERE task_id=? ORDER BY id DESC LIMIT ?",
+                            (task_id, limit)).fetchall()
+    return [dict(r) for r in reversed(rows)]
 
 
 # --- reminders ---------------------------------------------------------------
@@ -678,6 +747,22 @@ def attention_open(limit: int = 50, max_priority: int = 3) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM attention WHERE state IN ('new','notified') AND priority<=?"
             " ORDER BY priority ASC, first_seen ASC LIMIT ?", (max_priority, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def attention_open_from(who: str, limit: int = 200) -> list[dict]:
+    """Open rows raised by one person — how "he answered them" settles a thread.
+
+    Matched case-insensitively on the stored name, because the same colleague
+    arrives as "Alex Kumar" from the chat rail and "Alex" from a draft.
+    """
+    if not (who or "").strip():
+        return []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM attention WHERE state IN ('new','notified')"
+            " AND lower(who)=lower(?) ORDER BY id DESC LIMIT ?",
+            (who.strip(), limit)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -933,8 +1018,8 @@ def teams_messages(chat: str = "", since: float | None = None,
                    until: float | None = None, limit: int = 200) -> list[dict]:
     """Stored messages, oldest first, optionally windowed by time.
 
-    `chat` matches loosely: he asks for "Vinish" and the thread was stored under
-    the full header Teams renders, "Vinish Kumar".
+    `chat` matches loosely: he asks for "Alex" and the thread was stored under
+    the full header Teams renders, "Alex Kumar".
 
     Rows with no `sent_at` are excluded once a window is asked for — an untimed
     message cannot be honestly claimed to fall inside "last night".
@@ -956,6 +1041,20 @@ def teams_messages(chat: str = "", since: float | None = None,
     args.append(max(1, limit))
     with _connect() as conn:
         rows = conn.execute(" ".join(sql), args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def teams_senders_known(limit: int = 400) -> list[dict]:
+    """Distinct people who have spoken in any stored thread, busiest first.
+
+    Separate from `teams_chats_known` because a colleague can be all over the
+    group chats and never be a thread of his own — which is exactly how a message
+    addressed to one by name read as an ordinary sentence.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT sender, COUNT(*) n FROM teams_messages WHERE sender<>'' "
+            "GROUP BY sender ORDER BY n DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
 
 

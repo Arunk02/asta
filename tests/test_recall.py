@@ -39,7 +39,7 @@ def seeded(tmp_path, monkeypatch):
                  "Document Storage / Finance Chassis client_id-secret pointing at api-cdt.maersk.com"},
         {"path": "facts/teams-ping.md", "title": "Ping people personally", "mtype": "fact",
          "date": "2026-07-27", "body": "ping X means X's 1:1 Teams DM, never a group"},
-        {"path": "episodes/vinish-pr.md", "title": "Vinish PR review", "mtype": "episode",
+        {"path": "episodes/alex-pr.md", "title": "Alex PR review", "mtype": "episode",
          "date": "2026-07-31",
          "body": "Reviewed PR 1333 telikos-booking-service rental chassis references, "
                  "flagged duplicate validator code"},
@@ -62,7 +62,7 @@ def test_a_generic_question_recalls_nothing(seeded, monkeypatch):
 
 def test_the_send_question_does_not_surface_document_storage(seeded, monkeypatch):
     monkeypatch.setattr(memory, "local_embed", lambda texts: [])
-    hits = memory.recall("why is it breaking while sending to vinish")
+    hits = memory.recall("why is it breaking while sending to alex")
     assert "IAM Token API error ERR_GW_001" not in _titles(hits)
 
 
@@ -107,7 +107,7 @@ def test_the_floor_drops_a_semantically_unrelated_hit(seeded, monkeypatch):
     monkeypatch.setattr(memory, "local_embed", _fake_embedder("chassis"))
     monkeypatch.setattr(memory, "RECALL_FLOOR", 0.35)
     hits = memory.recall("rental chassis")
-    assert _titles(hits) <= {"Vinish PR review"}          # only the on-topic one, if any
+    assert _titles(hits) <= {"Alex PR review"}          # only the on-topic one, if any
     assert "IAM Token API error ERR_GW_001" not in _titles(hits)
 
 

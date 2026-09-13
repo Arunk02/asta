@@ -5,6 +5,14 @@ description = "Personal dev-assistant chatbot: multi-LLM, MCP tools, project con
 requires-python = ">=3.12"
 dependencies = [
     "pydantic-ai-slim[anthropic,openai,mcp]>=2.13",
+    # The MCP server is written against the v1 API (`mcp.server.fastmcp`); v2
+    # renamed FastMCP to MCPServer. Unpinned, CI resolved 2.x on 12 Sep and the
+    # server test failed while the laptop's 1.28 passed.
+    "mcp>=1.28,<2",
+    # The task engine behind ASTA_GRAPH (app/graph): a checkpointed graph per code
+    # task. Imported only when a task runs on it.
+    "langgraph>=1.2,<2",
+    "langgraph-checkpoint-sqlite>=3.1,<4",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-dotenv>=1.0",

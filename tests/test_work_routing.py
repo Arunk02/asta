@@ -49,7 +49,7 @@ def test_these_are_work(text):
     "review PR 123 in booking",
     "trace booking 88271",
     "check the logs for errors",
-    "read my chat with Vinish",
+    "read my chat with Alex",
 ])
 def test_these_are_not_work(text):
     assert not work_intent.is_work_assignment(text), text
@@ -66,7 +66,7 @@ def test_these_are_not_work(text):
     "delete that message",
     "update the ticket status to done",
     "change my status to busy",
-    "reply to Vinish and add that I'll be late",
+    "reply to Alex and add that I'll be late",
 ])
 def test_other_flows_are_never_hijacked(text):
     """Every one of these leads with a listed work verb and none is code work.
@@ -321,12 +321,23 @@ def test_reading_is_untouched(_conv):
 
 
 def test_task_runs_may_still_implement():
-    """Implementing is a task's whole job — the ban is chat-only."""
+    """Implementing is an APPROVED task's whole job.
+
+    The invariant moved on 11 September and this test moved with it: a task leg
+    may write, but only once Arun has approved the plan. Before that the same
+    ban as chat applies (`plan_only`), because "the plan gate is unconditional"
+    was an instruction the micro pipeline's own agent file contradicted. So the
+    check is no longer "the task path never denies a tool" — it is "it denies
+    them only behind plan_only".
+    """
     from pathlib import Path
     src = Path("app/copilot_cli.py").read_text()
     one_shot = src[src.index("async def one_shot"):]
-    assert "--deny-tool" not in one_shot, \
-        "the task path was barred from editing, which is its entire purpose"
+    denials = [line for line in one_shot.splitlines() if "--deny-tool" in line]
+    assert denials, "an unapproved leg must still be barred from writing"
+    guard = one_shot[:one_shot.index(denials[0])]
+    assert "if plan_only:" in guard, \
+        "the task path denied a tool outside the plan_only guard"
 
 
 def test_the_ban_is_one_decision_not_two(monkeypatch, _conv):

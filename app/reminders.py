@@ -1,4 +1,4 @@
-"""Reminders & nudges — "remind me at 3pm to reply to Vinish".
+"""Reminders & nudges — "remind me at 3pm to reply to Alex".
 
 The brain (any model) converts natural language to a local ISO timestamp and
 calls set_reminder / POST /api/reminders; this module just stores and fires.

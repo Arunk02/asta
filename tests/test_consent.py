@@ -1,13 +1,13 @@
 """The 27 August substitution: asked for a call, given a code push.
 
-Arun asked, in these words: "Call Vinish and discuss on the 1409 PR he gave some
+Arun asked, in these words: "Call Alex and discuss on the 1409 PR he gave some
 comments in the chat and try to resolve with him."
 
 What happened instead, in order:
 
   1. `tool_index` ranked the call tools out of the top-8 for that message.
   2. The model cannot see that a selection happened, so it reported the gap as a
-     fact about Asta — "I can't hold a live conversation with Vinish myself".
+     fact about Asta — "I can't hold a live conversation with Alex myself".
   3. `delegate_task` is in the ALWAYS floor, so it was reachable anyway.
   4. It spawned task #72 to rewrite seven review findings and push them.
   5. Told to stop, it said "no cancel/stop tool is available to me … it will push
@@ -29,7 +29,7 @@ import pytest
 from app import capabilities, consent, tool_index
 
 #: His message, verbatim.
-ASKED_TO_CALL = ("Call Vinish and discuss on the 1409 PR he gave some comments "
+ASKED_TO_CALL = ("Call Alex and discuss on the 1409 PR he gave some comments "
                  "in the chat and try to resolve with him")
 #: And the follow-up, once the code task was already running.
 ASKED_TO_DISCUSS = "Dont push change blindly discuss with them , does it really matter"
@@ -48,10 +48,10 @@ def test_asking_to_discuss_is_asking_for_a_person_not_a_call():
 
 
 @pytest.mark.parametrize("text", [
-    "call vinish",
-    "can you call vinish",
-    "ring vinish",
-    "give vinish a call",
+    "call alex",
+    "can you call alex",
+    "ring alex",
+    "give alex a call",
     "call him back",
     "get him on the phone",
 ])
@@ -74,7 +74,7 @@ def test_the_word_call_is_not_always_a_request_to_ring_somebody(text):
 
 @pytest.mark.parametrize("text", [
     "dont call him, just fix it",
-    "no need to call vinish",
+    "no need to call alex",
     "fix it instead of calling him",
 ])
 def test_a_negated_call_is_not_a_request(text):
@@ -105,7 +105,7 @@ def test_the_refusal_tells_him_how_to_get_what_he_wanted():
 
 def test_asking_for_both_a_call_and_the_work_allows_the_spawn():
     """Refusing a task he DID ask for is its own failure — narrower is safer here."""
-    assert not consent.substitution("call vinish and fix the eta validation", "code")
+    assert not consent.substitution("call alex and fix the eta validation", "code")
 
 
 def test_plain_code_work_is_untouched():
@@ -171,7 +171,7 @@ def test_an_unrelated_message_pulls_in_no_call_tools():
 # --- the capability exists at all ---------------------------------------------
 
 def test_asta_can_hold_a_conversation():
-    """The refusal was "I can't hold a live conversation with Vinish myself". Every
+    """The refusal was "I can't hold a live conversation with Alex myself". Every
     part of that loop was proven live the same day and left in a scratch file."""
     assert "discuss_in_call" in capabilities.registry()
 
@@ -222,15 +222,15 @@ def test_a_call_he_asked_for_rings_instead_of_asking_him_again(monkeypatch, _tea
 
     async def _fake_run(spec):
         dialled.update(spec)
-        return "📞 Calling Vinish Kumar"
+        return "📞 Calling Alex Kumar"
 
     monkeypatch.setattr(ops, "run", _fake_run)
     monkeypatch.setattr(offers, "staged_write",
                         lambda *a, **k: pytest.fail("staged a call he asked for"))
     _turn(ASKED_TO_CALL)
-    out = asyncio.run(agent_mod.teams_call("Vinish"))
+    out = asyncio.run(agent_mod.teams_call("Alex"))
     assert dialled["name"] == "teams_call"
-    assert dialled["args"] == {"who": "Vinish", "video": False}
+    assert dialled["args"] == {"who": "Alex", "video": False}
     assert "Calling" in out
 
 
@@ -243,8 +243,8 @@ def test_a_call_asta_thought_of_itself_still_waits_for_his_yes(monkeypatch, _tea
                         lambda op, args, *a, **k: staged.update({"op": op, "args": args}))
     monkeypatch.setattr(ops, "run",
                         lambda spec: pytest.fail("dialled without being asked"))
-    _turn("what did vinish say about the PR")
-    out = asyncio.run(agent_mod.teams_call("Vinish"))
+    _turn("what did alex say about the PR")
+    out = asyncio.run(agent_mod.teams_call("Alex"))
     assert staged["op"] == "teams_call"
     assert "waiting for Arun's yes" in out
     assert "Nothing is ringing yet" in out
@@ -255,11 +255,11 @@ def test_a_failed_call_says_which_part_failed(monkeypatch, _teams_on, _turn):
     from app import ops
 
     async def _boom(spec):
-        raise RuntimeError("no person match for 'Vinish' (saw: nothing)")
+        raise RuntimeError("no person match for 'Alex' (saw: nothing)")
 
     monkeypatch.setattr(ops, "run", _boom)
     _turn(ASKED_TO_CALL)
-    out = asyncio.run(agent_mod.teams_call("Vinish"))
+    out = asyncio.run(agent_mod.teams_call("Alex"))
     assert "no person match" in out
     assert "Nothing rang" in out
 
@@ -277,12 +277,12 @@ def test_discuss_returns_at_once_and_talks_in_the_background(monkeypatch, _teams
     monkeypatch.setattr(conversation, "converse", _fake_converse)
 
     async def _drive():
-        out = await agent_mod.discuss_in_call("Vinish", "the 1409 review comments")
+        out = await agent_mod.discuss_in_call("Alex", "the 1409 review comments")
         await asyncio.wait_for(ran.wait(), timeout=2)
         return out
 
     out = asyncio.run(_drive())
-    assert "Calling Vinish" in out
+    assert "Calling Alex" in out
     assert "won't commit you to anything" in out
 
 

@@ -59,6 +59,16 @@ conversation) and follow its query discipline exactly — namespace-wide Loki fi
 call for identifier traces, aggregates before raw lines, limit <= 50, no per-service loops,
 Prometheus/Tempo only for performance asks. The atlassian_* MCP tools are the optional fallback
 for what the Jira REST tools don't cover (Confluence, creating issues) — never for plain reads.
+HARD RULE for EVERY MCP server, not just grafana: ONE wide call, then reason from what came
+back. The response is already in your context, so re-querying for a detail you were sent costs
+a round trip and buys nothing, and calling the same tool twice with the same arguments buys
+less. Pull the whole set — the namespace, the window, the workflow history — and do the
+analysis against it. Go back only for something genuinely absent, and say what was missing.
+Production unless an env is named; the prod namespace and the Helm values path are in your
+guardrails (Investigation). Runtime behaviour is settled by those prod Helm values, not by
+guessing: a key absent there means the application.yml default applies, which is an answer. And
+when someone hands over an id, the LOGS decide what happened — code explains why, and a cause
+never confirmed in logs is a hypothesis, so label it as one.
 
 CODE WORK — the flow Arun expects, with a message to him at EVERY step:
 plan → HIS approval → implement → "code done" → he says raise the PR → ship (commit, push, PR)
@@ -69,14 +79,31 @@ message or PR body — Arun's commits must read as his own work.
 
 Meeting recaps and summaries: ONLY when Arun pastes or asks — never proactively.
 
+BE CRISP. Every channel, every kind of answer, unless he asks you to elaborate. Lead with the
+answer, then only what he needs to act on it. Never narrate the route you took to get there —
+no "let me check", no "fixing it now", no recounting your own tool calls, file edits or
+reasoning. Do not restate his question back to him, do not list what you considered and
+rejected, do not close with a summary of what you just said. If it genuinely needs more, give
+the headline and offer the detail: he will ask. A long answer he did not ask for is not
+thoroughness, it is work he now has to do.
+
 If a tool fails, say what failed and continue with what you have.
 """
 
 
 CHANNEL_NOTES = {
-    "whatsapp": "Channel: WhatsApp. Reply in plain text (no markdown), max ~120 words. "
-                "For long content give the headline and say the full detail is in the web UI.",
-    "voice": "Channel: voice. Reply conversationally in short sentences that sound natural read aloud.",
+    "whatsapp": "Channel: WhatsApp, read on a phone. Answer in ~120 words, and lead "
+                "with the answer — he is standing up, not reading a report. Say what "
+                "you found or did, not the route you took to it: no 'let me check', no "
+                "'fixing it now', no narrating your own tool calls or file edits. If it "
+                "needs more than that, give the headline and say the detail is in the "
+                "web UI. *bold* is one asterisk here, not two.",
+    "voice": "Channel: voice. Reply conversationally in short sentences that sound natural read "
+             "aloud. Shorter than you would write it — he cannot skim speech.",
+    "teams": "Channel: Teams, read between meetings. Two or three sentences unless he asks for "
+             "more.",
+    "telegram": "Channel: Telegram, read on a phone. Answer in ~120 words, headline first; say "
+                "the detail is in the web UI rather than pasting it.",
 }
 
 
@@ -112,10 +139,15 @@ def build_instructions(conversation_summary: str, recall_block: str, workspace: 
     toolset narrows for a message the rules narrow with it — and a tool can
     never be exposed with its hard rule left behind.
     """
-    from . import capabilities
+    from . import capabilities, guardrails
     # The safety policy rides in the instructions, ahead of anything external,
     # so it is in context before the first wrapped block arrives.
     parts = [PERSONA.format(name=assistant_name()), untrusted.POLICY]
+    # His standing instructions, right after the persona they override. Same
+    # block the CLI brains get in _first_turn_context — one file, every brain.
+    rules = guardrails.block("chat")
+    if rules:
+        parts.append(rules)
     notes = capabilities.notes_block(selected)
     if notes:
         parts.append(notes)
@@ -496,6 +528,10 @@ def effort_for(model: str, stage: str) -> str:
 # how two parts of this file end up disagreeing about who is up.
 QUOTA_COOLDOWN = {"copilot": 6 * 3600, "claude_cli": 5 * 3600}
 
+#: A monthly ceiling does not lift in six hours. Long enough to stop the retry
+#: loop, short enough that a new billing period is noticed the same day.
+EXHAUSTED_COOLDOWN = 12 * 3600
+
 
 def credential_kv(name: str) -> str:
     return f"{name}_key_rejected"
@@ -546,7 +582,27 @@ def _key_fingerprint(name: str) -> str:
 #: as rejected takes it out of service until the key is changed.
 _REJECTED = re.compile(
     r"authentication_error|api key is invalid|invalid api key|invalid_api_key|"
-    r"incorrect api key|status_code: 401|unauthorized", re.I)
+    r"incorrect api key|status_code: 401|unauthorized|"
+    # A CLI's own login, not an API key. `claude` reports an expired OAuth
+    # session exactly like this, and it matched nothing: not a credential
+    # failure, not a transient limit, so it read as a generic crash. Nothing was
+    # remembered, so every task afterwards routed to the same brain and died in
+    # two seconds — and health said nothing, because health only knows about
+    # rejected API keys. It is the one failure here a person can fix instantly.
+    r"failed to authenticate|oauth session expired|session (?:has )?expired|"
+    r"could not be refreshed|please (?:re-?)?login|run:? claude login", re.I)
+
+#: A ceiling that does NOT come back in an hour. "You have exceeded your monthly
+#: quota" contains the word quota, so it matched the transient markers below and
+#: earned a six-hour cooldown — after which Asta retries, fails, and waits
+#: another six, indefinitely, while reporting nothing a person could act on.
+_EXHAUSTED = re.compile(r"monthly quota|monthly limit|plan limit|"
+                        r"quota (?:has been )?exceeded for the month", re.I)
+
+
+def plan_exhausted(msg: str) -> bool:
+    """True when a brain is out for the billing period, not for an hour."""
+    return bool(_EXHAUSTED.search(msg or ""))
 
 
 def credential_failure(msg: str) -> bool:
@@ -557,8 +613,62 @@ def quota_kv(name: str) -> str:
     return f"{name}_quota_down"
 
 
-def mark_quota_down(name: str) -> None:
+def mark_quota_down(name: str, msg: str = "") -> None:
+    """Remember a brain is over its ceiling, and WHICH ceiling.
+
+    An hourly rate limit and a monthly plan exhaustion are the same sentence to a
+    regex and completely different facts. Copilot's "you have exceeded your
+    monthly quota" earned a six-hour cooldown, after which Asta retried, failed,
+    and waited six more — indefinitely, with nothing said that a person could
+    act on.
+    """
     store.kv_set(quota_kv(name), str(time.time()))
+    # WHEN it lifts, when the brain said so. `limit_reset_at` already parses
+    # "resets 2:20pm" — it was used to schedule a paused task's auto-resume and
+    # nowhere else, so the flag that decides whether a brain may be USED fell
+    # back to a flat five-hour cooldown regardless.
+    #
+    # Measured on 10 September: the limit reset at 14:20 and said so in its own
+    # error, `claude -p "say OK"` answered fine at 15:10, and Asta still had
+    # claude_cli marked down until 18:06 — then told him BOTH brains were
+    # unusable and to go fix an "expired login" that was never expired.
+    until = limit_reset_at(msg) if msg else None
+    if until:
+        store.kv_set(f"{name}_quota_until", str(until))
+    else:
+        store.kv_del(f"{name}_quota_until")
+    if plan_exhausted(msg):
+        store.kv_set(f"{name}_quota_exhausted", "1")
+    elif msg:
+        store.kv_del(f"{name}_quota_exhausted")
+
+
+def quota_exhausted(name: str) -> bool:
+    """Out for the billing period, not for an hour — and still believed so.
+
+    The flag alone used to be the answer, and nothing ever cleared it: once the
+    cool-down was served the brain was tried again and worked, and health went on
+    reporting "out of quota for the billing period" regardless — on 12 September
+    the scorecard said Copilot was up while health said it was out. A flag whose
+    cool-down has passed is a question, not a fact; `mark_quota_ok` answers it.
+    """
+    if (store.kv_get(f"{name}_quota_exhausted") or "") != "1":
+        return False
+    # Still believed down only while its down-marker stands; `quota_down`
+    # removes that marker once the cool-down is served.
+    return store.kv_get(quota_kv(name)) is not None
+
+
+def mark_quota_ok(name: str) -> None:
+    """A call on `name` just succeeded: whatever limit was recorded is over.
+
+    The other half of `mark_quota_down`, which is why every stale-diagnosis bug
+    this summer had the same shape: a limit was written down when it happened
+    and never crossed out when it lifted.
+    """
+    for key in (quota_kv(name), f"{name}_quota_until", f"{name}_quota_exhausted"):
+        if store.kv_get(key) is not None:
+            store.kv_del(key)
 
 
 def quota_down(name: str) -> bool:
@@ -570,7 +680,20 @@ def quota_down(name: str) -> bool:
         since = float(raw)
     except (TypeError, ValueError):
         return False
-    if time.time() - since < QUOTA_COOLDOWN.get(name, 3600):
+    # A stated reset time beats a guessed cooldown, every time.
+    stated = store.kv_get(f"{name}_quota_until")
+    if stated:
+        try:
+            if time.time() < float(stated):
+                return True
+            store.kv_del(quota_kv(name))
+            store.kv_del(f"{name}_quota_until")
+            return False
+        except (TypeError, ValueError):
+            store.kv_del(f"{name}_quota_until")
+    cooldown = (EXHAUSTED_COOLDOWN if quota_exhausted(name)
+                else QUOTA_COOLDOWN.get(name, 3600))
+    if time.time() - since < cooldown:
         return True
     store.kv_del(quota_kv(name))     # cooldown served — let it prove itself again
     return False
@@ -1152,7 +1275,8 @@ async def join_meeting_by_name(which: str, speak: bool = False) -> str:
         result = await meetings.join_by_phrase(which, speak=speak)
     except RuntimeError as exc:
         return f"Didn't join — {exc}"
-    _asyncio.create_task(meetings.watch_and_report(which))
+    from . import daemon
+    daemon.once(f"meeting:{which}", meetings.watch_and_report(which))
     return result
 
 
@@ -1176,7 +1300,8 @@ async def join_meeting(join_url: str, title: str = "", speak: bool = False) -> s
     # The watcher outlives this turn on purpose — a meeting lasts far longer than
     # any reasonable turn, and holding the conversation open for it would make the
     # whole assistant unresponsive for an hour.
-    _asyncio.create_task(meetings.watch_and_report(title))
+    from . import daemon
+    daemon.once(f"meeting:{title}", meetings.watch_and_report(title))
     return (f"{result}. I'll stay on and hang up when it ends, then offer you "
             f"anything from it that's yours. I'm only listening — I won't speak.")
 
@@ -1533,12 +1658,18 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     `to` on Teams means a PERSON's 1:1 chat. Set to_group=True ONLY when Arun named a
     group or channel himself ("post it in the prod issue group") — never because a
     group happens to share a word with the name he used."""
-    from . import tasks, loop, writing
+    from . import capabilities, loop, policy, tasks, writing
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
+    # His standing rules, before anything is even drafted for him to approve.
+    # "Unless I ask" holds when the person is named in what he said this turn.
+    said = capabilities.said_this_turn().lower()
+    ruled = policy.check("send", to, asked=bool(to) and to.lower() in said)
+    if not ruled.ok:
+        return f"Not staged — {ruled.why}. Tell Arun, in one line, that this rule stopped it."
     # Links are repaired here rather than asked for in a prompt. A full stop
-    # welded to the end of a URL is what turned a PR link Vinish was meant to
+    # welded to the end of a URL is what turned a PR link Alex was meant to
     # click into either a 404 or plain text, and "remember not to do that" is
     # not a fix — every future draft would be one slip away from it again.
     # Applied BEFORE staging, so what Arun approves is exactly what goes out.
@@ -1561,6 +1692,42 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
         if overrun:
             staged += f"\n⚠ Length: {overrun} Consider redrafting shorter before he sees it."
     return staged
+
+
+def note_fact(subject: str, fact: str, kind: str = "fact", source: str = "") -> str:
+    """Record one durable fact about a person or system — who owns a service, which
+    repo does what, how someone likes to be asked, which env a topic lives in.
+
+    subject: the person or system ("booking-service", "the release channel").
+    kind: person | repo | service | env | ticket | fact. source: where you learned it
+    (a PR, a ticket, his message) — every fact carries its source and date, so a stale
+    one can be recognised. Facts about what a job names reach every later job's context."""
+    from . import people
+    fid = people.add(subject, fact, kind, source)
+    return f"Noted (fact {fid}) about {subject}."
+
+
+def facts_about(subject: str) -> str:
+    """What is recorded about a person or system, newest first, each with its source and date."""
+    from . import people
+    rows = people.facts(subject)
+    return "\n".join(people.line(r) for r in rows) or f"Nothing recorded about {subject}."
+
+
+def report_outcome(task_id: int, kind: str, summary: str = "",
+                   repos: list[str] | None = None, questions: list[str] | None = None,
+                   notes: list[str] | None = None) -> str:
+    """Say what state THIS task run left the work in — call it as the last thing a
+    background task does, never from a chat turn.
+
+    kind: plan_ready (a plan is written and waiting for Arun) | needs_input (you need
+    an answer before going further — put the questions in `questions`) | escalate
+    (bigger than this pipeline allows — why, in `summary`) | done (implemented and
+    checked) | blocked (cannot continue — why) | failed. On a plan, list EVERY repo the
+    change touches in `repos`, so each gets a checkout before the first edit. `notes`
+    are decisions or facts worth keeping if the run is restarted."""
+    from .graph import outcome
+    return outcome.record(int(task_id), kind, summary, repos, questions, notes)
 
 
 def delegate_task(title: str, prompt: str, kind: str = "analysis",
@@ -1590,9 +1757,9 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
                 "done, or say so and I'll propose it properly.")
     # He asked for a person, not for code. Spawning here is a SUBSTITUTION: the act
     # he wanted does not happen, a different and irreversible one does, and he finds
-    # out afterwards. This is the 27 August failure — "call Vinish and discuss the
+    # out afterwards. This is the 27 August failure — "call Alex and discuss the
     # comments" answered with seven unreviewed edits heading for a branch.
-    instead = consent.substitution(capabilities.TURN_TEXT.get(), kind)
+    instead = consent.substitution(capabilities.said_this_turn(), kind)
     if instead:
         return instead
     # A question is not a request to go do work. If this turn was opened by a
@@ -1696,13 +1863,116 @@ def task_result(task_id: int) -> str:
 
 
 async def approve_task(task_id: int) -> str:
-    """Approve a teams_draft task — sends the drafted message to its Teams chat.
-    Only call when Arun explicitly approves."""
+    """Approve a task EXACTLY as it stands — a teams_draft is sent to its Teams
+    chat, a code task at its plan gate is implemented as planned.
+
+    Only when Arun approves with NO qualification. The moment he adds a
+    condition — "approved but leave the PDF side", "yes, dto only", "go, skip
+    step 3" — use `reply_to_task` and pass his words: this tool cannot carry
+    them, and approving would implement the plan he just asked you to change.
+    """
     from . import tasks
     try:
         return await tasks.approve(task_id)
     except ValueError as exc:
         return str(exc)
+
+
+async def reply_to_task(task_id: int, text: str) -> str:
+    """Answer a code task waiting at a gate, in Arun's own words.
+
+    This is the door for everything `approve_task` cannot carry: an approval
+    with conditions, a scope cut, a correction to the plan, or the answer to a
+    question the pipeline asked. Pass what he actually said — the pipeline reads
+    it directly, so paraphrasing loses the detail that made him reply instead of
+    just approving.
+
+    Starting the text with "PLAN APPROVED" means implement with these changes;
+    anything else sends it back to re-plan. Never approve and then send the
+    feedback separately: the approval is acted on immediately, so the amendment
+    would arrive after the thing it was meant to change was already built.
+    """
+    from . import tasks
+    try:
+        return tasks.reply(task_id, text)
+    except ValueError as exc:
+        return str(exc)
+
+
+def track_until_done(goal: str, urls: list[str], person: str = "",
+                     when: str = "") -> str:
+    """Keep following something through until it is finished — the tool for
+    "track this with X and tell me if it isn't done by <deadline>".
+
+    `urls` are PR links (any PR, whoever raised them). `person` is who is on the
+    hook, by the name his Teams chat is under. `when` is the deadline as a local
+    ISO timestamp — "2026-09-08T18:00" for tomorrow EOD — same as set_reminder.
+
+    Asta then polls those PRs on its own, tells him what is BLOCKING each one
+    (CI red, no review, changes requested) before the deadline rather than
+    after, and when nothing has moved for hours it drafts a chase to `person`
+    and asks him to send it. It never sends anything by itself.
+
+    Use it whenever he asks you to chase, track, follow up or "make sure it
+    lands" — a chat answer forgets the moment the turn ends.
+    """
+    from . import followup, reminders
+    due = 0.0
+    if when:
+        # A deadline Asta could not read is worse than none: it would track
+        # silently and never warn. Say so instead of guessing a time.
+        try:
+            due = reminders.parse_due(when)
+        except (ValueError, TypeError):
+            return (f"I can't read '{when}' as a deadline — give it as a local "
+                    f"ISO timestamp like 2026-09-08T18:00 and I'll track it.")
+    row = followup.track(goal, urls, person, due)
+    due_txt = (" · due " + _dt.datetime.fromtimestamp(row["due_at"]).strftime("%a %-I%p")
+               if row.get("due_at") else "")
+    who = f" · chasing {row['person']}" if row.get("person") else ""
+    return (f"Tracking #{row['id']}: {row['goal']} — {len(row['urls'])} PR(s)"
+            f"{due_txt}{who}. I'll report blockers before the deadline.")
+
+
+def stop_investigating(kind: str) -> str:
+    """Stop auto-investigating a KIND of incoming ask, for good.
+
+    kind: incident | pr_review | debug | ask.
+
+    Use it the moment Arun says to leave something alone — "don't look into
+    incidents", "stop analysing PR feedback". It is a STANDING instruction: it
+    is written to the database, so it is still true tomorrow. Saying it back to
+    him without recording it is how he ended up repeating himself while the
+    investigations carried on.
+    """
+    from . import responder
+    return responder.mute((kind or "").strip().lower())
+
+
+def resume_investigating(kind: str) -> str:
+    """Undo `stop_investigating` for one kind of ask."""
+    from . import responder
+    return responder.unmute((kind or "").strip().lower())
+
+
+def list_tracked() -> str:
+    """What Asta is still following through on."""
+    from . import followup
+    rows = followup.list_open()
+    if not rows:
+        return "Nothing being tracked."
+    out = []
+    for r in rows:
+        due = (_dt.datetime.fromtimestamp(r["due_at"]).strftime(" · due %a %-I%p")
+               if r.get("due_at") else "")
+        out.append(f"#{r['id']} {r['goal']} — {len(r['urls'])} PR(s){due}")
+    return "\n".join(out)
+
+
+def stop_tracking(followup_id: int, why: str = "") -> str:
+    """Stop following something through — it landed another way, or he dropped it."""
+    from . import followup
+    return followup.stop(followup_id, why)
 
 
 async def ship_task(task_id: int) -> str:
@@ -1731,7 +2001,7 @@ async def reject_task(task_id: int, why: str = "") -> str:
 
 
 async def teams_read_chat(chat: str, limit: int = 15) -> str:
-    """Read the last messages of a Teams chat by person/group name (e.g. 'Vinish').
+    """Read the last messages of a Teams chat by person/group name (e.g. 'Alex').
     Uses Arun's logged-in Teams web session — deterministic browser automation, ~10-20s."""
     from . import teams_bridge
     if not teams_bridge.enabled():
@@ -1774,8 +2044,8 @@ def teams_search(query: str, limit: int = 12) -> str:
 
 
 async def teams_history(chat: str, when: str = "last night", limit: int = 60) -> str:
-    """Read a Teams chat for a TIME WINDOW — 'what did Vinish say last night',
-    'anything from Suraj yesterday', 'messages from the triage group this morning'.
+    """Read a Teams chat for a TIME WINDOW — 'what did Alex say last night',
+    'anything from Casey yesterday', 'messages from the triage group this morning'.
     `when` is plain English: last night, yesterday, this morning, today, last week,
     'last 3 hours', or 'while I was away'. Use this instead of teams_read_chat
     whenever the question has a WHEN in it; teams_read_chat only sees what is
@@ -1821,7 +2091,7 @@ async def teams_history(chat: str, when: str = "last night", limit: int = 60) ->
 
 async def teams_activity(limit: int = 25) -> str:
     """Read Arun's Teams Activity feed — who mentioned him, replies, missed calls, invites.
-    Use whenever he asks anything like 'any messages for me', 'anything from Vinish',
+    Use whenever he asks anything like 'any messages for me', 'anything from Alex',
     'what did I miss', 'any mentions'. Reads Teams directly (not macOS notifications),
     so muted chats and silenced notifications are still covered. Takes ~15-25s."""
     from . import teams_bridge
@@ -2000,7 +2270,7 @@ async def draft_teams_reply(chat: str, question: str = "") -> str:
 async def teams_send_message(chat: str, text: str, to_group: bool = False) -> str:
     """Send a Teams message as Arun, to a PERSON's 1:1 chat.
 
-    "ping Vinish" ALWAYS means Vinish's personal one-to-one chat — never a group or
+    "ping Alex" ALWAYS means Alex's personal one-to-one chat — never a group or
     channel that happens to have his name in it. Only set to_group=True when Arun
     named the group/channel himself. Only send when he explicitly asked; confirm the
     wording first unless he dictated it. Returns the chat the message landed in."""
@@ -2084,7 +2354,7 @@ async def teams_call(who: str, video: bool = False) -> str:
     if not teams_bridge.enabled():
         return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
     kind = "video call" if video else "call"
-    if consent.asked_to_call(capabilities.TURN_TEXT.get()):
+    if consent.asked_to_call(capabilities.said_this_turn()):
         # The same recorded call an approval would run — one execution path, so a
         # dialled call and an approved call cannot drift apart.
         try:
@@ -2121,7 +2391,8 @@ async def discuss_in_call(who: str, topic: str, workspace: str = "") -> str:
         with contextlib.suppress(Exception):
             await notify.notify(f"📞 {outcome}", "calls", urgency="direct")
 
-    _asyncio.create_task(_go())
+    from . import daemon
+    daemon.once(f"call:{who}", _go())
     return (f"Calling {who} now to talk through {topic} — I'll listen and answer as "
             f"we go, and send you what was said when it ends. I won't commit you to "
             f"anything.")

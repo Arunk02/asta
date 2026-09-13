@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -34,7 +35,11 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, health, jira, learn, llm_meter, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, refresh, reminders, relevance, resume, quiet, router, quality, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, followup, frontdesk, health, instructions, jira, learn, llm_meter, logsetup, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, policy, refresh, reminders, relevance, resume, quiet, router, quality, scorecard, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
+
+from .workworld import nightly as workworld_nightly
+
+logsetup.apply()
 
 UI_DIR = ROOT / "ui"
 
@@ -166,10 +171,24 @@ async def startup() -> None:
     daemon.start("health", health.loop)
     daemon.start("ci_watch", ci_watch.loop)
     daemon.start("resume_paused", tasks.resume_paused_loop)
+    # Whatever was mid-flight when this process's predecessor stopped. Runs once,
+    # here, because a fresh process is the only place that can tell an
+    # interrupted task from a running one.
+    daemon.once("recover-orphans", tasks.recover_orphans())
+    # Mutes he gave before standing rules existed, shown and enforced as rules.
+    with contextlib.suppress(Exception):
+        policy.adopt_legacy()
     # Follows shipped work until the PR merges or closes. Without it a task
     # ended at "PR raised" and everything after — CI, review, the merge — landed
     # with nothing that knew which task it belonged to.
     daemon.start("pr_watch", tasks.pr_watch_loop)
+    daemon.start("followup", followup.loop)
+    # Quiet: snapshots yesterday's card after midnight, pushes nothing.
+    daemon.start("scorecard", scorecard.loop)
+    # The live test bench, at night, on quota that would otherwise expire. Off
+    # until ASTA_BENCH_NIGHTLY=1; the loop itself decides whether tonight
+    # qualifies (window, budget, and whether he was working).
+    daemon.start("bench", workworld_nightly.loop)
     daemon.start("held_notify", notify.held_watch_loop)
     daemon.start("attention_sweep", attention.sweep_loop)
     daemon.start("delivery_chase", delivery.chase_loop)
@@ -215,6 +234,7 @@ async def _probe_mcp() -> None:
     """Drop MCP servers that fail their handshake so one dead server can't stall chat."""
     global MCP_TOOLSETS
     healthy = []
+    failed: dict[str, str] = {}
     for prefixed in MCP_TOOLSETS:
         toolset = prefixed
         while not hasattr(toolset, "list_tools") and hasattr(toolset, "wrapped"):
@@ -229,10 +249,32 @@ async def _probe_mcp() -> None:
             if entry:
                 entry["reason"] = f"{len(tools)} tools" + (" (deferred)" if deferred else "")
         except Exception as exc:
+            why = _handshake_reason(exc)
+            failed[toolset.id] = why
             if entry:
                 entry["enabled"] = False
-                entry["reason"] = f"handshake failed: {str(exc)[:120]}"
+                entry["reason"] = f"handshake failed: {why}"
     MCP_TOOLSETS = healthy
+    # Where health can see it. The reason used to live only in MCP_STATUS, in
+    # this process's memory, and read "handshake failed: " — a TimeoutError has
+    # no message — so a dead Atlassian login was invisible from every surface.
+    store.kv_set("mcp_handshake_failed", json.dumps(failed))
+
+
+def _handshake_reason(exc: BaseException) -> str:
+    """The most specific non-empty reason an MCP handshake failed.
+
+    An ExceptionGroup (anyio's task groups raise them) hides the real error one
+    level down, and a TimeoutError stringifies to "" — the two ways this used to
+    report nothing at all.
+    """
+    inner = exc
+    while isinstance(inner, BaseExceptionGroup) and inner.exceptions:
+        inner = inner.exceptions[0]
+    text = str(inner).strip()
+    if isinstance(inner, TimeoutError) and not text:
+        text = "no answer within 20s"
+    return f"{type(inner).__name__}: {text}"[:160] if text else type(inner).__name__
 
 
 async def _digest_loop() -> None:
@@ -287,6 +329,41 @@ def rotate_sessions(conv_id: str) -> list[str]:
         if (store.kv_get(key) or "").strip():
             store.kv_set(key, "")
             dropped.append(key.split(":")[0])
+    return dropped
+
+
+def session_max_tokens() -> int:
+    """Context, in tokens of ONE model call, past which a chat session is retired.
+    0 disables. Default 100k: a Claude session re-reads its whole context on every
+    call, so the first word waits on the size of the session, not the question."""
+    try:
+        return int(os.environ.get("ASTA_SESSION_MAX_TOKENS", "100000") or 0)
+    except ValueError:
+        return 100000
+
+
+def retire_session_for_size(conv: dict, context: int) -> list[str]:
+    """Drop this conversation's CLI sessions because ONE call grew past the cap.
+
+    The idle digest (`_digest_loop`) only ever retires a thread that has been
+    quiet for thirty minutes, and the WhatsApp conversation is never quiet for
+    thirty minutes — so it was digested once, in August, and its session then
+    grew unchecked: 232k tokens per call by 11 September, a 48-second wait for
+    the first word, and most of the "session limit" failures, since every call
+    re-read the lot against the five-hour window.
+
+    Two things, in this order. Synchronously: the session keys go, so the very
+    next message starts fresh, and a flag asks `_switch_recap` to hand that
+    fresh session the last few messages — the thread continues, it does not
+    restart. In the background: the digest, so what mattered lands in memory
+    the same way the idle path has always done it.
+    """
+    cid = conv["id"]
+    dropped = rotate_sessions(cid)
+    store.kv_set(f"session_recap:{cid}", "1")
+    store.record_outcome("session", "rotated", subject=cid,
+                         detail=f"context={context} dropped={','.join(dropped) or 'none'}")
+    daemon.once(f"digest:{cid}", asyncio.to_thread(memory.write_episode, conv))
     return dropped
 
 
@@ -448,6 +525,29 @@ async def api_invoke(body: dict):
             result = await result
     except TypeError as exc:
         raise HTTPException(400, f"bad arguments for {name}: {exc}")
+    except ValueError as exc:
+        # A capability refusing its arguments is not a server fault — it is an
+        # answer, and the brain on the other end can act on it. Unhandled, it
+        # became a 500 and an ASGI traceback, and the model saw a dead tool
+        # rather than "Unknown workspace 'email'. Registered: booking".
+        #
+        # Newly reachable because task runs now carry Asta's MCP server: before
+        # that, a task had no capabilities to mis-call. The first one fired
+        # eleven minutes after the restart that shipped it.
+        raise HTTPException(400, f"{name}: {exc}")
+    except HTTPException:
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        # Anything else a capability throws — a Playwright element gone from the
+        # DOM, an HTTP error from Jira — is a tool that failed, and the brain on
+        # the other end needs to hear WHICH tool and WHY in one line. Unhandled it
+        # was a bare 500 with an ASGI traceback in the log (43 of them in the last
+        # 20k lines) and "failed (500): Internal Server Error" in the model's
+        # context. Recorded, so the scorecard counts failing tools.
+        why = f"{type(exc).__name__}: {exc}".strip()[:300]
+        store.record_outcome("capability", "failed", subject=name, detail=why)
+        logging.getLogger("asta.invoke").warning("capability %s failed — %s", name, why)
+        raise HTTPException(502, f"{name} failed — {why}")
     finally:
         if token is not None:
             tasks.unbind_conversation(token)
@@ -1049,6 +1149,40 @@ async def api_approve_task(task_id: int):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/responder/mute", dependencies=[Depends(require_auth)])
+async def api_responder_mute(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": agent_mod.stop_investigating(b.get("kind", ""))}
+
+
+@app.post("/api/responder/unmute", dependencies=[Depends(require_auth)])
+async def api_responder_unmute(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": agent_mod.resume_investigating(b.get("kind", ""))}
+
+
+@app.get("/api/followups", dependencies=[Depends(require_auth)])
+def api_followups():
+    return {"open": followup.list_open()}
+
+
+@app.post("/api/followups", dependencies=[Depends(require_auth)])
+async def api_followup_create(request: Request):
+    b = await request.json()
+    try:
+        return {"ok": True, "detail": agent_mod.track_until_done(
+            b.get("goal", ""), b.get("urls") or [],
+            b.get("person", ""), b.get("when", ""))}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/followups/{followup_id}/stop", dependencies=[Depends(require_auth)])
+async def api_followup_stop(followup_id: int, request: Request):
+    b = await request.json() if await request.body() else {}
+    return {"ok": True, "detail": followup.stop(followup_id, (b or {}).get("why", ""))}
+
+
 @app.post("/api/tasks/{task_id}/reply", dependencies=[Depends(require_auth)])
 async def api_reply_task(task_id: int, request: Request):
     b = await request.json()
@@ -1056,6 +1190,48 @@ async def api_reply_task(task_id: int, request: Request):
         raise HTTPException(400, "text is required")
     try:
         return {"ok": True, "detail": tasks.reply(task_id, b["text"])}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/facts", dependencies=[Depends(require_auth)])
+async def api_note_fact(request: Request):
+    b = await request.json()
+    try:
+        return {"ok": True, "detail": agent_mod.note_fact(b.get("subject", ""), b.get("fact", ""),
+                                                          b.get("kind", "fact"), b.get("source", ""))}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/facts", dependencies=[Depends(require_auth)])
+def api_facts(subject: str = ""):
+    from . import people
+    return {"facts": people.facts(subject)}
+
+
+@app.get("/api/rules", dependencies=[Depends(require_auth)])
+def api_rules():
+    return {"rules": [r.__dict__ for r in policy.rules()], "summary": policy.summary()}
+
+
+@app.get("/api/tasks/{task_id}/events", dependencies=[Depends(require_auth)])
+def api_task_events(task_id: int):
+    """One task's timeline: status changes, route decisions, gate answers, in order."""
+    if not store.get_task(task_id):
+        raise HTTPException(404, f"no task #{task_id}")
+    return {"task_id": task_id, "events": store.task_events(task_id, 200)}
+
+
+@app.post("/api/tasks/{task_id}/outcome", dependencies=[Depends(require_auth)])
+async def api_task_outcome(task_id: int, request: Request):
+    """A task run saying what state it left the work in (see app/graph/outcome.py)."""
+    from .graph import outcome
+    b = await request.json()
+    try:
+        return {"ok": True, "detail": outcome.record(
+            task_id, b.get("kind", ""), b.get("summary", ""), b.get("repos"),
+            b.get("questions"), b.get("notes"))}
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1173,6 +1349,21 @@ async def api_review(request: Request):
                                                 b.get("repo", ""))}
 
 
+@app.get("/api/scorecard", dependencies=[Depends(require_auth)])
+def api_scorecard(days: int = scorecard.WINDOW_DAYS, history: int = 30):
+    """Is Asta getting better — the plan's scorecard, with targets and a daily trend."""
+    card = scorecard.compute(days=max(1, min(days, 60)))
+    card["history"] = scorecard.history(max(0, min(history, 90)))
+    return card
+
+
+@app.get("/scorecard")
+def scorecard_page():
+    """The page shell. It reads /api/scorecard with the UI's own saved token, so
+    the numbers sit behind the same auth as everything else."""
+    return FileResponse(UI_DIR / "scorecard.html", headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/quality", dependencies=[Depends(require_auth)])
 def api_quality(days: int = 7):
     return quality.summary(days)
@@ -1248,8 +1439,37 @@ async def api_wa_incoming(request: Request):
         done, _pending = await asyncio.wait({job}, timeout=WA_INBAND_TIMEOUT)
         if not done:
             sink.handoff()
-            return {"reply": "⏳ on it — I'll send the answer here in a moment."}
+            return {"reply": _working_note(conv["id"], text)}
     return {"reply": (sink.text() or "")[:3500]}
+
+
+def _working_note(cid: str, text: str) -> str:
+    """What it is DOING, not merely that it is doing something.
+
+    Every turn that outran the WhatsApp deadline answered with the same sentence
+    — "⏳ on it — I'll send the answer here in a moment" — whatever he had asked
+    for. Ten identical acks in a row say nothing about whether it understood him,
+    and that ack is the one moment he could cheaply correct it if it had not:
+    "when ever i ask to work on someting, on it will update it samething same
+    diagloue and it is not proactive here".
+
+    Everything here is already known at this instant — the task it just spawned,
+    or the shape of the ask — so this costs nothing and can be checked against
+    what actually happens next.
+    """
+    live = tasks.live_tasks_for(cid)
+    if live:
+        row = store.get_task(live[-1]) or {}
+        title = (row.get("title") or "").strip()
+        if title:
+            return f"⏳ #{live[-1]} — {title[:100]}. I'll report back here."
+    from . import responder
+    kind = responder.what_it_asks(text)
+    doing = {"incident": "Digging into the incident",
+             "pr_review": "Going through the PR",
+             "debug": "Debugging that",
+             "ask": "Looking that up"}.get(kind, "Working on it")
+    return f"⏳ {doing} — I'll send the answer here."
 
 
 async def _telegram_turn(text: str) -> str:
@@ -1425,11 +1645,26 @@ class PushSink:
         self.conv_id = conv_id
         self.alive = True
         self._buf: list[str] = []
+        self._narration: str = ""
 
     async def send(self, payload: dict) -> None:
         typ = payload.get("type")
         if typ == "delta":
             self._buf.append(payload.get("text", ""))
+        elif typ == "tool" and payload.get("status") == "start":
+            # Text said BEFORE a tool call is the model thinking out loud — "let
+            # me check what's really there", "fixing it now", "now retrying
+            # ship". The socket channel wants that: it is a live transcript. A
+            # phone does not. Buffering every block and pushing the lot is how a
+            # one-line answer arrived as four hundred words of debugging diary.
+            #
+            # Kept as a fallback rather than discarded: a turn whose last act is
+            # a tool call has nothing after it, and silence is worse than
+            # narration.
+            said = "".join(self._buf).strip()
+            if said:
+                self._narration = said
+            self._buf.clear()
         elif typ == "note":
             with contextlib.suppress(Exception):
                 await self._send(payload.get("text", ""))
@@ -1437,8 +1672,9 @@ class PushSink:
             with contextlib.suppress(Exception):
                 await self._send(f"⚠️ {payload.get('message', 'error')}")
         elif typ == "done":
-            text = "".join(self._buf).strip()
+            text = "".join(self._buf).strip() or self._narration
             self._buf.clear()
+            self._narration = ""
             if text:
                 with contextlib.suppress(Exception):
                     await self._send(text[:4000])
@@ -1526,6 +1762,9 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
         if _is_quota_error(exc):
             resume.save(conv["id"], user_text, via, "".join(parts), channel)
         raise
+    # It answered, so whatever limit was recorded for it is over — say so, or
+    # health goes on reporting a ceiling that lifted hours ago.
+    agent_mod.mark_quota_ok(via)
     await out.send({"type": "tool", "status": "done", "name": tool_name})
     # A CLI that reports usage only after the turn (Copilot's session snapshot,
     # vs Claude's live on_usage stream) exposes last_turn_usage. Same
@@ -1543,11 +1782,16 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
                     spent.input, spent.output, spent.cache_read,
                     0, len(user_text), [tool_name],
                     cache_write_tokens=spent.cache_write, cost_usd=spent.cost_usd,
-                    measured=spent.measured)
+                    measured=spent.measured, context_tokens=spent.context)
     store.add_usage(conv["id"], via, spent.input, spent.output,
                     spent.cache_read, spent.cache_write)
     store.add_ui_message(conv["id"], "assistant", reply,
                          {"tools": [tool_name], "via": via, "channel": channel})
+    # Retire a session that has grown past the cap NOW, before the next message
+    # can resume it — the idle digest never fires on a thread that never idles.
+    cap = session_max_tokens()
+    if cap and spent.context > cap:
+        retire_session_for_size(conv, spent.context)
     await out.send({"type": "done", "tools": [tool_name]})
 
 
@@ -1731,10 +1975,8 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
                     "args": str(event.part.args)[:300],
                 })
             elif isinstance(event, FunctionToolResultEvent):
-                await out.send({
-                    "type": "tool", "status": "done",
-                    "name": getattr(event.result, "tool_name", "") or "",
-                })
+                await out.send({"type": "tool", "status": "done",
+                                "name": _finished_tool_name(event)})
             elif isinstance(event, AgentRunResultEvent):
                 result = event.result
                 usage = result.usage
@@ -1853,6 +2095,7 @@ def _workspace_repos(workspace: str) -> tuple[str, ...]:
 
 
 def _start_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task:
+    frontdesk.record("brain", channel)
     job = asyncio.create_task(_conducted_turn(conv, user_text, sink, channel))
     _inflight[conv["id"]] = job
     job.add_done_callback(lambda j: _clear_inflight(j, conv["id"]))
@@ -1890,6 +2133,7 @@ def _start_side_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.
         return None
     token = capabilities.READ_ONLY_TURN.set(True)
     try:
+        frontdesk.record("brain", f"{channel} side")
         job = asyncio.create_task(_conducted_turn(conv, user_text, sink, channel))
     finally:
         # The task kept the read-only context; this turn's caller must not.
@@ -1935,6 +2179,22 @@ async def _conduct(conv0: dict, first_text: str, sink, channel: str) -> None:
     if he left nothing does the loop auto-continue, bounded by ASTA_LOOP_MAX_STEPS."""
     cid = conv0["id"]
     text = first_text
+    # "What are you doing?" must never queue behind the doing. The local status
+    # answer already existed, but it lived INSIDE the turn, which is inside the
+    # per-conversation lock — so the one question that is only ever asked while
+    # something is running was the one question that could not be answered until
+    # it stopped. He asked at 22:45, four minutes into a live turn, and got the
+    # reply at 22:48 when the work finished: by then it answered itself.
+    #
+    # It costs no brain and no session, so it does not need the lock at all.
+    if activity.is_status_ask(text):
+        store.add_ui_message(cid, "user", text, {"channel": channel})
+        reply = await asyncio.to_thread(activity.summary)
+        await sink.send({"type": "delta", "text": reply})
+        store.add_ui_message(cid, "assistant", reply,
+                             {"via": "local-status", "channel": channel})
+        await sink.send({"type": "done", "tools": []})
+        return
     loop.reset_steps(cid)                        # the step budget is per user message
     while True:
         conv = store.get_conversation(cid) or conv0
@@ -2022,8 +2282,8 @@ def _recipient_warning(intent: dict) -> str:
     """Say when the name he is approving is not the thread he actually talks in.
 
     What he approves is the NAME the model typed, and Teams opens whatever that
-    name resolves to. "Divya" resolves to a real, EMPTY 1:1 — while the person he
-    actually talks to is "Palikala Divya Maheswari". The message would have gone
+    name resolves to. "Blake" resolves to a real, EMPTY 1:1 — while the person he
+    actually talks to is "Stone Blake Rivers". The message would have gone
     to the wrong person and the approval would have looked completely normal.
 
     Answered from threads Asta has already read, so it costs nothing and cannot
@@ -2054,7 +2314,7 @@ async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> No
     persisted as an assistant turn so it survives in history, and the loop waits:
     his next message is routed as the yes/no (see _dispatch)."""
     # A group is named as a group. The difference between a 1:1 and a fourteen-person
-    # thread is the whole risk of the question being asked, and "to *Vinish*" and
+    # thread is the whole risk of the question being asked, and "to *Alex*" and
     # "to *prod issue - triaging*" look identical when skimmed on a phone.
     where = "👥 GROUP " if intent.get("to_group") else ""
     to = f" to {where}*{intent['to']}*" if intent.get("to") else ""
@@ -2127,6 +2387,64 @@ def _offer_prompt(o, where: str = "") -> str:
 # A bare yes to "can I send this?" — anything else is treated as change-requests.
 _AFFIRM = re.compile(r"^\s*(send( it)?|yes|yep|yeah|y|ok(ay)?( send| do it)?|go( ahead)?|"
                      r"confirm|do it|👍|✅)\s*[.!]*\s*$", re.I)
+
+#: The same words spelled out, for the near-miss check below. Kept beside the
+#: regex and pinned to it by a test, because two lists of "what yes looks like"
+#: that drift apart is how a confirmation stops being recognised.
+_AFFIRM_WORDS = ("send", "send it", "yes", "yep", "yeah", "ok", "okay",
+                 "ok send", "ok do it", "go", "go ahead", "confirm", "do it")
+
+
+def _slip_of(word: str, target: str) -> bool:
+    """Is `word` an obvious mistype of `target` — a doubled key, or a swap?
+
+    Narrow on purpose. Only two shapes count: a character duplicated next to
+    itself ("sendd", "yess", "okk") and two neighbours swapped ("sedn"). Neither
+    can land on a different real word.
+
+    Substitution and deletion are excluded, and that exclusion is the whole
+    safety of this. They are exactly the edits that collide: "sent" is one
+    substitution from "send" and means the opposite; "n" is one from "y"; "no"
+    is one from "go". A confirmation releases an irreversible outward act, so
+    the tolerance has to be narrower than the mistake it forgives.
+    """
+    if len(target) < 2 or not word or word == target:
+        return False
+    if len(word) == len(target) + 1:
+        for i in range(len(word)):
+            if word[:i] + word[i + 1:] != target:
+                continue
+            if (i and word[i] == word[i - 1]) or (i + 1 < len(word) and word[i] == word[i + 1]):
+                return True
+    if len(word) == len(target):
+        diff = [i for i in range(len(word)) if word[i] != target[i]]
+        if len(diff) == 2 and diff[1] == diff[0] + 1:
+            a, b = diff
+            return word[a] == target[b] and word[b] == target[a]
+    return False
+
+
+def _affirmation(text: str) -> tuple[bool, str]:
+    """(approved, what it was read as) — "" when it matched exactly.
+
+    He replied “sendd” to a staged draft on 2026-09-07. It missed the regex by
+    one key, so it was handed to the brain as revision feedback; the brain could
+    make nothing of it and re-staged the identical draft. The confirmation he
+    had already given cost him two more messages, a turn, and the time.
+
+    A slip is reported rather than absorbed: the note names what it was read as,
+    so a wrong reading is visible in the same breath as the send.
+    """
+    raw = (text or "").strip()
+    if _AFFIRM.match(raw):
+        return True, ""
+    word = raw.rstrip(".!").strip().lower()
+    if not word or _DECLINE.match(word):
+        return False, ""
+    for target in _AFFIRM_WORDS:
+        if _slip_of(word, target):
+            return True, target
+    return False, ""
 
 
 def _mechanical_send(staged: dict) -> dict | None:
@@ -2277,8 +2595,18 @@ def _pending_summary(cid: str) -> str:
         lines.append(f"{len(lines) + 1}. ❓ {q['text'][:100]}")
     live = tasks.live_tasks_for(cid)
     for tid in live:
-        title = (store.get_task(tid) or {}).get("title", "")[:45]
-        lines.append(f"{len(lines) + 1}. ⚙️ task #{tid} running — {title}")
+        row = store.get_task(tid) or {}
+        state = ("waiting for you" if row.get("status") == "awaiting_approval"
+                 else (row.get("status") or "running").replace("_", " "))
+        lines.append(f"{len(lines) + 1}. ⚙️ task #{tid} {state} — {row.get('title', '')[:45]}")
+    # Gates from anywhere else — a plan raised from the web UI waits on him just
+    # the same, and this list is the only place he asks where things stand.
+    for t in store.list_tasks(limit=100):
+        if t["status"] != "awaiting_approval" or t["id"] in live:
+            continue
+        gate = store.kv_get(f"task_gate:{t['id']}") or (
+            "draft" if t["kind"] == "teams_draft" else "plan")
+        lines.append(f"{len(lines) + 1}. 📋 #{t['id']} {t['title'][:45]} — {gate}")
     if not lines:
         return "Nothing is waiting on you."
     return ("Waiting on you (a bare “yes” answers the first one):\n"
@@ -2438,6 +2766,9 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     starting one (status answer, augment folded in, task steered) — so a
     request/response channel knows whether there's anything to wait for."""
     cid = conv["id"]
+    # When he last spoke to Asta. Read by the nightly bench, which must never
+    # compete with him for a subscription window he is in the middle of using.
+    store.kv_set("last_user_message_at", str(time.time()))
 
     # "new chat" on a phone channel — the clean slate the web UI gets from its
     # button. Answered here so it never reaches a brain and costs a turn.
@@ -2478,7 +2809,8 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     if _mrt or _mts:
         _tid = int((_mrt or _mts).group(1))
         _rt = store.get_task(_tid)
-        if _rt and _rt["kind"] == "code" and _rt["status"] in ("paused", "failed"):
+        # Any kind: a paused analysis or draft now resumes too (by running again).
+        if _rt and _rt["status"] in ("paused", "failed"):
             try:
                 _detail = await tasks.resume_task(_tid, _mts.group(2).strip() if _mts else "")
             except ValueError as exc:
@@ -2507,6 +2839,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             await sink.send({"type": "done", "tools": []})
         return None
     if _PENDING_ASK.match(user_text or ""):
+        frontdesk.record("state", "pending")
         await sink.send({"type": "note", "text": _pending_summary(cid)})
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
@@ -2542,9 +2875,27 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # the answer. A bare yes sends it (via the model's real send tool, so the send
     # itself still runs through that tool's own rules); anything else is revision.
     staged = loop.awaiting(cid)
+    # An unmistakable command or a question the task table answers is NOT an
+    # answer to the draft — "drop rule 2" was once read as feedback on one. It
+    # goes to its own handler below, and the draft keeps waiting for its yes.
+    if staged and (_TASK_CMD.match(user_text or "")
+                   or (frontdesk.enabled() and frontdesk.answer_from_state(user_text))):
+        staged = None
+    if staged and _DECLINE.match(user_text or ""):
+        # A plain no drops the draft. Handing "no" to a brain as revision feedback
+        # got the draft re-staged, and his next message eaten as feedback on it.
+        loop.clear_awaiting(cid)
+        await sink.send({"type": "note", "text": "👍 Dropped the draft — nothing was sent."})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
     if staged and (user_text or "").strip():
         loop.clear_awaiting(cid)
-        if _AFFIRM.match(user_text):
+        approved, read_as = _affirmation(user_text)
+        if approved:
+            if read_as:
+                await sink.send({"type": "note",
+                                 "text": f"↩︎ Read “{user_text.strip()}” as “{read_as}”."})
             # A Teams send runs as a recorded call, not as a prompt asking a brain
             # to perform the send it just described. Handing it back to the model
             # is what made "send it" unreliable: it could reword the message,
@@ -2571,7 +2922,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # his phone and the answer usually comes back the same way.
     open_offer = offers.pending()
     if open_offer and (user_text or "").strip():
-        if _AFFIRM.match(user_text):
+        if _affirmation(user_text)[0]:
             offers.accept()
             # An outward write was staged with its exact arguments. Run THAT,
             # rather than asking a brain to perform the thing it described — the
@@ -2628,13 +2979,61 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             await sink.send({"type": "done", "tools": []})
         return None
 
+    # Approve / reject / stop, answered HERE from the task table.
+    #
+    # These used to go to a brain, which then called the approve tool. On the
+    # evening of 11 September both brains were out of quota — so the approve
+    # button on his phone did nothing at all, and the plan it was approving sat
+    # waiting for a subscription window to reopen. A decision he has already
+    # made must not need a model to be awake, cost a turn, or risk being
+    # paraphrased into a different task.
+    cmd = _TASK_CMD.match(user_text or "")
+    if cmd:
+        # "approved" is not "approv": normalise, do not strip.
+        verb = _COMMAND_VERB[cmd.group(1).lower()]
+        wanted = int(cmd.group(2)) if cmd.group(2) else None
+        note = await _run_task_command(verb, wanted, cid)
+        if note:
+            frontdesk.record("command", verb)
+            await sink.send({"type": "note", "text": note})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+        # Names nothing actionable — fall through and treat it as an ordinary
+        # message rather than answering "there is nothing to approve".
+
+    # A question the task table answers is answered from it — status, what's
+    # pending, "status of 117", open PRs. No brain, no tokens, a second or less.
+    if frontdesk.enabled():
+        answer = frontdesk.answer_from_state(user_text)
+        if answer:
+            frontdesk.record("state")
+            await sink.send({"type": "delta" if channel == "web" else "note", "text": answer})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+
+    # A STANDING instruction — "don't check incidents going forward", "my
+    # favourite workspace is booking" — is proposed as a rule the code enforces,
+    # once, with a one-tap yes. Said on its own, that proposal IS the reply: no
+    # brain, and nothing folded into whatever task happens to be live.
+    if frontdesk.enabled():
+        proposal = frontdesk.standing_instruction(user_text)
+        if proposal:
+            frontdesk.record("rule", proposal.kind)
+            await sink.send({"type": "note", "text": instructions.propose(user_text, proposal)})
+            if frontdesk.instruction_only(user_text, proposal):
+                if channel == "web":
+                    await sink.send({"type": "done", "tools": []})
+                return None
+
     # A live background CODE task owns the conversation's attention: augment it
     # (delivered at its next gate — no session restart) or redirect it (cancel).
     live = tasks.live_tasks_for(cid)
     named = _named_task(user_text, live)
     if named is not None:
         if await _route_to_task(named, _strip_task_ref(user_text), sink, channel,
-                                conv.get("model", "")):
+                                conv.get("model", ""), named=True):
             return None
     elif len(live) > 1:
         # Several tasks live and none named. Guessing (it used to take the
@@ -2646,7 +3045,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                          f"Which task do you mean?\n{listing}\n\n"
                          "Say the number — e.g. “14 also cover the amend path” or “stop 15”."})
         return None
-    elif len(live) == 1:
+    elif len(live) == 1 and not _names_another_task(user_text, live):
         if await _route_to_task(live[0], user_text, sink, channel, conv.get("model", "")):
             return None
         # Not about the task — fall through and answer it as an ordinary message.
@@ -2666,20 +3065,24 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     #
     # Only when a workspace is known: `tasks.code_cwd` refuses to run code work
     # without one, and routing into a refusal would be worse than not routing.
-    if (not live and (conv.get("workspace") or "").strip()
-            and work_intent.is_work_assignment(user_text, _workspace_repos(conv["workspace"]))):
+    # His stated default ("my favourite workspace is booking") stands in for a
+    # chat that never picked one — the phone chat, mostly.
+    work_ws = (conv.get("workspace") or "").strip() or policy.prefer("workspace")
+    if (not live and work_ws
+            and work_intent.is_work_assignment(user_text, _workspace_repos(work_ws))):
         try:
             t = tasks.spawn(work_intent.title_for(user_text), user_text,
-                            "code", conv["workspace"])
+                            "code", work_ws)
         except Exception as exc:                       # noqa: BLE001
             # Never swallow the message: if the lane will not take it, the chat
             # turn still answers, which is exactly the old behaviour.
             quiet.note("dispatch.route_code_work", exc)
         else:
             tasks.link_task(cid, t["id"])
+            frontdesk.record("work", f"#{t['id']}")
             await sink.send({"type": "note", "text":
                              f"🛠 Task #{t['id']} — {t['title']}\n"
-                             f"Planning it in {conv['workspace']} now; you'll get the "
+                             f"Planning it in {work_ws} now; you'll get the "
                              f"plan to approve before anything is written. "
                              f"Say “stop {t['id']}” to drop it."})
             if channel == "web":
@@ -2698,7 +3101,10 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             # Unnamed: only treat it as feedback if it actually reads like a
             # follow-up. A genuinely new request must not be swallowed into the
             # last thing that happened to finish.
-            intent = await activity.resolve_interjection(user_text, conv.get("model", ""))
+            # Rules only when the front desk is on: a brain's guess that this is
+            # "more of the same" is how a new ask gets folded into finished work.
+            intent = (activity.classify_interjection(user_text) if frontdesk.enabled()
+                      else await activity.resolve_interjection(user_text, conv.get("model", "")))
             if intent == "augment":
                 target = recent[-1]
         if target is not None:
@@ -2710,6 +3116,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             except ValueError:
                 pass          # not continuable after all — answer it normally
             else:
+                frontdesk.record("job", f"refine #{target}")
                 await sink.send({"type": "note", "text": note})
                 return None
 
@@ -2745,6 +3152,16 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                          "text": "💬 a couple of answers already in flight — "
                                  "I'll take this one next."})
         return None
+    if intent == "new_task":
+        # A SEPARATE piece of work. Neither folded in — that is what put one
+        # task's clarifying questions under another task's title and shipped a
+        # PLAN for the wrong repo — nor treated as a redirect, because he never
+        # said stop. The running work continues; this becomes its own turn.
+        _followups.setdefault(cid, []).append(user_text)
+        await sink.send({"type": "note",
+                         "text": "🆕 that's a separate task — I'll start it as its own, "
+                                 "and leave the running one alone."})
+        return None
     if intent == "ambiguous":
         # Not clearly a refinement of the running work, so DON'T glue it on —
         # that both corrupts the instruction and eats the message. Answer it
@@ -2764,9 +3181,122 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     return _start_turn(conv, user_text, sink, channel)
 
 
+#: "approve task 14", "approve 14", "approve", "reject 3", "stop 15",
+#: "cancel task 2" — with the openers he actually types in front of them.
+#: Deliberately anchored at both ends: this may only ever match a message that
+#: is ENTIRELY a command, never "approve it once CI is green".
+_COMMAND_VERB = {"approve": "approve", "approved": "approve",
+                 "reject": "reject", "rejected": "reject",
+                 "cancel": "stop", "stop": "stop"}
+
+_TASK_CMD = re.compile(
+    r"^\s*(?:ok(?:ay)?|pls|please|yes)?[\s,:—-]*"
+    r"(approve[d]?|reject(?:ed)?|cancel|stop)\b"
+    r"(?:\s+(?:the\s+)?task)?\s*#?\s*(\d{1,5})?\s*[.!]*\s*$", re.I)
+
+
+async def _run_task_command(verb: str, wanted: int | None, cid: str) -> str:
+    """Carry out approve / reject / stop, or "" when it names nothing to act on.
+
+    "" is important: a bare "stop" with nothing running is an ordinary message,
+    and answering "there is nothing to stop" would eat it.
+    """
+    tid, problem = _task_for_command(verb, wanted, cid)
+    if problem:
+        return problem
+    if tid is None:
+        return ""
+    store.record_outcome("command", verb, subject=str(tid))
+    try:
+        if verb == "approve":
+            return "👍 " + await tasks.approve(tid)
+        if verb == "reject":
+            return "👎 " + await tasks.reject(tid)
+        killed = await tasks.cancel(tid, why="he said stop")
+        title = (store.get_task(tid) or {}).get("title", "")[:50]
+        return (f"⏹ Stopped task #{tid} — {title}." if killed
+                else f"Task #{tid} — {title} — had already finished; nothing to stop.")
+    except ValueError as exc:
+        return f"Task #{tid}: {exc}"
+
+
+def _task_for_command(verb: str, wanted: int | None, cid: str) -> tuple[int | None, str]:
+    """Which task a command means: the one he named, or the only one it can be."""
+    if wanted is not None:
+        row = store.get_task(wanted)
+        if not row:
+            return None, f"There's no task #{wanted}."
+        return wanted, ""
+    want_status = ("awaiting_approval",) if verb in ("approve", "reject") else ("running",)
+    here = [i for i in tasks.live_tasks_for(cid)
+            if (store.get_task(i) or {}).get("status") in want_status]
+    if not here:
+        # The phone is one conversation, but a task started from the web UI is
+        # linked to that one — so fall back to anything waiting, recently.
+        cutoff = time.time() - 24 * 3600
+        here = [t["id"] for t in store.list_tasks(limit=50)
+                if t["status"] in want_status
+                and float(t.get("created_at") or 0) > cutoff]
+    if not here:
+        return None, ""
+    if len(here) > 1:
+        listing = "\n".join(f"  #{i} {(store.get_task(i) or {}).get('title', '')[:45]}"
+                            for i in here)
+        return None, (f"Which one do you mean?\n{listing}\n\n"
+                      f"Say “{verb} {here[0]}”.")
+    return here[0], ""
+
+
 # "14 also cover the amend path", "stop 15", "#14 …", "task 14 …" — the same
 # shape as the `approve task 14` command Arun already uses.
 _TASK_REF = re.compile(r"(?:^|\b)(?:task\s*)?#?(\d{1,5})\b")
+
+#: The same reference, but SPELLED OUT. `_TASK_REF` accepts a bare number, which
+#: is right when steering a live task ("14 also cover the amend path") and wrong
+#: for deciding that a message is about some OTHER task — "bump partition to 4"
+#: would name task #4 and take the message away from the one actually running.
+_EXPLICIT_TASK_REF = re.compile(r"(?:\btask\s*#?|(?:^|[\s(\[])#)(\d{1,5})\b", re.I)
+
+
+def _finished_tool_name(event) -> str:
+    """The tool name off a FunctionToolResultEvent, whatever the library calls it.
+
+    pydantic-ai renamed the field to `.part` in 2.13; it was `.result` before.
+    The inner lookup here was already defensive and the OUTER attribute access
+    was not, so the rename raised straight out of the streaming loop —
+    "AttributeError: 'FunctionToolResultEvent' object has no attribute 'result'"
+    — and took the WHOLE reply with it, not just the tool line it was building.
+    Arun saw that instead of an answer.
+
+    A version bump must not be able to do that again: this reads whichever field
+    exists and returns "" when neither does, because a missing label on a tool
+    activity line is worth nothing next to losing the turn.
+    """
+    part = getattr(event, "part", None)
+    if part is None:
+        part = getattr(event, "result", None)
+    return getattr(part, "tool_name", "") or ""
+
+
+def _names_another_task(text: str, live: list[int]) -> bool:
+    """He named a REAL task, and it is not the one that happens to be running.
+
+    `_named_task` only matches ids that are live, so naming a finished one read
+    as "named nothing" — and the single live task then claimed the message. On
+    10 September "prepare all list of topics per env and send it to Alex from
+    task 121" was answered as task #117, a different task in a different repo:
+    #121 had already shipped, so it was invisible to the matcher, and #117 was
+    the only thing live.
+
+    Naming a task that is not running is a perfectly ordinary thing to do — it
+    is how you ask about work that has finished. It must never hand the message
+    to whatever else is in flight.
+    """
+    for m in _EXPLICIT_TASK_REF.finditer(text or ""):
+        n = int(m.group(1))
+        if n not in live and store.get_task(n):
+            return True
+    return False
 
 
 def _named_task(text: str, live: list[int]) -> int | None:
@@ -2784,14 +3314,17 @@ def _strip_task_ref(text: str) -> str:
 
 
 async def _route_to_task(task_id: int, user_text: str, sink, channel: str,
-                         model_name: str = "") -> bool:
+                         model_name: str = "", named: bool = False) -> bool:
     """A follow-up arrived while a background code task is live. Fold it in at the
     task's next gate, or cancel the task if it's a redirect.
 
     False means "this wasn't about the task" — the caller answers it normally
     rather than burying an unrelated message in the task's instructions.
     """
-    intent = await activity.resolve_interjection(user_text, model_name)
+    intent = (frontdesk.interjection(user_text, named) if frontdesk.enabled()
+              else await activity.resolve_interjection(user_text, model_name))
+    if intent in ("status", "redirect", "augment"):
+        frontdesk.record("job", f"{intent} #{task_id}")
     if intent == "status":
         summary = await asyncio.to_thread(activity.summary)
         await sink.send({"type": "note" if channel != "web" else "delta", "text": summary})

@@ -151,6 +151,68 @@ def _pins_files(root: Path) -> list[Path]:
     return out
 
 
+def _pins_at(context_root: Path, name: str) -> str | None:
+    """The pinned command for repo `name`, from the workspace's own context folder —
+    for a repo checked out somewhere else (a task's worktree) than where its
+    workspace keeps context."""
+    for ctx in (_ours(), ".contmark", ".context"):
+        pins = Path(context_root) / ctx / "repos" / name / PINS
+        if not pins.is_file():
+            continue
+        try:
+            import yaml
+            data = yaml.safe_load(pins.read_text()) or {}
+        except Exception:                              # noqa: BLE001
+            continue
+        commands = data.get("commands") if isinstance(data.get("commands"), dict) else data
+        for key in ("unit_test", "test", "build"):
+            value = (commands or {}).get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def targets(tree: str, workspace: str | None = None,
+            workspace_root: str | None = None) -> list[tuple[str, str]]:
+    """(directory, command) for every repo in a task's tree that has a check.
+
+    A task works in its own tree — `.asta-worktrees/task-N/<repo>` for a
+    workspace of several repos, or the repo itself. The check must run THERE:
+    run against the shared checkout it tested code the task never touched. And
+    it must be looked up by the REPO's name and the workspace's pins, because
+    the folder it now sits in is called task-N and knows about neither.
+    """
+    root = Path(tree)
+    try:
+        inner = sorted(p for p in root.iterdir() if p.is_dir() and (p / ".git").exists())
+    except OSError:
+        inner = []
+    out: list[tuple[str, str]] = []
+    for repo in inner or [root]:
+        cmd = resolve_command(str(repo), workspace)
+        if not cmd and workspace_root:
+            cmd = _pins_at(Path(workspace_root), repo.name)
+        if cmd:
+            out.append((str(repo), cmd))
+    return out
+
+
+async def check_tree(tree: str, workspace: str | None = None,
+                     workspace_root: str | None = None) -> VerifyResult:
+    """Run every repo's check in the task's tree. The first red one is the answer;
+    green only when every check that could run passed; ran=False when none could."""
+    ran_any, commands = False, []
+    for cwd, cmd in targets(tree, workspace, workspace_root):
+        res = await run(cwd, cmd)
+        if not res.ran:
+            continue
+        ran_any = True
+        commands.append(cmd)
+        if not res.ok:
+            return res
+    return VerifyResult(ran=ran_any, ok=ran_any, command="; ".join(commands))
+
+
 #: repo directory name -> check command. Lives with Asta's data, not in the repo.
 COMMANDS_FILE = Path(__file__).resolve().parent.parent / "data" / "verify-commands.json"
 

@@ -294,13 +294,12 @@ async def verify_node(state: JobState) -> dict:
     t = _task(tid)
     if not verify.enabled():
         return {"verdict": "skip"}
-    cwd = tasks._cwd(t["workspace"])
-    cmd = verify.resolve_command(cwd, t["workspace"])
-    if not cmd:
-        return {"verdict": "skip"}
-    res = await verify.run(cwd, cmd)
+    # Where the change is — the task's own tree — never the shared checkout.
+    res = await verify.check_tree(tasks.task_cwd(tid, t["workspace"]), t["workspace"],
+                                  tasks._cwd(t["workspace"]))
     if not res.ran:
         return {"verdict": "skip"}
+    cmd = res.command
     if res.ok:
         store.record_outcome("verify", "passed", subject=str(tid),
                              detail=f"fix_rounds={tasks._verify_rounds(tid)} cmd={cmd[:140]}")

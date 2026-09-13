@@ -73,7 +73,8 @@ _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 #: reviewer and the chat tool set are his machine's choices, not the code's.
 _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND",
                        "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_GRAPH", "ASTA_ROUTING",
-                       "ASTA_FRONTDESK", "ASTA_CROSS_REVIEW", "ASTA_CLAUDE_CHAT_TOOLS")
+                       "ASTA_FRONTDESK", "ASTA_CROSS_REVIEW", "ASTA_CLAUDE_CHAT_TOOLS",
+                       "ASTA_CHAT_ALLOW")
 
 
 #: What this machine's .env said, captured before it is cleared. A handful of

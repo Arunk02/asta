@@ -547,3 +547,47 @@ def test_the_second_brain_reviews_read_only_and_a_failure_falls_back(monkeypatch
 
     monkeypatch.setattr(claude_cli, "one_shot", broken)
     assert asyncio.run(review.review_own_diff(diff, reviewer="claude")) == "- fallback note"
+
+
+# --- the check runs where the work is --------------------------------------------------
+
+def _two_trees(monkeypatch, tmp_path):
+    """A shared checkout and the task's own worktree, as on his machine — the
+    sandbox points both at one folder, which is how this went unseen."""
+    shared, own = tmp_path / "shared", tmp_path / "own"
+    shared.mkdir(), own.mkdir()
+    monkeypatch.setattr(tasks, "_cwd", lambda ws: str(shared))
+    monkeypatch.setattr(tasks, "task_cwd", lambda tid, ws: str(own))
+    from app import verify
+    seen: list[str] = []
+
+    async def run(cwd, cmd, _retried=False):
+        seen.append(cwd)
+        return verify.VerifyResult(ran=True, ok=True, command=cmd, code=0, tail="")
+
+    monkeypatch.setattr(verify, "enabled", lambda: True)
+    monkeypatch.setattr(verify, "resolve_command", lambda cwd, ws=None: "pytest -q")
+    monkeypatch.setattr(verify, "run", run)
+    return str(own), seen
+
+
+def test_the_graph_checks_the_tasks_own_worktree(world, monkeypatch, tmp_path):
+    own, seen = _two_trees(monkeypatch, tmp_path)
+    _use(monkeypatch, Brain("Plan\n\nPLAN READY", "Implemented."))
+
+    async def go():
+        t = _spawn()
+        await _settle(t["id"])
+        tasks.reply(t["id"], "PLAN APPROVED")
+        await _settle(t["id"])
+
+    asyncio.run(go())
+    assert seen == [own]
+
+
+def test_the_old_engine_checks_the_tasks_own_worktree(world, monkeypatch, tmp_path):
+    own, seen = _two_trees(monkeypatch, tmp_path)
+    t = store.create_task("x", "code", "p", WS)
+    tasks.mark_approved(t["id"])
+    asyncio.run(tasks._verify_gate(t["id"], t, "done", hops=0))
+    assert seen == [own]

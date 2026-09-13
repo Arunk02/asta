@@ -36,8 +36,14 @@ _WORK_VERB = (
     r"wire|hook|expose|validate|guard|bump")
 
 #: An imperative opening: the verb leads, optionally after a polite prefix.
+#: A short label he puts in front — "E2E check:", "Quick check —", "Task:",
+#: "Bug -". Found driving the real Asta on 13 Sep: with the verb no longer first,
+#: "E2E check: fix the add function" read as chat, and the chat brain fixed the
+#: file through its shell with no plan. Up to four words, then a colon or dash.
+_LABEL = r"(?:[\w#./'-]+(?:\s+[\w#./'-]+){0,3}\s*[:–—-]\s+)?"
 _IMPERATIVE = re.compile(
-    rf"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|pls\s+|kindly\s+)?(?:{_WORK_VERB})\b",
+    rf"^\s*{_LABEL}(?:ok(?:ay)?[,\s]+|hey[,\s]+|so[,\s]+)?"
+    rf"(?:please\s+|can\s+you\s+|could\s+you\s+|pls\s+|kindly\s+)?(?:{_WORK_VERB})\b",
     re.I)
 
 #: A ticket key — BEPTELIKOS-10159, ABC-1. Strong evidence of assigned work when

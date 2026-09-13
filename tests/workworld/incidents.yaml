@@ -384,3 +384,65 @@ scenarios:
     checks:
       - brain_calls: {count: 0}
       - task_status: {task: draft, is: sent}
+
+  - id: a-labelled-work-ask-still-goes-to-the-task-lane
+    title: '"E2E check: fix the add function…" is code work, label or not — it plans, it does not edit in chat'
+    why: >
+      13 Sep, found driving the real Asta end to end: routing only recognised work
+      that STARTED with the verb, so a label in front ("E2E check: …", "Quick
+      check: …", "Task: …") sent it to a chat turn — and the chat brain fixed the
+      file through its shell, with no plan and no approval. His one unconditional rule.
+    setup:
+      workspace: booking
+    brains:
+      chat:
+        - {text: "Fixed calc.py — add was subtracting."}
+    steps:
+      - say: "E2E check: fix the add function in calc.py so the tests pass"
+    checks:
+      - tasks: {kind: code, count: 1}
+      - brain_calls: {kind: chat, count: 0}
+      - said_contains: "plan to approve before anything is written"
+
+  - id: no-to-a-staged-draft-drops-it
+    title: '"no" to a staged draft drops it — no brain, no re-staged draft'
+    why: >
+      13 Sep, live: "no" was handed to a brain as revision feedback, the brain
+      staged the draft again, and his next message was then eaten as feedback on it.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged", to: "A colleague", channel: teams}}]
+          text: "Staged — send it?"
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged!", to: "A colleague", channel: teams}}]
+          text: "Revised and staged again."
+    steps:
+      - say: "tell a colleague the fix is merged"
+      - say: "no"
+    checks:
+      - said_contains: "Dropped the draft"
+      - brain_calls: {kind: chat, count: 1}
+      - no_send: true
+
+  - id: a-command-while-a-draft-waits-is-still-a-command
+    title: '"status of 1" while a draft waits is answered, and the draft still waits for its yes'
+    why: >
+      13 Sep, live: with a draft pending, "drop rule 2" was read as feedback on the
+      draft. An unmistakable command must reach its handler; the draft keeps waiting.
+    twin: false
+    may_send: true
+    setup:
+      tasks:
+        - {as: t, title: "retention to 90 days", kind: code, status: awaiting_approval}
+    brains:
+      chat:
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged", to: "A colleague", channel: teams}}]
+          text: "Staged — send it?"
+    steps:
+      - say: "tell a colleague the fix is merged"
+      - say: "status of 1"
+      - say: "yes"
+    checks:
+      - said_contains: "#1 retention to 90 days"
+      - sent: {door: teams, count: 1}
+      - brain_calls: {kind: chat, count: 1}

@@ -140,6 +140,11 @@ def config_entry(tools: list[str] | None = None, conv_id: str = "") -> dict:
         "ASTA_TOKEN": os.environ.get("ASTA_TOKEN", ""),
         "ASTA_PORT": os.environ.get("ASTA_PORT", "8321"),
         "ASTA_URL": _asta_url(),
+        # Found driving the real Asta on 13 Sep: the CLI starts the server from the
+        # CHAT's directory — a workspace, for every phone conversation — and does
+        # not honour `cwd`, so `-m app.mcp_server` could not be found and every
+        # Asta tool silently vanished from chats that had a workspace.
+        "PYTHONPATH": str(ROOT),
     }
     if tools:
         env["ASTA_MCP_TOOLS"] = ",".join(tools)

@@ -2875,6 +2875,20 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # the answer. A bare yes sends it (via the model's real send tool, so the send
     # itself still runs through that tool's own rules); anything else is revision.
     staged = loop.awaiting(cid)
+    # An unmistakable command or a question the task table answers is NOT an
+    # answer to the draft — "drop rule 2" was once read as feedback on one. It
+    # goes to its own handler below, and the draft keeps waiting for its yes.
+    if staged and (_TASK_CMD.match(user_text or "")
+                   or (frontdesk.enabled() and frontdesk.answer_from_state(user_text))):
+        staged = None
+    if staged and _DECLINE.match(user_text or ""):
+        # A plain no drops the draft. Handing "no" to a brain as revision feedback
+        # got the draft re-staged, and his next message eaten as feedback on it.
+        loop.clear_awaiting(cid)
+        await sink.send({"type": "note", "text": "👍 Dropped the draft — nothing was sent."})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
     if staged and (user_text or "").strip():
         loop.clear_awaiting(cid)
         approved, read_as = _affirmation(user_text)

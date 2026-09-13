@@ -244,3 +244,23 @@ def test_a_chat_turn_gets_the_lean_built_in_tool_set(monkeypatch):
 def test_a_chat_that_may_edit_keeps_every_tool(monkeypatch):
     monkeypatch.setenv("ASTA_CHAT_MAY_EDIT", "1")
     assert "--tools" not in claude_cli._build_cmd({"id": "c-edit", "workspace": "", "model": "claude_cli"}, "fix it")
+
+
+def test_a_chat_turn_cannot_write_through_its_shell():
+    """The lock found missing on 13 Sep: denied Edit, a chat brain wrote the file
+    with a python3 script in its shell. Chat now runs in dontAsk mode with a
+    read-only allow-list, so the CLI itself refuses anything else."""
+    cmd = claude_cli._build_cmd({"id": "c-lock", "workspace": "", "model": "claude_cli"}, "fix it")
+    assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
+    allow = cmd[cmd.index("--allowed-tools") + 1]
+    for writer in ("python", "node", "sed", "tee", "rm", "curl", "sqlite3", "gh api", "find"):
+        assert f"Bash({writer}" not in allow
+    assert "mcp__asta" in allow and "Bash(git log:*)" in allow
+
+
+def test_the_mcp_server_starts_from_any_directory():
+    """Found 13 Sep: the CLI starts Asta's MCP server from the chat's folder and
+    ignores `cwd`, so every chat with a workspace had no Asta tools at all."""
+    from app import mcp_server
+    entry = mcp_server.config_entry(conv_id="c")["mcpServers"][mcp_server.SERVER_NAME]
+    assert entry["env"]["PYTHONPATH"] == str(mcp_server.ROOT)

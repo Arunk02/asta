@@ -181,6 +181,29 @@ _CHAT_DENY = ("Write", "Edit", "NotebookEdit",
 #: The built-in tools a chat turn gets. "default" hands back Claude Code's whole set.
 CHAT_TOOLS = "Bash,Read,Grep,Glob,WebFetch,WebSearch"
 
+#: What a chat turn may run, when it may not write. Anything else is REFUSED by
+#: the CLI itself (--permission-mode dontAsk), whatever the model decides.
+#:
+#: Why an allow-list and not a deny-list: on 13 Sep, driving the real Asta end to
+#: end, a chat brain was denied the Edit tool and wrote the file anyway through a
+#: `python3 - <<EOF` script in its shell. There is no end of ways to write a
+#: file from a shell; there is a short list of commands a chat answer needs. The
+#: CLI also refuses output redirection on an allowed command (`cat > f`,
+#: `echo x > f`) — measured, not assumed.
+CHAT_READ_ONLY = ",".join((
+    "Read", "Grep", "Glob", "WebFetch", "WebSearch", "ToolSearch", "mcp__asta", "mcp__grafana",
+    "Bash(cd:*)", "Bash(ls:*)", "Bash(grep:*)", "Bash(cat:*)", "Bash(head:*)",
+    "Bash(tail:*)", "Bash(wc:*)", "Bash(git log:*)", "Bash(git status:*)",
+    "Bash(git diff:*)", "Bash(git show:*)", "Bash(git blame:*)", "Bash(git grep:*)",
+    "Bash(gh pr view:*)", "Bash(gh pr list:*)", "Bash(gh pr checks:*)",
+    "Bash(gh pr diff:*)", "Bash(gh run view:*)", "Bash(gh run list:*)",
+    "Bash(kubectl get:*)", "Bash(kubectl logs:*)", "Bash(kubectl describe:*)"))
+
+
+def chat_allow() -> str:
+    raw = os.environ.get("ASTA_CHAT_ALLOW", "").strip()
+    return raw or CHAT_READ_ONLY
+
 
 def chat_tools() -> str:
     raw = os.environ.get("ASTA_CLAUDE_CHAT_TOOLS", CHAT_TOOLS).strip()
@@ -230,6 +253,12 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     # variadic — a bare list would swallow the flags that follow it.
     from . import capabilities
     if not capabilities.chat_may_write():
+        # The lock, not a request: only the allow-list below may run, and the CLI
+        # refuses the rest outright instead of asking a question nobody is there
+        # to answer. Replaces the bypassPermissions set above for this turn.
+        i = cmd.index("--permission-mode")
+        cmd[i + 1] = "dontAsk"
+        cmd += ["--allowed-tools", chat_allow()]
         cmd += ["--disallowed-tools", ",".join(_CHAT_DENY)]
         # And only the built-in tools a chat turn reads with. Claude Code's full
         # kit — sub-agents, todo lists, notebooks, plan mode — is ~12k tokens of

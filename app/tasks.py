@@ -1529,13 +1529,14 @@ async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
     from . import verify, notify
     if not verify.enabled():
         return False
-    cwd = _cwd(t["workspace"])
-    cmd = verify.resolve_command(cwd, t["workspace"])
-    if not cmd:
-        return False
-    outcome = await verify.run(cwd, cmd)
+    # The task's OWN tree. The change lives in its private worktree; checking the
+    # shared checkout ran his tests against code the task never touched, so a
+    # green result said nothing about the work.
+    cwd = task_cwd(task_id, t["workspace"])
+    outcome = await verify.check_tree(cwd, t["workspace"], _cwd(t["workspace"]))
     if not outcome.ran:
         return False   # no usable oracle — behave exactly as today
+    cmd = outcome.command
     if outcome.ok:
         # fix_rounds in the detail feeds the convergence metric (quality.verify_convergence):
         # a rate that climbs while this average falls is the loop genuinely learning.
@@ -1703,7 +1704,9 @@ async def _self_review(task_id: int, t: dict, result: str) -> str:
     if not REVIEW_OWN_DIFF:
         return ""
     try:
-        root = Path(code_cwd(t.get("workspace")))
+        # The task's own tree: a worktree task commits there, never in the
+        # shared checkout — reading that one found no diff and skipped the review.
+        root = Path(task_cwd(task_id, t.get("workspace")))
     except RuntimeError:
         return ""
     diffs = []

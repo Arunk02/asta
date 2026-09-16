@@ -190,9 +190,40 @@ on run argv
 end run
 '''
 
-#: A DRAFT. Mail's `send` is deliberately not in this file: an outward act has a
-#: gate of its own (`prepare_to_send`), and a recipe that could send would put a
-#: second, ungated route to the same act on his machine.
+#: A DRAFT, in the mail client he ACTUALLY uses. Apple Mail is on his Mac and
+#: empty; his work mail is Outlook, which is why the Apple Mail recipe was the
+#: wrong door — right mechanism, wrong application, and he would have found out
+#: by opening Mail and seeing nothing.
+#:
+#: `send` is deliberately absent from both: an outward act has a gate of its own
+#: (`prepare_to_send`), and a recipe that could send would put a second, ungated
+#: route to the same act on his machine.
+_OUTLOOK_DRAFT = '''
+on run argv
+  set theTo to item 1 of argv
+  set theSubject to item 2 of argv
+  set theBody to item 3 of argv
+  tell application "Microsoft Outlook"
+    set msg to make new outgoing message with properties ¬
+      {subject:theSubject, content:theBody}
+    make new recipient at msg with properties {email address:{address:theTo}}
+    open msg
+  end tell
+end run
+'''
+
+_OUTLOOK_DRAFTS = '''
+on run argv
+  tell application "Microsoft Outlook"
+    set out to ""
+    repeat with m in (messages of drafts folder)
+      set out to out & (subject of m) & linefeed
+    end repeat
+    return out
+  end tell
+end run
+'''
+
 _MAIL_DRAFT = '''
 on run argv
   set theTo to item 1 of argv
@@ -258,8 +289,12 @@ RECIPES: dict[str, Recipe] = {r.name: r for r in (
            "Write a note into Notes",
            _NOTE_ADD, takes=("title", "body"), writes=True,
            verify=_NOTE_LIST, verify_has="title"),
+    Recipe("outlook_draft", "Microsoft Outlook",
+           "Leave a DRAFT email open in Outlook — his work mail, never sent from here",
+           _OUTLOOK_DRAFT, takes=("to", "subject", "body"), writes=True,
+           verify=_OUTLOOK_DRAFTS, verify_has="subject"),
     Recipe("mail_draft", "Mail",
-           "Leave a DRAFT email open for him — it is never sent from here",
+           "Leave a DRAFT in Apple Mail — only for personal mail; work mail is Outlook",
            _MAIL_DRAFT, takes=("to", "subject", "body"), writes=True,
            verify=_MAIL_DRAFTS, verify_has="subject"),
     Recipe("reveal_file", "Finder",
@@ -316,9 +351,14 @@ async def run(name: str, **args) -> dict:
     if not verdict.ok:
         raise AppError(f"a rule of his stops that: {verdict.why}")
 
-    await _osascript(recipe.script, argv)
+    said = await _osascript(recipe.script, argv)
     if not (recipe.writes and recipe.verify):
-        return {"ok": True, "app": recipe.app, "did": recipe.does}
+        # What the app ANSWERED. A reading recipe that returns only "ok" tells a
+        # brain nothing — "what is on my reminders list" would come back as the
+        # fact that it was asked, which is how a tool ends up being described
+        # rather than used.
+        return {"ok": True, "app": recipe.app, "did": recipe.does,
+                "said": said[:4000]}
 
     # Read it back through the same door. `reveal_file` is checked on the file's
     # NAME rather than its path, because that is what Finder reports.

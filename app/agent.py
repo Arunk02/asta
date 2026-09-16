@@ -1762,8 +1762,11 @@ async def use_app(recipe: str, args: dict | None = None) -> str:
     except apps.AppError as exc:
         return f"Not done — {exc}"
     verified = out.get("verified")
-    return (f"Done in {out['app']}: {out['did']}"
-            + (f" — read back and found {verified!r}." if verified else "."))
+    if verified:
+        return f"Done in {out['app']}: {out['did']} — read back and found {verified!r}."
+    said = (out.get("said") or "").strip()
+    return (f"{out['app']} says:\n{said}" if said
+            else f"Done in {out['app']}: {out['did']}.")
 
 
 def app_recipes() -> str:

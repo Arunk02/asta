@@ -186,3 +186,17 @@ def test_what_it_changed_is_readable_and_reversible_from_the_front_desk(monkeypa
     assert "ASTA_COALESCE_SECONDS 120.0→180" in said and "180" in said
     assert "Rolled back" in frontdesk.answer_from_state(f"roll back {eid}")
     assert settings.overrides() == {}
+
+
+def test_it_runs_on_the_night_not_on_the_live_benchs_flag(monkeypatch):
+    """Switched on for the first time, P6 would never have run: its gate was the
+    LIVE bench's, which is off, and proving a candidate costs no brain at all."""
+    import datetime as dt
+    from app.workworld import nightly
+    monkeypatch.delenv("ASTA_BENCH_NIGHTLY", raising=False)
+    night = dt.datetime(2026, 9, 17, 3, 0)
+    assert "ASTA_BENCH_NIGHTLY" in nightly.why_not(night)      # the live tier stays off
+    assert nightly.quiet_window(night) == ""                   # the free work may run
+    assert "outside the window" in nightly.quiet_window(dt.datetime(2026, 9, 17, 12, 0))
+    store.kv_set("last_user_message_at", str(__import__("time").time()))
+    assert "was working" in nightly.quiet_window(night)

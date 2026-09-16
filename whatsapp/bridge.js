@@ -194,6 +194,29 @@ async function connect() {
   });
 }
 
+// A file, not a paragraph about a file. His ask from the start was a spreadsheet
+// he can open on his phone; a path to his Mac is not that.
+async function sendDocument(filePath, caption) {
+  let jid = targetJid();
+  if (!config.enabled || !sock || !paired || !jid) return false;
+  if (selfLid && normJid(jid) === normJid(selfJid)) jid = selfLid;
+  const data = fs.readFileSync(filePath);
+  const name = path.basename(filePath);
+  const types = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".csv": "text/csv", ".md": "text/markdown", ".pdf": "application/pdf",
+  };
+  const res = await sock.sendMessage(jid, {
+    document: data,
+    mimetype: types[path.extname(name).toLowerCase()] || "application/octet-stream",
+    fileName: name,
+    caption: caption ? BOT_MARK + caption : undefined,
+  });
+  if (res?.key?.id) sentByMe.add(res.key.id);
+  return true;
+}
+
 async function send(text) {
   let jid = targetJid();
   if (!config.enabled || !sock || !paired || !jid) return false;
@@ -258,6 +281,24 @@ http
           res.end(JSON.stringify({ ok: true, ...config }));
         } catch (e) {
           res.writeHead(400); res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+    if (req.method === "POST" && req.url === "/send-document") {
+      if (TOKEN && auth !== `Bearer ${TOKEN}`) {
+        res.writeHead(401); res.end(); return;
+      }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", async () => {
+        try {
+          const b = JSON.parse(body);
+          const ok = await sendDocument(b.path, b.caption || "");
+          res.writeHead(ok ? 200 : 503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok }));
+        } catch (e) {
+          res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
         }
       });
       return;

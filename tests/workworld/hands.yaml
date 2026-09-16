@@ -1,0 +1,54 @@
+# Hands — Astra-class P7, layer one: files written by code and checked.
+#
+# "even i ask to create a data in exceel it has to do" — the first message of
+# this plan. A table pasted into chat is not a spreadsheet.
+
+scenarios:
+  - id: a-sheet-he-asks-for-is-a-real-file
+    title: '"give me the topics per environment in Excel" produces a file with those cells'
+    why: >
+      The end state is checkable, which is the whole point of doing this in code:
+      the file exists, it has the header he asked for, and it reached him.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: xlsx, name: topics-per-env, title: "Topics per environment",
+                   rows: [["Environment", "Topic", "Partitions"], ["dev", "booking.events", 3], ["uat", "booking.events", 6]]}}]
+          text: "Sent it over."
+    steps:
+      - say: "give me the topics per environment in excel"
+    checks:
+      - tool_result_contains: {tool: make_file, text: "2 row\\(s\\) × 3 column\\(s\\)"}
+      - made_file: {name: "topics-per-env.xlsx", contains: "booking.events", rows: 3}
+
+  - id: a-file-that-does-not-check-out-is-not-sent
+    title: A spreadsheet that lost its rows is refused, not delivered
+    why: A wrong sheet he trusts is worse than no sheet — so the file is read back before it goes.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: nonsense, name: broken, rows: [["a"], ["b"]]}}]
+          text: "That format is not something I can write."
+    steps:
+      - say: "put that in a pdf"
+    checks:
+      - tool_result_contains: {tool: make_file, text: "Not created"}
+      - no_send: true
+
+  - id: a-sheet-he-shares-is-data-not-a-path
+    title: A spreadsheet he shares can be answered from
+    why: Reading is the other half of hands — otherwise Asta can only talk about the file.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: csv, name: shared-topics, send: false,
+                   rows: [["Environment", "Topic"], ["uat", "booking.events"]]}}]
+          text: "Written."
+        - calls: [{tool: read_data_file, args: {path: "SCRATCH/shared-topics.csv"}}]
+          text: "uat has booking.events."
+    steps:
+      - say: "write a small csv of the uat topics"
+      - say: "what is in that csv?"
+    checks:
+      - tool_result_contains: {tool: read_data_file, text: "booking.events"}
+      - said_contains: "uat"

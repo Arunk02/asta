@@ -36,6 +36,19 @@ async def wa_send(text: str) -> bool:
         return False
 
 
+async def wa_document(path: str, caption: str = "") -> bool:
+    """Send a FILE to his phone. False when the bridge is down or unpaired."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{bridge_url()}/send-document",
+                             headers={"Authorization": f"Bearer {os.environ.get('ASTA_TOKEN', '')}"},
+                             json={"path": str(path), "caption": caption})
+        return bool(r.status_code == 200 and (r.json() or {}).get("ok"))
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
 async def wa_status() -> dict:
     try:
         async with httpx.AsyncClient(timeout=3) as c:

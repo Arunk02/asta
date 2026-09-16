@@ -630,6 +630,22 @@ def _check_digest(arg, world, state):
     return ""
 
 
+def _check_made_file(arg, world, state):
+    """A file Asta actually wrote — `{name, contains, rows}` — in the world's folder."""
+    from app import files
+    path = files.folder() / arg["name"]
+    if not path.is_file():
+        there = sorted(p.name for p in files.folder().iterdir()) if files.folder().is_dir() else []
+        return f"{arg['name']} was not written (folder has: {there})"
+    data = files.read(str(path))
+    if "rows" in arg and len(data.get("rows") or []) != arg["rows"]:
+        return f"{arg['name']} has {len(data.get('rows') or [])} rows, expected {arg['rows']}"
+    blob = str(data.get("rows")) + (data.get("text") or "")
+    if arg.get("contains") and arg["contains"].lower() not in blob.lower():
+        return f"{arg['name']} lacks {arg['contains']!r}"
+    return ""
+
+
 def _check_setting(arg, world, state):
     """What a tunable knob is worth now — `{name: …, is: 180}` or `{is_default: true}`."""
     from app import settings
@@ -703,6 +719,7 @@ CHECKS = {
     "digest": _check_digest,
     "permissions": _check_permissions,
     "setting": _check_setting,
+    "made_file": _check_made_file,
     "scratch_file": _check_scratch_file,
     "health_says": _check_health,
     "reply_max_chars": _check_reply_max,

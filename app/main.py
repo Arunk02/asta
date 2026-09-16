@@ -1199,6 +1199,19 @@ async def api_reply_task(task_id: int, request: Request):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/files", dependencies=[Depends(require_auth)])
+async def api_make_file(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.make_file(
+        b.get("kind", "xlsx"), b.get("name", "asta"), b.get("rows"),
+        b.get("title", ""), b.get("text", ""), bool(b.get("send", True)))}
+
+
+@app.get("/api/files", dependencies=[Depends(require_auth)])
+def api_read_file(path: str):
+    return {"detail": agent_mod.read_data_file(path)}
+
+
 @app.post("/api/facts", dependencies=[Depends(require_auth)])
 async def api_note_fact(request: Request):
     b = await request.json()

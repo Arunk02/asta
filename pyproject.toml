@@ -16,6 +16,10 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-dotenv>=1.0",
+    # Hands, layer 1: a spreadsheet or document is WRITTEN by code and checked
+    # after writing — a brain decides the content, it never types into an app.
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
 ]
 
 # Declared here rather than as a loose list in the CI workflow, so "what the

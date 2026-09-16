@@ -30,6 +30,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def files_dir() -> Path:
+    """Where files Asta writes land in this world (see World.install)."""
+    import os as _os
+    return Path(_os.environ.get("ASTA_FILES_DIR", "/tmp")).expanduser()
+
+
 class SandboxBreach(RuntimeError):
     """Something reached for the real world. Always a scenario failure."""
 
@@ -91,8 +97,11 @@ class ScriptedBrain:
         if reply.sleep:
             await asyncio.sleep(reply.sleep)
         for call in reply.calls:
-            await self.world.call_capability(call.get("tool", ""), call.get("args") or {},
-                                             conv_id)
+            args = call.get("args") or {}
+            # A scenario cannot know the sandbox's folder; it says SCRATCH.
+            args = {k: (v.replace("SCRATCH", str(files_dir())) if isinstance(v, str) else v)
+                    for k, v in args.items()}
+            await self.world.call_capability(call.get("tool", ""), args, conv_id)
         if reply.raises:
             raise RuntimeError(reply.raises)
         return reply.text
@@ -281,6 +290,9 @@ class World:
         rails.write_text(guardrails.EXAMPLE_PATH.read_text() if guardrails.EXAMPLE_PATH.exists() else "")
         self._rails_undo = os.environ.get("ASTA_GUARDRAILS")
         os.environ["ASTA_GUARDRAILS"] = str(rails)
+        # Files Asta writes land in THIS world, never in his own folder — found
+        # the hard way: two bench files appeared in ~/Asta files.
+        self.use_env({"ASTA_FILES_DIR": str(self.db_path.parent / "files")})
 
         # 2. His phone. notify's own ledger/dedup logic still runs; only the
         #    delivery at the end of it is a recorder.

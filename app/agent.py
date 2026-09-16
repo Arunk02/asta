@@ -1713,6 +1713,46 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     return staged
 
 
+async def make_file(kind: str, name: str, rows: list | None = None, title: str = "",
+                    text: str = "", send: bool = True) -> str:
+    """Create a real spreadsheet or document and put it in Arun's hands.
+
+    kind: xlsx | csv | md | docx. `rows` is a table with the HEADER as its first
+    row — that is what makes a spreadsheet useful — and `text` is prose for a
+    document. Decide the content yourself; this writes the file, checks what it
+    wrote, and sends it to his phone (send=False leaves it on the Mac).
+
+    Use it whenever he asks for data "in Excel", a sheet, a table, a report or a
+    document. Do not paste a table into chat and call it a spreadsheet."""
+    from . import files
+    try:
+        made = files.make(kind, name, rows=rows, title=title, text=text)
+    except (ValueError, RuntimeError) as exc:
+        return f"Not created — {exc}"
+    if not send:
+        return f"Written: {made.line()}"
+    out = await files.deliver(made)
+    return (f"Sent to his phone: {made.line()}" if out["sent"]
+            else f"Written (his phone would not take it): {made.line()}")
+
+
+def read_data_file(path: str) -> str:
+    """Read a spreadsheet or document he shared, as data you can answer from.
+
+    xlsx, csv, docx, md or plain text. Returns the rows (or the text) so the
+    answer comes from what the file says, not from its filename."""
+    from . import files
+    data = files.read(path)
+    if data.get("error"):
+        return data["error"]
+    out = [files.describe(path)]
+    for row in (data.get("rows") or [])[:40]:
+        out.append(" | ".join("" if c is None else str(c) for c in row))
+    if data.get("text"):
+        out.append((data["text"] or "")[:4000])
+    return "\n".join(out)
+
+
 def note_fact(subject: str, fact: str, kind: str = "fact", source: str = "") -> str:
     """Record one durable fact about a person or system — who owns a service, which
     repo does what, how someone likes to be asked, which env a topic lives in.

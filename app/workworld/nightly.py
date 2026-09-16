@@ -64,6 +64,28 @@ def _week_of(now: dt.datetime) -> str:
     return f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
 
 
+def quiet_window(now: dt.datetime | None = None) -> str:
+    """'' when the night is free for work that costs NO brain, else the reason.
+
+    The deterministic bench and the evolution loop spend no legs at all, so
+    gating them on the live tier's flag and leg budget meant P6 could be on and
+    never run — which is exactly what it did the first night it was switched on.
+    The two things they do share is his machine and his sleep: the window, and
+    not competing with him while he is working.
+    """
+    from app import store
+    now = now or dt.datetime.now()
+    if not (WINDOW[0] <= now.hour < WINDOW[1]):
+        return f"outside the window {WINDOW[0]:02d}:00–{WINDOW[1]:02d}:00"
+    try:
+        last = float(store.kv_get("last_user_message_at") or 0)
+    except (TypeError, ValueError):
+        last = 0
+    if last and (time.time() - last) < IDLE_BEFORE_MINUTES * 60:
+        return "he was working within the hour"
+    return ""
+
+
 def why_not(now: dt.datetime | None = None) -> str:
     """'' when the bench may run tonight, else the reason it may not."""
     from app import agent, store

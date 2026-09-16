@@ -142,3 +142,21 @@ def test_the_nightly_budget_halves_itself_after_a_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(nightly, "BUDGET_FILE", tmp_path / "budget.json")
     nightly.note_limit_hit_today()
     assert nightly._budget()["nightly_legs"] == nightly.NIGHTLY_LEGS // 2
+
+
+def test_the_bench_never_writes_into_his_own_folder(monkeypatch, tmp_path):
+    """Two bench files turned up in ~/Asta files before this. The sandbox owns
+    every door a scenario can write through, and that is one of them."""
+    import os
+    from app import files
+    from app.workworld import world as W
+    monkeypatch.setenv("ASTA_FILES_DIR", str(tmp_path / "his"))
+    w = W.World()
+    w.install()
+    try:
+        assert os.environ["ASTA_FILES_DIR"] != str(tmp_path / "his")
+        made = files.make("csv", "bench", rows=[["a"], ["b"]])
+        assert str(w.db_path.parent) in made.path
+    finally:
+        w.uninstall()
+    assert os.environ["ASTA_FILES_DIR"] == str(tmp_path / "his")

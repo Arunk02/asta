@@ -347,8 +347,13 @@ async def loop(interval: int = 3600) -> None:
     while True:
         await asyncio.sleep(interval)
         try:
-            if not enabled() or night.why_not():
+            # The night and his sleep, not the live bench's flag: proving a
+            # candidate runs the deterministic bench and costs no brain at all.
+            if not enabled() or night.quiet_window():
                 continue
+            if store.kv_get("evolve_ran:" + time.strftime("%Y-%m-%d")):
+                continue
+            store.kv_set("evolve_ran:" + time.strftime("%Y-%m-%d"), "1")
             out = await nightly()
             if out.get("promoted"):
                 from . import notify

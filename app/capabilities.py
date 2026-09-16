@@ -79,6 +79,13 @@ _TABLE: tuple[Capability, ...] = (
                note="Durable memory across ALL conversations. kind: fact | preference "
                     "| gotcha | fix. Save corrections and preferences, not chatter."),
     Capability("search_memory", "memory", http="GET /api/memory/search?q={query}"),
+    Capability("make_file", "hands", write=True,
+               http='POST /api/files {"kind":"xlsx","name":"topics","title":"…","rows":[["Env","Topic"],["dev","x"]]}',
+               note="THE way to answer “give me this in Excel / a sheet / a report”. Code "
+                    "writes the file and checks it; it is then sent to his phone. Never "
+                    "paste a table into chat instead."),
+    Capability("read_data_file", "hands", http="GET /api/files?path={path}",
+               note="A spreadsheet or document he shared, as rows you can answer from."),
     Capability("note_fact", "memory",
                http='POST /api/facts {"subject":"…","fact":"…","kind":"person|repo|service|env","source":"…"}',
                note="Facts about people and systems, with a source — who owns what, which "

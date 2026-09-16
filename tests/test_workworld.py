@@ -160,3 +160,47 @@ def test_the_bench_never_writes_into_his_own_folder(monkeypatch, tmp_path):
     finally:
         w.uninstall()
     assert os.environ["ASTA_FILES_DIR"] == str(tmp_path / "his")
+
+
+def test_the_bench_never_sends_a_document_to_his_real_phone(monkeypatch, tmp_path):
+    """The folder was one door; the bridge is the other. `files.deliver` posts the
+    file to the WhatsApp bridge, and on his laptop that bridge is up and paired —
+    so every bench run that made a file was putting it on his phone. The sandbox
+    owns that call now, and a scenario's delivery is a recorded push like any other."""
+    import asyncio
+
+    from app import files, notify
+    from app.workworld import world as W
+
+    async def explode(*a, **k):                     # the real door, wired to fail
+        raise AssertionError("the bench reached the real WhatsApp bridge")
+
+    monkeypatch.setattr(notify, "wa_document", explode)
+    w = W.World()
+    w.install()
+    try:
+        made = files.make("csv", "bench", rows=[["a"], ["b"]])
+        out = asyncio.run(files.deliver(made))
+        assert out["sent"] is True
+        assert any("bench.csv" in d["path"] for d in w.documents)
+        # One file on his phone is ONE interruption: `deliver` announces it
+        # through notify, and the document itself must not be counted again.
+        assert len([p for p in w.pushes if "bench.csv" in p["text"]]) == 1
+    finally:
+        w.uninstall()
+
+
+def test_the_bench_does_not_change_answer_with_the_hour(monkeypatch):
+    """Green at noon and red at midnight teaches people to re-run the bench
+    rather than read it. His own .env pins quiet hours; the world clears them."""
+    from app import delivery
+    from app.workworld import world as W
+
+    monkeypatch.setenv("ASTA_QUIET_HOURS", "22:00-07:00")
+    w = W.World()
+    w.install()
+    try:
+        assert delivery.quiet_window() is None
+    finally:
+        w.uninstall()
+    assert delivery.quiet_window() == (22 * 60, 7 * 60)

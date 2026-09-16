@@ -1717,13 +1717,18 @@ async def make_file(kind: str, name: str, rows: list | None = None, title: str =
                     text: str = "", send: bool = True) -> str:
     """Create a real spreadsheet or document and put it in Arun's hands.
 
-    kind: xlsx | csv | md | docx. `rows` is a table with the HEADER as its first
-    row — that is what makes a spreadsheet useful — and `text` is prose for a
-    document. Decide the content yourself; this writes the file, checks what it
+    kind: xlsx | csv | md | docx | pptx | pdf. `rows` is a table with the HEADER
+    as its first row — that is what makes a spreadsheet useful — and `text` is
+    prose: paragraphs for a document or a PDF, and one bullet per paragraph for
+    a deck. Decide the content yourself; this writes the file, checks what it
     wrote, and sends it to his phone (send=False leaves it on the Mac).
 
-    Use it whenever he asks for data "in Excel", a sheet, a table, a report or a
-    document. Do not paste a table into chat and call it a spreadsheet."""
+    Pick the kind by what he will do with it: xlsx or csv to work with numbers,
+    docx or pdf to read or forward, pptx to show people. A deck holds 300 rows
+    and a PDF 2000 — past that it is a spreadsheet, whatever he called it.
+
+    Use it whenever he asks for data "in Excel", a sheet, a table, a report, a
+    deck, slides or a PDF. Do not paste a table into chat and call it a file."""
     from . import files
     try:
         made = files.make(kind, name, rows=rows, title=title, text=text)

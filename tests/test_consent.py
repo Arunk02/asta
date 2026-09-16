@@ -325,3 +325,23 @@ def test_the_note_names_both_things_it_wrongly_denied():
     """Live calls and cancelling a task — the two false denials of 27 August."""
     assert "two-way conversation" in agent_mod.NARROWED
     assert "cancelling" in agent_mod.NARROWED
+
+
+# --- a file he asked for is not an engineering task -------------------------
+
+
+def test_a_file_ask_is_not_answered_with_a_code_task():
+    """Live, 16 Sep: "make a short deck of my open tasks — and send it" became a
+    delegated CODE task to write the deck with a script. He has a tool for this;
+    spawning instead spends five minutes and a repo on a job that is one call."""
+    out = consent.substitution("make a short deck of my open tasks and send it", "code")
+    assert "make_file" in out and "not for a change to a repository" in out
+    assert consent.substitution("give me the open topics in excel", "code")
+    assert consent.substitution("send me that note as a pdf", "code")
+
+
+def test_work_on_the_code_that_makes_files_is_still_work():
+    """The guard must not swallow real tasks: "fix the excel export" is code."""
+    assert consent.substitution("fix the excel export in the booking service", "code") == ""
+    assert consent.substitution("the pdf parser is dropping pages, debug it", "code") == ""
+    assert consent.substitution("make a short deck of my open tasks", "analysis") == ""

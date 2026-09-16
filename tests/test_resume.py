@@ -111,6 +111,20 @@ def test_a_handoff_with_nothing_produced_still_reads_sensibly():
     assert "———" not in p            # no empty evidence block
 
 
+def test_a_handoff_with_nothing_produced_says_there_is_nothing_to_recover():
+    """Found live on 16 Sep: the first brain hit its limit before writing a word,
+    and the one that took over spent its whole budget searching /tmp and the repo
+    for what the previous run had supposedly done. "Do not redo work that is
+    already done" is advice about work that exists; with no partial output it
+    sends the next brain digging for a trace that was never left."""
+    point = resume.save("c1", "make me a deck of my open tasks and send it",
+                        "claude", partial="")
+    p = resume.handoff_prompt(point, "copilot_cli")
+    assert "nothing to recover" in p.lower()
+    assert "do not go looking" in p.lower()
+    assert "Do not redo work" not in p
+
+
 def test_the_note_says_why_it_stopped_in_his_terms():
     """Copilot's is a monthly pool and Claude's a rolling window — which one it was
     decides whether he tops up or just waits."""

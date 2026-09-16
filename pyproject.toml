@@ -20,6 +20,12 @@ dependencies = [
     # after writing — a brain decides the content, it never types into an app.
     "openpyxl>=3.1",
     "python-docx>=1.1",
+    # Layer 1, second half: a deck and a PDF. fpdf2 writes the PDF, pypdf reads
+    # it back — the check is only worth anything if a different library can find
+    # the words again.
+    "python-pptx>=1.0",
+    "fpdf2>=2.8",
+    "pypdf>=5.1",
 ]
 
 # Declared here rather than as a loose list in the CI workflow, so "what the

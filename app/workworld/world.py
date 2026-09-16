@@ -155,6 +155,7 @@ class Patcher:
 class World:
     """What happened, and what the outside world would have said."""
     pushes: list[dict] = field(default_factory=list)          # to his phone
+    documents: list[dict] = field(default_factory=list)       # files that reached it
     replies: list[dict] = field(default_factory=list)         # in the chat
     sent: list[dict] = field(default_factory=list)            # OUT of the house
     brain_calls: list[dict] = field(default_factory=list)
@@ -293,6 +294,14 @@ class World:
         # Files Asta writes land in THIS world, never in his own folder — found
         # the hard way: two bench files appeared in ~/Asta files.
         self.use_env({"ASTA_FILES_DIR": str(self.db_path.parent / "files")})
+        # His real .env sets ASTA_QUIET_HOURS=22:00-07:00, and the bench inherits
+        # it: two attention scenarios expect an interrupt, and after ten at night
+        # they correctly got a digest entry instead. The suite has cleared this
+        # since the same failure bit it at 23:42 (see tests/conftest.py); the
+        # bench had not, so `python -m app.workworld` was green by day and red by
+        # night — including on CI, which runs in UTC. A scenario that is ABOUT
+        # quiet hours sets the window itself through its own settings.
+        self.use_env({"ASTA_QUIET_HOURS": ""})
 
         # 2. His phone. notify's own ledger/dedup logic still runs; only the
         #    delivery at the end of it is a recorder.
@@ -306,7 +315,18 @@ class World:
             store.add_notification(text, level)
             return {"whatsapp": True}
 
+        #    A FILE is the other way to his phone, and it is a real HTTP post to
+        #    the bridge — which on his laptop is up and paired. Unstubbed, every
+        #    bench run that wrote a spreadsheet delivered it to him for real.
+        #    Not recorded, for the same reason as Telegram below: `files.deliver`
+        #    announces the file through notify straight after, and one file on
+        #    his phone is one interruption, not two.
+        async def wa_document(path: str, caption: str = "") -> bool:
+            self.documents.append({"path": str(path), "caption": caption})
+            return True
+
         p.set(notify, "wa_send", wa_send)
+        p.set(notify, "wa_document", wa_document)
         if not real_notify:
             p.set(notify, "notify", notify_fn)
         p.set(notify, "wa_status", _async_value({"up": True, "paired": True, "enabled": True}))

@@ -17,12 +17,19 @@ from __future__ import annotations
 import csv
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-KINDS = ("xlsx", "csv", "md", "docx")
+KINDS = ("xlsx", "csv", "md", "docx", "pptx", "pdf")
 #: What a delivered file may weigh, so a runaway generation cannot fill his phone.
 MAX_ROWS = 20000
+#: A deck and a page are read by eye, not scrolled: past these, the honest answer
+#: is "you want a spreadsheet", said before the file is written rather than after.
+KIND_MAX_ROWS = {"pptx": 300, "pdf": 2000}
+#: Rows per slide and per table slide, so a table is never wider than a room.
+ROWS_PER_SLIDE = 12
+BULLETS_PER_SLIDE = 6
 
 
 def folder() -> Path:
@@ -58,12 +65,16 @@ def make(kind: str, name: str, rows: list[list] | None = None,
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)} — got {kind!r}")
     rows = [list(r) for r in (rows or [])]
-    if len(rows) > MAX_ROWS:
-        raise ValueError(f"{len(rows)} rows is more than {MAX_ROWS}; narrow it first")
+    cap = KIND_MAX_ROWS.get(kind, MAX_ROWS)
+    if len(rows) > cap:
+        raise ValueError(
+            f"{len(rows)} rows is more than a {kind} should carry ({cap}) — "
+            "ask for xlsx if he wants all of it, or narrow what goes in the deck")
     if not rows and not text.strip():
         raise ValueError("nothing to write — give rows, text, or both")
     path = _safe(name or title or "asta", kind)
-    writer = {"xlsx": _xlsx, "csv": _csv, "md": _md, "docx": _docx}[kind]
+    writer = {"xlsx": _xlsx, "csv": _csv, "md": _md, "docx": _docx,
+              "pptx": _pptx, "pdf": _pdf}[kind]
     writer(path, rows, title, text)
     made = Made(str(path), kind, max(0, len(rows) - 1 if rows else 0),
                 _summary(kind, rows, title, text))
@@ -77,6 +88,40 @@ def _summary(kind: str, rows: list[list], title: str, text: str) -> str:
     else:
         body = f"{len(text.split())} words"
     return f"{title or kind.upper()}: {body}"
+
+
+#: A PDF written with the built-in fonts can only carry latin-1, and he writes
+#: em dashes and middots constantly — fpdf raises on the first one. Rather than
+#: embed a font file or lose the line, spell those characters the long way. The
+#: check below compares against the SAME transliteration, so it still proves the
+#: content arrived; it just knows an em dash arrives as a hyphen.
+_SUBS = {
+    "\u2014": "-", "\u2013": "-", "\u2015": "-", "\u00b7": "-", "\u2022": "-",
+    "\u2026": "...", "\u201c": '"', "\u201d": '"', "\u201e": '"',
+    "\u2018": "'", "\u2019": "'", "\u2192": "->", "\u2190": "<-",
+    "\u2265": ">=", "\u2264": "<=", "\u20ac": "EUR", "\u00a0": " ",
+}
+
+
+def _latin1(text: str) -> str:
+    """The same words, in characters a built-in PDF font can actually draw."""
+    out = []
+    for ch in str(text):
+        ch = _SUBS.get(ch, ch)
+        try:
+            ch.encode("latin-1")
+        except UnicodeEncodeError:
+            plain = "".join(c for c in unicodedata.normalize("NFKD", ch)
+                            if ord(c) < 128)
+            ch = plain                       # an emoji normalises to nothing: drop it
+        out.append(ch)
+    return "".join(out)
+
+
+def _flat(text: str) -> str:
+    """Whitespace collapsed — a PDF wraps lines wherever the page ends, so the
+    only fair way to ask "is this sentence in there" is to ignore the wrapping."""
+    return " ".join(str(text).split())
 
 
 def _xlsx(path: Path, rows: list[list], title: str, text: str) -> None:
@@ -134,6 +179,75 @@ def _docx(path: Path, rows: list[list], title: str, text: str) -> None:
     doc.save(path)
 
 
+def _pptx(path: Path, rows: list[list], title: str, text: str) -> None:
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    deck = Presentation()
+    paras = [p.strip() for p in (text or "").split("\n\n") if p.strip()]
+
+    opening = deck.slides.add_slide(deck.slide_layouts[0])
+    opening.shapes.title.text = title or path.stem.replace("-", " ").title()
+    if len(opening.placeholders) > 1:
+        opening.placeholders[1].text = paras[0][:250] if paras else ""
+
+    for i in range(0 if not paras else 1, len(paras), BULLETS_PER_SLIDE):
+        slide = deck.slides.add_slide(deck.slide_layouts[1])
+        slide.shapes.title.text = title or "Notes"
+        body = slide.placeholders[1].text_frame
+        for j, para in enumerate(paras[i:i + BULLETS_PER_SLIDE]):
+            line = body.paragraphs[0] if j == 0 else body.add_paragraph()
+            line.text = para[:300]
+
+    if rows:
+        head, body_rows = rows[0], rows[1:] or []
+        chunks = ([body_rows[i:i + ROWS_PER_SLIDE]
+                   for i in range(0, len(body_rows), ROWS_PER_SLIDE)] or [[]])
+        for chunk in chunks:
+            slide = deck.slides.add_slide(deck.slide_layouts[5])
+            slide.shapes.title.text = title or "Data"
+            shape = slide.shapes.add_table(
+                len(chunk) + 1, len(head), Inches(0.5), Inches(1.7),
+                Inches(9), Inches(0.4 * (len(chunk) + 1)))
+            table = shape.table
+            for j, cell in enumerate(head):
+                table.cell(0, j).text = "" if cell is None else str(cell)
+            for i, row in enumerate(chunk, start=1):
+                for j in range(len(head)):
+                    value = row[j] if j < len(row) else ""
+                    table.cell(i, j).text = "" if value is None else str(value)
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.text_frame.paragraphs:
+                        for run in para.runs:
+                            run.font.size = Pt(12)
+    deck.save(path)
+
+
+def _pdf(path: Path, rows: list[list], title: str, text: str) -> None:
+    from fpdf import FPDF
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    if title:
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.multi_cell(0, 9, _latin1(title))
+        pdf.ln(2)
+    if text.strip():
+        pdf.set_font("Helvetica", size=11)
+        for para in text.strip().split("\n\n"):
+            if para.strip():
+                pdf.multi_cell(0, 6, _latin1(para.strip()))
+                pdf.ln(2)
+    if rows:
+        pdf.set_font("Helvetica", size=10)
+        with pdf.table(line_height=6) as table:
+            for row in rows:
+                line = table.row()
+                for cell in row:
+                    line.cell(_latin1("" if cell is None else str(cell)))
+    pdf.output(str(path))
+
+
 def _check(made: Made, rows: list[list], text: str) -> None:
     """Open what was just written and confirm it says what was asked.
 
@@ -144,10 +258,27 @@ def _check(made: Made, rows: list[list], text: str) -> None:
     if not path.is_file() or path.stat().st_size == 0:
         raise RuntimeError(f"{path} was not written")
     back = read(str(path))
+    if made.kind == "pdf":
+        # A PDF gives back a page of words, not a grid: the cells are all there,
+        # but which line they sit on is the page's business. So look for the
+        # words — transliterated the same way they were written.
+        got = _flat(back.get("text") or "")
+        missing = [str(c) for c in (rows[0] if rows else [])
+                   if _flat(_latin1(str(c))) not in got]
+        if missing:
+            raise RuntimeError(
+                f"{path.name} is missing header cell(s): {', '.join(missing[:3])}")
+        for row in (rows[1:] if len(rows) > 1 else []):
+            head = _flat(_latin1(str(row[0]))) if row else ""
+            if head and head not in got:
+                raise RuntimeError(f"{path.name} is missing the row for {row[0]!r}")
+        if text.strip() and _flat(_latin1(text.strip()))[:40] not in got:
+            raise RuntimeError(f"{path.name} is missing the text it was given")
+        return
     if rows:
-        want, got = len(rows), len(back.get("rows") or [])
-        if got < want:
-            raise RuntimeError(f"{path.name} has {got} rows, expected {want}")
+        want, got_rows = len(rows), len(back.get("rows") or [])
+        if got_rows < want:
+            raise RuntimeError(f"{path.name} has {got_rows} rows, expected {want}")
         first = [str(c) for c in rows[0]]
         if [str(c) for c in (back["rows"][0] if back.get("rows") else [])][:len(first)] != first:
             raise RuntimeError(f"{path.name} does not start with the header it was given")
@@ -172,6 +303,24 @@ def read(path: str, limit: int = 500) -> dict:
         if kind == "csv":
             with p.open(newline="", encoding="utf-8", errors="replace") as fh:
                 return {"rows": [r for r in list(csv.reader(fh))[:limit] if r], "text": ""}
+        if kind == "pptx":
+            from pptx import Presentation
+            deck = Presentation(str(p))
+            said, rows = [], []
+            for slide in deck.slides:
+                for shape in slide.shapes:
+                    if shape.has_text_frame and shape.text_frame.text.strip():
+                        said.append(shape.text_frame.text.strip())
+                    if getattr(shape, "has_table", False):
+                        rows += [[c.text for c in r.cells] for r in shape.table.rows]
+            return {"rows": rows[:limit], "text": "\n".join(said)}
+        if kind == "pdf":
+            from pypdf import PdfReader
+            pages = PdfReader(str(p)).pages
+            text = "\n".join((page.extract_text() or "") for page in pages)
+            # No rows: a PDF keeps words, not cells. `describe` says so rather
+            # than inventing a grid out of where the lines happened to break.
+            return {"rows": [], "text": text[:20000], "pages": len(pages)}
         if kind == "docx":
             from docx import Document
             doc = Document(str(p))
@@ -216,4 +365,6 @@ def describe(path: str) -> str:
         head = ", ".join(str(c) for c in data["rows"][0][:8])
         return f"{Path(path).name}: {len(data['rows']) - 1} row(s), columns: {head}"
     words = len((data.get("text") or "").split())
+    if data.get("pages"):
+        return f"{Path(path).name}: {data['pages']} page(s), {words} words"
     return f"{Path(path).name}: {words} words"

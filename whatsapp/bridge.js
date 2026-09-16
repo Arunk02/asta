@@ -205,6 +205,7 @@ async function sendDocument(filePath, caption) {
   const types = {
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".csv": "text/csv", ".md": "text/markdown", ".pdf": "application/pdf",
   };
   const res = await sock.sendMessage(jid, {

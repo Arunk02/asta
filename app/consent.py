@@ -141,6 +141,31 @@ def asked_to_talk(text: str) -> bool:
     return _asked(_TALK, text or "") or asked_to_call(text)
 
 
+#: A file he wants in his hands: a sheet, a deck, a document, a PDF.
+#:
+#: Found live on 16 Sep. Asked for "a short deck of my open tasks — and send it",
+#: the chat brain read the repository for five minutes and then spawned a CODE
+#: TASK to write the deck with a script. Every one of those minutes was spent
+#: rebuilding a tool it already had, and the thing he asked for never arrived.
+#: Same shape as 27 August: the act he named does not happen, a heavier and
+#: repo-touching one does, and he learns about it afterwards.
+_FILE_NOUN = re.compile(
+    r"\b(excel|spread\s?sheet|xlsx|csv|deck|slides?|power\s?point|pptx|"
+    r"pdf|word\s+doc\w*|docx|sheet)\b", re.I)
+#: "make me…", "send it as…", "turn that into…" — he is asking to be GIVEN a file,
+#: not for the code that makes files to be changed.
+_FILE_VERB = re.compile(
+    r"\b(make|create|give|send|share|put|turn|export|generate|produce|prepare|"
+    r"draft|write\s+(?:me|up)?)\b", re.I)
+
+
+def asked_for_a_file(text: str) -> bool:
+    """Did he ask to be handed a file? Both halves must be there, so "the pdf
+    parser is broken" is not mistaken for "give me a pdf"."""
+    text = text or ""
+    return bool(_FILE_NOUN.search(text) and _FILE_VERB.search(text))
+
+
 def substitution(turn_text: str, kind: str, repos: tuple[str, ...] = ()) -> str:
     """Why this background task replaces what he actually asked for, or "".
 
@@ -159,6 +184,15 @@ def substitution(turn_text: str, kind: str, repos: tuple[str, ...] = ()) -> str:
     """
     if kind != "code" or not (turn_text or "").strip():
         return ""
+    if (asked_for_a_file(turn_text)
+            and not work_intent.is_work_assignment(turn_text, repos)):
+        return ("You asked me for a file, not for a change to a repository. I'm not "
+                "spawning a code task to write it — `make_file` does exactly this: "
+                "decide the rows and the title yourself and call it, and code writes "
+                "the file, checks what it wrote and sends it to him.\n\n"
+                "kind: xlsx | csv | md | docx | pptx | pdf. If the repository really "
+                "does need changing as well, say so and spawn that alongside — not "
+                "in place of the file.")
     if not asked_to_talk(turn_text):
         return ""
     if work_intent.is_work_assignment(turn_text, repos) or _ALSO_WORK.search(turn_text):

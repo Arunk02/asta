@@ -122,13 +122,28 @@ def handoff_prompt(point: dict, taking_over: str = "") -> str:
             got,
             "———",
         ]
-    lines += [
-        "",
-        "Continue from there. Do not redo work that is already clearly done, and do "
-        "not re-explain what is above — Arun has already read it. Pick up at the "
-        "next unfinished step and carry the task to the end. If you draft anything "
-        "to send outside this chat, stage it with prepare_to_send.",
-    ]
+    if got:
+        lines += [
+            "",
+            "Continue from there. Do not redo work that is already clearly done, and "
+            "do not re-explain what is above — Arun has already read it. Pick up at "
+            "the next unfinished step and carry the task to the end. If you draft "
+            "anything to send outside this chat, stage it with prepare_to_send.",
+        ]
+    else:
+        # Nothing came out before it stopped, so "do not redo what is done" is
+        # advice about work that does not exist — and on 16 Sep it sent the brain
+        # that took over searching /tmp and the repo for a file the previous run
+        # had never written, until its own budget ran out. Say plainly that the
+        # slate is empty: the cheapest way to finish is to do the thing.
+        lines += [
+            "",
+            "It stopped before producing anything, so there is NOTHING TO RECOVER. "
+            "Do the work now from his request alone — do not go looking for what "
+            "the previous run did, and do not investigate its traces; there are "
+            "none. If his request is a single tool call, make that call. If you "
+            "draft anything to send outside this chat, stage it with prepare_to_send.",
+        ]
     if taking_over:
         lines.append(f"You are {taking_over}.")
     return "\n".join(lines)

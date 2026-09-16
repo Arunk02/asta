@@ -27,10 +27,10 @@ scenarios:
     twin: false
     brains:
       chat:
-        - calls: [{tool: make_file, args: {kind: nonsense, name: broken, rows: [["a"], ["b"]]}}]
+        - calls: [{tool: make_file, args: {kind: keynote, name: broken, rows: [["a"], ["b"]]}}]
           text: "That format is not something I can write."
     steps:
-      - say: "put that in a pdf"
+      - say: "put that in a keynote"
     checks:
       - tool_result_contains: {tool: make_file, text: "Not created"}
       - no_send: true
@@ -52,3 +52,63 @@ scenarios:
     checks:
       - tool_result_contains: {tool: read_data_file, text: "booking.events"}
       - said_contains: "uat"
+
+  - id: a-deck-he-can-show-people
+    title: '"turn that into slides" produces a deck with the table on a slide'
+    why: >
+      A deck is the one file he opens in front of other people, so the table has
+      to be IN it — not described in the chat message that carries it.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: pptx, name: uat-readiness, title: "UAT readiness",
+                   rows: [["Environment", "Topic", "Partitions"], ["uat", "booking.events", 6], ["prd", "booking.events", 12]],
+                   text: "Two environments are ready.\n\nPartitions double in prd."}}]
+          text: "Deck is on its way."
+    steps:
+      - say: "turn the uat readiness into slides and send it"
+    checks:
+      - tool_result_contains: {tool: make_file, text: "Sent to his phone"}
+      - made_file: {name: "uat-readiness.pptx", contains: "booking.events", rows: 3}
+
+  - id: a-pdf-keeps-the-words-he-wrote
+    title: A PDF he asks for carries the prose and every row
+    why: >
+      The PDF fonts cannot draw an em dash, and he writes them constantly. The
+      words must still arrive — spelled the long way — or the check refuses the file.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: pdf, name: uat-note, title: "UAT note — week 38",
+                   rows: [["Environment", "Owner"], ["uat", "platform"]],
+                   text: "Where we stand — uat is refreshed and prd follows."}}]
+          text: "Sent the PDF."
+    steps:
+      - say: "send me that note as a pdf"
+    checks:
+      - tool_result_contains: {tool: make_file, text: "Sent to his phone"}
+      - made_file: {name: "uat-note.pdf", contains: "uat is refreshed"}
+
+  - id: a-file-ask-never-becomes-a-code-task
+    title: '"make me a deck" is one tool call, not an engineering task'
+    why: >
+      Found live on 16 Sep: asked for a deck of his open tasks, the chat brain
+      spent five minutes reading the repo and then DELEGATED A CODE TASK to write
+      the file with a script. That is the 27 August substitution in a new costume —
+      the act he asked for does not happen, a different one does, and he finds out
+      later. He has the tool; it must use it.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: delegate_task, args: {title: "Generate and send open-tasks deck",
+                   kind: code, workspace: asta,
+                   prompt: "Use app/files.py to write a pptx of the open tasks and deliver it"}},
+                  {tool: make_file, args: {kind: pptx, name: open-tasks, title: "Open tasks",
+                   rows: [["id", "title", "status"], [116, "Nudge the reviewer", "awaiting_approval"]]}}]
+          text: "Sent the deck."
+    steps:
+      - say: "make me a short deck of my open tasks and send it"
+    checks:
+      - tool_result_contains: {tool: delegate_task, text: "make_file"}
+      - tasks: {count: 0}
+      - made_file: {name: "open-tasks.pptx", rows: 2}

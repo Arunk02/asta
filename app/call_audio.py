@@ -79,6 +79,13 @@ async def current_mic() -> str:
         return ""
 
 
+#: "A warning is outstanding for this device." Absent means none is.
+WARNED_KEY = "mic_warned_for"
+#: Stored when the input device cannot be read at all — a real state, and NOT
+#: the same as "no warning outstanding".
+UNKNOWN_MIC = "(unreadable)"
+
+
 async def _restore_mic(page) -> None:
     """Give the microphone back. Shouts only if it really did not go back.
 
@@ -96,16 +103,24 @@ async def _restore_mic(page) -> None:
     from . import notify
     for attempt in range(3):
         if await set_call_mic(page, HIS_MIC):
-            store.kv_set("mic_warned_for", "")
+            store.kv_del(WARNED_KEY)     # nothing outstanding — not "" , see below
             return
         await asyncio.sleep(0.4 * (attempt + 1))
     now = await current_mic()
     if now == HIS_MIC:
         return                       # it landed; only the verify read was early
-    # Once per call, not once per attempt. Repeating it is what made it noise.
-    if store.kv_get("mic_warned_for") == now:
+    # Once per device, not once per attempt. Repeating it is what made it noise.
+    #
+    # The marker spells the unreadable case out loud rather than storing "". It
+    # used to store the device name directly, and a successful restore cleared
+    # the key by writing "" — the same value the unreadable case wrote. So after
+    # any good call, a genuine "I cannot read your input device" failure compared
+    # equal to the marker and was dropped in silence. A warning that is only
+    # suppressed when it is TRUE is worse than no warning.
+    mark = now or UNKNOWN_MIC
+    if store.kv_get(WARNED_KEY) == mark:
         return
-    store.kv_set("mic_warned_for", now)
+    store.kv_set(WARNED_KEY, mark)
     await notify.notify(
         f"🎙️ Your mic is on {now or 'an unknown device'}, not {HIS_MIC} — you may "
         f"be muted. Set it in Teams → Settings → Devices.", "warn", urgency="direct")

@@ -396,3 +396,15 @@ def test_crispness_is_a_rule_for_every_channel_not_just_whatsapp():
     assert "elaborate" in agent.PERSONA
     for channel in ("whatsapp", "telegram", "teams", "voice"):
         assert channel in agent.CHANNEL_NOTES, channel
+
+
+def test_the_suite_cannot_reach_his_phone():
+    """He asked why the same mic warning had arrived two hundred times in three
+    days. It was the suite: `wa_send` posts to WA_BRIDGE_URL, which defaults to
+    the bridge on his laptop, and five tests reach it on every run. The bridge is
+    an outward door like the microphone and the voice server, and conftest points
+    all three at nothing — this asserts it stays that way."""
+    from app import notify, telegram
+
+    assert notify.bridge_url() == "http://127.0.0.1:9"      # a closed port
+    assert telegram.enabled() is False

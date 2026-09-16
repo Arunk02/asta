@@ -111,6 +111,20 @@ def _no_machine_side_effects(monkeypatch):
     from app import call_audio, voice
     monkeypatch.setattr(call_audio, "SWITCH_AUDIO", "/nonexistent/SwitchAudioSource")
     monkeypatch.setattr(voice, "BASE", "http://127.0.0.1:9")    # nothing listens on 9
+    # The third door, and the only one that reaches a PERSON. `notify.wa_send`
+    # posts to WA_BRIDGE_URL, which defaults to the bridge running on his laptop,
+    # so five tests have been pushing real WhatsApp messages to him on every run
+    # of the suite — four "🎙️ Your mic is on an unknown device…" and one
+    # "📞 Talked to Alex…". He counted more than two hundred in three days and
+    # asked what was bloating his phone; it was the tests. Same treatment as the
+    # microphone and the voice server: the code path still runs, the message
+    # reaches a closed port. A test ABOUT delivery patches `wa_send` itself.
+    monkeypatch.setenv("WA_BRIDGE_URL", "http://127.0.0.1:9")
+    # Telegram is the same door on another channel. It is dead in tests only by
+    # accident today (the chat id lives in the isolated database), and a test
+    # that stores one would push to his phone for real.
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     yield
 
 

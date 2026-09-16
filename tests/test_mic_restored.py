@@ -357,3 +357,30 @@ def test_the_same_warning_is_not_repeated(monkeypatch):
     asyncio.run(call_audio._restore_mic(None))
     asyncio.run(call_audio._restore_mic(None))
     assert len(said) == 1
+
+
+def test_an_unknown_device_warning_is_not_swallowed_by_a_previous_success(monkeypatch):
+    """The marker used "" for BOTH "nothing outstanding" (set on success) and
+    "the device could not be read". So after any successful restore, a genuine
+    unknown-device failure compared equal to the marker and was silently
+    dropped — the one time the warning is true, he would not hear it."""
+    said: list = []
+
+    async def never(page=None, device: str = ""):
+        return False
+
+    monkeypatch.setattr(call_audio, "set_call_mic", never)
+    monkeypatch.setattr(call_audio, "current_mic", lambda: _resolved(""))
+    from app import notify, store
+
+    async def fake_notify(text, level="info", **kw):
+        said.append(text)
+        return {}
+
+    monkeypatch.setattr(notify, "notify", fake_notify)
+    store.kv_set("mic_warned_for", "")          # as a successful restore leaves it
+    asyncio.run(call_audio._restore_mic(None))
+    assert len(said) == 1 and "unknown device" in said[0]
+    # ...and still only once, however many calls end the same way.
+    asyncio.run(call_audio._restore_mic(None))
+    assert len(said) == 1

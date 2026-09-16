@@ -545,6 +545,20 @@ def to_digest(source: str, who: str = "", priority: int = P_FYI,
         return "you asked for this one in the digest"
     if not learns():
         return ""
+    # Two things his ledger cannot see, both found on his real data (16 Sep):
+    #
+    #   ASTA'S OWN VOICE sits at 226 of 226 "ignored" — nothing he does with a
+    #   plan gate is recorded as acting on it. Digesting that would silence the
+    #   gate itself.
+    #
+    #   A PERSON he answers IN TEAMS looks ignored too: four colleagues sit at
+    #   100%, because the reply happens where Asta cannot watch. Burying a
+    #   colleague's ask on that evidence is the one failure this must not have.
+    #
+    # So the record only ever demotes a feed that broadcasts by nature — the
+    # ticket desk, a no-reply notifier. A person is demoted only if HE says so.
+    if source == SELF_SOURCE or not from_bulk_sender(who or source):
+        return ""
     handled, ignored = history(source, who, now=now)
     seen = handled + ignored
     if seen >= MIN_SEEN and ignored / seen >= IGNORE_SHARE:

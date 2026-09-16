@@ -313,6 +313,11 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
         if attention.consider(source, key, who=who, what=text, priority=pri):
             await notify.notify(text, source, urgency=arg.get("urgency", "direct"),
                                 priority=pri, considered=True)
+    elif kind == "announce":
+        # Asta speaking on its own initiative — a plan gate, a finished task.
+        from app import notify
+        await notify.notify(arg.get("text", ""), arg.get("level", "task"),
+                            urgency=arg.get("urgency", "direct"))
     elif kind == "digest_add":
         from app import digest
         digest.add(arg.get("text", ""), source=arg.get("source", ""), why=arg.get("why", ""))

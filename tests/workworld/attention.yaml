@@ -119,3 +119,37 @@ scenarios:
       - said_contains: "revoked"
       - tool_result_contains: {tool: prepare_to_send, text: "Draft staged"}
       - permissions: {count: 0}
+
+  - id: a-colleague-is-never-moved-to-the-digest
+    title: A person he answers in Teams is never demoted, however "ignored" the ledger looks
+    why: >
+      Found on his live ledger, 16 Sep: several colleagues sit at 100% "ignored"
+      because he replies to them inside Teams, where Asta cannot see it. Demoting
+      a person on that evidence would bury a real ask. Only a bulk feed is demoted.
+    twin: false
+    real_notify: true
+    setup:
+      reactions:
+        - {source: teams-chat, who: "Kendall Brooks", seen: 100, ignored: 100}
+    steps:
+      - inbound: {who: "Kendall Brooks", source: teams-chat, text: "can you check why STF is not done for this one"}
+    checks:
+      - push_contains: "STF is not done"
+      - digest: {count: 0}
+
+  - id: astas-own-voice-is-never-digested
+    title: A plan gate is not a source he ignores
+    why: >
+      Also from the live ledger: Asta's own announcements sit at 226 of 226
+      "ignored", because nothing he does with them is recorded as acting on them.
+      Digesting those would silence the plan gate itself.
+    twin: false
+    real_notify: true
+    setup:
+      reactions:
+        - {source: asta, who: "", seen: 226, ignored: 226}
+    steps:
+      - announce: {text: "📋 PLAN #42 — retention to 90 days. Approve?"}
+    checks:
+      - push_contains: "PLAN #42"
+      - digest: {count: 0}

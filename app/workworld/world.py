@@ -156,6 +156,7 @@ class World:
     """What happened, and what the outside world would have said."""
     pushes: list[dict] = field(default_factory=list)          # to his phone
     documents: list[dict] = field(default_factory=list)       # files that reached it
+    app_calls: list[dict] = field(default_factory=list)       # doors into his own apps
     replies: list[dict] = field(default_factory=list)         # in the chat
     sent: list[dict] = field(default_factory=list)            # OUT of the house
     brain_calls: list[dict] = field(default_factory=list)
@@ -274,6 +275,7 @@ class World:
         from app import (attention, briefing, chat_watch, claude_cli, copilot_cli, delivery,
                          jira, main, meetings, memory, notify, outlook, presence, quiet,
                          repo_ops, store, tasks, teams_bridge, telegram, verify, wa_bridge)
+        from app import apps
         p = self._patch
 
         # 1. The database: a fresh file per scenario. Checked again by
@@ -348,6 +350,26 @@ class World:
             return True
 
         p.set(telegram, "send", tg_send)
+        # His Mac's apps (hands, layer two). A door like any other: the scenario
+        # asserts that Asta ASKED Reminders for something, and his real
+        # Reminders list is never opened. The recipe is checked against the real
+        # table on the way through, so a scenario cannot pass on a recipe that
+        # does not exist.
+        async def use_app(recipe: str, **args):
+            from app import apps as apps_mod
+            if recipe not in apps_mod.RECIPES:
+                raise apps_mod.AppError(f"no such recipe: {recipe}")
+            # Its own ledger, NOT `sent`: an app on his own Mac is not an
+            # outward act, the same way Telegram is his phone rather than a
+            # door to a colleague. Filed under `sent`, the constitution read a
+            # reminder he asked for as "sent without approval".
+            self.app_calls.append({"recipe": recipe, "args": dict(args)})
+            spec = apps_mod.RECIPES[recipe]
+            return {"ok": True, "app": spec.app, "did": spec.does,
+                    "verified": str(args.get(spec.verify_has, ""))}
+
+        p.set(apps, "run", use_app)
+        p.set(apps, "enabled", lambda: True)
         p.set(jira, "add_comment", self._door("jira-comment", "key"))
         p.set(jira, "transition_issue", self._door("jira-transition", "key"))
         p.set(meetings, "call_person", self._door("call", "who"))

@@ -86,6 +86,14 @@ _TABLE: tuple[Capability, ...] = (
                     "paste a table into chat instead."),
     Capability("read_data_file", "hands", http="GET /api/files?path={path}",
                note="A spreadsheet or document he shared, as rows you can answer from."),
+    Capability("use_app", "hands", write=True,
+               http='POST /api/apps {"recipe":"reminder_add","args":{"title":"…"}}',
+               note="His Mac's apps through their own scripting doors — Reminders, "
+                    "Calendar, Notes, a Mail DRAFT, Finder. Named recipes only, and "
+                    "every write is read back before it counts as done. Call "
+                    "app_recipes() first to see what exists."),
+    Capability("app_recipes", "hands", http="GET /api/apps",
+               note="The app recipes and what each one takes. Read before use_app."),
     Capability("note_fact", "memory",
                http='POST /api/facts {"subject":"…","fact":"…","kind":"person|repo|service|env","source":"…"}',
                note="Facts about people and systems, with a source — who owns what, which "

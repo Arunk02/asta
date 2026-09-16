@@ -1207,6 +1207,18 @@ async def api_make_file(request: Request):
         b.get("title", ""), b.get("text", ""), bool(b.get("send", True)))}
 
 
+@app.post("/api/apps", dependencies=[Depends(require_auth)])
+async def api_use_app(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.use_app(b.get("recipe", ""),
+                                                          b.get("args") or {})}
+
+
+@app.get("/api/apps", dependencies=[Depends(require_auth)])
+def api_app_recipes():
+    return {"detail": agent_mod.app_recipes()}
+
+
 @app.get("/api/files", dependencies=[Depends(require_auth)])
 def api_read_file(path: str):
     return {"detail": agent_mod.read_data_file(path)}

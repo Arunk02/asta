@@ -125,6 +125,13 @@ def _no_machine_side_effects(monkeypatch):
     # that stores one would push to his phone for real.
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    # And the app doors (hands, layer two). These write to his REAL Reminders,
+    # Calendar, Notes and Mail — the suite gets an interpreter that does not
+    # exist, and a test about a recipe patches the runner it needs.
+    from app import apps
+    monkeypatch.setattr(apps, "OSASCRIPT", "/nonexistent/osascript")
+    monkeypatch.setattr(apps, "SHORTCUTS", "/nonexistent/shortcuts")
+    monkeypatch.delenv("ASTA_APPS", raising=False)
     yield
 
 

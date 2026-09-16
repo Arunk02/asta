@@ -1741,6 +1741,42 @@ async def make_file(kind: str, name: str, rows: list | None = None, title: str =
             else f"Written (his phone would not take it): {made.line()}")
 
 
+async def use_app(recipe: str, args: dict | None = None) -> str:
+    """Do something in one of Arun's Mac apps, through that app's own door.
+
+    recipe: one of the named recipes from `app_recipes` — a reminder, a calendar
+    event, a note, a Mail DRAFT, or showing a file in Finder. `args` fills in
+    what that recipe takes.
+
+    You do not write scripts here and you do not drive his mouse: you choose a
+    recipe. Every recipe that CHANGES something reads the app back afterwards
+    and fails if the change is not there, so a success from this tool means the
+    thing is actually in the app — and a failure means it is not, whatever the
+    app said on the way through.
+
+    Nothing here sends mail. A draft is left open for him; sending is an outward
+    act with a gate of its own (prepare_to_send)."""
+    from . import apps
+    try:
+        out = await apps.run(recipe, **(args or {}))
+    except apps.AppError as exc:
+        return f"Not done — {exc}"
+    verified = out.get("verified")
+    return (f"Done in {out['app']}: {out['did']}"
+            + (f" — read back and found {verified!r}." if verified else "."))
+
+
+def app_recipes() -> str:
+    """What Asta can do in Arun's apps, and what each one needs.
+
+    Read this before use_app rather than guessing a recipe name."""
+    from . import apps
+    if not apps.enabled():
+        return ("App doors are off (ASTA_APPS=1 turns them on). The recipes that "
+                "would be available:\n" + apps.catalogue())
+    return apps.catalogue()
+
+
 def read_data_file(path: str) -> str:
     """Read a spreadsheet or document he shared, as data you can answer from.
 

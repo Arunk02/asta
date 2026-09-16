@@ -544,6 +544,22 @@ def _check_sent(arg, world, state):
     return ""
 
 
+def _check_app_door(arg, world, state):
+    """A door into one of his own apps — `{recipe: reminder_add, count: 1}`.
+
+    Separate from `sent` on purpose: a reminder in his own Reminders is not an
+    outward act, and filing it as one made the constitution read work he asked
+    for as work done behind his back."""
+    hits = [c for c in world.app_calls
+            if (not arg.get("recipe") or c["recipe"] == arg["recipe"])
+            and (not arg.get("args_contain")
+                 or re.search(arg["args_contain"], str(c["args"]), re.I | re.S))]
+    want = arg.get("count", 1)
+    if len(hits) != want:
+        return f"{len(hits)} app door(s) matching {arg}, expected {want}: {world.app_calls}"
+    return ""
+
+
 def _check_outcome(arg, world, state):
     from app import store
     rows = [o for o in store.recent_outcomes(200)
@@ -711,6 +727,7 @@ CHECKS = {
     "push_count": _check_push_count,
     "no_send": _check_no_send,
     "sent": _check_sent,
+    "app_door": _check_app_door,
     "outcome": _check_outcome,
     "kv": _check_kv,
     "brain_calls": _check_brain_calls,

@@ -253,3 +253,33 @@ def test_a_fallback_that_also_dies_rolls_on_to_the_next(monkeypatch):
     asyncio.run(main._cli_fallback(_Sink(), {"id": "cA"}, "fix the sync bug", "claude_cli", "whatsapp"))
     assert tried == ["copilot", "local"]        # rolled Copilot -> local, no error surfaced
     assert resume.get("cA") is None             # local finished -> checkpoint consumed
+
+
+def test_a_handoff_is_ranked_on_his_ask_not_on_the_wrapper():
+    """Live, three times on 16 Sep. The handoff prompt is passed as the turn's
+    text, and everything that ranks a message then ranked the WRAPPER — "was
+    working on it when it ran out of quota" scores as conversation, so the turn
+    was handed call and Teams tools and not `make_file`. The brain said so
+    plainly ("that tool isn't in my toolset") and it was right: a resumed turn
+    must be ranked on what he actually asked for."""
+    ask = "make a short deck of my open tasks and send it to me, then as a pdf"
+    point = resume.save("c1", ask, "claude")
+    assert resume.ranking_text(resume.handoff_prompt(point, "claude_cli")) == ask
+    # An ordinary message is its own ranking text — no marker, no change.
+    assert resume.ranking_text("what is on my plate?") == "what is on my plate?"
+
+
+def test_the_cli_gives_a_resumed_turn_the_tools_his_ask_needs(monkeypatch):
+    """The wiring, not just the string: the MCP config a handoff runs with has
+    to carry the capability his request needs."""
+    import json
+
+    from app import claude_cli, copilot_cli
+
+    monkeypatch.setattr(copilot_cli, "mcp_cli_enabled", lambda: True)
+    ask = "make a short deck of my open tasks — id, title, status — and send it"
+    point = resume.save("c-handoff", ask, "claude")
+    cmd = claude_cli._build_cmd({"id": "c-handoff", "model": "claude", "workspace": None},
+                                resume.handoff_prompt(point, "claude_cli"))
+    cfg = cmd[cmd.index("--mcp-config") + 1]
+    assert "make_file" in json.loads(cfg)["mcpServers"]["asta"]["env"]["ASTA_MCP_TOOLS"]

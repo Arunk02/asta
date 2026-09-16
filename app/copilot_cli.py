@@ -199,7 +199,7 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     runs once per CLI session (the CLI remembers the rest), so the index tail is
     what keeps a later message in the same session reachable.
     """
-    from . import capabilities, guardrails, skills, tool_index
+    from . import capabilities, consent, guardrails, skills, tool_index
     name = os.environ.get("ASSISTANT_NAME", "Asta")
     parts = [
         f"You are acting as {name}, Arun's assistant, via {via}. Be concise and direct.",
@@ -225,11 +225,29 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
         parts.append(
             "Arun's capabilities are native MCP tools on the `asta` server "
             "(remember, set_reminder, teams_activity, jira_issue, delegate_task, "
-            "ask_user, review_pr, …). Call them directly — do NOT curl the HTTP API "
-            "or shell out for them. Each tool's own description carries its rules.")
+            "make_file, ask_user, review_pr, …). Call them directly — do NOT curl "
+            "the HTTP API or shell out for them. Each tool's own description "
+            "carries its rules.")
     else:
         selected = tool_index.select(user_text) if user_text else None
         parts.append(capabilities.cli_block(port, str(ROOT), selected))
+    # A file ask is the one where shelling out looks plausible: the module that
+    # writes files is right there in the repo, so a brain reads app/files.py and
+    # tries to run it. Live, twice on 16 Sep, that ended in a five-minute repo
+    # hunt, a delegated code task, and no file — while `make_file` sat in its own
+    # tool list. So when he is plainly asking to be handed a file, say which tool
+    # that is. Outside the MCP branch on purpose: every brain gets the same
+    # sentence, because a rule that holds on one CLI and not the other is two
+    # assistants. Same definition the substitution guard uses, so the prompt and
+    # the refusal cannot drift apart.
+    if consent.asked_for_a_file(user_text or ""):
+        parts.append(
+            "THIS MESSAGE ASKS FOR A FILE. `make_file` is how that happens: you "
+            "decide the rows (header first) and the title, it writes the "
+            "xlsx/csv/md/docx/pptx/pdf, checks what it wrote and sends it to his "
+            "phone. Call it directly. Do NOT write a script, do NOT run "
+            "app/files.py yourself, and do NOT delegate a task for it — a file he "
+            "asked for is one tool call, not a piece of engineering.")
     recap = _switch_recap(conv, via)
     if recap:
         parts.append(recap)
@@ -349,7 +367,12 @@ async def _outlook_context(user_text: str) -> str:
 
 def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]:
     sid, is_new = _session_id(conv["id"])
-    ranking_text = user_text            # the bare message, before prefixes muddy it
+    # A handoff arrives AS the turn's text, and its wrapper ("was working on
+    # it when it ran out of quota") ranks as conversation — so a resumed turn
+    # was handed tools chosen for the handoff instead of for his request. Rank
+    # on his sentence; the wrapper is provenance, not the subject.
+    from . import resume as resume_mod
+    ranking_text = resume_mod.ranking_text(user_text)
     # Every turn carries the current local time — long-lived sessions otherwise
     # drift days behind, which breaks "remind me at 3pm" style requests.
     import datetime as _dt

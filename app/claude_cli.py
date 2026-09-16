@@ -215,7 +215,12 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     import datetime as _dt
 
     sid, is_new = _session_id(conv["id"])
-    ranking_text = user_text            # the bare message, before the [now:] prefix
+    # A handoff arrives AS the turn's text, and its wrapper ("was working on
+    # it when it ran out of quota") ranks as conversation — so a resumed turn
+    # was handed tools chosen for the handoff instead of for his request. Rank
+    # on his sentence; the wrapper is provenance, not the subject.
+    from . import resume as resume_mod
+    ranking_text = resume_mod.ranking_text(user_text)
     now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M %a")
     umsg = f"[now: {now}]\n{user_text}"
     if prefetched:

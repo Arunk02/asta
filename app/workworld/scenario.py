@@ -459,7 +459,8 @@ def _run_checks(sc: Scenario, world: W.World, state: dict) -> list[str]:
 def _text_of(world: W.World, where: str) -> str:
     return {"push": world.phone_text(), "reply": world.chat_text(),
             "any": world.everything_said(),
-            "brain": "\n".join(b["prompt"] for b in world.brain_calls),
+            "brain": "\n".join(f"{b['prompt']}\n{b.get('system', '')}"
+                                for b in world.brain_calls),
             "sent": "\n".join(str(s) for s in world.sent)}[where]
 
 

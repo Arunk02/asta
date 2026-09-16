@@ -456,7 +456,21 @@ class World:
             task = task_brain or ScriptedBrain([], self, "task")
 
             async def run_turn(conv, user_text, on_delta=None, on_tool=None, on_usage=None):
+                # What the brain is TOLD, not only what it is asked. The real chat
+                # path builds this orientation every turn and the sandbox replaced
+                # the whole call, so no scenario could assert on it — which is how
+                # "a file ask says which tool writes files" was untestable here
+                # while failing live. Recorded beside the prompt rather than
+                # prepended to it, so a scripted `when:` still matches his words.
+                system = ""
+                try:
+                    system = copilot_cli._first_turn_context(
+                        conv, via="bench", user_text=user_text)
+                except Exception:                               # noqa: BLE001
+                    system = ""                 # orientation is evidence, not a door
                 out = await chat.answer(user_text, conv.get("id", ""))
+                if self.brain_calls:
+                    self.brain_calls[-1]["system"] = system
                 if on_delta:
                     await on_delta(out)
                 if on_usage:

@@ -345,3 +345,18 @@ def test_work_on_the_code_that_makes_files_is_still_work():
     assert consent.substitution("fix the excel export in the booking service", "code") == ""
     assert consent.substitution("the pdf parser is dropping pages, debug it", "code") == ""
     assert consent.substitution("make a short deck of my open tasks", "analysis") == ""
+
+
+def test_the_orientation_points_at_the_tool_on_a_file_ask(monkeypatch):
+    """The refusal and the prompt must agree about what a file ask is — one
+    definition, or they drift and the brain gets told two different things."""
+    from app import copilot_cli
+
+    monkeypatch.setenv("ASTA_MCP_CLI", "1")
+    conv = {"id": "c-file", "model": "claude", "workspace": None}
+    asked = copilot_cli._first_turn_context(
+        conv, via="Claude Code CLI", user_text="send me my open tasks as a pdf")
+    assert "THIS MESSAGE ASKS FOR A FILE" in asked and "make_file" in asked
+    other = copilot_cli._first_turn_context(
+        conv, via="Claude Code CLI", user_text="what is on my plate today?")
+    assert "THIS MESSAGE ASKS FOR A FILE" not in other

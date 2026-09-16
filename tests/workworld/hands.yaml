@@ -112,3 +112,24 @@ scenarios:
       - tool_result_contains: {tool: delegate_task, text: "make_file"}
       - tasks: {count: 0}
       - made_file: {name: "open-tasks.pptx", rows: 2}
+
+  - id: a-file-ask-tells-the-brain-which-tool-writes-files
+    title: The brain is told make_file exists, in the turn where it matters
+    why: >
+      Live on 16 Sep, twice: the brain read app/files.py, tried to run it through
+      the shell, hit the read-only lock and concluded "make_file is not bound to
+      this session" — while make_file sat in its own tool list. A tool nobody
+      points at is a tool that does not exist. Only on a file ask: an orientation
+      that says everything says nothing.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: pdf, name: open-tasks, title: "Open tasks",
+                   rows: [["id", "status"], [116, "awaiting_approval"]]}}]
+          text: "Sent the PDF."
+    steps:
+      - say: "send me my open tasks as a pdf"
+    checks:
+      - brain_prompt_contains: "THIS MESSAGE ASKS FOR A FILE"
+      - brain_prompt_contains: "not a piece of engineering"
+      - made_file: {name: "open-tasks.pdf", contains: "awaiting_approval"}

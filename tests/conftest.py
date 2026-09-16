@@ -132,6 +132,7 @@ def _no_machine_side_effects(monkeypatch):
     monkeypatch.setattr(apps, "OSASCRIPT", "/nonexistent/osascript")
     monkeypatch.setattr(apps, "SHORTCUTS", "/nonexistent/shortcuts")
     monkeypatch.delenv("ASTA_APPS", raising=False)
+    monkeypatch.delenv("ASTA_SCREEN", raising=False)
     yield
 
 

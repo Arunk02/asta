@@ -94,6 +94,12 @@ _TABLE: tuple[Capability, ...] = (
                     "app_recipes() first to see what exists."),
     Capability("app_recipes", "hands", http="GET /api/apps",
                note="The app recipes and what each one takes. Read before use_app."),
+    Capability("use_screen", "hands", write=True,
+               http='POST /api/screen {"process":"Preview","steps":[{"do":"menu",'
+                    '"target":"File > Export","expect":"exists: Export"}]}',
+               note="LAST RESORT: clicking a window by element NAME, with an "
+                    "expectation checked after every step. Refused for any app "
+                    "that has a use_app recipe. Prefer make_file, then use_app."),
     Capability("note_fact", "memory",
                http='POST /api/facts {"subject":"…","fact":"…","kind":"person|repo|service|env","source":"…"}',
                note="Facts about people and systems, with a source — who owns what, which "

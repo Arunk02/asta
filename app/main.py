@@ -1214,6 +1214,14 @@ async def api_use_app(request: Request):
                                                           b.get("args") or {})}
 
 
+@app.post("/api/screen", dependencies=[Depends(require_auth)])
+async def api_use_screen(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.use_screen(
+        b.get("process", ""), b.get("steps") or [], b.get("why", ""),
+        b.get("remember_as", ""))}
+
+
 @app.get("/api/apps", dependencies=[Depends(require_auth)])
 def api_app_recipes():
     return {"detail": agent_mod.app_recipes()}

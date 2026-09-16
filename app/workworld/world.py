@@ -157,6 +157,7 @@ class World:
     pushes: list[dict] = field(default_factory=list)          # to his phone
     documents: list[dict] = field(default_factory=list)       # files that reached it
     app_calls: list[dict] = field(default_factory=list)       # doors into his own apps
+    screen_frames: list[str] = field(default_factory=list)    # what the UI tree answers
     replies: list[dict] = field(default_factory=list)         # in the chat
     sent: list[dict] = field(default_factory=list)            # OUT of the house
     brain_calls: list[dict] = field(default_factory=list)
@@ -275,7 +276,7 @@ class World:
         from app import (attention, briefing, chat_watch, claude_cli, copilot_cli, delivery,
                          jira, main, meetings, memory, notify, outlook, presence, quiet,
                          repo_ops, store, tasks, teams_bridge, telegram, verify, wa_bridge)
-        from app import apps
+        from app import apps, screen
         p = self._patch
 
         # 1. The database: a fresh file per scenario. Checked again by
@@ -370,6 +371,20 @@ class World:
 
         p.set(apps, "run", use_app)
         p.set(apps, "enabled", lambda: True)
+
+        # The screen fallback (layer three) runs for REAL in the bench — its
+        # refusals and its after-every-step checking are the behaviour worth
+        # testing — with only the interpreter replaced. A scenario writes the
+        # frames the accessibility tree returns; everything else is the code.
+        async def osascript(script: str, args: list) -> str:
+            if "entire contents" in script:
+                frames = self.screen_frames
+                return frames.pop(0) if len(frames) > 1 else (frames[0] if frames else "")
+            self.app_calls.append({"recipe": "screen", "args": {"args": list(args)}})
+            return ""
+
+        p.set(apps, "_osascript", osascript)
+        p.set(screen, "enabled", lambda: True)
         p.set(jira, "add_comment", self._door("jira-comment", "key"))
         p.set(jira, "transition_issue", self._door("jira-transition", "key"))
         p.set(meetings, "call_person", self._door("call", "who"))

@@ -222,6 +222,11 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
     world.teams_activity.extend(s.get("teams_activity", []) or [])
     if "jira" in s:
         world.use_jira(s.get("jira") or {})
+    if s.get("screen"):
+        # What the accessibility tree answers, frame by frame — one per look,
+        # the last repeating. The screen layer itself is NOT stubbed: its
+        # refusals and its check-after-every-step are the point of the test.
+        world.screen_frames.extend(s["screen"])
     if s.get("intent_guess"):
         world.intent_guess(s["intent_guess"])
     for r in s.get("reactions", []) or []:

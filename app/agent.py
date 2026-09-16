@@ -1769,6 +1769,41 @@ async def use_app(recipe: str, args: dict | None = None) -> str:
             else f"Done in {out['app']}: {out['did']}.")
 
 
+async def use_screen(process: str, steps: list | None = None,
+                     why: str = "", remember_as: str = "") -> str:
+    """Drive an app by clicking it — only when it has no other way in.
+
+    steps: [{"do": "click|menu|type|key", "target": "...", "expect": "exists: ..."}]
+    Targets are NAMES on screen, never coordinates: `button "Send"`, or
+    `File > Export` for a menu. Every step must say what will be true afterwards
+    (`exists:` or `gone:`), and that is checked against the screen before the
+    next step runs — a click whose expectation does not come true STOPS the
+    sequence, because the alternative is typing into a window nobody has read.
+
+    Use make_file for documents and use_app for an app with a real door; this is
+    refused outright for those. `remember_as` keeps a path that worked, so the
+    next time is a replay rather than a hunt."""
+    from . import screen
+    try:
+        path = [screen.Step(**{k: v for k, v in s.items()
+                               if k in ("do", "target", "expect", "window")})
+                for s in (steps or [])]
+        out = await screen.follow(process, path, why=why)
+        if remember_as:
+            screen.remember_path(remember_as, process, path, why=why)
+    except (screen.ScreenError, TypeError) as exc:
+        return f"Not done — {exc}"
+    kept = f" Kept as {remember_as!r}." if remember_as else ""
+    return (f"Done in {process}, each step checked: "
+            + " → ".join(out["steps"]) + kept)
+
+
+def screen_paths() -> str:
+    """UI paths that have worked before, ready to replay by name."""
+    from . import screen
+    return screen.describe_paths()
+
+
 def app_recipes() -> str:
     """What Asta can do in Arun's apps, and what each one needs.
 

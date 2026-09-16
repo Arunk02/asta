@@ -1,0 +1,64 @@
+# Hands, layer three — the screen and the mouse: the fallback, and the last one.
+#
+# The behaviour worth testing is not that it can click. It is that it REFUSES
+# where a real door exists, and that it stops the moment a click does not do
+# what it said it would.
+
+scenarios:
+  - id: the-mouse-is-refused-where-a-door-exists
+    title: An app with a scripting door is never clicked at
+    why: >
+      Clicking at Reminders while it sits there answering AppleScript trades a
+      verified act for a fragile one, and the fragility shows up later, on his
+      screen, in front of someone.
+    twin: false
+    setup:
+      screen: ["window: Reminders\nbutton: New\n"]
+    brains:
+      chat:
+        - calls: [{tool: use_screen, args: {process: Reminders,
+                   steps: [{do: click, target: "New", expect: "exists: New"}]}}]
+          text: "I'll use the proper door instead."
+    steps:
+      - say: "add a reminder by clicking the reminders window"
+    checks:
+      - tool_result_contains: {tool: use_screen, text: "has a proper door"}
+      - app_door: {recipe: screen, count: 0}
+
+  - id: a-click-that-does-nothing-stops-the-sequence
+    title: A step whose expectation does not come true halts, and says what it saw
+    why: >
+      The alternative is typing into whatever has focus now — which is how screen
+      automation ends up sending half a sentence into the wrong window.
+    twin: false
+    setup:
+      screen: ["window: Preview\nbutton: Export\n"]
+    brains:
+      chat:
+        - calls: [{tool: use_screen, args: {process: Preview,
+                   steps: [{do: menu, target: "File > Export", expect: "exists: Export As"},
+                           {do: type, target: "report", expect: "exists: report"}]}}]
+          text: "That did not open the export sheet, so I stopped."
+    steps:
+      - say: "export this preview as a pdf by clicking"
+    checks:
+      - tool_result_contains: {tool: use_screen, text: "did not come true"}
+      - app_door: {recipe: screen, count: 1}
+
+  - id: a-path-that-worked-is-kept-for-next-time
+    title: A verified sequence is saved as a named path
+    why: The first walk is careful; after that it is a replay he can read.
+    twin: false
+    setup:
+      screen: ["window: Preview\ntext: Export As\n", "window: Preview\ntext: report\n"]
+    brains:
+      chat:
+        - calls: [{tool: use_screen, args: {process: Preview, remember_as: "export a pdf",
+                   steps: [{do: menu, target: "File > Export", expect: "exists: Export As"},
+                           {do: type, target: "report", expect: "exists: report"}]}}]
+          text: "Exported, and I kept the path."
+    steps:
+      - say: "export this preview and remember how"
+    checks:
+      - tool_result_contains: {tool: use_screen, text: "each step checked"}
+      - kv: {key: "screen_paths", set: true}

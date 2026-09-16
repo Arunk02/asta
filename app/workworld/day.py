@@ -102,6 +102,27 @@ def generate(seed: int = 20260911, count: int = 150) -> list[Event]:
     return out
 
 
+#: What his ledger actually holds for the ticket feed: 130 items in 30 days, 122
+#: of which he never touched. Seeded so the day starts where his real Asta starts
+#: — with a month of his own reactions — because "learned from him" cannot be
+#: measured in a world where he has never reacted to anything.
+IGNORED_SOURCE = ("outlook", "IT Service Desk", 130, 122)
+
+
+def seed_history(now: float) -> None:
+    from app import attention, store
+    source, who, total, ignored = IGNORED_SOURCE
+    for i in range(total):
+        at = now - (30 - (i % 30)) * 86400
+        key = f"seed-{source}-{i}"
+        store.attention_upsert(key, source, who=who, what=f"ticket notice {i}",
+                               priority=attention.P_TODAY, now=at)
+        if i < ignored:
+            store.attention_set(key, state="notified", notified_at=at)
+        else:
+            store.attention_set(key, state="acted", notified_at=at, acted_at=at + 600)
+
+
 async def run(seed: int = 20260911, count: int = 150, batch: int = 6) -> DayResult:
     """Play the day through the REAL intake and count what he would have felt.
 
@@ -115,11 +136,24 @@ async def run(seed: int = 20260911, count: int = 150, batch: int = 6) -> DayResu
     from app import chat_watch, main, notify, outlook
     t0 = time.monotonic()
     world = W.World()
+    # The REAL notify: the day is the one measure of how often he is interrupted,
+    # so the layer that decides whether and when to push has to run.
     world.install(chat_brain=W.ScriptedBrain(
         [W.BrainReply(text="Nothing outstanding on your side.")] * 60, world, "chat"),
-        task_brain=W.ScriptedBrain([W.BrainReply(text="PLAN READY")] * 40, world, "task"))
+        task_brain=W.ScriptedBrain([W.BrainReply(text="PLAN READY")] * 40, world, "task"),
+        real_notify=True)
     world.assert_sandboxed()
     res = DayResult(events=generate(seed, count))
+    # Nine hours, as nine hours: every window Asta has (batching, quiet hours,
+    # the digest slots, the day's budget) reads the clock.
+    clock = world.use_clock(res.events[0].at if res.events else time.time())
+    # HIS configuration, stated rather than inherited: the day is a measure of
+    # what his Asta does, and on a machine with no .env (CI) the ledger and the
+    # batching are off — which quietly made the day a different day, 21 pushes
+    # instead of 14, with no test able to say why.
+    world.use_env({"ASTA_ATTENTION": "1", "ASTA_DELIVERY": "1", "ASTA_PUSH_BUDGET": "20",
+                   "ASTA_ATTENTION_LEARN": "1", "ASTA_COALESCE_SECONDS": "120"})
+    seed_history(clock.now)
     conv = W.new_conversation(workspace="booking")
     sink = W.Sink(world)
     patch = W.Patcher()
@@ -132,6 +166,7 @@ async def run(seed: int = 20260911, count: int = 150, batch: int = 6) -> DayResu
     patch.set(chat_watch, "_people_he_talks_to", lambda: list(PEOPLE))
 
     async def flush() -> None:
+        from app import delivery, digest
         if pending:
             await chat_watch.sweep(notify.notify)
         if mail:
@@ -141,9 +176,14 @@ async def run(seed: int = 20260911, count: int = 150, batch: int = 6) -> DayResu
             await outlook._push_mail(notify, list(mail))
             mail.clear()
         await W.settle(timeout=8)
+        # What the live server's daemons do: drain the coalescing buffer, and
+        # send the digest when its hour comes round.
+        await delivery.flush_buffered()
+        await digest.tick()
 
     try:
         for i, ev in enumerate(res.events):
+            clock.now = ev.at
             before = len(world.pushes)
             if ev.kind == "colleague":
                 chat = ev.chat or ev.who
@@ -164,8 +204,18 @@ async def run(seed: int = 20260911, count: int = 150, batch: int = 6) -> DayResu
             if i % batch == batch - 1:
                 await flush()
             if ev.expect == "noise" and len(world.pushes) > before:
-                res.false_interrupts.append(f"pushed noise: {ev.text[:50]}")
+                # Only if the noise ITSELF reached him. A batch of real asks that
+                # happens to flush on the same tick is not an interruption for
+                # noise, and counting it as one flattered nothing and misled us.
+                head = " ".join(ev.text.split()[:4]).lower()
+                if any(head in p["text"].lower() for p in world.pushes[before:]):
+                    res.false_interrupts.append(f"pushed noise: {ev.text[:50]}")
         await flush()
+        # End of the working day: whatever is still held goes out as one digest,
+        # which is the promise the digest makes — nothing is dropped.
+        from app import delivery, digest
+        await delivery.flush_buffered()
+        await digest.flush(reason="end of day")
         res.pushes = list(world.pushes)
         res.brain_calls = len(world.brain_calls)
         res.investigations = sum(1 for b in world.brain_calls if b["kind"] == "task")

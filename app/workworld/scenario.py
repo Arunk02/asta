@@ -48,6 +48,9 @@ class Scenario:
     why: str = ""
     gap: str = ""                       # the phase that will close it, if it fails today
     may_send: bool = False
+    #: Keep Asta's own deciding layer in the loop (budget, digest, batching) and
+    #: record what reaches his phone at the delivery door — see World.install.
+    real_notify: bool = False
     allow: list[str] = field(default_factory=list)
     twin: bool = True
     setup: dict = field(default_factory=dict)
@@ -111,7 +114,14 @@ async def run(sc: Scenario, seed: int = 0, live: bool = False) -> list[str]:
 
     world = W.World()
     brains = _brains(sc, world)
-    world.install(chat_brain=brains[0], task_brain=brains[1], live_brains=live)
+    world.install(chat_brain=brains[0], task_brain=brains[1], live_brains=live,
+                  real_notify=sc.real_notify)
+    if sc.real_notify:
+        # A scenario that exercises Asta's deciding layer has to say which
+        # settings it decides with — on a machine with no .env they are all off,
+        # and the scenario would quietly test nothing. `setup.env` still wins.
+        world.use_env({"ASTA_ATTENTION": "1", "ASTA_DELIVERY": "1",
+                       "ASTA_ATTENTION_LEARN": "1", "ASTA_PUSH_BUDGET": "20"})
     world.assert_sandboxed()
     failures: list[str] = []
     state: dict = {"aliases": {}, "setup_ids": set(), "env_undo": [],
@@ -126,6 +136,12 @@ async def run(sc: Scenario, seed: int = 0, live: bool = False) -> list[str]:
             if next(iter(step)) not in SKIP_SETTLE:
                 await W.settle(window)
         await W.settle(window)
+        if sc.real_notify:
+            # What the live server's flush daemon does: a message waiting in the
+            # coalescing buffer has not reached him yet, and a scenario that
+            # ended without draining it would read as "never pushed".
+            from app import delivery
+            await delivery.flush_buffered()
         failures += _run_checks(sc, world, state)
         failures += _constitution(sc, world, state)
     except Exception as exc:                                   # noqa: BLE001
@@ -208,6 +224,27 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
         world.use_jira(s.get("jira") or {})
     if s.get("intent_guess"):
         world.intent_guess(s["intent_guess"])
+    for r in s.get("reactions", []) or []:
+        # What he has DONE with this source before — the evidence the learned
+        # attention reads. Seeded the way his own ledger holds it.
+        from app import attention, store
+        seen, ignored = int(r.get("seen", 0)), int(r.get("ignored", 0))
+        for i in range(seen):
+            at = time.time() - (30 - (i % 30)) * 86400
+            key = f"seed-{r.get('source')}-{r.get('who', '')}-{i}"
+            store.attention_upsert(key, r.get("source", ""), who=r.get("who", ""),
+                                   what=r.get("what", f"item {i}"),
+                                   priority=attention.P_TODAY, now=at)
+            if i < ignored:
+                store.attention_set(key, state="notified", notified_at=at)
+            else:
+                store.attention_set(key, state="acted", notified_at=at, acted_at=at + 600)
+    for g in s.get("permissions", []) or []:
+        from app import authority
+        authority.grant(g["act"], g["target"], int(g.get("per_day", 1)), g.get("words", ""))
+    if s.get("pushes_today") is not None:
+        from app import budget, store
+        store.kv_set(budget._key(), str(int(s["pushes_today"])))
     for r in s.get("rules", []) or []:
         # Rules he has already approved, as the world finds them.
         from app import policy
@@ -265,6 +302,20 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
                                  "comments": arg.get("comments", []),
                                  "reviews": arg.get("reviews", []),
                                  "statusCheckRollup": arg.get("checks", [])}
+    elif kind == "inbound":
+        # One thing arriving from a source, through the decision every source
+        # makes: the ledger first, then the push. What outlook and chat_watch do.
+        from app import attention, notify
+        source, who = arg.get("source", "teams-chat"), arg.get("who", "A colleague")
+        text = arg.get("text", "")
+        pri = int(arg.get("priority", attention.P_TODAY))
+        key = attention.key_for(who, text)
+        if attention.consider(source, key, who=who, what=text, priority=pri):
+            await notify.notify(text, source, urgency=arg.get("urgency", "direct"),
+                                priority=pri, considered=True)
+    elif kind == "digest_add":
+        from app import digest
+        digest.add(arg.get("text", ""), source=arg.get("source", ""), why=arg.get("why", ""))
     elif kind == "tick":
         await _tick(arg, world, state)
     elif kind == "restart":
@@ -296,6 +347,9 @@ async def _tick(what: str, world: W.World, state: dict) -> None:
             note = await tasks.check_pr(tid)
             if note:
                 await notify.notify(note, "task", urgency="ambient")
+    elif what == "digest":
+        from app import digest
+        await digest.flush(reason="midday digest")
     elif what == "resume_due":
         await tasks._resume_due()
     elif what == "resume_due_later":
@@ -523,6 +577,30 @@ def _check_scratch_file(arg, world, state):
     return ""
 
 
+def _check_digest(arg, world, state):
+    """What is waiting in the digest — `{contains: "…", count: 3}`."""
+    from app import digest
+    rows = digest.pending()
+    if "count" in arg and len(rows) != arg["count"]:
+        return f"{len(rows)} digest item(s), expected {arg['count']}"
+    if arg.get("contains") and not any(re.search(arg["contains"], r["text"], re.I)
+                                       for r in rows):
+        return f"digest lacks {arg['contains']!r}: {[r['text'][:60] for r in rows]}"
+    if arg.get("lacks") and any(re.search(arg["lacks"], r["text"], re.I) for r in rows):
+        return f"digest carries {arg['lacks']!r}, which should have interrupted him"
+    return ""
+
+
+def _check_permissions(arg, world, state):
+    from app import authority
+    live = authority.grants()
+    if "count" in arg and len(live) != arg["count"]:
+        return f"{len(live)} permission(s), expected {arg['count']}"
+    if arg.get("contains") and not any(arg["contains"].lower() in g.target.lower() for g in live):
+        return f"no permission for {arg['contains']!r}"
+    return ""
+
+
 def _check_frontdesk(arg, world, state):
     """How the front desk routed the scenario's messages — `{route: state, min: 1}`."""
     from app import store
@@ -571,6 +649,8 @@ CHECKS = {
     "tool_result_contains": _check_tool_result,
     "brain_flags": _check_brain_flags,
     "frontdesk": _check_frontdesk,
+    "digest": _check_digest,
+    "permissions": _check_permissions,
     "scratch_file": _check_scratch_file,
     "health_says": _check_health,
     "reply_max_chars": _check_reply_max,

@@ -129,10 +129,11 @@ async def deliver(text: str) -> dict:
     exactly the same path — and so `note_sent` is stamped in ONE place. Stamping
     it per call site is how a batching window starts disagreeing with itself.
     """
-    from . import delivery
+    from . import budget, delivery
     wa = await wa_send(text)
     tg = await telegram.send(text)
     delivery.note_sent()
+    budget.note_push()          # one buzz, one unit — a batch of four costs one
     if not (wa or tg):
         store.kv_set("last_push_failure",
                      json.dumps({"at": time.time(), "text": text[:120]}))
@@ -203,7 +204,15 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
             return {"bell": True, "held": False, "suppressed": True,
                     "whatsapp": False, "telegram": False}
 
-    from . import delivery
+    from . import budget, delivery
+    # The day's budget of interruptions. Breakage and things he is blocked on are
+    # never counted against it; everything ordinary that arrives once the budget
+    # is gone is read in the digest instead of buzzing his pocket.
+    if not budget.allows(priority, urgency):
+        from . import digest
+        digest.add(text, source=level, why="past today's budget of interruptions")
+        return {"bell": True, "held": True, "digested": True,
+                "whatsapp": False, "telegram": False}
     # Night first, because it outranks every other reason to speak. Held items
     # wait for morning rather than for him to walk away — at 2am he has already
     # walked away, and a departure-released hold would fire instantly.

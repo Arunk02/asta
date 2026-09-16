@@ -27,6 +27,7 @@ here that can hurt him today.
 from __future__ import annotations
 
 import datetime as dt
+import contextlib
 import os
 import re
 import time
@@ -450,8 +451,118 @@ def consider(source: str, key: str, who: str = "", what: str = "",
                                  priority=priority, why=why, due_at=due_at, now=now)
     if not should_push(row):
         return False
+    # A source he keeps ignoring is read, not buzzed. Learned from his own
+    # reactions; he can overrule it in either direction at any time.
+    reason = to_digest(source, who, priority, now=now)
+    if reason:
+        from . import digest
+        digest.add(what or key, source=who or source, why=reason)
+        store.attention_set(key, state="notified",
+                            notified_at=time.time() if now is None else now)
+        store.record_outcome("attention", "digested", subject=str(key)[:80], detail=reason[:200])
+        notice = note_demoted(source, who, reason)
+        if notice:
+            import asyncio
+            from . import notify as notify_mod
+            with contextlib.suppress(RuntimeError):
+                asyncio.get_running_loop()
+                asyncio.ensure_future(notify_mod.notify(notice, "attention",
+                                                        urgency="direct", considered=True))
+        return False
     store.attention_set(key, state="notified", notified_at=time.time() if now is None else now)
     return True
+
+
+# --- what he has actually done with this source before -------------------------------
+#
+# R6: attention was rule-based, never learned. His ledger holds 2,115 reactions —
+# the top ignored source was ignored 122 times in 30 days — and none of it fed
+# back into the decision to buzz him. It does now, in the one place that decides.
+
+#: How many items from a source before its record means anything.
+MIN_SEEN = 10
+#: Ignored at least this often, and it stops interrupting and starts digesting.
+IGNORE_SHARE = 0.8
+#: How long an announced item may sit untouched before it counts as ignored.
+IGNORED_AFTER = 24 * 3600
+
+
+def history(source: str, who: str = "", days: int = 30,
+            now: float | None = None) -> tuple[int, int]:
+    """(handled, ignored) for this source — from his own reactions, not a rule."""
+    now = time.time() if now is None else now
+    handled = ignored = 0
+    for row in store.attention_history(source, who, since=now - days * 86400):
+        if row.get("acted_at") or row.get("state") == "acted":
+            handled += 1
+        elif row.get("state") == "dropped":
+            ignored += 1
+        elif row.get("state") == "notified" and row.get("notified_at") \
+                and now - float(row["notified_at"]) > IGNORED_AFTER:
+            ignored += 1
+    return handled, ignored
+
+
+def forced(source: str, who: str = "") -> str:
+    """'push' or 'digest' when he has said so himself, else ''.
+
+    He names what he SEES — "push IT Service Desk", the sender — while the code
+    holds a source and a person. Both spellings are looked up, or his undo
+    silently does nothing.
+    """
+    for name in (f"{source}:{who}" if who else "", who, source):
+        if name:
+            value = store.kv_get(f"attention_force:{name.strip().lower()}") or ""
+            if value:
+                return value
+    return ""
+
+
+def set_force(name: str, how: str) -> str:
+    store.kv_set(f"attention_force:{name.strip().lower()}", how)
+    return (f"“{name}” will interrupt you again." if how == "push"
+            else f"“{name}” goes to the digest from now on.")
+
+
+def learns() -> bool:
+    """Whether a source may be moved to the digest on its own record."""
+    return os.environ.get("ASTA_ATTENTION_LEARN", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def to_digest(source: str, who: str = "", priority: int = P_FYI,
+              now: float | None = None) -> str:
+    """Should this go to the digest instead of his phone? The reason, or ''.
+
+    Never for breakage, never for a source he has told Asta to keep pushing, and
+    never on a thin record — ten items at least, and four in five ignored.
+    """
+    if int(priority) <= P_NOW:
+        return ""
+    how = forced(source, who)
+    if how == "push":
+        return ""
+    if how == "digest":
+        return "you asked for this one in the digest"
+    if not learns():
+        return ""
+    handled, ignored = history(source, who, now=now)
+    seen = handled + ignored
+    if seen >= MIN_SEEN and ignored / seen >= IGNORE_SHARE:
+        return f"you ignored {ignored} of the last {seen} from {who or source}"
+    return ""
+
+
+def note_demoted(source: str, who: str, why: str) -> str:
+    """Tell him ONCE that a source moved to the digest, and how to undo it. ''
+    after the first time — a notice that repeats is the noise it is preventing."""
+    name = (who or source).strip()
+    key = f"attention_demoted:{name.lower()}"
+    if store.kv_get(key):
+        return ""
+    store.kv_set(key, "1")
+    store.record_outcome("attention", "demoted", subject=name[:80], detail=why[:200])
+    return (f"🔕 Moving *{name}* to the digest — {why}. "
+            f"Say “push {name}” to have it interrupt you again.")
 
 
 def should_push(row: dict) -> bool:

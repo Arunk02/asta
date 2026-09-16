@@ -168,6 +168,16 @@ async def _rule_add(**args) -> str:
     return instructions.adopt(args)
 
 
+@op("authority_grant", lambda a: (f"Let Asta {a.get('act', 'act')} {a.get('target', '?')} "
+                                  f"without asking, up to {a.get('per_day', 1)} a day"))
+async def _authority_grant(**args) -> str:
+    """His yes to a standing permission (app/authority.py)."""
+    from . import authority
+    g = authority.grant(args.get("act", ""), args.get("target", ""),
+                        int(args.get("per_day", 1) or 1), args.get("words", ""))
+    return f"🔓 Permission {g.id}: {g.render()}. Say “revoke {g.id}” to end it."
+
+
 #: What each outward op DOES, in the words a standing rule is written in, and
 #: which argument names its target — so "never message X" stops a Teams send to X.
 _ACTS = {"teams_send": ("send", "to"), "teams_call": ("call", "who"),
@@ -198,4 +208,13 @@ async def run(op_spec: dict) -> str:
         if not d.ok:
             return (f"⛔ Not done — {d.why}. Say “drop rule {d.rule.id}” if that has "
                     f"changed.")
-    return await entry["run"](**args)
+    out = await entry["run"](**args)
+    if act:
+        # He approved this exact act, as written. Ten of the same and Asta may
+        # ask for a standing permission — never sooner, never for a new person.
+        from . import authority
+        target = str(args.get(act[1], ""))
+        authority.note_approved(act[0], target)
+        if authority.earned(act[0], target):
+            out += "\n\n" + authority.propose(act[0], target)
+    return out

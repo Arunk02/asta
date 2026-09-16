@@ -129,6 +129,16 @@ _RULES = re.compile(_LEAD + r"(?:(?:what\s+are\s+)?my\s+(?:standing\s+)?rules|"
 _DROP_RULE = re.compile(_LEAD + r"(?:drop|forget|remove|delete|lift)\s+rule\s*#?(\d{1,4})" + _END, re.I)
 
 
+_PERMISSIONS = re.compile(_LEAD + r"(?:(?:what\s+)?(?:are\s+)?my\s+permissions|permissions|"
+                          r"what\s+can\s+you\s+do\s+(?:alone|without\s+asking))" + _END, re.I)
+_REVOKE = re.compile(_LEAD + r"revoke\s+(?:permission\s*)?#?(\d{1,4})" + _END, re.I)
+_DIGEST_ASK = re.compile(_LEAD + r"(?:what(?:'s| is)?\s+in\s+the\s+digest|the\s+digest|digest)" + _END, re.I)
+#: "push IT Service Desk" / "digest that channel" — only ever for a name Asta has
+#: actually moved, so "push the branch" stays a perfectly ordinary message.
+_FORCE = re.compile(_LEAD + r"(push|unmute|digest|mute)\s+(?P<name>[\w .&'-]{2,40}?)"
+                    r"(?:\s+again)?" + _END, re.I)
+
+
 def answer_from_state(text: str) -> str:
     """The reply, when the message is a question the task table answers. '' otherwise."""
     t = (text or "").strip()
@@ -137,6 +147,28 @@ def answer_from_state(text: str) -> str:
     from . import policy
     if _RULES.match(t):
         return policy.summary()
+    if _PERMISSIONS.match(t):
+        from . import authority
+        return authority.summary()
+    m = _REVOKE.match(t)
+    if m:
+        from . import authority
+        gid = int(m.group(1))
+        return (f"Permission {gid} revoked — that goes back to asking you first."
+                if authority.revoke(gid) else
+                f"There's no permission {gid}. Say “my permissions” to list them.")
+    if _DIGEST_ASK.match(t):
+        from . import digest
+        rows = digest.pending()
+        return digest.render(rows) if rows else "Nothing in the digest right now."
+    m = _FORCE.match(t)
+    if m:
+        from . import attention
+        how = "push" if m.group(1).lower() in ("push", "unmute") else "digest"
+        name = m.group("name").strip()
+        # Only a source Asta has actually moved, or one he has steered before.
+        if store.kv_get(f"attention_demoted:{name.lower()}") or attention.forced(name):
+            return attention.set_force(name, how)
     m = _DROP_RULE.match(t)
     if m:
         rid = int(m.group(1))

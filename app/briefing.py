@@ -112,10 +112,35 @@ async def _outlook_bits() -> tuple[list[str], list[str]]:
 
 # --- morning brief -----------------------------------------------------------
 
+def yesterday_line(cutoff: float) -> str:
+    """One line for what happened while he was not watching — P5's "one morning line".
+
+    Handled, waiting, done alone, read-not-buzzed: the four numbers that say
+    whether yesterday was worth the interruptions it cost him.
+    """
+    from . import authority, digest, store as store_mod
+    rows = store_mod.list_tasks(limit=200)
+    handled = sum(1 for t in rows if t["status"] in ("done", "shipped", "merged")
+                  and float(t.get("finished_at") or 0) >= cutoff)
+    waiting = sum(1 for t in rows if t["status"] == "awaiting_approval")
+    alone = sum(1 for o in store_mod.recent_outcomes(300)
+                if o["kind"] == "authority" and o["outcome"] == "used"
+                and o["created_at"] >= cutoff)
+    quiet_items = len(digest.pending())
+    bits = [f"{handled} handled", f"{waiting} need you"]
+    if alone:
+        bits.append(f"{alone} done under your standing permissions "
+                    f"({len(authority.grants())} granted)")
+    if quiet_items:
+        bits.append(f"{quiet_items} read, not buzzed")
+    return "Yesterday: " + ", ".join(bits) + "."
+
+
 async def morning_brief() -> str:
     day = dt.date.today().strftime("%a %d %b")
     cutoff = time.time() - 24 * 3600
-    parts = [f"☀️ Morning brief — {day}"]
+    parts = [f"☀️ Morning brief — {day}", yesterday_line(cutoff)]
+    parts = [p for p in parts if p]
 
     done_tasks = _finished_since(store.list_tasks(), "finished_at", cutoff)
     done_missions = [m for m in store.list_missions()

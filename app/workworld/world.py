@@ -98,6 +98,29 @@ class ScriptedBrain:
         return reply.text
 
 
+class Clock:
+    """A simulated wall clock, so nine hours of a day are nine hours to the code.
+
+    The day plays 150 events in a fraction of a second. Every window Asta has —
+    the two-minute coalescing window, quiet hours, a chase that is due at end of
+    day, a daily push budget — reads `time.time()`, and against real time they
+    all collapse into one instant: with the real notify path in the loop, the
+    whole day batched into a single message. Modules do `import time` and call
+    `time.time()`, so handing them this in place of the module is enough.
+    """
+
+    def __init__(self, start: float):
+        self.now = start
+        import time as _real
+        self._real = _real
+
+    def time(self) -> float:
+        return self.now
+
+    def __getattr__(self, name):                 # sleep, strftime, localtime, …
+        return getattr(self._real, name)
+
+
 class Patcher:
     """setattr with an undo, so a scenario cannot leak into the next one."""
 
@@ -203,9 +226,34 @@ class World:
 
     # --- the sandbox ------------------------------------------------------
 
+    def use_env(self, values: dict) -> None:
+        """Settings this world runs with, restored on uninstall."""
+        for key, value in values.items():
+            self._env_undo = getattr(self, "_env_undo", [])
+            self._env_undo.append((key, os.environ.get(key)))
+            os.environ[key] = str(value)
+
+    def use_clock(self, start: float) -> Clock:
+        """Run the sandbox on a simulated clock (see Clock)."""
+        from app import attention, delivery, digest, notify, outlook, quiet
+        self.clock = Clock(start)
+        for mod in (notify, delivery, attention, digest, quiet, outlook):
+            if hasattr(mod, "time"):
+                self._patch.set(mod, "time", self.clock)
+        return self.clock
+
     def install(self, chat_brain: ScriptedBrain | None = None,
-                task_brain: ScriptedBrain | None = None, live_brains: bool = False) -> None:
-        """Put the doubles in place. Nothing may run before this."""
+                task_brain: ScriptedBrain | None = None, live_brains: bool = False,
+                real_notify: bool = False) -> None:
+        """Put the doubles in place. Nothing may run before this.
+
+        `real_notify` keeps Asta's OWN deciding layer in the loop — the ledger,
+        the digest, the daily budget, quiet hours, batching — and records what
+        reaches his phone at the delivery door instead. A scenario asserting on
+        one push wants the recorder; the simulated day, which measures how often
+        he is interrupted, must measure the real thing (it did not, and so the
+        same CI line reached him four times in a day nobody could see).
+        """
         from app import (attention, briefing, chat_watch, claude_cli, copilot_cli, delivery,
                          jira, main, meetings, memory, notify, outlook, presence, quiet,
                          repo_ops, store, tasks, teams_bridge, telegram, verify, wa_bridge)
@@ -240,16 +288,27 @@ class World:
             return {"whatsapp": True}
 
         p.set(notify, "wa_send", wa_send)
-        p.set(notify, "notify", notify_fn)
+        if not real_notify:
+            p.set(notify, "notify", notify_fn)
         p.set(notify, "wa_status", _async_value({"up": True, "paired": True, "enabled": True}))
-        for mod in (main, tasks, chat_watch, outlook, briefing, meetings, attention, delivery):
-            if hasattr(mod, "notify"):
-                p.set(mod, "notify", notify)          # module object, already patched
+        if not real_notify:
+            for mod in (main, tasks, chat_watch, outlook, briefing, meetings, attention, delivery):
+                if hasattr(mod, "notify"):
+                    p.set(mod, "notify", notify)      # module object, already patched
 
         # 3. Outward doors. Every one records instead of acting.
         p.set(teams_bridge, "send_message", self._door("teams", "chat"))
         p.set(teams_bridge, "send_voice_note", self._door("teams-voice", "chat"))
-        p.set(telegram, "send", self._door("telegram", None))
+        # Telegram is HIS PHONE, the same as WhatsApp — not an outward act to a
+        # colleague. Modelled as a door, every real push read as "sent without
+        # approval" the moment the day started exercising the real notify path.
+        async def tg_send(text: str, *a, **k) -> bool:
+            # Delivered, and deliberately NOT recorded: `wa_send` above already
+            # counted this push. One message on two channels is one interruption,
+            # and counting it twice would double every number the day reports.
+            return True
+
+        p.set(telegram, "send", tg_send)
         p.set(jira, "add_comment", self._door("jira-comment", "key"))
         p.set(jira, "transition_issue", self._door("jira-transition", "key"))
         p.set(meetings, "call_person", self._door("call", "who"))
@@ -262,7 +321,9 @@ class World:
         p.set(teams_bridge, "logged_in_once", lambda: True)
         p.set(teams_bridge, "in_a_call", lambda: False)
         p.set(outlook, "read_mail", _async_value_fn(lambda *a, **k: []))
-        p.set(presence, "at_laptop", lambda *a, **k: False)
+        # async, like the real one: notify awaits it (a sync double raised only
+        # once the day started exercising the real notify path).
+        p.set(presence, "at_laptop", _async_value(False))
         p.set(wa_bridge, "status", lambda: {"running": True})
         p.set(quiet, "in_quiet_hours", lambda *a, **k: False)
         p.set(memory, "local_llm_complete", lambda *a, **k: None)

@@ -1668,6 +1668,25 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     ruled = policy.check("send", to, asked=bool(to) and to.lower() in said)
     if not ruled.ok:
         return f"Not staged — {ruled.why}. Tell Arun, in one line, that this rule stopped it."
+    # A standing permission he granted (app/authority.py): send it now, tell him
+    # after, and count it against the day's allowance for that permission.
+    from . import authority
+    allowed = authority.may("send", to) if channel in ("teams", "chat") else None
+    if allowed:
+        # It goes on the loop rather than through the gate: he already said yes to
+        # this, once, in so many words. With no loop running (a test, a script)
+        # nothing is sent and it stages exactly as before.
+        import asyncio
+        body = writing.fit_address(writing.tidy_links(what), to)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            allowed = None
+        else:
+            asyncio.ensure_future(authority.send_now(allowed, to, body, to_group))
+            return (f"Sending to {to} now under permission {allowed.id} "
+                    f"({allowed.render()}) — no approval needed. Tell Arun in one line "
+                    f"what is going and to whom.")
     # Links are repaired here rather than asked for in a prompt. A full stop
     # welded to the end of a URL is what turned a PR link Alex was meant to
     # click into either a 404 or plain text, and "remember not to do that" is

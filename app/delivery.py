@@ -235,6 +235,18 @@ async def chase_loop() -> None:
             pass
 
 
+async def flush_buffered() -> dict:
+    """Send whatever is waiting in the coalescing buffer, as one message."""
+    from . import notify
+    if not enabled() or quiet_now():
+        return {"sent": False, "items": 0}
+    texts = take_buffered()
+    if not texts:
+        return {"sent": False, "items": 0}
+    await notify.deliver(render_batch(texts))
+    return {"sent": True, "items": len(texts)}
+
+
 async def flush_loop() -> None:
     """Drain the coalescing buffer so a batched message cannot sit for ever."""
     import asyncio

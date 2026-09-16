@@ -220,6 +220,17 @@ CREATE TABLE IF NOT EXISTS rules (
     active INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS authority (
+    -- What Asta may do without asking: explicit, capped per day, revocable, and
+    -- only ever created by his yes (app/authority.py).
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    act TEXT NOT NULL,
+    target TEXT NOT NULL,
+    per_day INTEGER NOT NULL DEFAULT 1,
+    words TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS people_systems (
     -- Who owns what, how a person works, which repo does what. Every fact
     -- carries where it came from and when, so a stale one can be recognised.
@@ -748,6 +759,22 @@ def attention_open(limit: int = 50, max_priority: int = 3) -> list[dict]:
             "SELECT * FROM attention WHERE state IN ('new','notified') AND priority<=?"
             " ORDER BY priority ASC, first_seen ASC LIMIT ?", (max_priority, limit)).fetchall()
     return [dict(r) for r in rows]
+
+
+def attention_history(source: str, who: str = "", since: float = 0.0,
+                      limit: int = 400) -> list[dict]:
+    """What became of the things this source (and person) sent him. His reactions
+    are the only honest evidence of whether a source is worth a buzz."""
+    q = ("SELECT state, priority, first_seen, notified_at, acted_at FROM attention "
+         "WHERE first_seen >= ? AND (source = ? OR sources LIKE ?)")
+    args: list = [since, source, f"%{source}%"]
+    if who:
+        q += " AND lower(who) = lower(?)"
+        args.append(who)
+    q += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(q, tuple(args)).fetchall()]
 
 
 def attention_open_from(who: str, limit: int = 200) -> list[dict]:

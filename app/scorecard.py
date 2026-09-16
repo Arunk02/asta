@@ -244,6 +244,42 @@ def task_tiers(since: float, until: float) -> dict:
     return {"counts": counts, "max_on_small": int(max_on_small)}
 
 
+def interruptions(since: float, until: float) -> dict:
+    """Buzzes a day — what actually reached his phone, not what the bell recorded.
+
+    The pushes row above counts notification ROWS, and the bell gets everything
+    including what the digest absorbed. Counted at the delivery door instead
+    (app/budget.py), so the digest shows up as fewer interruptions rather than
+    as the same number with different words.
+    """
+    from . import budget, digest
+    days, total = 0, 0
+    day = dt.date.fromtimestamp(since)
+    last = dt.date.fromtimestamp(until)
+    while day <= last:
+        days += 1
+        try:
+            total += int(store.kv_get("pushes:" + day.isoformat()) or 0)
+        except ValueError:
+            pass
+        day += dt.timedelta(days=1)
+    digests = _one("SELECT COUNT(*) FROM outcomes WHERE kind='digest' AND outcome='sent' "
+                   "AND created_at >= ? AND created_at < ?", (since, until)) or 0
+    digested = _one("SELECT COUNT(*) FROM outcomes WHERE kind='attention' AND outcome='digested' "
+                    "AND created_at >= ? AND created_at < ?", (since, until)) or 0
+    return {"per_day": (total / days) if days else None, "total": total,
+            "budget": budget.cap(), "digests": int(digests), "digested": int(digested),
+            "waiting": len(digest.pending())}
+
+
+def done_alone(since: float, until: float) -> dict:
+    """Acts Asta carried out under a standing permission, and how many exist."""
+    from . import authority
+    used = _one("SELECT COUNT(*) FROM outcomes WHERE kind='authority' AND outcome='used' "
+                "AND created_at >= ? AND created_at < ?", (since, until)) or 0
+    return {"used": int(used), "grants": len(authority.grants())}
+
+
 def rules_holding() -> dict:
     """His standing rules, and whether his own corrections still hold in replay."""
     from . import policy
@@ -335,6 +371,8 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
     fd = front_desk(since, until)
     tt = task_tiers(since, until)
     rh = rules_holding()
+    it = interruptions(since, until)
+    da = done_alone(since, until)
 
     rows = [
         Row("reply_p50", "WhatsApp reply time, typical", r["p50_s"], _fmt_s(r["p50_s"]),
@@ -366,6 +404,16 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
         Row("pushes_per_day", "Pushes to your phone per day", p["per_day"], f"{p['per_day']:.0f}",
             "≤ 20, none missed", _judge(p["per_day"], 20, 45),
             f"peak {p['peak_day']} · most for one task {p['most_for_one_task']}"),
+        Row("buzzes_per_day", "Times your phone actually buzzed, per day", it["per_day"],
+            "—" if it["per_day"] is None else f"{it['per_day']:.0f}",
+            f"≤ {it['budget']} (the rest is read in the digest)",
+            "na" if it["per_day"] is None else _judge(it["per_day"], it["budget"] or 20, 45),
+            f"{it['digested']} moved to the digest · {it['digests']} digests sent · "
+            f"{it['waiting']} waiting"),
+        Row("done_alone", "Acts Asta did under a standing permission", da["used"],
+            str(da["used"]), "only what you granted",
+            "good" if da["grants"] or not da["used"] else "bad",
+            f"{da['grants']} permission(s) granted — say “my permissions”"),
         Row("duplicate_pushes", "Pushes that repeat an earlier one", p["duplicate_share"],
             _fmt_pct(p["duplicate_share"]), "≤ 5%", _judge(p["duplicate_share"], 0.05, 0.15)),
         Row("ignored", "Tracked items you ignored", a["ignored_share"], _fmt_pct(a["ignored_share"]),

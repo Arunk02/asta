@@ -35,7 +35,7 @@ from pydantic_ai.messages import (
 )
 
 from . import agent as agent_mod
-from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, digest, followup, frontdesk, health, instructions, jira, learn, llm_meter, logsetup, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, policy, refresh, reminders, relevance, resume, quiet, router, quality, scorecard, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
+from . import activity, asking, attention, briefing, capabilities, ci_watch, claude_cli, context_build, copilot_cli, daemon, delivery, diagnostics, digest, evolve, followup, frontdesk, health, instructions, jira, learn, llm_meter, logsetup, loop, mcp_loader, memory, msnotify, notify, offers, ops, outlook, policy, refresh, reminders, relevance, resume, quiet, router, quality, scorecard, selector_health, store, tasks, teams_bridge, telegram, tool_index, wa_bridge, wake, work_intent, workspace, workspace_tools
 
 from .workworld import nightly as workworld_nightly
 
@@ -173,6 +173,9 @@ async def startup() -> None:
     daemon.start("resume_paused", tasks.resume_paused_loop)
     # Midday and evening: everything that was worth reading and not worth a buzz.
     daemon.start("digest", digest.loop)
+    # Nightly: look at yesterday, prove one small change against the bench, and
+    # keep it only if it wins. Off unless ASTA_EVOLVE is on.
+    daemon.start("evolve", evolve.loop)
     # Whatever was mid-flight when this process's predecessor stopped. Runs once,
     # here, because a fresh process is the only place that can tell an
     # interrupted task from a running one.

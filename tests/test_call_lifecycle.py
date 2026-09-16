@@ -534,7 +534,13 @@ async def test_the_wake_watcher_ends_a_slept_through_call(call, pushed, monkeypa
 
     monkeypatch.setattr(wake, "wait_for_network", online)
     task = asyncio.create_task(wake.watch_loop())
-    await asyncio.sleep(0.2)
+    # Wait for the loop to DO it, not for a fixed 0.2 s: on a busy machine that
+    # window expired before the first tick, and the suite failed for how loaded
+    # the runner was rather than for anything about the code.
+    for _ in range(200):
+        if seen:
+            break
+        await asyncio.sleep(0.01)
     task.cancel()
     assert seen, "the wake loop never told the call it had been slept through"
 

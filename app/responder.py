@@ -47,6 +47,13 @@ def enabled() -> bool:
 #: attentiveness. Older than the window and the count resets.
 MAX_PER_HOUR = int(os.environ.get("ASTA_RESPOND_MAX_PER_HOUR", "4"))
 
+
+def max_per_hour() -> int:
+    """Tunable by evolution (app/settings.py), and still just MAX_PER_HOUR when
+    nothing has tuned it."""
+    from . import settings
+    return int(settings.effective("ASTA_RESPOND_MAX_PER_HOUR", MAX_PER_HOUR))
+
 #: Only asks that actually matter get investigated. P_FYI and below are things he
 #: was copied on; spending a full agentic turn on each is the noise he already
 #: complained about, wearing a different hat.
@@ -436,8 +443,8 @@ def should_respond(kind: str, priority: int | None, key: str,
         return f"ranked p{priority} — below the bar for spending a turn"
     if already_handled(key):
         return "already investigated"
-    if len(_recent(now)) >= MAX_PER_HOUR:
-        return f"rate limit — {MAX_PER_HOUR} investigations already this hour"
+    if len(_recent(now)) >= max_per_hour():
+        return f"rate limit — {max_per_hour()} investigations already this hour"
     return ""
 
 

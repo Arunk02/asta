@@ -74,7 +74,14 @@ _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND",
                        "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_GRAPH", "ASTA_ROUTING",
                        "ASTA_FRONTDESK", "ASTA_CROSS_REVIEW", "ASTA_CLAUDE_CHAT_TOOLS",
-                       "ASTA_CHAT_ALLOW", "ASTA_PUSH_BUDGET", "ASTA_ATTENTION_LEARN")
+                       "ASTA_CHAT_ALLOW", "ASTA_PUSH_BUDGET", "ASTA_ATTENTION_LEARN",
+                       "ASTA_EVOLVE", "ASTA_EVOLVE_L3", "ASTA_COALESCE_SECONDS",
+                       # The tunable knobs (app/settings.py). His shell exports
+                       # some of these, and a test that pins the module constant
+                       # then loses to the environment — machine-dependent, and
+                       # silent about it.
+                       "ASTA_RESPOND_MAX_PER_HOUR", "ASTA_ATTENTION_MIN_SEEN",
+                       "ASTA_ATTENTION_IGNORE_SHARE")
 
 
 #: What this machine's .env said, captured before it is cleared. A handful of

@@ -239,6 +239,37 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
                 store.attention_set(key, state="notified", notified_at=at)
             else:
                 store.attention_set(key, state="acted", notified_at=at, acted_at=at + 600)
+    for e in s.get("evolutions", []) or []:
+        from app import evolve as ev
+        c = ev.Candidate("L1", e["knob"], float(e["after"]), e.get("cluster", ""),
+                         e.get("why", "measured"))
+        ev.promote(c, e.get("gain", ""))
+    if s.get("evolve"):
+        # A bench run is minutes; the scenario is about what the loop DOES with
+        # the numbers, so the measurement itself is scripted.
+        from app import evolve as ev
+        spec = s["evolve"]
+
+        def _shaped(d):
+            failed = int(d.get("constitution_failed", 0))
+            return {"pass_rate": d.get("pass_rate", 1.0),
+                    "day": {"pushes": d.get("pushes", 0), "missed": d.get("missed", 0)},
+                    "sets": {"constitution": {"total": 5, "passed": 5 - failed}}}
+
+        seq = [_shaped(spec.get("before") or {}), _shaped(spec.get("after") or {})]
+        calls = {"n": 0}
+
+        async def measure(k: int = 1):
+            calls["n"] += 1
+            return seq[0] if calls["n"] == 1 else seq[1]
+
+        world._patch.set(ev, "measure", measure)
+        world._patch.set(ev, "observe", lambda: {
+            "day": {"pushes": spec.get("before", {}).get("pushes", 0),
+                    "missed": spec.get("before", {}).get("missed", 0),
+                    "false_interrupts": 0}, "outcomes": {}})
+        state["env_undo"].append(("ASTA_EVOLVE", os.environ.get("ASTA_EVOLVE")))
+        os.environ["ASTA_EVOLVE"] = "1"
     for g in s.get("permissions", []) or []:
         from app import authority
         authority.grant(g["act"], g["target"], int(g.get("per_day", 1)), g.get("words", ""))
@@ -352,6 +383,9 @@ async def _tick(what: str, world: W.World, state: dict) -> None:
             note = await tasks.check_pr(tid)
             if note:
                 await notify.notify(note, "task", urgency="ambient")
+    elif what == "evolve":
+        from app import evolve as ev
+        await ev.nightly()
     elif what == "digest":
         from app import digest
         await digest.flush(reason="midday digest")
@@ -596,6 +630,18 @@ def _check_digest(arg, world, state):
     return ""
 
 
+def _check_setting(arg, world, state):
+    """What a tunable knob is worth now — `{name: …, is: 180}` or `{is_default: true}`."""
+    from app import settings
+    name = arg["name"]
+    now = settings.value(name)
+    if arg.get("is_default") and settings.override(name):
+        return f"{name} is pinned at {now:g}, expected the shipped default"
+    if "is" in arg and float(arg["is"]) != now:
+        return f"{name} = {now:g}, expected {arg['is']}"
+    return ""
+
+
 def _check_permissions(arg, world, state):
     from app import authority
     live = authority.grants()
@@ -656,6 +702,7 @@ CHECKS = {
     "frontdesk": _check_frontdesk,
     "digest": _check_digest,
     "permissions": _check_permissions,
+    "setting": _check_setting,
     "scratch_file": _check_scratch_file,
     "health_says": _check_health,
     "reply_max_chars": _check_reply_max,

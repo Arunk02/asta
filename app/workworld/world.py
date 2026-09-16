@@ -226,9 +226,16 @@ class World:
 
     # --- the sandbox ------------------------------------------------------
 
-    def use_env(self, values: dict) -> None:
-        """Settings this world runs with, restored on uninstall."""
+    def use_env(self, values: dict, keep_existing: bool = False) -> None:
+        """Settings this world runs with, restored on uninstall.
+
+        `keep_existing` leaves anything already set in the environment alone —
+        how a candidate under test reaches the sandbox: the day states the
+        configuration it needs, and a value being PROVED is not overwritten.
+        """
         for key, value in values.items():
+            if keep_existing and os.environ.get(key):
+                continue
             self._env_undo = getattr(self, "_env_undo", [])
             self._env_undo.append((key, os.environ.get(key)))
             os.environ[key] = str(value)

@@ -545,6 +545,9 @@ def to_digest(source: str, who: str = "", priority: int = P_FYI,
         return "you asked for this one in the digest"
     if not learns():
         return ""
+    from . import settings
+    min_seen = int(settings.effective("ASTA_ATTENTION_MIN_SEEN", MIN_SEEN))
+    share = settings.effective("ASTA_ATTENTION_IGNORE_SHARE", IGNORE_SHARE)
     # Two things his ledger cannot see, both found on his real data (16 Sep):
     #
     #   ASTA'S OWN VOICE sits at 226 of 226 "ignored" — nothing he does with a
@@ -561,7 +564,7 @@ def to_digest(source: str, who: str = "", priority: int = P_FYI,
         return ""
     handled, ignored = history(source, who, now=now)
     seen = handled + ignored
-    if seen >= MIN_SEEN and ignored / seen >= IGNORE_SHARE:
+    if seen >= min_seen and ignored / seen >= share:
         return f"you ignored {ignored} of the last {seen} from {who or source}"
     return ""
 

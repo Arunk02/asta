@@ -101,11 +101,9 @@ def hold_for_quiet(urgency: str, priority: int | None, now: float | None = None)
 # --- one message instead of four ------------------------------------------------
 
 def coalesce_seconds() -> int:
-    """0 disables batching entirely."""
-    try:
-        return max(0, int(os.environ.get("ASTA_COALESCE_SECONDS", "120")))
-    except ValueError:
-        return 120
+    """0 disables batching entirely. Tunable (app/settings.py)."""
+    from . import settings
+    return max(0, int(settings.effective("ASTA_COALESCE_SECONDS", 120)))
 
 
 def _pending() -> list[str]:

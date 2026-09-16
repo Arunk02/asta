@@ -152,7 +152,8 @@ async def run(seed: int = 20260911, count: int = 150, batch: int = 6) -> DayResu
     # batching are off — which quietly made the day a different day, 21 pushes
     # instead of 14, with no test able to say why.
     world.use_env({"ASTA_ATTENTION": "1", "ASTA_DELIVERY": "1", "ASTA_PUSH_BUDGET": "20",
-                   "ASTA_ATTENTION_LEARN": "1", "ASTA_COALESCE_SECONDS": "120"})
+                   "ASTA_ATTENTION_LEARN": "1", "ASTA_COALESCE_SECONDS": "120"},
+                  keep_existing=True)
     seed_history(clock.now)
     conv = W.new_conversation(workspace="booking")
     sink = W.Sink(world)

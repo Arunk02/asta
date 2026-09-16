@@ -129,6 +129,10 @@ _RULES = re.compile(_LEAD + r"(?:(?:what\s+are\s+)?my\s+(?:standing\s+)?rules|"
 _DROP_RULE = re.compile(_LEAD + r"(?:drop|forget|remove|delete|lift)\s+rule\s*#?(\d{1,4})" + _END, re.I)
 
 
+_EVOLUTIONS = re.compile(_LEAD + r"(?:what\s+have\s+you\s+(?:changed|tuned)|"
+                         r"(?:your\s+)?(?:own\s+)?changes|what\s+did\s+you\s+tune|"
+                         r"(?:my\s+)?settings)" + _END, re.I)
+_ROLLBACK = re.compile(_LEAD + r"roll\s*back\s*#?(\d{1,4})" + _END, re.I)
 _PERMISSIONS = re.compile(_LEAD + r"(?:(?:what\s+)?(?:are\s+)?my\s+permissions|permissions|"
                           r"what\s+can\s+you\s+do\s+(?:alone|without\s+asking))" + _END, re.I)
 _REVOKE = re.compile(_LEAD + r"revoke\s+(?:permission\s*)?#?(\d{1,4})" + _END, re.I)
@@ -147,6 +151,15 @@ def answer_from_state(text: str) -> str:
     from . import policy
     if _RULES.match(t):
         return policy.summary()
+    if _EVOLUTIONS.match(t):
+        from . import evolve, settings
+        return evolve.summary() + "\n\n" + settings.summary()
+    m = _ROLLBACK.match(t)
+    if m:
+        from . import evolve
+        out = evolve.rollback(int(m.group(1)), "you asked")
+        return (f"Rolled back: {out}" if out else
+                f"There's nothing promoted as {m.group(1)}. Say “what have you changed”.")
     if _PERMISSIONS.match(t):
         from . import authority
         return authority.summary()

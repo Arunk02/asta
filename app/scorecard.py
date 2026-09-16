@@ -280,6 +280,16 @@ def done_alone(since: float, until: float) -> dict:
     return {"used": int(used), "grants": len(authority.grants())}
 
 
+def self_changes(since: float, until: float) -> dict:
+    """What Asta changed about itself, and what became of it."""
+    from . import settings
+    rows = _rows("SELECT outcome, COUNT(*) n FROM outcomes WHERE kind='evolution' "
+                 "AND created_at >= ? AND created_at < ? GROUP BY outcome", (since, until))
+    counts = {r["outcome"]: r["n"] for r in rows}
+    return {"promoted": counts.get("promoted", 0), "rejected": counts.get("rejected", 0),
+            "rolled_back": counts.get("rolled_back", 0), "live": len(settings.overrides())}
+
+
 def rules_holding() -> dict:
     """His standing rules, and whether his own corrections still hold in replay."""
     from . import policy
@@ -371,6 +381,7 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
     fd = front_desk(since, until)
     tt = task_tiers(since, until)
     rh = rules_holding()
+    sc = self_changes(since, until)
     it = interruptions(since, until)
     da = done_alone(since, until)
 
@@ -418,6 +429,10 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
             _fmt_pct(p["duplicate_share"]), "≤ 5%", _judge(p["duplicate_share"], 0.05, 0.15)),
         Row("ignored", "Tracked items you ignored", a["ignored_share"], _fmt_pct(a["ignored_share"]),
             "≤ 10%", _judge(a["ignored_share"], 0.10, 0.25)),
+        Row("self_changes", "Changes Asta proved and kept", sc["promoted"],
+            f"{sc['promoted']} kept · {sc['rejected']} thrown away", "each one measured",
+            "good" if sc["rolled_back"] == 0 else "warn",
+            f"{sc['live']} setting(s) tuned · {sc['rolled_back']} rolled back"),
         Row("rules_hold", "Your corrections that still hold in replay", rh["held"],
             "—" if rh["replayed"] is None else f"{rh['held']} of {rh['replayed']}",
             "all of them", "na" if not rh["replayed"] else

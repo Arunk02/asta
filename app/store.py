@@ -220,6 +220,22 @@ CREATE TABLE IF NOT EXISTS rules (
     active INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS evolutions (
+    -- Every change Asta proposed to itself: what it would move, what the bench
+    -- said, and what happened. Nothing is promoted without a measured gain, and
+    -- nothing is forgotten when it is rejected — the lesson is the record.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    level TEXT NOT NULL DEFAULT 'L1',
+    knob TEXT NOT NULL DEFAULT '',
+    before_value TEXT NOT NULL DEFAULT '',
+    after_value TEXT NOT NULL DEFAULT '',
+    cluster TEXT NOT NULL DEFAULT '',
+    why TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'proposed',
+    gain TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    decided_at REAL
+);
 CREATE TABLE IF NOT EXISTS authority (
     -- What Asta may do without asking: explicit, capped per day, revocable, and
     -- only ever created by his yes (app/authority.py).

@@ -175,6 +175,10 @@ def _cwd(conv: dict) -> str:
 #: so "chat may not implement" held or not depending purely on which brain was
 #: selected — the per-brain drift that one shared decision exists to prevent.
 _CHAT_DENY = ("Write", "Edit", "NotebookEdit",
+              # The heavy built-ins a chat answer never needs, denied rather than
+              # trimmed away with `--tools`. See the note on that flag below: it
+              # takes the capabilities with it, and these are what it was for.
+              "Task", "TodoWrite", "ExitPlanMode", "BashOutput", "KillShell",
               "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh pr create:*)")
 
 
@@ -268,10 +272,27 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         # And only the built-in tools a chat turn reads with. Claude Code's full
         # kit — sub-agents, todo lists, notebooks, plan mode — is ~12k tokens of
         # schema re-read on EVERY call of every turn (measured 12 Sep: 29.8k →
-        # 17.5k for "reply ok"), for tools a chat answer never needs. Asta's own
-        # capabilities arrive over MCP and are unaffected.
+        # 17.5k for "reply ok"), for tools a chat answer never needs.
+        #
+        # "Asta's own capabilities arrive over MCP and are unaffected" is what
+        # this comment used to say, and it was wrong. Measured on CLI 2.1.212
+        # (17 Sep) with one config and one server: WITH the flag the model can
+        # call NO mcp__asta tools at all; without it, nineteen. `--tools` does
+        # not narrow the built-ins, it replaces the entire tool set — and naming
+        # the server in it (`mcp__asta`, or a single `mcp__asta__set_reminder`)
+        # does not help, measured too.
+        #
+        # What that cost: he asked Asta to put a reminder in Reminders and got
+        # "the set_reminder tool isn't available in my current tool list (only
+        # Bash, Glob, Grep, Read, WebFetch, WebSearch are provided this
+        # session)". The brain was telling the truth. A cheaper turn that cannot
+        # reach a single capability is not a saving.
+        #
+        # So the flag is used only where nothing is attached to lose, and the
+        # heavy built-ins are dropped through _CHAT_DENY above, which leaves MCP
+        # alone (measured: 22 tools still callable).
         lean = chat_tools()
-        if lean:
+        if lean and not copilot_cli.mcp_cli_enabled():
             cmd += ["--tools", lean]
     # Native tools instead of curl, when enabled: Claude Code spawns Asta's MCP
     # server and calls capabilities as `mcp__asta__*` tools that forward to the

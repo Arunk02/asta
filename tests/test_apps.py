@@ -146,3 +146,15 @@ def test_work_mail_goes_to_outlook_which_is_the_client_he_uses(monkeypatch):
     assert out["app"] == "Microsoft Outlook" and out["verified"] == "Kafka topics for UAT"
     assert "Microsoft Outlook" in calls[0]["script"]
     assert "someone@example.com" in calls[0]["args"]
+
+
+def test_a_reminder_can_carry_the_time_he_said(monkeypatch):
+    """Live on 17 Sep: "remind me tomorrow morning" put the reminder in his list
+    with no time on it — the one thing that makes a reminder a reminder."""
+    calls: list = []
+    _fake_runner(monkeypatch, wrote=calls, reads="Chase Vinish on the three PRs")
+    out = asyncio.run(apps.run("reminder_add", title="Chase Vinish on the three PRs",
+                               due="2026-09-18 09:00"))
+    assert out["ok"]
+    assert "2026-09-18 09:00" in calls[0]["args"]
+    assert "remind me date" in calls[0]["script"]

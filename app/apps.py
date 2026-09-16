@@ -80,15 +80,31 @@ _REMINDER_ADD = '''
 on run argv
   set theTitle to item 1 of argv
   set theNote to item 2 of argv
+  set dueText to item 3 of argv
   tell application "Reminders"
     set theList to default list
-    if theNote is "" then
-      make new reminder at end of theList with properties {name:theTitle}
-    else
-      make new reminder at end of theList with properties {name:theTitle, body:theNote}
-    end if
+    set props to {name:theTitle}
+    if theNote is not "" then set props to props & {body:theNote}
+    if dueText is not "" then set props to props & {remind me date:my parseStamp(dueText)}
+    make new reminder at end of theList with properties props
   end tell
 end run
+
+on parseStamp(t)
+  set y to (text 1 thru 4 of t) as integer
+  set mo to (text 6 thru 7 of t) as integer
+  set d to (text 9 thru 10 of t) as integer
+  set h to (text 12 thru 13 of t) as integer
+  set mi to (text 15 thru 16 of t) as integer
+  set theDate to current date
+  set year of theDate to y
+  set month of theDate to mo
+  set day of theDate to d
+  set hours of theDate to h
+  set minutes of theDate to mi
+  set seconds of theDate to 0
+  return theDate
+end parseStamp
 '''
 
 _REMINDER_LIST = '''
@@ -274,8 +290,9 @@ end run
 
 RECIPES: dict[str, Recipe] = {r.name: r for r in (
     Recipe("reminder_add", "Reminders",
-           "Put a reminder in his default Reminders list",
-           _REMINDER_ADD, takes=("title", "note?"), writes=True,
+           "Put a reminder in his default Reminders list "
+           "(due as 'YYYY-MM-DD HH:MM' — set it whenever he named a time)",
+           _REMINDER_ADD, takes=("title", "note?", "due?"), writes=True,
            verify=_REMINDER_LIST, verify_has="title"),
     Recipe("reminders_open", "Reminders",
            "What is on his Reminders list right now (reads nothing else)",

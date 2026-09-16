@@ -233,12 +233,39 @@ def test_the_scorecard_counts_messages_that_needed_no_brain():
 # --- a chat turn carries only the tools it reads with --------------------------------------
 
 def test_a_chat_turn_gets_the_lean_built_in_tool_set(monkeypatch):
+    """Only where it costs nothing — see the next test for where it costs everything."""
+    from app import copilot_cli
+    monkeypatch.setattr(copilot_cli, "mcp_cli_enabled", lambda: False)
     conv = {"id": "c-lean", "workspace": "", "model": "claude_cli"}
     cmd = claude_cli._build_cmd(conv, "what is task 116 waiting for?")
     assert cmd[cmd.index("--tools") + 1] == claude_cli.CHAT_TOOLS
     assert "Task" not in claude_cli.CHAT_TOOLS and "Edit" not in claude_cli.CHAT_TOOLS
     monkeypatch.setenv("ASTA_CLAUDE_CHAT_TOOLS", "default")
     assert "--tools" not in claude_cli._build_cmd(conv, "hi")
+
+
+def test_the_lean_tool_list_is_never_sent_alongside_his_capabilities(monkeypatch):
+    """Measured on CLI 2.1.212, 17 Sep: `--tools` does not narrow the built-ins,
+    it replaces the WHOLE tool set — MCP included. Same config, same server:
+    with the flag the model reported NONE, without it, nineteen mcp__asta tools.
+
+    So for months' worth of turns the flag was quietly removing every capability
+    Asta has. He asked for a reminder and got "the set_reminder tool isn't
+    available in my current tool list (only Bash, Glob, Grep, Read, WebFetch,
+    WebSearch are provided)" — which was true, and was our doing.
+
+    The token saving is real but it is second: a chat brain with no capabilities
+    is not a cheaper assistant, it is a chatbot. The heavy built-ins are dropped
+    with --disallowed-tools instead, which leaves MCP alone."""
+    from app import copilot_cli
+    monkeypatch.setattr(copilot_cli, "mcp_cli_enabled", lambda: True)
+    cmd = claude_cli._build_cmd({"id": "c-mcp", "workspace": "", "model": "claude_cli"},
+                                "remind me tomorrow to chase the PRs")
+    assert "--mcp-config" in cmd
+    assert "--tools" not in cmd, "the lean list would strip every mcp__asta tool"
+    denied = cmd[cmd.index("--disallowed-tools") + 1]
+    for heavy in ("Task", "TodoWrite", "NotebookEdit"):
+        assert heavy in denied
 
 
 def test_a_chat_that_may_edit_keeps_every_tool(monkeypatch):

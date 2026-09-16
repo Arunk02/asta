@@ -75,9 +75,14 @@ async def flush(reason: str = "") -> dict:
     if not rows:
         return {"sent": False, "items": 0}
     from . import notify
-    # Below the policy on purpose: this IS the quiet path, and re-entering
-    # `notify` would weigh a digest against the budget it exists to absorb.
-    out = await notify.deliver(render(rows, reason))
+    body = render(rows, reason)
+    # The bell gets it too. Delivering below `notify` is deliberate — re-entering
+    # it would weigh a digest against the budget it exists to absorb — but that
+    # also skipped the one line every other push takes: found live on 16 Sep,
+    # when a digest of three real messages reached his phone and appeared
+    # nowhere in the UI.
+    store.add_notification(body, "digest")
+    out = await notify.deliver(body)
     store.record_outcome("digest", "sent", detail=f"{len(rows)} items {reason}"[:200])
     return {"sent": True, "items": len(rows), **out}
 

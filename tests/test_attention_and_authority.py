@@ -212,3 +212,18 @@ def test_a_day_in_his_life_stays_within_the_budget_and_misses_nothing():
     assert len(res.pushes) <= 20, day.report(res)
     assert res.missed == [], day.report(res)
     assert res.false_interrupts == [], day.report(res)
+
+
+def test_the_digest_also_reaches_the_bell(monkeypatch):
+    """Found live: a digest of three real messages went to his phone and showed
+    up nowhere in the UI, because it delivers below the layer that records it."""
+    from app import notify
+
+    async def deliver(text):
+        return {"whatsapp": True}
+
+    monkeypatch.setattr(notify, "deliver", deliver)
+    digest.add("Change CHG1 scheduled", source="IT Service Desk")
+    asyncio.run(digest.flush(reason="midday digest"))
+    bell = [n for n in store.list_notifications(10) if "Digest" in n["text"]]
+    assert bell and bell[0]["level"] == "digest"

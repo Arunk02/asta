@@ -1,0 +1,42 @@
+# The three P7 graphs — investigation, draft-and-send, follow-through.
+#
+# Each exists for one property a daemon loop cannot have: it survives not
+# finishing in one go. So the scenarios are about pausing and being picked up,
+# not about the happy path.
+
+scenarios:
+  - id: a-warning-before-the-deadline-waits-for-his-word
+    title: '"chase them or leave it" is a question the thread can actually hear'
+    why: >
+      Said after EOD it is a report; said four hours before it is still
+      actionable — and what he says back has to be waited for. A daemon loop
+      cannot wait; a checkpointed thread can.
+    twin: false
+    setup:
+      env: {ASTA_GRAPHS: "1"}
+      followups:
+        - {goal: "3 PRs reviewed and merged", person: "a colleague",
+           urls: ["https://example.invalid/pr/1"], due_in_hours: 2}
+    steps:
+      - tick: followup
+      - say: "leave it"
+    checks:
+      - said_contains: "Left it with you"
+      - no_send: true
+
+  - id: a-nudge-is-staged-and-never-sent
+    title: A stalled promise drafts a chase for his yes, and nothing leaves
+    why: >
+      His standing rule. A tracker that messages his colleagues at 3am is
+      exactly the thing that rule exists to prevent.
+    twin: false
+    setup:
+      env: {ASTA_GRAPHS: "1"}
+      followups:
+        - {goal: "the 1440 review", person: "a colleague",
+           urls: ["https://example.invalid/pr/2"], due_in_hours: 48}
+    steps:
+      - tick: followup
+    checks:
+      - no_send: true
+      - tasks: {kind: teams_draft, max: 1}

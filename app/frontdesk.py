@@ -143,6 +143,24 @@ _FORCE = re.compile(_LEAD + r"(push|unmute|digest|mute)\s+(?P<name>[\w .&'-]{2,4
                     r"(?:\s+again)?" + _END, re.I)
 
 
+#: His answer to a deadline warning. Short and unmistakable on purpose: anything
+#: longer is a sentence for the brain, not a gate answer.
+_PROMISE_REPLY = re.compile(
+    r"^\s*(chase (them|him|her|it)|leave it|drop it|stop chasing|"
+    r"i'?ll do it( myself)?)\s*[.!]?\s*$", re.I)
+
+
+def _promises_at_a_gate() -> list[int]:
+    """Follow-ups whose thread is parked at the deadline gate, from state."""
+    from . import followup
+    from .graph import engine
+    out = []
+    for row in followup.list_open():
+        if (store.kv_get(engine.waiting_key("promise", row["id"])) or "") == "deadline":
+            out.append(int(row["id"]))
+    return out
+
+
 def answer_from_state(text: str) -> str:
     """The reply, when the message is a question the task table answers. '' otherwise."""
     t = (text or "").strip()
@@ -160,6 +178,27 @@ def answer_from_state(text: str) -> str:
         out = evolve.rollback(int(m.group(1)), "you asked")
         return (f"Rolled back: {out}" if out else
                 f"There's nothing promoted as {m.group(1)}. Say “what have you changed”.")
+    # A promise that warned him is a thread PARKED at a gate, and his one-word
+    # answer is what it is waiting for. Without this the warning is a broadcast:
+    # it asks "chase them or leave it?" and then has no way to hear the answer,
+    # and the thread sits at its gate until a restart cleans it up. Rules only —
+    # a brain is never asked which promise he meant.
+    m = _PROMISE_REPLY.match(t)
+    if m:
+        from .graph import engine
+        if engine.enabled():
+            open_ones = [f for f in _promises_at_a_gate()]
+            if len(open_ones) == 1:
+                # Recorded, not driven. This function is synchronous and runs
+                # inside the server's loop; the next tick applies it, and a
+                # restart in between loses nothing.
+                engine.record_answer("promise", open_ones[0], {"text": t})
+                leave = t.strip().lower().startswith(("leave", "drop", "stop", "i'"))
+                return ("Left it with you." if leave else
+                        "Right — I'll keep chasing and tell you what moves.")
+            if len(open_ones) > 1:
+                return ("Which one — " + ", ".join(f"#{f}" for f in open_ones)
+                        + "? Say “leave #N” or “chase #N”.")
     if _PERMISSIONS.match(t):
         from . import authority
         return authority.summary()

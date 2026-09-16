@@ -202,6 +202,20 @@ async def check_all(now: float | None = None) -> list[str]:
     for row in rows:
         if row.get("status") != "open":
             continue
+        # On the graph, a promise is a checkpointed thread: the warning before
+        # the deadline can PARK and wait for what he says back, across restarts,
+        # without the chase carrying on underneath it. A daemon loop cannot wait.
+        from .graph import engine
+        if engine.enabled():
+            from .graph import bindings
+            try:
+                state = await bindings.tick_promise(row)
+            except Exception:
+                continue
+            if state.get("outcome") == "kept":
+                row["status"] = "done"
+                out.append(f"✅ {row['goal']} — all {len(row['urls'])} merged.")
+            continue
         try:
             notes, done = await check_one(row, now)
         except Exception:

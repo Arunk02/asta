@@ -1214,6 +1214,12 @@ async def api_use_app(request: Request):
                                                           b.get("args") or {})}
 
 
+@app.post("/api/voice-note", dependencies=[Depends(require_auth)])
+async def api_voice_note(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.leave_voice_note(b.get("text", ""))}
+
+
 @app.post("/api/screen", dependencies=[Depends(require_auth)])
 async def api_use_screen(request: Request):
     b = await request.json()

@@ -218,6 +218,30 @@ async function sendDocument(filePath, caption) {
   return true;
 }
 
+// A voice note is a PTT message, not an audio file: WhatsApp shows it as the
+// waveform he can hold-to-play, which is the whole reason for sending one
+// instead of a paragraph. Baileys needs the Opus/ogg container for that.
+async function sendVoiceNote(filePath, seconds) {
+  let jid = targetJid();
+  if (!config.enabled || !sock || !paired || !jid) return false;
+  if (selfLid && normJid(jid) === normJid(selfJid)) jid = selfLid;
+  // The mimetype must be the TRUTH about the bytes. Declaring ogg/opus over an
+  // AAC file is how a voice note arrives as something the phone cannot open —
+  // and `ptt` is only honoured for opus, so anything else is sent as an audio
+  // clip rather than pretending to be a waveform.
+  const ext = path.extname(filePath).toLowerCase();
+  const opus = ext === ".ogg" || ext === ".opus";
+  const res = await sock.sendMessage(jid, {
+    audio: fs.readFileSync(filePath),
+    mimetype: opus ? "audio/ogg; codecs=opus"
+      : ext === ".m4a" ? "audio/mp4" : ext === ".mp3" ? "audio/mpeg" : "audio/wav",
+    ptt: opus,
+    seconds: Math.max(1, Math.round(Number(seconds) || 1)),
+  });
+  if (res?.key?.id) sentByMe.add(res.key.id);
+  return true;
+}
+
 async function send(text) {
   let jid = targetJid();
   if (!config.enabled || !sock || !paired || !jid) return false;
@@ -286,6 +310,25 @@ http
       });
       return;
     }
+    if (req.method === "POST" && req.url === "/send-voice") {
+      if (TOKEN && auth !== `Bearer ${TOKEN}`) {
+        res.writeHead(401); res.end(); return;
+      }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", async () => {
+        try {
+          const b = JSON.parse(body);
+          const ok = await sendVoiceNote(b.path, b.seconds);
+          res.writeHead(ok ? 200 : 503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok }));
+        } catch (e) {
+          res.writeHead(500); res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
+
     if (req.method === "POST" && req.url === "/send-document") {
       if (TOKEN && auth !== `Bearer ${TOKEN}`) {
         res.writeHead(401); res.end(); return;

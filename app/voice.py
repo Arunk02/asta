@@ -280,6 +280,62 @@ async def speak(text: str, profile: str = "", engine: str = "",
         return audio.content
 
 
+#: What WhatsApp needs for a hold-to-play voice note: Opus in an Ogg container.
+#: Anything else arrives as an audio clip — playable, but not the waveform.
+#: macOS ships `afconvert`, which advertises Opus and then fails to encode it
+#: ('pck?'), so the good path needs ffmpeg and the fallback is AAC. Detected
+#: rather than assumed: a machine without ffmpeg still gets a voice note, and
+#: the caller is told which one it sent instead of being left to guess.
+async def voice_note(text: str, voice: str = "assistant") -> dict:
+    """Say it out loud on his phone. Returns what was actually sent.
+
+    A voice note is the right shape for something he would rather hear than
+    read — a two-line summary while he is walking — and the wrong shape for
+    anything he needs to search for later, which is why nothing calls this for
+    an outcome or a file.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    import wave
+    from pathlib import Path
+
+    from . import notify
+
+    audio = await speak(text, voice=voice)
+    tmp = Path(tempfile.mkdtemp(prefix="asta-vn-"))
+    wav = tmp / "note.wav"
+    wav.write_bytes(audio)
+    try:
+        with wave.open(str(wav)) as w:
+            seconds = max(1, round(w.getnframes() / float(w.getframerate() or 1)))
+    except Exception:                                           # noqa: BLE001
+        seconds = max(1, len(text.split()) // 3)
+
+    out, kind = wav, "wav"
+    if shutil.which("ffmpeg"):
+        opus = tmp / "note.ogg"
+        done = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(wav), "-c:a", "libopus", "-b:a", "24k",
+             "-ar", "48000", "-ac", "1", str(opus)],
+            capture_output=True, timeout=60)
+        if done.returncode == 0 and opus.exists():
+            out, kind = opus, "opus"
+    if kind == "wav":
+        m4a = tmp / "note.m4a"
+        done = subprocess.run(["afconvert", "-f", "m4af", "-d", "aac", str(wav), str(m4a)],
+                              capture_output=True, timeout=60)
+        if done.returncode == 0 and m4a.exists():
+            out, kind = m4a, "aac"
+
+    sent = await notify.wa_voice(str(out), seconds)
+    return {"sent": bool(sent), "format": kind, "seconds": seconds,
+            "path": str(out),
+            "note": ("" if kind == "opus" else
+                     "sent as an audio clip rather than a hold-to-play note — "
+                     "install ffmpeg for Opus and it becomes a proper voice note")}
+
+
 async def transcribe(data: bytes, filename: str = "speech.webm",
                      language: str = "") -> str:
     """Whisper transcription of a recorded clip.

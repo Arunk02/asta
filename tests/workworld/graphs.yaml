@@ -40,3 +40,19 @@ scenarios:
     checks:
       - no_send: true
       - tasks: {kind: teams_draft, max: 1}
+
+  - id: something-he-would-rather-hear-is-said-out-loud
+    title: A short heads-up can arrive as his own assistant's voice
+    why: >
+      For the two lines he would rather hear while walking. Not for an outcome
+      or a file — spoken words cannot be scrolled back to.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: leave_voice_note, args: {text: "The three PRs are merged; nothing needs you tonight."}}]
+          text: "Said it on WhatsApp."
+    steps:
+      - say: "just tell me out loud where the PRs got to"
+    checks:
+      - tool_result_contains: {tool: leave_voice_note, text: "Said it on WhatsApp"}
+      - no_send: true

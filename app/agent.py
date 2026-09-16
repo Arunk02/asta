@@ -1804,6 +1804,24 @@ def screen_paths() -> str:
     return screen.describe_paths()
 
 
+async def leave_voice_note(text: str) -> str:
+    """Say something to Arun out loud on WhatsApp, in Asta's voice.
+
+    For the thing he would rather hear than read — a two-line summary while he
+    is walking, or a heads-up he can take without stopping. NOT for an outcome,
+    a file or anything he will want to search for later: spoken words cannot be
+    scrolled back to. Keep it under about forty words."""
+    from . import voice
+    try:
+        out = await voice.voice_note(text)
+    except Exception as exc:                                    # noqa: BLE001
+        return f"Not sent — the voice server would not render it: {str(exc)[:160]}"
+    if not out["sent"]:
+        return "Not sent — his phone would not take the audio."
+    return f"Said it on WhatsApp ({out['seconds']}s)." + (
+        f" {out['note']}." if out.get("note") else "")
+
+
 def app_recipes() -> str:
     """What Asta can do in Arun's apps, and what each one needs.
 

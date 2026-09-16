@@ -158,6 +158,7 @@ class World:
     documents: list[dict] = field(default_factory=list)       # files that reached it
     app_calls: list[dict] = field(default_factory=list)       # doors into his own apps
     screen_frames: list[str] = field(default_factory=list)    # what the UI tree answers
+    spoke: list[str] = field(default_factory=list)            # what it said out loud
     replies: list[dict] = field(default_factory=list)         # in the chat
     sent: list[dict] = field(default_factory=list)            # OUT of the house
     brain_calls: list[dict] = field(default_factory=list)
@@ -276,7 +277,7 @@ class World:
         from app import (attention, briefing, chat_watch, claude_cli, copilot_cli, delivery,
                          jira, main, meetings, memory, notify, outlook, presence, quiet,
                          repo_ops, store, tasks, teams_bridge, telegram, verify, wa_bridge)
-        from app import apps, screen
+        from app import apps, screen, voice
         p = self._patch
 
         # 1. The database: a fresh file per scenario. Checked again by
@@ -329,7 +330,21 @@ class World:
             return True
 
         p.set(notify, "wa_send", wa_send)
+        #    And his voice. Same door, same reason: unstubbed, every bench run
+        #    that spoke would speak to him for real — and the voice server would
+        #    be asked to synthesise it, on his laptop, at whatever hour the
+        #    suite runs.
+        async def wa_voice(path: str, seconds: int = 1) -> bool:
+            self.documents.append({"path": str(path), "caption": f"voice {seconds}s"})
+            return True
+
+        async def spoken(text: str, **kw) -> bytes:
+            self.spoke.append(text)
+            return b"RIFF" + b"\0" * 64          # enough to be a file, not audio
+
         p.set(notify, "wa_document", wa_document)
+        p.set(notify, "wa_voice", wa_voice)
+        p.set(voice, "speak", spoken)
         if not real_notify:
             p.set(notify, "notify", notify_fn)
         p.set(notify, "wa_status", _async_value({"up": True, "paired": True, "enabled": True}))

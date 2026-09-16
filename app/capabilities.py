@@ -94,6 +94,11 @@ _TABLE: tuple[Capability, ...] = (
                     "app_recipes() first to see what exists."),
     Capability("app_recipes", "hands", http="GET /api/apps",
                note="The app recipes and what each one takes. Read before use_app."),
+    Capability("leave_voice_note", "hands", write=True,
+               http='POST /api/voice-note {"text":"…"}',
+               note="Speak to him on WhatsApp instead of writing. For what he "
+                    "would rather hear while walking; never for an outcome or a "
+                    "file, which he will want to search for later."),
     Capability("use_screen", "hands", write=True,
                http='POST /api/screen {"process":"Preview","steps":[{"do":"menu",'
                     '"target":"File > Export","expect":"exists: Export"}]}',

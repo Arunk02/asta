@@ -49,6 +49,19 @@ async def wa_document(path: str, caption: str = "") -> bool:
         return False
 
 
+async def wa_voice(path: str, seconds: int = 1) -> bool:
+    """Send a voice note (PTT) to his phone. False when the bridge will not take it."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{bridge_url()}/send-voice",
+                             headers={"Authorization": f"Bearer {os.environ.get('ASTA_TOKEN', '')}"},
+                             json={"path": str(path), "seconds": int(seconds)})
+        return bool(r.status_code == 200 and (r.json() or {}).get("ok"))
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
 async def wa_status() -> dict:
     try:
         async with httpx.AsyncClient(timeout=3) as c:

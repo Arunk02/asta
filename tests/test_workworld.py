@@ -204,3 +204,27 @@ def test_the_bench_does_not_change_answer_with_the_hour(monkeypatch):
     finally:
         w.uninstall()
     assert delivery.quiet_window() == (22 * 60, 7 * 60)
+
+
+def test_the_bench_never_speaks_to_him_for_real(monkeypatch, tmp_path):
+    """The third door in the same family as the folder and the bridge: a bench
+    run that spoke would put Asta's voice on his phone, and would ask the voice
+    server on his laptop to synthesise it, at whatever hour the suite runs."""
+    import asyncio
+
+    from app import voice
+    from app.workworld import world as W
+
+    async def explode(*a, **k):
+        raise AssertionError("the bench reached the real voice path")
+
+    monkeypatch.setattr(voice, "speak", explode)
+    w = W.World()
+    w.install()
+    try:
+        out = asyncio.run(voice.voice_note("two lines while you walk"))
+        assert out["sent"] is True
+        assert w.spoke == ["two lines while you walk"]
+        assert any("voice" in d["caption"] for d in w.documents)
+    finally:
+        w.uninstall()

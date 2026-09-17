@@ -347,8 +347,17 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
         pri = int(arg.get("priority", attention.P_TODAY))
         key = attention.key_for(who, text)
         if attention.consider(source, key, who=who, what=text, priority=pri):
-            await notify.notify(text, source, urgency=arg.get("urgency", "direct"),
-                                priority=pri, considered=True)
+            if arg.get("as_watcher"):
+                # Exactly the shape the Teams watcher pushes in: level "teams",
+                # urgency from the rank, and NO priority — it batches several
+                # messages into one "💬 Teams" line. Passing the priority here
+                # is what hid that a colleague's direct question was budgeted.
+                await notify.notify(f"💬 Teams\n🔴 {who}: {text}", "teams",
+                                    urgency="direct" if pri <= attention.P_TODAY else "ambient",
+                                    considered=True)
+            else:
+                await notify.notify(text, source, urgency=arg.get("urgency", "direct"),
+                                    priority=pri, considered=True)
     elif kind == "announce":
         # Asta speaking on its own initiative — a plan gate, a finished task.
         from app import notify

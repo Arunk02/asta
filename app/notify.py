@@ -234,7 +234,7 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     # The day's budget of interruptions. Breakage and things he is blocked on are
     # never counted against it; everything ordinary that arrives once the budget
     # is gone is read in the digest instead of buzzing his pocket.
-    if not budget.allows(priority, urgency):
+    if not budget.allows(priority, urgency, level=level):
         from . import digest
         digest.add(text, source=level, why="past today's budget of interruptions")
         return {"bell": True, "held": True, "digested": True,

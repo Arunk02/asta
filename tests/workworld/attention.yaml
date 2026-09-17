@@ -153,3 +153,22 @@ scenarios:
     checks:
       - push_contains: "PLAN #42"
       - digest: {count: 0}
+
+  - id: a-person-asking-him-something-is-never-budgeted
+    title: Past the day's budget, a colleague's direct question still reaches him
+    why: >
+      Live, 17 Sep. Asta's own pushes spent the day's budget of twenty, and after
+      that a colleague asking "for sit and qa is it v1 or v11?" and another asking
+      "can we increase this, bro?" went to the next midday digest — about sixteen
+      hours late. The budget is for what can wait; a person waiting on his answer
+      cannot. Asta's own announcements still count against it.
+    twin: false
+    real_notify: true
+    setup:
+      pushes_today: 20
+    steps:
+      - inbound: {who: "A colleague", source: teams-chat, text: "for sit and qa is it v1 or v11?", priority: 1, as_watcher: true}
+      - announce: {text: "📎 open-tasks.pdf — Open tasks: 1 row(s)", level: file}
+    checks:
+      - push_contains: "is it v1 or v11"
+      - digest: {contains: "open-tasks.pdf"}

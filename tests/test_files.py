@@ -95,7 +95,12 @@ def test_it_reaches_his_phone_and_says_so_when_it_cannot(monkeypatch):
     monkeypatch.setattr(notify, "notify", push)
     made = files.make("xlsx", "topics", rows=ROWS, title="Topics")
     assert asyncio.run(files.deliver(made))["sent"] is True
-    assert pushed[-1].startswith("📎")
+    # The document IS the message: it arrives with its caption. A second "📎"
+    # push repeated it — live on 17 Sep every file reached him twice, the copy
+    # spent his daily budget, and four of them turned up again in the digest.
+    assert pushed == [], "a delivered document must not be announced a second time"
+    assert any("topics.xlsx" in n["text"] for n in store.list_notifications(10)), \
+        "…but the bell still records it"
     assert asyncio.run(files.deliver(made))["sent"] is False
     assert "on your Mac" in pushed[-1]
     kinds = [o["outcome"] for o in store.recent_outcomes(10) if o["kind"] == "file"]

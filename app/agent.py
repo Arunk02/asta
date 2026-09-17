@@ -1783,7 +1783,7 @@ async def use_screen(process: str, steps: list | None = None,
     Use make_file for documents and use_app for an app with a real door; this is
     refused outright for those. `remember_as` keeps a path that worked, so the
     next time is a replay rather than a hunt."""
-    from . import screen
+    from . import apps, screen
     try:
         path = [screen.Step(**{k: v for k, v in s.items()
                                if k in ("do", "target", "expect", "window")})
@@ -1791,7 +1791,10 @@ async def use_screen(process: str, steps: list | None = None,
         out = await screen.follow(process, path, why=why)
         if remember_as:
             screen.remember_path(remember_as, process, path, why=why)
-    except (screen.ScreenError, TypeError) as exc:
+    # AppError too: the interpreter's own failures — a permission, a timeout —
+    # arrive as AppError from the shared runner. Uncaught, the first live call
+    # became an HTTP 500 and a brain would have been handed a stack trace.
+    except (screen.ScreenError, apps.AppError, TypeError) as exc:
         return f"Not done — {exc}"
     kept = f" Kept as {remember_as!r}." if remember_as else ""
     return (f"Done in {process}, each step checked: "

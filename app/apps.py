@@ -343,7 +343,18 @@ async def _osascript(script: str, args: list[str]) -> str:
     if proc.returncode != 0:
         why = err.decode(errors="replace").strip().splitlines()
         tail = why[-1] if why else f"exit {proc.returncode}"
-        if "-1743" in tail or "not allowed" in tail.lower():
+        # Two different switches, and naming the wrong one leaves the real one
+        # off. -1719 ("not allowed assistive access") is ACCESSIBILITY — needed
+        # to click and type through System Events. -1743 ("not authorised to send
+        # Apple events") is AUTOMATION — needed to ask an app to do something.
+        # Both were once reported as Automation; the first live screen call sent
+        # him to the wrong page.
+        if "-1719" in tail or "assistive access" in tail.lower():
+            raise AppError(
+                "macOS has not let Asta click and type yet — System Settings → "
+                "Privacy & Security → Accessibility, and switch on the Python that "
+                f"runs Asta ({tail})")
+        if "-1743" in tail or "not allowed" in tail.lower() or "not authori" in tail.lower():
             raise AppError(
                 f"macOS has not granted Asta access to that app yet — "
                 f"System Settings → Privacy & Security → Automation ({tail})")

@@ -366,3 +366,32 @@ def test_turn_timeout_is_five_minutes_and_shared_by_every_cli_brain(monkeypatch)
 
     monkeypatch.setenv("ASTA_TURN_TIMEOUT", "junk")
     assert copilot_cli.turn_timeout() == 300
+
+
+def test_a_staged_send_survives_a_restart():
+    """Found live on 17 Sep, while wiring the draft-and-send graph: the staged
+    send lived in an in-memory dict. Restart Asta between "can I send this?" and
+    his "yes" and the draft was gone — his "yes" then went to a brain as an
+    ordinary message. The 13 September failure, still open on the chat path.
+    The staged draft is written down now, so a new process finds it."""
+    from app import loop
+
+    intent = {"kind": "send", "what": "Bro, can you review 1440?",
+              "to": "a colleague", "channel": "teams", "to_group": False}
+    loop.stage("c-restart", intent)
+
+    loop._awaiting.clear()                    # the process died; memory is gone
+    assert loop.awaiting("c-restart") == intent
+
+    assert loop.clear_awaiting("c-restart") == intent
+    loop._awaiting.clear()
+    assert loop.awaiting("c-restart") is None, "a cleared draft must stay cleared"
+
+
+def test_forgetting_a_conversation_forgets_its_staged_send_too():
+    from app import loop
+    loop.stage("c-forget", {"kind": "send", "what": "x", "to": "y",
+                            "channel": "teams", "to_group": False})
+    loop.clear("c-forget")
+    loop._awaiting.clear()
+    assert loop.awaiting("c-forget") is None

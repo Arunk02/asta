@@ -86,15 +86,52 @@ async def answer_promise(fid: int, text: str) -> dict:
 
 # --- investigation ----------------------------------------------------------
 
-def _looker(question: str, looks: list) -> dict:
-    """One read-only look, run by the same engine a delegated question uses."""
+#: How long one look may run before the investigation takes what it has.
+LOOK_TIMEOUT = 600
+
+#: Statuses a look is finished in — read or gave up.
+_LOOK_DONE = ("done", "failed", "rejected", "cancelled")
+
+
+async def _looker(question: str, looks: list) -> dict:
+    """One read-only look, run by the same engine a delegated question uses —
+    and WAITED for.
+
+    The first version spawned the analysis and returned at once with nothing
+    found. `judge` saw an empty finding, looked again, and spawned again: one
+    question would have become four analyses running side by side, each billing
+    his subscription for the same answer. Caught before it was ever wired live.
+
+    Two rules from the code graph apply. A look waits for its result. And a look
+    that is RE-RUN — a restart mid-analysis re-enters the node from the top —
+    reuses the analysis it already started rather than starting a second one,
+    which is the #88/#89 failure in a new costume.
+    """
+    import asyncio
+    import contextlib
+    import hashlib
+
     from app import tasks
+
+    idx = len(looks)
+    mark = "inv_look:" + hashlib.sha1(question.encode()).hexdigest()[:16] + f":{idx}"
     already = "; ".join(str(lk.get("what", "")) for lk in looks)
     title = f"Check: {question[:60]}"
-    prompt = (f"{question}\n\nRead-only. Say what you CHECKED and what you FOUND.\n"
-              + (f"Already checked, do not repeat: {already}\n" if already else ""))
-    t = tasks.spawn(title, prompt, "analysis", None, "")
-    return {"what": title, "found": "", "task": t.get("id"), "at": time.time()}
+    tid = store.kv_get(mark)
+    if not tid:
+        prompt = (f"{question}\n\nRead-only. Say what you CHECKED and what you FOUND.\n"
+                  + (f"Already checked, do not repeat: {already}\n" if already else ""))
+        t = tasks.spawn(title, prompt, "analysis", None, "")
+        tid = str(t["id"])
+        store.kv_set(mark, tid)
+    job = tasks._running.get(int(tid))
+    if job is not None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(job), timeout=LOOK_TIMEOUT)
+    row = store.get_task(int(tid)) or {}
+    found = ((row.get("result") or "").strip()
+             if row.get("status") in _LOOK_DONE else "")
+    return {"what": title, "found": found[:1500], "task": int(tid), "at": time.time()}
 
 
 async def investigate_question(key: str, question: str, who: str = "") -> dict:

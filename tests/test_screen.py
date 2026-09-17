@@ -106,3 +106,50 @@ def test_a_saved_path_replays_and_an_unknown_one_says_what_exists(monkeypatch):
     assert asyncio.run(screen.replay("say hello"))["ok"]
     with pytest.raises(screen.ScreenError, match="no saved path"):
         asyncio.run(screen.replay("nonsense"))
+
+
+def test_a_permission_failure_is_an_answer_not_a_crash(monkeypatch):
+    """Live on 17 Sep: the first real screen call raised AppError out of
+    use_screen and the server returned a 500 — a brain would have been handed an
+    exception instead of a sentence it can pass on."""
+    from app import agent
+
+    async def refuse(script, args):
+        raise apps.AppError("not allowed")
+
+    monkeypatch.setattr(apps, "_osascript", refuse)
+    out = asyncio.run(agent.use_screen(
+        "TextEdit", [{"do": "menu", "target": "File > New", "expect": "exists: Untitled"}]))
+    assert out.startswith("Not done")
+
+
+def test_the_grant_it_names_is_the_one_that_is_actually_missing(monkeypatch):
+    """-1719 is ACCESSIBILITY ("not allowed assistive access"); -1743 is
+    AUTOMATION. Both used to be reported as Automation, which sends him to the
+    wrong page of System Settings and leaves the real switch off."""
+    import types
+
+    def fake_proc(stderr: bytes):
+        class P:
+            returncode = 1
+            async def communicate(self, _input=None):
+                return b"", stderr
+            def kill(self):
+                pass
+        return P()
+
+    async def exec_1719(*a, **k):
+        return fake_proc(b"execution error: System Events got an error: "
+                         b"osascript is not allowed assistive access. (-1719)")
+
+    async def exec_1743(*a, **k):
+        return fake_proc(b"execution error: Not authorised to send Apple events "
+                         b"to Reminders. (-1743)")
+
+    monkeypatch.setattr(apps.shutil, "which", lambda n: "/usr/bin/osascript")
+    monkeypatch.setattr(apps.asyncio, "create_subprocess_exec", exec_1719)
+    with pytest.raises(apps.AppError, match="Accessibility"):
+        asyncio.run(apps._osascript("x", []))
+    monkeypatch.setattr(apps.asyncio, "create_subprocess_exec", exec_1743)
+    with pytest.raises(apps.AppError, match="Automation"):
+        asyncio.run(apps._osascript("x", []))

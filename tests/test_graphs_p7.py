@@ -228,3 +228,64 @@ def test_the_promise_id_survives_the_state_schema():
     then looked up a promise that never arrived and reported it "gone", which
     reads exactly like a promise that was kept."""
     assert "id" in follow_through.Promise.__annotations__
+
+
+def test_leave_it_closes_the_promise_so_it_never_warns_again(monkeypatch):
+    """Live, 17 Sep: he said "leave it", the thread applied it and cleared its
+    gate — and the follow-up row stayed OPEN. The next tick would have started a
+    fresh run and warned him again, every fifteen minutes, about the thing he
+    had just told it to drop."""
+    import time
+
+    from app import followup, frontdesk
+    from app.graph import bindings
+
+    row = followup.track("my own PR merged", ["https://example.invalid/pr/9"],
+                         person="", due_at=time.time() + 3600)
+    warned: list = []
+    monkeypatch.setattr(bindings, "_watch",
+                        lambda p: {"state": "open", "moved": False})
+
+    async def warn(p):
+        warned.append(p["goal"])
+
+    monkeypatch.setattr(bindings, "_warn", warn)
+    asyncio.run(followup.check_all())
+    assert warned == ["my own PR merged"]
+
+    assert "Left it with you" in frontdesk.answer_from_state("leave it")
+    asyncio.run(followup.check_all())                 # applies "leave it"
+    assert all(r["id"] != row["id"] for r in followup.list_open()), \
+        "the promise he dropped is still being kept"
+
+    asyncio.run(followup.check_all())                 # and nothing comes back
+    assert warned == ["my own PR merged"]
+
+
+def test_one_question_is_one_analysis_not_four(monkeypatch):
+    """The first binding spawned an analysis and returned before it finished.
+    `judge` saw nothing found, looked again, spawned again — one question would
+    have become four analyses side by side. A look waits for its result, and a
+    re-run look reuses the analysis it already started."""
+    from app import store, tasks
+    from app.graph import bindings
+
+    spawned: list = []
+
+    def spawn(title, prompt, kind, workspace, chat):
+        tid = 900 + len(spawned)
+        spawned.append(tid)
+        store.create_task(title, kind, prompt, None)
+        return {"id": tid}
+
+    monkeypatch.setattr(tasks, "spawn", spawn)
+    monkeypatch.setattr(store, "get_task",
+                        lambda tid: {"status": "done", "result": "3 bookings stuck since 09:12"})
+
+    out = asyncio.run(bindings.investigate_question("q-one", "are prod bookings stuck?"))
+    assert out["verdict"] == "answered" and "3 bookings stuck" in out["answer"]
+    assert len(spawned) == 1, f"one question became {len(spawned)} analyses"
+
+    # A restart re-runs the look: it must find its analysis, not start another.
+    found = asyncio.run(bindings._looker("are prod bookings stuck?", []))
+    assert found["task"] == spawned[0] and len(spawned) == 1

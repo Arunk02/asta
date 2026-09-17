@@ -212,9 +212,18 @@ async def check_all(now: float | None = None) -> list[str]:
                 state = await bindings.tick_promise(row)
             except Exception:
                 continue
-            if state.get("outcome") == "kept":
+            outcome = state.get("outcome") or ""
+            if outcome == "kept":
                 row["status"] = "done"
                 out.append(f"✅ {row['goal']} — all {len(row['urls'])} merged.")
+            elif outcome in ("his_call", "dropped"):
+                # He said "leave it" (or the promise was dropped). The thread
+                # ends there — and a row left OPEN starts a fresh thread on the
+                # next tick, which warns him again about the thing he just told
+                # it to drop, every fifteen minutes. Found live on 17 Sep.
+                row["status"] = "stopped"
+                row["stopped_why"] = ("he said to leave it" if outcome == "his_call"
+                                      else "dropped")
             continue
         try:
             notes, done = await check_one(row, now)

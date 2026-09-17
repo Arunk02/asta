@@ -349,7 +349,11 @@ async def deliver(made: Made, caption: str = "") -> dict:
     store.record_outcome("file", "delivered" if sent else "written",
                          subject=Path(made.path).name, detail=made.summary[:200])
     if sent:
-        await notify.notify(f"📎 {line}", "file", urgency="direct", considered=True)
+        # The document IS the message — it arrives with this line as its caption.
+        # Pushing "📎 …" as well sent every file twice; the copy spent his daily
+        # budget and, once that ran out, reappeared in the digest (17 Sep). The
+        # bell still records it, which is all the second message ever added.
+        store.add_notification(f"📎 {line}", "file")
         return {"sent": True, "path": made.path}
     await notify.notify(f"📄 {line}\n\nIt is on your Mac — WhatsApp would not take it.",
                         "file", urgency="direct", considered=True)

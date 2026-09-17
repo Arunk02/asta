@@ -183,9 +183,9 @@ def test_the_bench_never_sends_a_document_to_his_real_phone(monkeypatch, tmp_pat
         out = asyncio.run(files.deliver(made))
         assert out["sent"] is True
         assert any("bench.csv" in d["path"] for d in w.documents)
-        # One file on his phone is ONE interruption: `deliver` announces it
-        # through notify, and the document itself must not be counted again.
-        assert len([p for p in w.pushes if "bench.csv" in p["text"]]) == 1
+        # One file on his phone is ONE message: the document, with its caption.
+        # `deliver` used to push a "📎" line as well — every file arrived twice.
+        assert not [p for p in w.pushes if "bench.csv" in p["text"]]
     finally:
         w.uninstall()
 

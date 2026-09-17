@@ -49,10 +49,21 @@ def test_past_the_budget_it_goes_to_the_digest(monkeypatch):
 
     monkeypatch.setattr(notify, "wa_send", wa)
     monkeypatch.setattr(notify.telegram, "send", tg)
-    asyncio.run(notify.notify("first thing", "teams", priority=attention.P_TODAY))
-    asyncio.run(notify.notify("second thing", "teams", priority=attention.P_TODAY))
+    asyncio.run(notify.notify("first thing", "task", priority=attention.P_TODAY))
+    asyncio.run(notify.notify("second thing", "task", priority=attention.P_TODAY))
     assert sent == ["first thing"]
     assert [r["text"] for r in digest.pending()] == ["second thing"]
+    # This test used to make its point with a Teams message he was OWED an answer
+    # to — which is exactly what went wrong live on 17 Sep: two colleagues' direct
+    # questions spent sixteen hours in the digest. A person waiting on him is never
+    # budgeted; Asta's own announcements are.
+    out = asyncio.run(notify.notify("for sit and qa is it v1 or v11?", "teams",
+                                    urgency="direct", priority=attention.P_TODAY,
+                                    considered=True))   # as the Teams watcher calls it
+    # It may be coalesced for a few seconds with whatever arrives beside it —
+    # that is delivery doing its job. What it must never be is digested.
+    assert not out.get("digested")
+    assert "for sit and qa is it v1 or v11?" not in [r["text"] for r in digest.pending()]
 
 
 # --- learned from his own reactions ------------------------------------------------------

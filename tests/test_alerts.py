@@ -372,3 +372,41 @@ def test_every_watcher_polls_at_least_every_five_minutes():
     assert outlook.POLL_SECONDS_DEFAULT <= 300
     assert teams_bridge.ACTIVITY_POLL_SECONDS <= 300
     assert ci_watch.POLL_SECONDS <= 300
+
+
+# --- a talk ABOUT alerts is not an alert --------------------------------------
+
+def test_an_invitation_to_a_talk_about_alerts_is_not_an_outage():
+    """Live, 17 Sep: "⚠️ Still broken after 5 min: Backend CoP tech-byte: Service
+    Level Objectives (SLOs) & Olly Alert Enrichment — Please join us…". The word
+    "Alert" in the talk's title made an invitation alert-class, the hold window
+    kept it for five minutes, and it went out as an outage. He asked what was
+    broken. Nothing was: it was a calendar of speakers."""
+    invite = _mail("Backend CoP tech-byte: Service Level Objectives (SLOs) & Olly Alert Enrichment",
+                   sender="Backend Community of Practice",
+                   preview="Please join us at our tech-byte where we have Sai Charan "
+                           "Madhvaraj and his team talking about SLOs and Olly alert…")
+    assert not outlook.is_alerty(invite)
+    assert not outlook.goes_to_hold(invite)
+
+
+@pytest.mark.parametrize("subject", [
+    "Webinar: incident response for platform teams",
+    "Invitation: Error budgets deep-dive @ Thu 15:00",
+    "Join us — Town hall on the Q3 outage retro",
+    "Newsletter: what's new in alerting",
+    "Accepted: Alert routing workshop",
+])
+def test_events_about_breakage_are_not_breakage(subject):
+    assert not outlook.is_alerty(_mail(subject, sender="Platform Engineering"))
+
+
+@pytest.mark.parametrize("subject,sender", [
+    (THE_ALERT, "Grafana Alerting"),
+    ("[FIRING:1] BookingService5xx prod", "Alertmanager"),
+    ("P1: all requests failing", "PagerDuty"),
+    ("Incident INC9686582 has been assigned to your group", "ServiceNow"),
+])
+def test_real_alerts_are_still_alerts(subject, sender):
+    """The fix must not cost the thing the hold window exists for."""
+    assert outlook.is_alerty(_mail(subject, sender=sender))

@@ -206,7 +206,34 @@ def is_critical(m: dict) -> bool:
 
 _ALERTY = re.compile(
     r"\b(alert|alarm|incident|error|failed|failure|down|unhealthy|degraded|"
-    r"threshold|breach|timeout|exception|critical|warning)\b", re.I)
+    r"threshold|breach|timeout|exception|critical|warning|firing)\b", re.I)
+
+#: A mail that is unmistakably an alerting system speaking, whatever else it says.
+#: Checked before the event markers below, so "[FIRING] … workshop-api" is still
+#: an alert. "firing" was also missing from the word list above: Alertmanager's
+#: own subject, "[FIRING:1] BookingService5xx prod", matched nothing at all.
+_ALERT_SHAPE = re.compile(
+    r"^\s*(\[(firing|resolved)[:\]]|(p[0-2]|sev[ -]?[0-2])\s*[:\-])", re.I)
+
+#: An event, an invitation or an announcement — a mail ABOUT breakage rather than
+#: breakage. Live on 17 Sep: "Backend CoP tech-byte: Service Level Objectives
+#: (SLOs) & Olly Alert Enrichment — Please join us…" matched "alert", sat in the
+#: hold window, and reached his phone as "⚠️ Still broken after 5 min". He asked
+#: what was broken. Nothing was. Words like "session" and "talk" are left out on
+#: purpose: "session store down" and "cannot talk to db" are real outages.
+_EVENT = re.compile(
+    r"\b(tech[- ]?bytes?|webinar|workshop|meet[- ]?up|town ?hall|all[- ]hands|"
+    r"newsletter|invitation|invited?|join us|please join|register(ation)?|rsvp|"
+    r"community of practice|cop|agenda|retro(spective)?|deep[- ]?dive|"
+    r"lunch (and|&) learn|brown[- ]?bag|knowledge share|kt session)\b"
+    r"|^\s*(accepted|declined|tentative|updated invitation|canceled|cancelled)\s*:",
+    re.I)
+
+
+def is_event(m: dict) -> bool:
+    """A talk, an invite or a newsletter — however alarming its title."""
+    text = f"{m.get('subject', '')} {m.get('sender', '')} {(m.get('preview') or '')[:200]}"
+    return bool(_EVENT.search(m.get("subject", "")) or _EVENT.search(text))
 _RECOVERY = re.compile(
     r"\b(recover(ed|y)?|resolved|closed|back to normal|healthy again|"
     r"cleared|ok now|restored|no longer)\b", re.I)
@@ -466,6 +493,10 @@ def is_alerty(m: dict) -> bool:
     disagree again.
     """
     subj = m.get("subject", "")
+    if _ALERT_SHAPE.search(subj):
+        return True
+    if is_event(m):
+        return False
     return bool(_ALERTY.search(subj) or _RECOVERY.search(subj) or is_critical(m))
 
 

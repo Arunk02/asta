@@ -34,7 +34,12 @@ def _brain(monkeypatch):
         seen.append(prompt)
         return "STANDUP"
 
-    monkeypatch.setattr(briefing.copilot_cli, "one_shot", one_shot)
+    # The seam the standup actually calls. Patching copilot_cli passed here and
+    # failed on CI: one_shot_any skips a brain that is not INSTALLED, the runner
+    # has no copilot binary, so the fake was never reached. A test that passes
+    # only because this laptop has a CLI is not a test of the code.
+    from app import agent
+    monkeypatch.setattr(agent, "one_shot_any", one_shot)
     return seen
 
 

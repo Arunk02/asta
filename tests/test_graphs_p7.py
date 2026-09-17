@@ -289,3 +289,24 @@ def test_one_question_is_one_analysis_not_four(monkeypatch):
     # A restart re-runs the look: it must find its analysis, not start another.
     found = asyncio.run(bindings._looker("are prod bookings stuck?", []))
     assert found["task"] == spawned[0] and len(spawned) == 1
+
+
+def test_the_deadline_warning_says_it_once(monkeypatch):
+    """Live, 17 Sep: "⏰ goal — 1h to go, ⏰ goal — 1h to go and 1 not merged".
+    The watcher's own note already IS the warning; wrapping it again doubled it."""
+    from app import notify
+    from app.graph import bindings
+
+    sent: list = []
+
+    async def push(text, level="info", **kw):
+        sent.append(text)
+        return {}
+
+    monkeypatch.setattr(notify, "notify", push)
+    note = ("⏰ my PR merged — 1h to go and 1 not merged:\n"
+            "• the PR\n  no review yet — https://example.invalid/pr/1")
+    asyncio.run(bindings._warn({"goal": "my PR merged", "state": note,
+                                "due_at": __import__("time").time() + 3600}))
+    assert sent[0].count("⏰") == 1 and sent[0].count("my PR merged") == 1
+    assert "leave it" in sent[0]

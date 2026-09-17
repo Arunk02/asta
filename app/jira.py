@@ -56,6 +56,44 @@ def _fmt_issue(i: dict) -> dict:
     }
 
 
+class JiraAuthError(RuntimeError):
+    """Jira did not accept who Asta says it is."""
+
+
+#: When the token was last proved good, so an empty answer does not cost a
+#: second request every time.
+_AUTH_OK_AT = 0.0
+_AUTH_OK_FOR = 900
+
+
+def _reset_auth_cache() -> None:
+    global _AUTH_OK_AT
+    _AUTH_OK_AT = 0.0
+
+
+async def _check_auth(c: httpx.AsyncClient) -> None:
+    """Raise if Jira does not know who we are.
+
+    Needed because Jira does not refuse an anonymous search — it answers 200
+    and shows it nothing. Found live on 17 Sep: `/myself` answered 401, every
+    search answered 200 with zero issues, and so every Jira read in Asta had been
+    silently EMPTY — the brief's open tickets, the standup's Jira lines, "what's
+    on my plate". The health check trusted the 200 and never noticed.
+    """
+    import time as _time
+    global _AUTH_OK_AT
+    if _time.time() - _AUTH_OK_AT < _AUTH_OK_FOR:
+        return
+    me = await c.get("/rest/api/3/myself")
+    if me.status_code in (401, 403):
+        raise JiraAuthError(
+            "Jira rejected Asta's API token — every Jira read would have come back "
+            "empty. Make a new token at id.atlassian.com → Security → API tokens and "
+            "put it in JIRA_API_TOKEN.")
+    if me.status_code == 200:
+        _AUTH_OK_AT = _time.time()
+
+
 async def search(jql: str, limit: int = 15) -> list[dict]:
     if not configured():
         raise RuntimeError("Jira is not configured — set JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN in .env")
@@ -69,8 +107,17 @@ async def search(jql: str, limit: int = 15) -> list[dict]:
                 "jql": jql, "maxResults": limit,
                 "fields": "summary,status,assignee,priority,updated,issuetype",
             })
+        if r.status_code in (401, 403):
+            raise JiraAuthError(
+                "Jira rejected Asta's API token. Make a new one at id.atlassian.com "
+                "→ Security → API tokens and put it in JIRA_API_TOKEN.")
         r.raise_for_status()
-        return [_fmt_issue(i) for i in r.json().get("issues", [])]
+        issues = r.json().get("issues", [])
+        # Results prove the token by themselves. Only an EMPTY answer is
+        # ambiguous — nothing to show, or nobody to show it to.
+        if not issues:
+            await _check_auth(c)
+        return [_fmt_issue(i) for i in issues]
 
 
 def sprint_jql() -> str:

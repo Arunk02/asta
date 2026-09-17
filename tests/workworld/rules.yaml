@@ -108,3 +108,26 @@ scenarios:
     checks:
       - no_send: true
       - said_contains: "Not done — your standing rule"
+
+  - id: a-standing-rule-is-never-folded-into-the-turn-that-is-running
+    title: '"don''t include PR review in standup … remember this always" is a rule, not an addendum to the PR check'
+    why: >
+      Live on 17 Sep. A PR check was running when he said it. The rule was
+      proposed — and then the same message fell through and a brain decided it
+      was "more of the same", so it was stapled onto the PR check ("✚ adding that
+      to what I'm doing"). That brain then "saved" it into its own notes before
+      he said yes, and narrated its memory directory to his phone. A standing
+      instruction is never an addendum to whatever happens to be running, and
+      binding a message to a job is decided by rules, never by a brain's guess.
+    twin: false
+    brains:
+      chat:
+        - text: "Going through the PR — nothing looks wrong so far."
+          sleep: 0.5
+        - text: "SHOULD NOT BE ASKED"
+    steps:
+      - say_async: "check PR 1440 for me"
+      - say: "Don't include PR review or some file opening anything related in standup, there u should mention only related to the tickets which gets assigned to u .. remember this always"
+    checks:
+      - said_contains: "standing rule"
+      - said_lacks: "adding that to what I"

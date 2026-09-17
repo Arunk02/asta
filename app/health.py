@@ -99,6 +99,18 @@ async def checks() -> dict[str, str]:
             problems["whatsapp"] = "channel disabled in config"
     except Exception as exc:
         problems["whatsapp"] = f"bridge unreachable: {str(exc)[:60]}"
+    # Jira is the quietest failure of all: a rejected token does not error, it
+    # answers every search with nothing — and "no tickets" looks exactly like a
+    # clear sprint. Found live on 17 Sep after every Jira read had been empty.
+    from . import jira
+    if jira.configured():
+        try:
+            async with jira._client() as c:
+                await jira._check_auth(c)
+        except jira.JiraAuthError as exc:
+            problems["jira"] = str(exc)
+        except Exception as exc:                               # noqa: BLE001
+            problems["jira"] = f"unreachable: {str(exc)[:80]}"
     tg = telegram.status()
     if tg["enabled"] and not tg["bound"]:
         problems["telegram"] = "token set but chat not bound — send /start <ASTA_TOKEN> to the bot"

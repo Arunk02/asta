@@ -64,7 +64,16 @@ class Step:
 
 
 def _tree_script(process: str) -> str:
-    """Everything named on screen, as one flat list the checks can search."""
+    """Everything named or holding a value on screen, as one flat list the checks
+    can search.
+
+    Two things the first live run taught. The element list must be FETCHED
+    (`set els to (get entire contents of w)`) before it is walked: iterating
+    `entire contents` directly hands back lazy references that System Events
+    cannot resolve, every property read fails, and the tree came back holding
+    nothing but window titles — so a click that worked read as a click that did
+    not. And a text area keeps what was typed as its VALUE, not its name.
+    """
     return f'''
 on run argv
   tell application "System Events"
@@ -73,11 +82,25 @@ on run argv
       set out to ""
       repeat with w in windows
         set out to out & "window: " & (name of w as text) & linefeed
-        repeat with e in (entire contents of w)
+        set els to (get entire contents of w)
+        repeat with i from 1 to (count of els)
+          set e to item i of els
           try
             set r to (role description of e) as text
-            set n to (name of e) as text
+            set n to ""
+            try
+              set n to (name of e) as text
+            end try
+            if n is "missing value" then set n to ""
             if n is not "" then set out to out & r & ": " & n & linefeed
+            set v to ""
+            try
+              set v to (value of e) as text
+            end try
+            if v is not "" and v is not "missing value" and v is not n then
+              if (length of v) > 300 then set v to text 1 thru 300 of v
+              set out to out & r & " value: " & v & linefeed
+            end if
           end try
         end repeat
       end repeat
@@ -135,6 +158,41 @@ end run
 '''
 
 
+def _paste_script(process: str) -> str:
+    """Type anything, by way of the clipboard — and give the clipboard back.
+
+    `keystroke` can only produce characters on the current keyboard layout. Live
+    on 17 Sep an em dash made it type NOTHING, silently; the step's own check
+    caught it ("did not come true") rather than reporting a success, which is
+    the design working. His text is full of em dashes, so anything that is not
+    plain ASCII is pasted instead. What was on his clipboard is restored after —
+    taking it and not giving it back would be the screen layer quietly costing
+    him something he copied.
+    """
+    return f'''
+on run argv
+  set theText to item 1 of argv
+  set hadClip to true
+  try
+    set oldClip to the clipboard
+  on error
+    set hadClip to false
+  end try
+  set the clipboard to theText
+  tell application "System Events" to tell process "{process}"
+    set frontmost to true
+    keystroke "v" using command down
+  end tell
+  delay 0.3
+  if hadClip then set the clipboard to oldClip
+end run
+'''
+
+
+def _needs_paste(text: str) -> bool:
+    return any(ord(ch) > 126 for ch in text)
+
+
 def _met(expect: str, seen: str) -> bool:
     """Is the expectation true of what is on screen now?"""
     kind, _, want = expect.partition(":")
@@ -183,6 +241,8 @@ async def follow(process: str, steps: list[Step], why: str = "") -> dict:
             if len(path) < 2:
                 raise ScreenError(f"a menu path needs 'Menu > Item', got {step.target!r}")
             await apps._osascript(_menu_script(process, path), [])
+        elif step.do == "type" and _needs_paste(step.target):
+            await apps._osascript(_paste_script(process), [step.target])
         elif step.do in ("type", "key"):
             await apps._osascript(_type_script(process, step.do == "key"), [step.target])
         else:

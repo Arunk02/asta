@@ -213,3 +213,16 @@ def test_a_mute_given_before_rules_existed_becomes_a_rule_once():
     assert [r.target for r in policy.adopt_legacy()] == ["incident"]
     assert policy.adopt_legacy() == []
     assert "Don't investigate incident asks unless you ask" in policy.summary()
+
+
+def test_a_proposed_rule_is_shown_whole_not_cut_mid_word():
+    """Live, 17 Sep: his standup rule was offered back ending on "rememb" — in the
+    one message whose whole job is to show him what he is agreeing to."""
+    from app.policy import Rule
+    words = ("Don't include PR review or some file opening anything related in "
+             "standup , there u should mention only related to the tickets which "
+             "gets assigned to u .. remember this always")
+    shown = Rule(0, kind="note", words=words).render()
+    assert shown.endswith("remember this always")
+    long = Rule(0, kind="note", words="word " * 100).render()
+    assert long.endswith("…") and not long[:-1].endswith("wor")

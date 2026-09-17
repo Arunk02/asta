@@ -54,6 +54,14 @@ _STRIP_FROM_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_
 def _subprocess_env() -> dict:
     env = {k: v for k, v in os.environ.items() if k not in _STRIP_FROM_ENV}
     env["CI"] = "1"
+    # Claude Code's OWN auto-memory, off for every Asta session. Left on, the
+    # brain has a second, private memory Asta never reads: on 17 Sep he gave a
+    # standing rule about standups, and the brain "saved" it there — before he
+    # said yes to the rule — and told his phone "Memory directory is empty on
+    # disk (no MEMORY.md…)". The standup never saw it. Asta's memory is Asta's
+    # `remember` tool and his guardrails file; nothing else. Measured: with this
+    # set, the session reports no memory directory; without it, it has one.
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     return env
 
 

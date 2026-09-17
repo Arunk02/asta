@@ -3168,7 +3168,13 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     if prev is None or prev.done():
         return _start_turn(conv, user_text, sink, channel)
 
-    intent = await activity.resolve_interjection(user_text, conv.get("model", ""))
+    # Rules, not a brain's guess, whenever the front desk is on — the same as
+    # every other path that binds a message to work. This one still asked a
+    # brain, and on 17 Sep the brain decided a standing rule about standups was
+    # "more of" a running PR check and stapled it on. A message a rule cannot
+    # place is "ambiguous", which answers it next, on its own.
+    intent = (activity.classify_interjection(user_text) if frontdesk.enabled()
+              else await activity.resolve_interjection(user_text, conv.get("model", "")))
     if intent == "status":
         summary = await asyncio.to_thread(activity.summary)
         if channel == "web":

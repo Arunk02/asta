@@ -51,11 +51,18 @@ async def _nudge(promise: dict):
 async def _warn(promise: dict):
     """Before the deadline, while it is still something he can act on."""
     from app import notify
-    left = max(0, int((float(promise.get("due_at") or 0) - time.time()) / 3600))
-    await notify.notify(
-        f"⏰ {promise.get('goal', 'your promise')} — {left}h to go, "
-        f"{promise.get('state') or 'nothing has moved'}.\n"
-        f"Say *chase them* or *leave it*.", "warn", urgency="direct")
+    state = (promise.get("state") or "").strip()
+    # The watcher's own note already IS the warning ("⏰ goal — 1h to go and 1
+    # not merged: …"). Wrapped again it read "⏰ goal — 1h to go, ⏰ goal — 1h to
+    # go and 1 not merged" on his phone, 17 Sep.
+    if state.startswith("⏰"):
+        body = state
+    else:
+        left = max(0, int((float(promise.get("due_at") or 0) - time.time()) / 3600))
+        body = (f"⏰ {promise.get('goal', 'your promise')} — {left}h to go, "
+                f"{state or 'nothing has moved'}.")
+    await notify.notify(f"{body}\nSay *chase them* or *leave it*.",
+                        "warn", urgency="direct")
 
 
 async def tick_promise(row: dict) -> dict:

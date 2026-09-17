@@ -153,3 +153,33 @@ def test_the_grant_it_names_is_the_one_that_is_actually_missing(monkeypatch):
     monkeypatch.setattr(apps.asyncio, "create_subprocess_exec", exec_1743)
     with pytest.raises(apps.AppError, match="Automation"):
         asyncio.run(apps._osascript("x", []))
+
+
+def test_the_tree_is_fetched_before_it_is_walked_and_reads_values():
+    """Live, 17 Sep. Walking `entire contents` directly gave lazy references
+    System Events could not resolve, so the tree held only window titles and a
+    typing step that WORKED ("Asta screen check and verified" was in the
+    document) was reported as not done. And typed text is a value, not a name."""
+    script = screen._tree_script("TextEdit")
+    assert "set els to (get entire contents of w)" in script
+    assert "repeat with e in (entire contents" not in script
+    assert "value of e" in script
+
+
+def test_text_the_keyboard_cannot_type_is_pasted_and_the_clipboard_given_back(monkeypatch):
+    """Live: an em dash made `keystroke` type nothing at all. His text is full of
+    them. Non-ASCII goes by the clipboard, which is restored afterwards."""
+    acts = _screen_says(monkeypatch, "window: TextEdit\ntext entry area value: done — read back\n")
+    out = asyncio.run(screen.follow(
+        "TextEdit", [Step("type", "done — read back", expect="exists: read back")]))
+    assert out["ok"]
+    script = acts[0]["script"]
+    assert 'keystroke "v" using command down' in script
+    assert "set the clipboard to oldClip" in script
+    assert acts[0]["args"] == ["done — read back"]
+
+
+def test_plain_text_is_still_typed_and_leaves_the_clipboard_alone(monkeypatch):
+    acts = _screen_says(monkeypatch, "window: TextEdit\ntext entry area value: plain\n")
+    asyncio.run(screen.follow("TextEdit", [Step("type", "plain", expect="exists: plain")]))
+    assert "clipboard" not in acts[0]["script"]

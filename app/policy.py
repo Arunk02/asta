@@ -54,7 +54,11 @@ class Rule:
             return f"{verb}{who}{tail}"
         if self.kind == "prefer":
             return f"Default {self.act}: {self.value}"
-        return self.words[:160]
+        # Cut at a word, with a mark that it was cut. [:160] ended his standup
+        # rule on "rememb" in the one message whose whole job is to show him the
+        # rule he is agreeing to.
+        from .clip import clip
+        return clip(self.words, 240)
 
 
 @dataclass(frozen=True)

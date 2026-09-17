@@ -201,37 +201,59 @@ async def morning_brief() -> str:
 # --- standup -----------------------------------------------------------------
 
 async def standup_draft() -> str:
-    commits = await _recent_commits("yesterday.midnight")
-    cutoff = time.time() - 24 * 3600
-    done = [f"task: {t['title']} ({t['status']})"
-            for t in _finished_since(store.list_tasks(), "finished_at", cutoff)]
-    done += [f"mission: {m['title']} ({m['status']})"
-             for m in store.list_missions()
-             if m["status"] in ("done", "failed") and m["updated_at"] >= cutoff]
-    jira_lines = await _jira_recent()
+    """His standup: tickets assigned to him in the CURRENT SPRINT, and nothing else.
 
-    facts = []
-    for repo, lines in commits.items():
-        facts.append(f"{repo} commits:\n" + "\n".join("  " + l for l in lines[:10]))
-    if done:
-        facts.append("Assistant work finished:\n" + "\n".join("  " + d for d in done))
-    if jira_lines:
-        facts.append("Jira updated:\n" + "\n".join("  " + l for l in jira_lines))
-    if not facts:
-        return ("Standup draft: no commits, finished work or Jira movement since "
-                "yesterday — say what you worked on and I'll phrase it.")
+    His words, 17 Sep: "Don't include PR review or some file opening anything
+    related in standup, there u should mention only related to the tickets which
+    gets assigned to u .. remember this always" — and then "That also in the
+    current sprint".
 
-    raw = "\n\n".join(facts)
+    It used to be built from three things he does not want in it: repo commits,
+    Asta's own finished tasks (PR reviews, a deck, an investigation) and every
+    Jira update regardless of sprint. He said so to Asta, a brain agreed and
+    "saved" it into its own notes — and this function never read those notes, so
+    the next standup would have been the same. The rule lives here now, in the
+    code that builds it.
+    """
+    if not jira.configured():
+        return "Standup: Jira isn't set up, so there are no sprint tickets to report."
+    try:
+        tickets = await jira.current_sprint()
+    except jira.JiraAuthError as exc:
+        # Empty-because-rejected must never read as a quiet sprint.
+        return f"Standup: I can't read Jira right now — {exc}"
+    except RuntimeError as exc:
+        return f"Standup: {exc}"
+    if not tickets:
+        return "Standup: nothing assigned to you in the current sprint."
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+
+    def moved(t: dict) -> bool:
+        try:
+            when = dt.datetime.strptime((t.get("updated") or "")[:19], "%Y-%m-%dT%H:%M:%S")
+            return when.replace(tzinfo=dt.timezone.utc) >= cutoff
+        except ValueError:
+            return False
+
+    lines = [f"{t['key']} [{t.get('status') or '?'}] {t.get('summary') or ''}"
+             + ("  (moved in the last day)" if moved(t) else "")
+             for t in tickets]
+    raw = "TICKETS\n" + "\n".join(lines)
     try:
         return await copilot_cli.one_shot(
-            "Draft a concise daily standup update (plain text, three sections: "
-            "Yesterday / Today / Blockers) from this real activity log. Group related "
-            "commits, drop noise (merge commits, version bumps). For 'Today' infer "
-            "likely continuations; for 'Blockers' write 'none' unless the log shows "
-            "one. Max 10 lines total. Output only the standup.\n\n" + raw,
+            "Draft Arun's daily standup (plain text, three short sections: "
+            "Yesterday / Today / Blockers). Use ONLY the Jira tickets below — the "
+            "ones assigned to him in the current sprint. Do NOT mention PR reviews, "
+            "code reviews, file or document work, commits, or anything Asta did "
+            "for him: he has said the standup is only about his sprint tickets. "
+            "Yesterday = tickets marked as moved; Today = the rest that are not "
+            "done; Blockers = anything whose status says blocked, else 'none'. "
+            "Max 8 lines. Output only the standup.\n\n" + raw,
             timeout=120)
     except Exception:
-        return "Standup draft (raw activity — Copilot unavailable):\n\n" + raw[:1500]
+        return "Standup (your sprint tickets — the brain was unavailable to phrase it):\n\n" \
+            + "\n".join(lines)
 
 
 # --- pre-meeting heads-up ----------------------------------------------------

@@ -120,3 +120,12 @@ def test_claude_cli_never_inherits_the_api_key(monkeypatch):
         assert k not in env, f"{k} must not reach the CLI"
     assert env["CI"] == "1"
     assert env.get("PATH"), "the rest of the environment is preserved"
+
+
+def test_every_claude_session_runs_without_its_own_private_memory():
+    """Live, 17 Sep: the brain "saved" his standup rule into Claude Code's
+    auto-memory — before he said yes — and narrated its memory directory to his
+    phone. Asta never reads that memory, so the rule changed nothing. Asta's
+    memory is Asta's; the CLI's own is switched off for every session."""
+    from app import claude_cli
+    assert claude_cli._subprocess_env()["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"

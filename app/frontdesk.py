@@ -293,8 +293,30 @@ def standing_instruction(text: str):
     return cand
 
 
+#: Words that say an instruction is meant to last. A "note" rule is the compiler's
+#: catch-all, so on its own it cannot tell an instruction from a request that
+#: merely starts with "always" — but a message that says "remember this always"
+#: or "from now on" is telling you which one it is.
+_STANDING = re.compile(
+    r"\b(remember (this|that)|always|from now on|going forward|every ?time|"
+    r"never|in future|henceforth|by default)\b", re.I)
+
+
 def instruction_only(text: str, cand) -> bool:
     """Was the message JUST the instruction? Then the proposal answers it. A longer
-    message with a request in it still goes on to be handled."""
-    return cand.kind != "note" and len((text or "").strip()) <= 200 and "?" not in text
+    message with a request in it still goes on to be handled.
+
+    A note-kind rule used to be never "only", so it always fell through — and on
+    17 Sep "don't include PR review in standup … remember this always" fell
+    straight into the PR check that happened to be running, where a brain folded
+    it in, "saved" it to its own notes before he said yes, and narrated its
+    memory directory to his phone. A note that says it is standing is the whole
+    message.
+    """
+    t = (text or "").strip()
+    if "?" in t:
+        return False
+    if cand.kind != "note":
+        return len(t) <= 200
+    return len(t) <= 320 and bool(_STANDING.search(t))
 

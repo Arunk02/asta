@@ -236,12 +236,23 @@ async def standup_draft() -> str:
         except ValueError:
             return False
 
+    # What is MOVING. A sprint can stay "open" long after its work is finished —
+    # the first live run brought back 18 Done tickets from months ago out of 21.
+    # Finished counts only if it finished in the last day.
+    def finished(t: dict) -> bool:
+        return (t.get("status") or "").strip().lower() in (
+            "done", "closed", "resolved", "cancelled", "won't do", "rejected")
+
+    current = [t for t in tickets if not finished(t) or moved(t)]
+    if not current:
+        return "Standup: nothing in progress in the current sprint, and nothing moved yesterday."
     lines = [f"{t['key']} [{t.get('status') or '?'}] {t.get('summary') or ''}"
              + ("  (moved in the last day)" if moved(t) else "")
-             for t in tickets]
+             for t in current]
     raw = "TICKETS\n" + "\n".join(lines)
+    from . import agent
     try:
-        return await copilot_cli.one_shot(
+        phrased = await agent.one_shot_any(
             "Draft Arun's daily standup (plain text, three short sections: "
             "Yesterday / Today / Blockers). Use ONLY the Jira tickets below — the "
             "ones assigned to him in the current sprint. Do NOT mention PR reviews, "
@@ -251,6 +262,9 @@ async def standup_draft() -> str:
             "done; Blockers = anything whose status says blocked, else 'none'. "
             "Max 8 lines. Output only the standup.\n\n" + raw,
             timeout=120)
+        # His guardrails: no code blocks on WhatsApp. The first live standup came
+        # back wrapped in a ``` fence regardless of "plain text".
+        return re.sub(r"^\s*```[a-z]*\s*\n?|\n?\s*```\s*$", "", phrased.strip()).strip()
     except Exception:
         return "Standup (your sprint tickets — the brain was unavailable to phrase it):\n\n" \
             + "\n".join(lines)

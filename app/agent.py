@@ -872,6 +872,28 @@ def model_registry() -> dict[str, dict]:
     return registry
 
 
+async def one_shot_any(prompt: str, timeout: int = 120) -> str:
+    """One background prompt, on whichever CLI brain can still answer.
+
+    Callers used to name a CLI — the standup called Copilot directly — so when
+    that brain's quota was spent the job degraded while another sat idle. On 17
+    Sep the standup fell back to a raw ticket dump with Claude available. Same
+    order as the chat default (cheapest first), skipping a brain marked down and
+    falling through on any failure, so one exhausted subscription never decides
+    for everything else.
+    """
+    reg = model_registry()
+    last: Exception | None = None
+    for name in EXECUTORS:
+        if quota_down(name) or not reg.get(name, {}).get("available"):
+            continue
+        try:
+            return await runner(name).one_shot(prompt, timeout=timeout)
+        except Exception as exc:                                # noqa: BLE001
+            last = exc
+    raise RuntimeError(f"no brain could answer ({last})" if last else "no brain available")
+
+
 def best_model_name() -> str:
     """Best available API-backed model for background jobs (mission planning, digests).
 

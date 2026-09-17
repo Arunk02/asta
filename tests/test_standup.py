@@ -92,3 +92,69 @@ def test_an_empty_sprint_is_said_plainly(monkeypatch, _brain):
     monkeypatch.setattr(jira, "configured", lambda: True)
     out = asyncio.run(briefing.standup_draft())
     assert "nothing assigned to you in the current sprint" in out.lower() and _brain == []
+
+
+def test_finished_tickets_from_long_ago_are_not_standup_material(monkeypatch, _brain):
+    """Live, 17 Sep, first run with a working token: 21 tickets, 18 of them Done
+    or Closed months ago in a project whose sprint is still technically open.
+    A standup is what is moving — in progress, to do, or finished yesterday."""
+    tickets = SPRINT + [
+        {"key": "OHM-1", "summary": "Old finished thing", "status": "Done",
+         "updated": "2000-01-01T09:00:00.000+0000"},
+        {"key": "OHM-2", "summary": "Closed ages ago", "status": "Closed",
+         "updated": "2000-01-01T09:00:00.000+0000"},
+        {"key": "BK-103", "summary": "Finished yesterday", "status": "Done",
+         "updated": "2099-01-01T09:00:00.000+0000"},
+    ]
+
+    async def sprint(limit=30):
+        return tickets
+
+    monkeypatch.setattr(jira, "current_sprint", sprint)
+    monkeypatch.setattr(jira, "configured", lambda: True)
+    asyncio.run(briefing.standup_draft())
+    prompt = _brain[0]
+    assert "OHM-1" not in prompt and "OHM-2" not in prompt
+    assert "BK-101" in prompt and "BK-102" in prompt and "BK-103" in prompt
+
+
+def test_the_standup_is_phrased_by_whichever_brain_still_has_quota(monkeypatch):
+    """Live, 17 Sep: Copilot's quota was spent, and the standup — calling Copilot
+    by name — fell back to a raw ticket dump while Claude sat there available.
+    Every other path already fails over; this one does now too."""
+    from app import agent, claude_cli, copilot_cli
+
+    async def sprint(limit=30):
+        return SPRINT
+
+    async def exhausted(prompt, **kw):
+        raise RuntimeError("quota exhausted")
+
+    async def claude(prompt, **kw):
+        return "PHRASED BY CLAUDE"
+
+    monkeypatch.setattr(jira, "current_sprint", sprint)
+    monkeypatch.setattr(jira, "configured", lambda: True)
+    monkeypatch.setattr(copilot_cli, "one_shot", exhausted)
+    monkeypatch.setattr(claude_cli, "one_shot", claude)
+    monkeypatch.setattr(agent, "quota_down", lambda name: False)
+    monkeypatch.setattr(agent, "model_registry",
+                        lambda: {n: {"available": True} for n in agent.EXECUTORS})
+    assert asyncio.run(briefing.standup_draft()) == "PHRASED BY CLAUDE"
+
+
+def test_the_standup_never_arrives_inside_a_code_block(monkeypatch):
+    """His guardrails: no backticks or code blocks on WhatsApp. The brain wrapped
+    the first live standup in a ``` fence anyway."""
+    async def sprint(limit=30):
+        return SPRINT
+
+    async def fenced(prompt, **kw):
+        return "```\nYesterday: none\nToday: BK-101\nBlockers: none\n```"
+
+    from app import agent
+    monkeypatch.setattr(jira, "current_sprint", sprint)
+    monkeypatch.setattr(jira, "configured", lambda: True)
+    monkeypatch.setattr(agent, "one_shot_any", fenced)
+    out = asyncio.run(briefing.standup_draft())
+    assert "```" not in out and out.startswith("Yesterday")

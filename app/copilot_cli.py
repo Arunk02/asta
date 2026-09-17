@@ -488,6 +488,7 @@ async def run_turn(conv: dict, user_text: str,
     prefetched = "" if mcp_cli_enabled() else await _prefetch(user_text)
     proc = await asyncio.create_subprocess_exec(
         *_build_cmd(conv, user_text, prefetched),
+        stdin=asyncio.subprocess.DEVNULL,           # see one_shot: never inherit
         cwd=_cwd(conv),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -667,6 +668,11 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                          os.environ.get("COPILOT_MAX_CREDITS_TASK", ""))
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        # Never inherit stdin. The CLI appends piped stdin to the prompt, so a
+        # parent with anything on it — a heredoc, a pipe — becomes part of what
+        # the brain is told. Found 17 Sep: a test's own script reached the
+        # standup brain as "the Python snippet at the end of your message".
+        stdin=asyncio.subprocess.DEVNULL,
         cwd=cwd or str(ROOT),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         env={**os.environ, "CI": "1"},

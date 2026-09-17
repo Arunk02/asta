@@ -45,6 +45,12 @@ class Usage:
     cache_read: int = 0
     cache_write: int = 0
     cost_usd: float = 0.0
+    #: The largest context ONE model call carried: input + cache read + cache
+    #: write of a single call. The sums above measure what a turn SPENT; this
+    #: measures how big the session has GROWN, which is a different question —
+    #: a ten-step turn on a 50k session and a one-step turn on a 500k session
+    #: sum alike and are nothing alike. A maximum, never a sum, under +.
+    context: int = 0
     #: False when these are char-count estimates rather than executor-reported
     #: numbers. A trend line that mixes the two silently is a trend line that
     #: lies, so the distinction is stored, not just logged.
@@ -57,6 +63,7 @@ class Usage:
             cache_read=self.cache_read + other.cache_read,
             cache_write=self.cache_write + other.cache_write,
             cost_usd=self.cost_usd + other.cost_usd,
+            context=max(self.context, other.context),
             measured=self.measured or other.measured,
         )
 
@@ -90,13 +97,15 @@ def from_anthropic(block: dict | None) -> Usage:
     """
     if not isinstance(block, dict):
         return Usage()
+    inp = int(block.get("input_tokens") or 0)
+    read = int(block.get("cache_read_input_tokens") or block.get("cache_read_tokens") or 0)
+    write = int(block.get("cache_creation_input_tokens") or block.get("cache_write_tokens") or 0)
     return Usage(
-        input=int(block.get("input_tokens") or 0),
+        input=inp,
         output=int(block.get("output_tokens") or 0),
-        cache_read=int(block.get("cache_read_input_tokens")
-                       or block.get("cache_read_tokens") or 0),
-        cache_write=int(block.get("cache_creation_input_tokens")
-                        or block.get("cache_write_tokens") or 0),
+        cache_read=read,
+        cache_write=write,
+        context=inp + read + write,
         measured=True,
     )
 

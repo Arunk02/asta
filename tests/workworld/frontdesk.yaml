@@ -1,0 +1,149 @@
+# The front desk and model routing — Astra-class P3.
+#
+# What a message needs is decided before a brain is woken: a status question
+# is answered from the task table, a message binds to a job only by name or by
+# rule, and a task's legs run at the model and effort the work calls for.
+
+scenarios:
+  - id: status-with-nothing-running-is-answered-from-state
+    title: '"status" with no live task in the chat is read from the task table'
+    why: >
+      "status" only had a free answer while a task was live in THIS conversation;
+      otherwise it went to a brain and waited a minute (WhatsApp p50 60 s, 11 Sep)
+      to be told what the task table already knew.
+    setup:
+      link_tasks: false
+      tasks:
+        - {as: waiting, title: "mapping change", kind: code, status: awaiting_approval}
+      kv: {"task_gate:1": plan}
+    steps:
+      - say: "status"
+    checks:
+      - brain_calls: {kind: chat, count: 0}
+      - said_contains: "#1 mapping change"
+      - frontdesk: {route: state, count: 1}
+
+  - id: status-of-a-named-task-is-its-card
+    title: '"status of 1" answers with that task — its gate and its last steps'
+    why: The answer to "where is 117" is a row and a timeline, not a model's paraphrase of them.
+    twin: false
+    setup:
+      link_tasks: false
+      tasks:
+        - {as: t, title: "retention to 90 days", kind: code, status: awaiting_approval}
+      kv: {"task_gate:1": plan}
+    steps:
+      - say: "status of 1"
+    checks:
+      - brain_calls: {kind: chat, count: 0}
+      - said_contains: "waiting for you to approve the plan"
+      - said_contains: "awaiting_approval|running → awaiting|→ awaiting approval|awaiting approval"
+
+  - id: whats-pending-lists-only-what-waits-on-him
+    title: '"what''s pending" lists the gates waiting on him and nothing else'
+    why: A list that mixes running work into "waiting on you" is a list he has to read twice.
+    setup:
+      link_tasks: false
+      tasks:
+        - {as: a, title: "plan for the ACL change", kind: code, status: awaiting_approval}
+        - {as: b, title: "draft to the reviewer", kind: teams_draft, status: awaiting_approval, teams_chat: "A colleague"}
+        - {as: c, title: "busy refactor", kind: code, status: running}
+    steps:
+      - say: "what's pending"
+    checks:
+      - brain_calls: {kind: chat, count: 0}
+      - said_contains: "#1 plan for the ACL change"
+      - said_contains: "#2 draft to the reviewer"
+      - said_lacks: "busy refactor"
+
+  - id: an-unclear-message-is-not-folded-into-a-running-job
+    title: A message that is neither named nor a clear addition is answered, not folded in
+    why: >
+      9 Sep: "can you update the topic details in booking and ap and raise PR and
+      inform the reviewer as well" was folded into #117, a different task in a different
+      repo. The rule-based check has been fixed; what remained was the brain's
+      GUESS, which could still say "augment". A guess no longer binds a message.
+    setup:
+      workspace: booking
+      intent_guess: augment            # the brain would have folded it in
+      tasks:
+        - {as: live, title: "BookingEquipment equals fix", kind: code, status: running, workspace: booking}
+    brains:
+      chat:
+        - {text: "The AP consumer lag is 0 right now."}
+    steps:
+      - say: "check the consumer lag on the AP side"
+    checks:
+      - kv: {key: "task_addenda:1", empty: true}
+      - said_lacks: "adding that to"
+      - brain_calls: {kind: chat, count: 1}
+      - brain_calls: {kind: intent, count: 0}
+
+  - id: a-one-file-change-never-runs-at-max
+    title: A one-line fix plans at T2 and implements cheap — never at max effort
+    why: >
+      A one-line change and a three-repo schema change ran on the same model at
+      the same effort. Effort is the biggest lever on a leg's cost and time.
+    setup:
+      env: {ASTA_ROUTING: "1"}
+    brains:
+      task:
+        - text: |
+            STRUCTURE
+              README.md          heading typo fixed
+
+            1. Fix the heading
+
+            RISK: none
+
+            PLAN READY
+        - {text: "Fixed the heading. Tests: n/a."}
+    steps:
+      - spawn: {title: "fix the typo in the README heading", prompt: "fix the typo in the README heading", kind: code, workspace: booking, as: job}
+      - approve: job
+    checks:
+      - task_status: {task: job, is: done}
+      - brain_flags: {kind: task, effort_not: [max, xhigh]}
+      - brain_flags: {kind: task, leg: 0, effort: medium, plan_only: true}
+      - brain_flags: {kind: task, leg: 1, effort: low, plan_only: false}
+
+  - id: a-two-repo-plan-implements-at-the-top-tier
+    title: A plan that names two repos is implemented at T3 without anyone asking
+    why: >
+      Two-stage routing: before the plan only cheap signals exist; the plan says
+      how big the change really is, and the build runs at that size.
+    setup:
+      env: {ASTA_ROUTING: "1"}
+    brains:
+      task:
+        - calls: [{tool: report_outcome, args: {task_id: 1, kind: plan_ready, repos: [booking-service, ap-service]}}]
+          text: |
+            STRUCTURE
+              TransportPriority     new enum, 3 values
+              BookingMapper         maps it
+
+            PLAN READY
+        - {text: "Implemented in both repos. Tests: 14 passed."}
+    steps:
+      - spawn: {title: "carry the transport priority to AP", prompt: "carry the transport priority through to AP", kind: code, workspace: booking, as: job}
+      - approve: job
+    checks:
+      - task_status: {task: job, is: done}
+      - brain_flags: {kind: task, leg: 0, effort: medium}
+      - brain_flags: {kind: task, leg: 1, effort: xhigh}
+      - outcome: {kind: route, outcome: T3}
+
+  - id: his-words-pick-the-brain-and-the-tier
+    title: '"use claude, max" in the ask runs it on Claude at the top tier, plan included'
+    why: He decides when it matters. The router is a default, not a veto.
+    twin: false
+    setup:
+      env: {ASTA_ROUTING: "1"}
+    brains:
+      task:
+        - {text: "STRUCTURE\n  BookingMapper   null-safe priority\n\nPLAN READY"}
+    steps:
+      - spawn: {title: "null check in BookingMapper", prompt: "fix the null check in BookingMapper, use claude, max", kind: code, workspace: booking, as: job}
+    checks:
+      - kv: {key: "task_executor:1", equals: claude}
+      - brain_flags: {kind: task, leg: 0, model: opus, effort: xhigh, plan_only: true}

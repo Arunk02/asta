@@ -9,7 +9,7 @@ import time
 
 import httpx
 
-from . import store, telegram
+from . import store, telegram, wa_format
 
 
 def bridge_url() -> str:
@@ -17,16 +17,48 @@ def bridge_url() -> str:
 
 
 async def wa_send(text: str) -> bool:
-    """Push a message through the WhatsApp bridge; False if bridge is down/unpaired."""
+    """Push a message through the WhatsApp bridge; False if bridge is down/unpaired.
+
+    Markup is converted at this boundary, not by callers. WhatsApp is the only
+    channel that needs it and every caller writes markdown, so doing it here is
+    the difference between one conversion and thirty missed ones — the plan
+    pushes had been arriving with `**bold**` spelled out in literal asterisks.
+    """
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.post(
                 f"{bridge_url()}/send",
-                json={"text": text},
+                json={"text": wa_format.for_whatsapp(text)},
                 headers={"Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")},
             )
             return r.status_code == 200
     except Exception:
+        return False
+
+
+async def wa_document(path: str, caption: str = "") -> bool:
+    """Send a FILE to his phone. False when the bridge is down or unpaired."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{bridge_url()}/send-document",
+                             headers={"Authorization": f"Bearer {os.environ.get('ASTA_TOKEN', '')}"},
+                             json={"path": str(path), "caption": caption})
+        return bool(r.status_code == 200 and (r.json() or {}).get("ok"))
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
+async def wa_voice(path: str, seconds: int = 1) -> bool:
+    """Send a voice note (PTT) to his phone. False when the bridge will not take it."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{bridge_url()}/send-voice",
+                             headers={"Authorization": f"Bearer {os.environ.get('ASTA_TOKEN', '')}"},
+                             json={"path": str(path), "seconds": int(seconds)})
+        return bool(r.status_code == 200 and (r.json() or {}).get("ok"))
+    except Exception:                                           # noqa: BLE001
         return False
 
 
@@ -123,10 +155,11 @@ async def deliver(text: str) -> dict:
     exactly the same path — and so `note_sent` is stamped in ONE place. Stamping
     it per call site is how a batching window starts disagreeing with itself.
     """
-    from . import delivery
+    from . import budget, delivery
     wa = await wa_send(text)
     tg = await telegram.send(text)
     delivery.note_sent()
+    budget.note_push()          # one buzz, one unit — a batch of four costs one
     if not (wa or tg):
         store.kv_set("last_push_failure",
                      json.dumps({"at": time.time(), "text": text[:120]}))
@@ -197,7 +230,15 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
             return {"bell": True, "held": False, "suppressed": True,
                     "whatsapp": False, "telegram": False}
 
-    from . import delivery
+    from . import budget, delivery
+    # The day's budget of interruptions. Breakage and things he is blocked on are
+    # never counted against it; everything ordinary that arrives once the budget
+    # is gone is read in the digest instead of buzzing his pocket.
+    if not budget.allows(priority, urgency):
+        from . import digest
+        digest.add(text, source=level, why="past today's budget of interruptions")
+        return {"bell": True, "held": True, "digested": True,
+                "whatsapp": False, "telegram": False}
     # Night first, because it outranks every other reason to speak. Held items
     # wait for morning rather than for him to walk away — at 2am he has already
     # walked away, and a departure-released hold would fire instantly.

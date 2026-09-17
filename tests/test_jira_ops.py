@@ -168,3 +168,54 @@ def test_the_http_endpoint_stages_exactly_like_the_chat_tool(monkeypatch):
     assert cap.write
     from app import main
     assert main.api_jira_comment.__doc__ and "SAME function" in main.api_jira_comment.__doc__
+
+
+# --- a rejected token is not an empty backlog ---------------------------------
+
+def _jira_serving(monkeypatch, *, myself: int, issues: list):
+    """A fake Jira: `/myself` answers `myself`, search answers with `issues`."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/myself"):
+            return httpx.Response(myself, json={"accountId": "a1"} if myself == 200 else {})
+        return httpx.Response(200, json={"issues": issues})
+
+    def client():
+        return httpx.AsyncClient(base_url="https://co.atlassian.net",
+                                 transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(jira, "_client", client)
+    jira._reset_auth_cache()
+
+
+def test_a_rejected_token_is_an_error_not_an_empty_backlog(monkeypatch):
+    """Live, 17 Sep: `/myself` answered 401 and search answered 200 with NO
+    issues — Jira shows an anonymous caller nothing rather than refusing it. So
+    every Jira read in Asta had been silently empty: the brief's open tickets,
+    the standup's Jira lines, "what's on my plate". A health check that trusted
+    the 200 never noticed. Empty-because-rejected must say so."""
+    _jira_serving(monkeypatch, myself=401, issues=[])
+    with pytest.raises(jira.JiraAuthError, match="token"):
+        asyncio.run(jira.search("assignee = currentUser()"))
+
+
+def test_a_genuinely_empty_result_is_still_just_empty(monkeypatch):
+    _jira_serving(monkeypatch, myself=200, issues=[])
+    assert asyncio.run(jira.search("assignee = currentUser()")) == []
+
+
+def test_results_mean_the_token_works_and_nothing_extra_is_asked(monkeypatch):
+    calls: list = []
+    issue = {"key": "BK-1", "fields": {"summary": "s", "status": {"name": "To Do"},
+                                       "assignee": None, "priority": None,
+                                       "updated": "", "issuetype": {"name": "Task"}}}
+
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"issues": [issue]})
+
+    monkeypatch.setattr(jira, "_client", lambda: httpx.AsyncClient(
+        base_url="https://co.atlassian.net", transport=httpx.MockTransport(handler)))
+    jira._reset_auth_cache()
+    assert len(asyncio.run(jira.search("x"))) == 1
+    assert not any(p.endswith("/myself") for p in calls), \
+        "a non-empty answer already proves the token; no second request"

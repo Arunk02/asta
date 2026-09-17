@@ -12,7 +12,7 @@ Each runner takes a case and returns an observation:
 
 `text` is what gets graded, so a runner's real job is rendering a decision into
 something a `must` can match: not the Verdict object, but "action=True asks you
-directly Vinish: …". That keeps the scenarios readable as data and keeps the
+directly Alex: …". That keeps the scenarios readable as data and keeps the
 grading in one place (`evals.grade`) instead of one comparison per capability.
 
 `violations` is for rules that must hold regardless of quality — a draft that

@@ -2,7 +2,7 @@
 
 Arun, on what was missing:
 
-    "vinish asked ... to check the production temporal bookings struck but thee
+    "alex asked ... to check the production temporal bookings struck but thee
      doesnt seen or not i'm not aware ... same for pr 1049 when he shared the
      message it should known automatically do the analysis to check right whether
      it is true or wrong ... it should always on someone pings anything whether im
@@ -20,7 +20,7 @@ import pytest
 
 from app import attention, responder, store
 
-#: Vinish's actual question, near enough.
+#: Alex's actual question, near enough.
 TEMPORAL = "can you check the production temporal bookings struck or not"
 PR_FEEDBACK = "I left some comments on PR 1049, can you check whether they are valid"
 DEBUG = "can you look into why the booking activity is failing"
@@ -65,9 +65,9 @@ def spawned(monkeypatch):
 # --- the three things he named ------------------------------------------------
 
 def test_a_production_question_is_investigated(spawned, known_ground):
-    """His example. Vinish asks whether prod bookings are stuck; Asta goes and
+    """His example. Alex asks whether prod bookings are stuck; Asta goes and
     looks instead of forwarding the question to a man who is not at his desk."""
-    t = responder.respond("teams", "Vinish", TEMPORAL, priority=attention.P_TODAY)
+    t = responder.respond("teams", "Alex", TEMPORAL, priority=attention.P_TODAY)
     assert t, "nothing was investigated"
     assert spawned[0]["kind"] == "analysis"
     assert "Temporal" in spawned[0]["prompt"]
@@ -76,7 +76,7 @@ def test_a_production_question_is_investigated(spawned, known_ground):
 def test_pr_feedback_is_verified_rather_than_believed(spawned, known_ground):
     """"check right whether it is true or wrong". The reviewer is not assumed
     correct — that assumption is what pushed seven unreviewed edits on 27 August."""
-    responder.respond("teams", "Vinish", PR_FEEDBACK, priority=attention.P_TODAY)
+    responder.respond("teams", "Alex", PR_FEEDBACK, priority=attention.P_TODAY)
     prompt = spawned[0]["prompt"]
     assert "1049" in prompt
     assert "Do not assume the reviewer is right" in prompt
@@ -84,12 +84,12 @@ def test_pr_feedback_is_verified_rather_than_believed(spawned, known_ground):
 
 
 def test_a_debug_request_is_picked_up(spawned, known_ground):
-    responder.respond("teams", "Vinish", DEBUG, priority=attention.P_TODAY)
+    responder.respond("teams", "Alex", DEBUG, priority=attention.P_TODAY)
     assert spawned and spawned[0]["kind"] == "analysis"
 
 
 def test_ordinary_chatter_starts_nothing(spawned):
-    assert responder.respond("teams", "Vinish", CHATTER, priority=attention.P_TODAY) is None
+    assert responder.respond("teams", "Alex", CHATTER, priority=attention.P_TODAY) is None
     assert not spawned
 
 
@@ -122,18 +122,18 @@ def test_it_can_only_ever_read(spawned, known_ground):
     for text in (TEMPORAL, PR_FEEDBACK, DEBUG):
         store.kv_set(responder._DONE_KEY, "")
         store.kv_set(responder._RATE_KEY, "")
-        responder.respond("teams", "Vinish", text, priority=attention.P_NOW)
+        responder.respond("teams", "Alex", text, priority=attention.P_NOW)
     assert spawned
     assert {c["kind"] for c in spawned} == {"analysis"}
 
 
 def test_it_never_sends_anything_itself(spawned, known_ground):
     """It may draft. Staging is his gate, and the brief must say so every time —
-    a worker told only "reply to Vinish" is a worker that replies to Vinish."""
+    a worker told only "reply to Alex" is a worker that replies to Alex."""
     for text in (TEMPORAL, PR_FEEDBACK, DEBUG):
         store.kv_set(responder._DONE_KEY, "")
         store.kv_set(responder._RATE_KEY, "")
-        responder.respond("teams", "Vinish", text, priority=attention.P_NOW)
+        responder.respond("teams", "Alex", text, priority=attention.P_NOW)
     for call in spawned:
         assert "prepare_to_send" in call["prompt"]
         assert "never send anything yourself" in call["prompt"]
@@ -162,11 +162,11 @@ def test_presence_is_never_consulted():
 def test_the_brief_is_self_contained(spawned, known_ground):
     """The worker has no chat context — `delegate_task` says so. A prompt that
     says "the message above" reaches a worker that cannot see any message."""
-    responder.respond("teams", "Vinish", TEMPORAL, priority=attention.P_TODAY)
+    responder.respond("teams", "Alex", TEMPORAL, priority=attention.P_TODAY)
     prompt = spawned[0]["prompt"]
     assert TEMPORAL in prompt, "the message itself is not in the brief"
     assert "the above" not in prompt.lower()
-    assert "Vinish" in prompt
+    assert "Alex" in prompt
 
 
 def test_ten_people_pinging_is_not_ten_investigations(spawned, known_ground, monkeypatch):
@@ -182,7 +182,7 @@ def test_ten_people_pinging_is_not_ten_investigations(spawned, known_ground, mon
 def test_the_same_ask_is_investigated_once(spawned, known_ground):
     """A caption or activity row settling over several polls arrives repeatedly."""
     for _ in range(4):
-        responder.respond("teams", "Vinish", TEMPORAL, priority=attention.P_TODAY,
+        responder.respond("teams", "Alex", TEMPORAL, priority=attention.P_TODAY,
                           key="same-key")
     assert len(spawned) == 1
 
@@ -190,7 +190,7 @@ def test_the_same_ask_is_investigated_once(spawned, known_ground):
 def test_low_priority_noise_is_not_worth_a_turn(spawned):
     """P_FYI is something he was copied on. Spending an investigation on each is
     the noise he already complained about wearing a different hat."""
-    assert responder.respond("teams", "Vinish", TEMPORAL,
+    assert responder.respond("teams", "Alex", TEMPORAL,
                              priority=attention.P_MUTE) is None
     assert not spawned
 
@@ -198,7 +198,7 @@ def test_low_priority_noise_is_not_worth_a_turn(spawned):
 def test_it_is_off_until_switched_on(monkeypatch, spawned):
     """Same as every other behaviour that spends money on his behalf."""
     monkeypatch.delenv("ASTA_RESPOND", raising=False)
-    assert responder.respond("teams", "Vinish", TEMPORAL,
+    assert responder.respond("teams", "Alex", TEMPORAL,
                              priority=attention.P_NOW) is None
     assert not spawned
 
@@ -229,8 +229,8 @@ def test_teams_and_outlook_both_call_it():
 def test_he_is_told_the_checking_has_started():
     """"hey X person asking for bug issue, can i analyse and move forward" — the
     line has to name the person and say it is already running."""
-    line = responder.line_for({"id": 42}, "Vinish", "incident")
-    assert "Vinish" in line
+    line = responder.line_for({"id": 42}, "Alex", "incident")
+    assert "Alex" in line
     assert "#42" in line
     assert "checking" in line.lower()
 
@@ -242,23 +242,23 @@ def test_the_answer_arrives_still_attached_to_its_question(spawned, known_ground
     for text in (TEMPORAL, PR_FEEDBACK, DEBUG):
         store.kv_set(responder._DONE_KEY, "")
         store.kv_set(responder._RATE_KEY, "")
-        responder.respond("teams", "Vinish", text, priority=attention.P_NOW)
+        responder.respond("teams", "Alex", text, priority=attention.P_NOW)
     assert spawned
     for call in spawned:
-        assert "Vinish" in call["title"], call["title"]
+        assert "Alex" in call["title"], call["title"]
 
 
 def test_a_pr_title_carries_the_number(spawned, known_ground):
-    responder.respond("teams", "Vinish", PR_FEEDBACK, priority=attention.P_TODAY)
+    responder.respond("teams", "Alex", PR_FEEDBACK, priority=attention.P_TODAY)
     assert "#1049" in spawned[0]["title"]
 
 
 def test_the_title_never_cuts_a_word_in_half():
     """It is the subject line of the answer. "...bookings struc" reads like a bug
     in Asta, at the exact moment he is deciding whether to trust the finding."""
-    title = responder.title_for("incident", "Vinish", TEMPORAL)
+    title = responder.title_for("incident", "Alex", TEMPORAL)
     assert "struc " not in title and not title.endswith("struc")
-    long = responder.title_for("debug", "Vinish", "please check " + "verylongword " * 12)
+    long = responder.title_for("debug", "Alex", "please check " + "verylongword " * 12)
     assert long.endswith("…")
     assert "verylongwor…" not in long          # cut on a space, not mid-word
 
@@ -268,7 +268,7 @@ def test_the_title_never_cuts_a_word_in_half():
 # the word-form matched "comments on PR 1409" and missed both rows that mattered.
 
 @pytest.mark.parametrize("row", [
-    "hi vinish arunkumar https github com maersk global telikos booking service pull 1409 files",
+    "hi alex arunkumar https github com maersk global telikos booking service pull 1409 files",
     "hi everyone please review https github com maersk global x pull 1502",
     "check my comments on pullrequest 1409",
 ])
@@ -285,40 +285,40 @@ def test_the_pr_number_survives_the_url_form():
 
 
 @pytest.mark.parametrize("row,name", [
-    ("vinish kumar mentioned you arunkumar could you please look into the issues",
-     "vinish kumar"),
-    ("Vinish Kumar mentioned you — Arunkumar — 10:33 AM — In chat with you",
-     "Vinish Kumar"),
-    ("palikala divya maheswari reacted to your message sure good night",
-     "palikala divya maheswari"),
-    ("ayashkant baral invited you ooo ayash 28th august", "ayashkant baral"),
+    ("alex kumar mentioned you arunkumar could you please look into the issues",
+     "alex kumar"),
+    ("Alex Kumar mentioned you — Arunkumar — 10:33 AM — In chat with you",
+     "Alex Kumar"),
+    ("stone blake rivers reacted to your message sure good night",
+     "stone blake rivers"),
+    ("reese wells invited you ooo ayash 28th august", "reese wells"),
 ])
 def test_the_asker_is_pulled_out_of_the_feed_row(row, name):
     """The " — " split in _push_activity does not fire on most renderings, so `who`
-    arrives as the entire row. Untouched, the title reads "vinish kumar mentioned
+    arrives as the entire row. Untouched, the title reads "alex kumar mentioned
     you arunkumar could you please… asked: …"."""
     assert responder.asker_from(row) == name
 
 
 def test_a_plain_sentence_is_left_alone():
-    assert responder.asker_from("can you check prod", "Vinish") == "Vinish"
+    assert responder.asker_from("can you check prod", "Alex") == "Alex"
 
 
 def test_a_greeting_with_a_link_is_still_not_an_ask():
     """The other direction. Matching every message containing a URL would spend
     four investigations an hour on people sharing dashboards."""
-    assert responder.what_it_asks("komal jayswal mentioned you hi arunkumar call") == ""
+    assert responder.what_it_asks("dana frost mentioned you hi arunkumar call") == ""
     assert responder.what_it_asks("sharing the release notes https confluence x y") == ""
 
 
 def test_the_feed_chrome_is_not_quoted_back_as_the_message():
-    """Left in, the title reads "vinish kumar asked: vinish kumar mentioned you
+    """Left in, the title reads "alex kumar asked: alex kumar mentioned you
     arunkumar could you…" and the worker is handed Teams' own UI text as if it
     were what the person said."""
-    row = "vinish kumar mentioned you arunkumar could you please look into the failing activity"
+    row = "alex kumar mentioned you arunkumar could you please look into the failing activity"
     assert responder.message_of(row).startswith("arunkumar could you please")
-    title = responder.title_for("debug", "vinish kumar", row)
-    assert title.count("vinish kumar") == 1, title
+    title = responder.title_for("debug", "alex kumar", row)
+    assert title.count("alex kumar") == 1, title
     assert "mentioned you" not in title
 
 
@@ -354,7 +354,7 @@ def test_a_statement_is_still_not_an_ask(text):
 def test_the_generic_brief_does_not_pretend_to_know_the_shape():
     """An ask nobody classified is exactly where a confident wrong answer comes
     from, so the brief says to name the readings instead of picking one."""
-    brief = responder.brief_for("ask", "Vinish", "can you send the config")
+    brief = responder.brief_for("ask", "Alex", "can you send the config")
     assert "ambiguous" in brief
     assert "prepare_to_send" in brief
 
@@ -393,7 +393,7 @@ def test_new_ground_is_offered_rather_than_started(monkeypatch, spawned):
     asked = {}
     monkeypatch.setattr(offers, "propose",
                         lambda **kw: asked.update(kw) or object())
-    assert responder.respond("teams", "Vinish", TEMPORAL, priority=attention.P_TODAY) is None
+    assert responder.respond("teams", "Alex", TEMPORAL, priority=attention.P_TODAY) is None
     assert not spawned, "spawned work on new ground without asking"
     assert "look into it" in asked["question"]
 
@@ -405,7 +405,7 @@ def test_the_offer_carries_the_brief_his_yes_will_run(monkeypatch, spawned):
     monkeypatch.setattr(st, "list_tasks", lambda n=200: [])
     asked = {}
     monkeypatch.setattr(offers, "propose", lambda **kw: asked.update(kw) or object())
-    responder.respond("teams", "Vinish", PR_FEEDBACK, priority=attention.P_TODAY)
+    responder.respond("teams", "Alex", PR_FEEDBACK, priority=attention.P_TODAY)
     assert "Do not assume the reviewer is right" in asked["action"]
 
 
@@ -419,7 +419,7 @@ def test_familiar_ground_is_acted_on_without_asking(monkeypatch, spawned):
                                         "workspace": ""}])
     monkeypatch.setattr(offers, "propose",
                         lambda **kw: pytest.fail("asked about work already underway"))
-    assert responder.respond("teams", "Vinish", PR_FEEDBACK, priority=attention.P_TODAY)
+    assert responder.respond("teams", "Alex", PR_FEEDBACK, priority=attention.P_TODAY)
     assert spawned
 
 
@@ -434,7 +434,7 @@ def test_a_bare_imperative_aimed_at_him_is_an_ask(text, is_ask):
     """No "please", no "can you", and unmistakably a request. Anchored on the
     pronoun, because "send the notes to the team" is somebody else's job."""
     from app import triage
-    assert triage.classify("Vinish", text).action is is_ask, text
+    assert triage.classify("Alex", text).action is is_ask, text
 
 
 # --- a live ask, not the day's backlog ----------------------------------------

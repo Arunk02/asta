@@ -42,7 +42,7 @@ def _row(content_id: str, author: str, text: str, extra: str = "") -> str:
 
 
 PAGE = "<html><body>" + _row(
-    "content-1786525691522", "Vinish Kumar",
+    "content-1786525691522", "Alex Kumar",
     "Bro, assigned this defect to you") + "</body></html>"
 
 
@@ -74,7 +74,7 @@ async def test_the_send_time_is_read_out_of_the_content_id(browser):
     """The whole point. 1786525691522ms is a real captured message time."""
     got = await _extract(browser, PAGE)
     assert len(got) == 1
-    assert got[0]["sender"] == "Vinish Kumar"
+    assert got[0]["sender"] == "Alex Kumar"
     assert got[0]["iso"], "no timestamp extracted — the reported bug, exactly"
 
     when = dt.datetime.fromtimestamp(teams_bridge._to_epoch(got[0]["iso"]))
@@ -85,7 +85,7 @@ async def test_a_time_element_still_wins_where_teams_ships_one(browser):
     """Other Teams builds do have <time>; supporting both is the point of the chain."""
     html = """<html><body>
       <div data-tid="chat-pane-item">
-        <span data-tid="message-author-name">Suraj</span>
+        <span data-tid="message-author-name">Casey</span>
         <time datetime="2026-08-11T21:14:00.000Z">9:14 PM</time>
         <div data-tid="messageBodyContent" id="content-1786525691522">hi</div>
       </div></body></html>"""
@@ -97,7 +97,7 @@ async def test_a_message_with_no_usable_time_reports_none_rather_than_guessing(b
     """A wrong time silently reassigns a message to the wrong evening."""
     html = """<html><body>
       <div data-tid="chat-pane-item">
-        <span data-tid="message-author-name">Suraj</span>
+        <span data-tid="message-author-name">Casey</span>
         <div data-tid="messageBodyContent">no id at all</div>
       </div></body></html>"""
     got = await _extract(browser, html)
@@ -109,7 +109,7 @@ async def test_a_thirteen_digit_id_that_is_not_a_time_is_rejected(browser):
     """Plenty of ids are thirteen digits long without being milliseconds."""
     html = """<html><body>
       <div data-tid="chat-pane-item">
-        <span data-tid="message-author-name">Suraj</span>
+        <span data-tid="message-author-name">Casey</span>
         <div data-tid="messageBodyContent" id="content-1000000000000">x</div>
       </div></body></html>"""
     got = await _extract(browser, html)

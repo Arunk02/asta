@@ -1,0 +1,155 @@
+# Attention and authority — Astra-class P5.
+#
+# Asta pushed about 70 things a day and he ignored 38% of what it tracked. These
+# scenarios are about the two halves of fixing that: interrupt less (learned from
+# his own reactions, a daily budget, a digest) and do more alone (explicit,
+# earned, capped permissions).
+
+scenarios:
+  - id: a-source-he-keeps-ignoring-stops-interrupting
+    title: A source ignored four times in five moves to the digest, once, with an undo
+    why: >
+      His ledger holds 2,115 reactions and none of them fed back into the decision
+      to buzz him — the top ignored source was ignored 122 times in 30 days and
+      kept interrupting. The rule is his own record, not a list someone wrote.
+    twin: false
+    real_notify: true
+    setup:
+      reactions:
+        - {source: outlook, who: "IT Service Desk", seen: 130, ignored: 122}
+    steps:
+      - inbound: {who: "IT Service Desk", source: outlook, text: "Change CHG9016018 is scheduled for this weekend"}
+    checks:
+      - digest: {count: 1, contains: "CHG9016018"}
+      - push_contains: "Moving \\*IT Service Desk\\* to the digest"
+      - push_lacks: "CHG9016018"
+
+  - id: the-digest-notice-comes-once-and-he-can-undo-it
+    title: '"push IT Service Desk" brings a demoted source back, and the notice never repeats'
+    why: A filter he cannot see or reverse is one he stops trusting. One line, one undo.
+    twin: false
+    real_notify: true
+    setup:
+      reactions:
+        - {source: outlook, who: "IT Service Desk", seen: 130, ignored: 122}
+    steps:
+      - inbound: {who: "IT Service Desk", source: outlook, text: "Change CHG1 is scheduled"}
+      - inbound: {who: "IT Service Desk", source: outlook, text: "Change CHG2 is scheduled"}
+      - say: "push IT Service Desk"
+      - inbound: {who: "IT Service Desk", source: outlook, text: "Change CHG3 is scheduled"}
+    checks:
+      - push_count: {matching: "Moving", count: 1}
+      - said_contains: "will interrupt you again"
+      - digest: {count: 2, lacks: CHG3}
+      - push_contains: "CHG3"
+
+  - id: past-the-days-budget-it-is-read-not-buzzed
+    title: Once the day's interruptions are spent, ordinary news goes to the digest — breakage still buzzes
+    why: >
+      The plan's number is 20 a day against about 70 measured. A budget that also
+      swallowed the broken thing would be worse than no budget.
+    twin: false
+    real_notify: true
+    setup:
+      pushes_today: 20
+    steps:
+      - inbound: {who: "A colleague", source: teams-chat, text: "I merged the doc update", priority: 2}
+      - inbound: {who: "A colleague", source: teams-chat, text: "prod is down, bookings are failing", priority: 0}
+    checks:
+      - digest: {contains: "merged the doc update"}
+      - push_contains: "prod is down"
+
+  - id: the-digest-goes-out-at-midday
+    title: The digest is one message at midday, not a place things go to die
+    why: Nothing is dropped — it is read at a moment he chose instead of the moment it arrived.
+    twin: false
+    real_notify: true
+    steps:
+      - digest_add: {text: "Change CHG9016018 scheduled", source: "IT Service Desk"}
+      - digest_add: {text: "Change CHG9478352 scheduled", source: "IT Service Desk"}
+      - tick: digest
+    checks:
+      - push_contains: "Digest — 2 things"
+      - push_contains: "CHG9016018"
+      - digest: {count: 0}
+
+  - id: a-permission-is-earned-not-assumed
+    title: Asta asks for a standing permission only after ten of the same, approved as-is
+    why: >
+      "May nudge a colleague about a PR review once a day" is a decision he can
+      make once — but only about an act he has already approved ten times, for
+      that same person, and only ever as a question.
+    twin: false
+    may_send: true
+    setup:
+      kv: {"authority_seen:send:a colleague": "9"}
+    brains:
+      chat:
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged", to: "A colleague", channel: teams}}]
+          text: "Staged — send it?"
+    steps:
+      - say: "tell a colleague the fix is merged"
+      - say: "yes"
+    checks:
+      - said_contains: "May message A colleague without asking"
+      - permissions: {count: 0}          # proposed, not granted — his yes comes next
+
+  - id: a-granted-permission-sends-without-asking-and-can-be-revoked
+    title: With a permission, the message goes; "revoke 1" puts it back behind the gate
+    why: Explicit, capped at one a day, visible in "my permissions", and reversible in three words.
+    may_send: true
+    twin: false
+    setup:
+      permissions:
+        - {act: send, target: "A colleague", per_day: 1, words: "after 10 approved as-is"}
+    brains:
+      chat:
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged", to: "A colleague", channel: teams}}]
+          text: "On its way."
+        - calls: [{tool: prepare_to_send, args: {what: "and the tests pass", to: "A colleague", channel: teams}}]
+          text: "Staged — send it?"
+    steps:
+      - say: "tell a colleague the fix is merged"
+      - say: "my permissions"
+      - say: "revoke 1"
+      - say: "tell a colleague the tests pass too"
+    checks:
+      - sent: {door: teams, count: 1}
+      - said_contains: "May message A colleague without asking"
+      - said_contains: "revoked"
+      - tool_result_contains: {tool: prepare_to_send, text: "Draft staged"}
+      - permissions: {count: 0}
+
+  - id: a-colleague-is-never-moved-to-the-digest
+    title: A person he answers in Teams is never demoted, however "ignored" the ledger looks
+    why: >
+      Found on his live ledger, 16 Sep: several colleagues sit at 100% "ignored"
+      because he replies to them inside Teams, where Asta cannot see it. Demoting
+      a person on that evidence would bury a real ask. Only a bulk feed is demoted.
+    twin: false
+    real_notify: true
+    setup:
+      reactions:
+        - {source: teams-chat, who: "Kendall Brooks", seen: 100, ignored: 100}
+    steps:
+      - inbound: {who: "Kendall Brooks", source: teams-chat, text: "can you check why STF is not done for this one"}
+    checks:
+      - push_contains: "STF is not done"
+      - digest: {count: 0}
+
+  - id: astas-own-voice-is-never-digested
+    title: A plan gate is not a source he ignores
+    why: >
+      Also from the live ledger: Asta's own announcements sit at 226 of 226
+      "ignored", because nothing he does with them is recorded as acting on them.
+      Digesting those would silence the plan gate itself.
+    twin: false
+    real_notify: true
+    setup:
+      reactions:
+        - {source: asta, who: "", seen: 226, ignored: 226}
+    steps:
+      - announce: {text: "📋 PLAN #42 — retention to 90 days. Approve?"}
+    checks:
+      - push_contains: "PLAN #42"
+      - digest: {count: 0}

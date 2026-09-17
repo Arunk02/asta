@@ -219,8 +219,67 @@ def _existing_match(slug: str) -> Path | None:
     return None
 
 
+def _sections(text: str) -> dict:
+    """An existing skill file back into the fields `_render` wrote."""
+    out: dict = {"procedure": [], "pitfalls": [], "verification": [], "when": "", "tags": []}
+    m = re.search(r"^tags:\s*(.*)$", text, re.M)
+    if m:
+        out["tags"] = [t.strip() for t in m.group(1).split(",") if t.strip()]
+    m = re.search(r"^confidence:\s*([\d.]+)", text, re.M)
+    out["confidence"] = float(m.group(1)) if m else 0.0
+    parts = re.split(r"^## ", text, flags=re.M)
+    for part in parts[1:]:
+        head, _, body = part.partition("\n")
+        key = head.strip().lower()
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        items = [re.sub(r"^(?:\d+\.|-)\s*", "", ln) for ln in lines]
+        items = [x for x in items if x and x != "(none recorded)"]
+        if key.startswith("when"):
+            out["when"] = " ".join(lines)
+        elif key.startswith("procedure"):
+            out["procedure"] = items
+        elif key.startswith("pitfall"):
+            out["pitfalls"] = items
+        elif key.startswith("verification"):
+            out["verification"] = items
+    return out
+
+
+def _norm(item: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
+
+
+def merge_delta(old: dict, new: dict) -> tuple[dict, int]:
+    """Grow a skill instead of rewriting it (ACE's generate → reflect → curate).
+
+    A rewrite from one run keeps what THAT run noticed and drops what earlier
+    runs had learned — detail erodes a little with every update. So: the
+    existing procedure keeps its order and wording, and only steps it does not
+    already have are appended; pitfalls and checks are a union. Returns the
+    merged fields and how many items were new.
+    """
+    merged = dict(new)
+    added = 0
+    for key in ("procedure", "pitfalls", "verification"):
+        have = list(old.get(key) or [])
+        seen = {_norm(x) for x in have}
+        for item in new.get(key) or []:
+            if str(item).strip() and _norm(str(item)) not in seen:
+                have.append(str(item).strip())
+                seen.add(_norm(str(item)))
+                added += 1
+        merged[key] = have
+    merged["when"] = old.get("when") or new.get("when", "")
+    merged["tags"] = list(dict.fromkeys((old.get("tags") or []) + list(new.get("tags") or [])))
+    merged["confidence"] = max(float(old.get("confidence") or 0), float(new.get("confidence") or 0))
+    return merged, added
+
+
 def write_skill(data: dict, source: str = "extracted") -> Path | None:
-    """Persist one extracted skill. None when it didn't clear the bar."""
+    """Persist one extracted skill. None when it didn't clear the bar.
+
+    A skill that already exists is updated in DELTAS (merge_delta), never
+    replaced — see there for why."""
     title = (data.get("title") or "").strip()
     confidence = float(data.get("confidence") or 0)
     if not title or confidence < MIN_CONFIDENCE:
@@ -229,8 +288,15 @@ def write_skill(data: dict, source: str = "extracted") -> Path | None:
         return None
     data = {**data, "source": source}
     slug = _slug(title)
-    path = _existing_match(slug) or (skills.SKILLS_DIR / f"{slug}.md")
+    existing = _existing_match(slug)
+    path = existing or (skills.SKILLS_DIR / f"{slug}.md")
     skills.SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    if existing:
+        try:
+            data, _added = merge_delta(_sections(existing.read_text()), data)
+            data["title"] = title
+        except OSError:
+            pass
     path.write_text(_render(data))
     usage = _usage()
     entry = usage.setdefault(slug, {"uses": 0, "created": time.time()})

@@ -66,8 +66,22 @@ _FIXTURE_SHAPING_ENV = ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")
 #: they observed — three failures whose messages were all about the ledger and
 #: none about the responder. A behaviour switched on for one machine is not a
 #: behaviour the suite should be silently exercising.
+#:
+#: `ASTA_GRAPH` chooses the task engine. Inherited, it would move every old-engine
+#: task test onto the graph without saying so; the graph's own tests set it. The
+#: P3 switches are the same kind of thing — routing, the front desk, the second
+#: reviewer and the chat tool set are his machine's choices, not the code's.
 _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND",
-                       "ASTA_CHATWATCH", "ASTA_INCOMING")
+                       "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_GRAPH", "ASTA_ROUTING",
+                       "ASTA_FRONTDESK", "ASTA_CROSS_REVIEW", "ASTA_CLAUDE_CHAT_TOOLS",
+                       "ASTA_CHAT_ALLOW", "ASTA_PUSH_BUDGET", "ASTA_ATTENTION_LEARN",
+                       "ASTA_EVOLVE", "ASTA_EVOLVE_L3", "ASTA_COALESCE_SECONDS",
+                       # The tunable knobs (app/settings.py). His shell exports
+                       # some of these, and a test that pins the module constant
+                       # then loses to the environment — machine-dependent, and
+                       # silent about it.
+                       "ASTA_RESPOND_MAX_PER_HOUR", "ASTA_ATTENTION_MIN_SEEN",
+                       "ASTA_ATTENTION_IGNORE_SHARE")
 
 
 #: What this machine's .env said, captured before it is cleared. A handful of
@@ -77,6 +91,65 @@ _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND"
 #: inherited, and so a test that forgets to ask gets the default like everyone else.
 _REAL_CONTEXT_DIRNAMES = {n: os.environ.get(n) for n in
                           ("ASTA_CONTEXT_DIRNAME", "ASTA_CONTEXT_DIRNAMES")}
+
+
+@pytest.fixture(autouse=True)
+def _no_machine_side_effects(monkeypatch):
+    """No test touches this Mac's audio devices or its voice server.
+
+    Found by CI on 12 September, and worse than a CI problem. Several call tests
+    patched `meetings.set_call_mic`, but the code had moved to
+    `call_audio.set_call_mic` — so on Arun's laptop the REAL one ran: the suite
+    switched his microphone input to BlackHole and back, and asked the local
+    Voicebox to synthesise speech, on every run. It passed here because the
+    devices exist and failed on a runner that has neither. A test that passes
+    only because it reached into the machine is not a test of the code.
+
+    So both doors are pointed at nothing, for every test. A test ABOUT them
+    patches the functions it needs, which states the dependency out loud.
+    """
+    from app import call_audio, voice
+    monkeypatch.setattr(call_audio, "SWITCH_AUDIO", "/nonexistent/SwitchAudioSource")
+    monkeypatch.setattr(voice, "BASE", "http://127.0.0.1:9")    # nothing listens on 9
+    # The third door, and the only one that reaches a PERSON. `notify.wa_send`
+    # posts to WA_BRIDGE_URL, which defaults to the bridge running on his laptop,
+    # so five tests have been pushing real WhatsApp messages to him on every run
+    # of the suite — four "🎙️ Your mic is on an unknown device…" and one
+    # "📞 Talked to Alex…". He counted more than two hundred in three days and
+    # asked what was bloating his phone; it was the tests. Same treatment as the
+    # microphone and the voice server: the code path still runs, the message
+    # reaches a closed port. A test ABOUT delivery patches `wa_send` itself.
+    monkeypatch.setenv("WA_BRIDGE_URL", "http://127.0.0.1:9")
+    # Telegram is the same door on another channel. It is dead in tests only by
+    # accident today (the chat id lives in the isolated database), and a test
+    # that stores one would push to his phone for real.
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    # And the app doors (hands, layer two). These write to his REAL Reminders,
+    # Calendar, Notes and Mail — the suite gets an interpreter that does not
+    # exist, and a test about a recipe patches the runner it needs.
+    from app import apps
+    monkeypatch.setattr(apps, "OSASCRIPT", "/nonexistent/osascript")
+    monkeypatch.setattr(apps, "SHORTCUTS", "/nonexistent/shortcuts")
+    monkeypatch.delenv("ASTA_APPS", raising=False)
+    monkeypatch.delenv("ASTA_SCREEN", raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _own_guardrails_file(tmp_path, monkeypatch):
+    """Every test reads — and may write — a temp copy of the shipped example.
+
+    His `guardrails.md` is real configuration, and the instruction compiler
+    APPENDS to it on his yes. A test that exercised that path against the real
+    file would edit his rules; one that merely read it would pass on his laptop
+    and fail on a runner that only has the example.
+    """
+    from app import guardrails
+    copy = tmp_path / "guardrails.md"
+    copy.write_text(guardrails.EXAMPLE_PATH.read_text() if guardrails.EXAMPLE_PATH.exists() else "")
+    monkeypatch.setenv("ASTA_GUARDRAILS", str(copy))
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -200,6 +273,14 @@ def _no_live_brains(monkeypatch):
     for mod in ("copilot_cli", "claude_cli"):
         with contextlib.suppress(ImportError, AttributeError):
             monkeypatch.setattr(f"app.{mod}.one_shot", _no_cli, raising=False)
+    # The LOCAL model too, and it was the one gap in this rule. It costs nothing
+    # per call, so it never looked like something to seal — but LM Studio is up
+    # on this machine, so a test that reached it made a real HTTP request and
+    # waited on a real generation. When the completion budget briefly rose from
+    # 120s to 300s the whole suite wedged at 89% on one of them: no output, no
+    # CPU, no failure. A test that reaches a live model is unbounded whether or
+    # not anyone is billed for it.
+    monkeypatch.setattr("app.memory.local_llm_model", lambda: None, raising=False)
     yield
 
 

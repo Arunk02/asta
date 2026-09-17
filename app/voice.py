@@ -25,7 +25,11 @@ import re
 
 import httpx
 
-BASE = os.environ.get("VOICEBOX_URL", "http://127.0.0.1:17493")
+#: Where Voicebox is configured to listen. Kept apart from BASE, which is what
+#: calls actually use — tests point BASE at nothing so no test can reach the
+#: real service, and a test ABOUT the configuration reads this instead.
+CONFIGURED_BASE = os.environ.get("VOICEBOX_URL", "http://127.0.0.1:17493")
+BASE = CONFIGURED_BASE
 DEFAULT_ENGINE = os.environ.get("VOICEBOX_ENGINE", "kokoro")
 DEFAULT_PROFILE = os.environ.get("VOICEBOX_PROFILE", "")
 HINDI_PROFILE = os.environ.get("VOICEBOX_PROFILE_HI", "Asta (Hindi)")
@@ -86,7 +90,7 @@ def voice_settings(voice: str) -> tuple[str, str]:
 def strip_voice_instruction(text: str) -> str:
     """The words to SAY, with the 'talk like me' instruction removed.
 
-    Without this the instruction is spoken aloud — Vinish hears "talk like me,
+    Without this the instruction is spoken aloud — Alex hears "talk like me,
     tell him the build passed", which is both wrong and revealing.
     """
     out = _SAY_AS_ASSISTANT.sub(" ", _SAY_AS_MINE.sub(" ", text or ""))
@@ -163,11 +167,13 @@ def play_to_device(wav: bytes, device: str = "") -> float:
 
 
 async def available() -> bool:
-    try:
-        async with httpx.AsyncClient(timeout=3) as c:
-            return (await c.get(f"{BASE}/health")).status_code == 200
-    except Exception:
-        return False
+    """Async form of `service_up` — same question, same endpoint, same cache.
+
+    Two independent answers to "is the speech service up" is how they end up
+    disagreeing; this one exists because most callers here are async, not
+    because it is a different check.
+    """
+    return await asyncio.to_thread(service_up)
 
 
 async def profiles() -> list[dict]:
@@ -274,6 +280,66 @@ async def speak(text: str, profile: str = "", engine: str = "",
         return audio.content
 
 
+#: What WhatsApp needs for a hold-to-play voice note: Opus in an Ogg container.
+#: Anything else arrives as an audio clip — playable, but not the waveform.
+#: macOS ships `afconvert`, which advertises Opus and then fails to encode it
+#: ('pck?'), so the good path needs ffmpeg and the fallback is AAC. Detected
+#: rather than assumed: a machine without ffmpeg still gets a voice note, and
+#: the caller is told which one it sent instead of being left to guess.
+async def voice_note(text: str, voice: str = "assistant") -> dict:
+    """Say it out loud on his phone. Returns what was actually sent.
+
+    A voice note is the right shape for something he would rather hear than
+    read — a two-line summary while he is walking — and the wrong shape for
+    anything he needs to search for later, which is why nothing calls this for
+    an outcome or a file.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    import wave
+    from pathlib import Path
+
+    from . import notify
+
+    audio = await speak(text, voice=voice)
+    tmp = Path(tempfile.mkdtemp(prefix="asta-vn-"))
+    wav = tmp / "note.wav"
+    wav.write_bytes(audio)
+    try:
+        with wave.open(str(wav)) as w:
+            seconds = max(1, round(w.getnframes() / float(w.getframerate() or 1)))
+    except Exception:                                           # noqa: BLE001
+        seconds = max(1, len(text.split()) // 3)
+
+    out, kind = wav, "wav"
+    if shutil.which("ffmpeg"):
+        opus = tmp / "note.ogg"
+        done = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(wav), "-c:a", "libopus", "-b:a", "24k",
+             "-ar", "48000", "-ac", "1", str(opus)],
+            capture_output=True, timeout=60)
+        if done.returncode == 0 and opus.exists():
+            out, kind = opus, "opus"
+    # `afconvert` is macOS-only. Found by CI on 17 Sep: every Linux runner raised
+    # FileNotFoundError here, and the clean checkout never saw it because it runs
+    # on this same Mac. Detected, like ffmpeg above — the last resort is the WAV
+    # Voicebox already produced, which still plays.
+    if kind == "wav" and shutil.which("afconvert"):
+        m4a = tmp / "note.m4a"
+        done = subprocess.run(["afconvert", "-f", "m4af", "-d", "aac", str(wav), str(m4a)],
+                              capture_output=True, timeout=60)
+        if done.returncode == 0 and m4a.exists():
+            out, kind = m4a, "aac"
+
+    sent = await notify.wa_voice(str(out), seconds)
+    return {"sent": bool(sent), "format": kind, "seconds": seconds,
+            "path": str(out),
+            "note": ("" if kind == "opus" else
+                     "sent as an audio clip rather than a hold-to-play note — "
+                     "install ffmpeg for Opus and it becomes a proper voice note")}
+
+
 async def transcribe(data: bytes, filename: str = "speech.webm",
                      language: str = "") -> str:
     """Whisper transcription of a recorded clip.
@@ -361,7 +427,7 @@ CLONE_SCRIPTS: dict[str, str] = {
 #: answers each out loud for fifteen or twenty seconds, in whatever words come.
 CLONE_PROMPTS: dict[str, str] = {
     "1-status": "Give this morning's update out loud — build, tests, what is pending.",
-    "2-one-to-one": "Tell Vinish where you got to on the ETA ticket and what you want his view on.",
+    "2-one-to-one": "Tell Alex where you got to on the ETA ticket and what you want his view on.",
     "3-quick": "Answer ten things quickly — yes, no, go ahead, on it, done, hold on.",
     "4-question": "Ask six things you genuinely need answers to today.",
     "5-technical": "Say the ticket id, the class it fails in, the PR number and the error rate.",
@@ -590,9 +656,53 @@ _CAMERA_TOGGLES = ('[data-tid="toggle-video"]', 'button[aria-label*="camera" i]'
 _CALL: dict = {}
 
 
+#: Cached answer to "is the speech service up", as (checked_at, up).
+_SERVICE_UP: tuple[float, bool] = (0.0, False)
+SERVICE_TTL = 30.0
+
+
+def service_up(ttl: float | None = None) -> bool:
+    """Is the speech service actually reachable? Cached, and never raises.
+
+    Cached because `can_speak()` is asked once per utterance inside a live call
+    (`meetings._speak_turn`), and an HTTP round trip per line would put a stall
+    into the middle of a conversation.
+
+    A short TTL rather than a one-shot, because the interesting transition is
+    Voicebox going down while Asta is mid-call: staying silent is correct there,
+    and claiming otherwise is how somebody ends up talking to nobody.
+    """
+    global _SERVICE_UP
+    import time as _time
+    ttl = SERVICE_TTL if ttl is None else ttl
+    checked, up = _SERVICE_UP
+    now = _time.monotonic()
+    if now - checked < ttl:
+        return up
+    try:
+        import httpx
+        up = httpx.get(f"{BASE}/health", timeout=1.5).status_code == 200
+    except Exception:                                          # noqa: BLE001
+        up = False
+    _SERVICE_UP = (now, up)
+    return up
+
+
 def can_speak() -> bool:
-    """Whether Asta can actually be heard in a call on this machine."""
-    return bool(CALL_DEVICE)
+    """Whether Asta can actually be heard in a call on this machine.
+
+    BOTH halves, and the second one is the one this was missing. A virtual
+    microphone that exists is not a voice: on 2026-09-07 this returned True with
+    nothing listening on Voicebox's port at all, so `discuss_in_call` would have
+    rung Alex and sat there mute. `voice_check` caught it — measuring what
+    ARRIVES rather than what was configured — and that is the same lesson this
+    module already learned once, when macOS answered a microphone request with a
+    valid, correctly-labelled track full of digital silence.
+
+    A device is a route. A service is a voice. Asking only about the route is
+    asking a different question from the one every caller means.
+    """
+    return bool(CALL_DEVICE) and service_up()
 
 
 def speaking_hint() -> str:
@@ -604,11 +714,37 @@ def speaking_hint() -> str:
 
 
 
+async def browser_hears_us(page, ms: int = 2000) -> dict:
+    """Does audio Asta plays actually ARRIVE in THIS browser? {'peak', 'label'}.
+
+    `browser_mic_delivers` alone answers a different question: it reads whatever
+    is on the mic right now, and if nothing is playing the honest answer is
+    silence. Using it as a pre-flight declared a working microphone dead and
+    blocked every call — Chrome opened, was told it could not be heard, and shut
+    again, which is what Arun saw as "Chrome getting close while coming up only".
+
+    So: listen FIRST, then play into it. `self_test` already had this right and
+    says why — "starting playback first is a measurement of nothing, which cost a
+    whole cycle the first time". One implementation now, on whatever page the
+    caller already has open, so a call can check the browser it is about to dial
+    from rather than a different one.
+    """
+    import asyncio as _a
+    wav = await speak("Microphone check.")
+    if not wav:
+        return {}                      # nothing to play — claim nothing
+    listen = _a.create_task(browser_mic_delivers(page, ms))
+    await _a.sleep(0.4)
+    with contextlib.suppress(Exception):
+        await _a.to_thread(play_to_device, wav, CALL_DEVICE)
+    return (await listen) or {}
+
+
 async def self_test() -> dict:
     """Can Asta actually BE HEARD from this process? Measured, not assumed.
 
     The one check that would have saved four calls. `say_in_call` measured audio
-    PLAYED and reported success; Vinish heard silence every time. macOS denies
+    PLAYED and reported success; Alex heard silence every time. macOS denies
     microphone access by handing the app a valid, correctly-labelled track that
     produces digital silence — no exception, no prompt — so every layer looked
     healthy and nothing was transmitted.
@@ -624,16 +760,16 @@ async def self_test() -> dict:
     call does. The system input is restored in a `finally`: leaving it on BlackHole
     breaks his own Teams calls, which happened twice in one day.
     """
-    from . import meetings, teams_bridge
+    from . import call_audio, meetings, teams_bridge
     out: dict = {"device": CALL_DEVICE, "restored": False}
     if not CALL_DEVICE:
         out["error"] = "no virtual microphone configured (ASTA_CALL_AUDIO_DEVICE)"
         return out
-    was = await meetings.current_mic()
+    was = await call_audio.current_mic()
     out["was"] = was
     pw = ctx = None
     try:
-        out["switched"] = await meetings.set_call_mic(device=CALL_DEVICE)
+        out["switched"] = await call_audio.set_call_mic(device=CALL_DEVICE)
         if not out["switched"]:
             out["error"] = f"could not select {CALL_DEVICE!r}"
             return out
@@ -667,5 +803,5 @@ async def self_test() -> dict:
         # Never leave his input on the virtual device.
         if was and was != CALL_DEVICE:
             with contextlib.suppress(Exception):
-                out["restored"] = await meetings.set_call_mic(device=was)
+                out["restored"] = await call_audio.set_call_mic(device=was)
     return out

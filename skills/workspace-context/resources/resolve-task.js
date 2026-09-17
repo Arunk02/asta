@@ -112,7 +112,11 @@ const domainsByRepo = Object.fromEntries(ws.repos.map((r) => [r.key, r.domains])
 let taskLc = TASK.toLowerCase();
 const tokenise = (s) => s.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean);
 const taskTerms = new Set(tokenise(taskLc));
-const ID_RE = /[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*/g;
+// Also lowerCamelCase — a FIELD or method name, not just a class. Without the
+// third alternative `transportAssetPriority` was not an identifier at all, so the
+// de-camel bridge below never ran on it and it answered route:"ask" while
+// `TransportAssetPriority` resolved fine. People type the field.
+const ID_RE = /[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*|[A-Z][a-z]+[A-Z][A-Za-z0-9]*|[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*/g;
 const taskIds = Array.from(new Set(TASK.match(ID_RE) || []));
 // DE-CAMEL BRIDGE: a CamelCase id ("ActivityPlanEvent") tokenises to one blob; split it
 // into business words so bucket/scenario/routing matching on the noun ("activity plan") fires

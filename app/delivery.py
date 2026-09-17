@@ -101,11 +101,9 @@ def hold_for_quiet(urgency: str, priority: int | None, now: float | None = None)
 # --- one message instead of four ------------------------------------------------
 
 def coalesce_seconds() -> int:
-    """0 disables batching entirely."""
-    try:
-        return max(0, int(os.environ.get("ASTA_COALESCE_SECONDS", "120")))
-    except ValueError:
-        return 120
+    """0 disables batching entirely. Tunable (app/settings.py)."""
+    from . import settings
+    return max(0, int(settings.effective("ASTA_COALESCE_SECONDS", 120)))
 
 
 def _pending() -> list[str]:
@@ -155,6 +153,14 @@ def render_batch(texts: list[str]) -> str:
 
 # --- chasing what he never answered ---------------------------------------------
 
+def chase_window_days() -> float:
+    """How old a thing may be and still be worth chasing him about."""
+    try:
+        return max(0.25, float(os.environ.get("ASTA_CHASE_WINDOW_DAYS", "1.5")))
+    except ValueError:
+        return 1.5
+
+
 def chase_due(now: float | None = None) -> list[dict]:
     """Things he was told about, still owed, and now past their moment.
 
@@ -174,6 +180,12 @@ def chase_due(now: float | None = None) -> list[dict]:
         # Asta says — so without this the loop chases its own last chase, and the
         # nesting grows by one every hour until the message is unreadable.
         if attention.self_originated(row):
+            continue
+        # Past a point it is not a chase, it is archaeology. He was shown a
+        # two-day-old "lets take billtoparty change tomorrow" under "Still
+        # waiting on you" — the tomorrow it names has already been and gone, and
+        # nothing he could do about it now is what the sentence asked for.
+        if now - float(row.get("first_seen") or now) > chase_window_days() * 86400:
             continue
         due = row.get("due_at")
         if due is not None and now >= float(due):
@@ -219,6 +231,18 @@ async def chase_loop() -> None:
                                 urgency="direct", priority=attention.P_TODAY)
         except Exception:
             pass
+
+
+async def flush_buffered() -> dict:
+    """Send whatever is waiting in the coalescing buffer, as one message."""
+    from . import notify
+    if not enabled() or quiet_now():
+        return {"sent": False, "items": 0}
+    texts = take_buffered()
+    if not texts:
+        return {"sent": False, "items": 0}
+    await notify.deliver(render_batch(texts))
+    return {"sent": True, "items": len(texts)}
 
 
 async def flush_loop() -> None:

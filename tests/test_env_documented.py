@@ -49,11 +49,20 @@ _READ = re.compile(r"""environ(?:\.get\(|\[)\s*["'](ASTA_[A-Z0-9_]+)["']""")
 _DECLARED = re.compile(r"""["']\w*_env["']\s*:\s*\(?\s*["'](ASTA_[A-Z0-9_]+)["']""")
 
 
+#: The tunable knobs (app/settings.py). Same shape as `_DECLARED` above: the
+#: name is a key in one table and read through `os.environ.get(name)` inside
+#: `settings.value`, so a regex over call sites cannot see it either. Narrow on
+#: purpose — only a `"ASTA_…": (` entry, which is what a KNOBS row looks like.
+_TUNABLE = re.compile(r"""["'](ASTA_[A-Z0-9_]+)["']\s*:\s*\(""")
+
+
 def _flags_in_code() -> set[str]:
     found: set[str] = set()
     for path in APP.rglob("*.py"):
         text = path.read_text(encoding="utf-8", errors="replace")
         found |= set(_READ.findall(text)) | set(_DECLARED.findall(text))
+        if path.name == "settings.py":
+            found |= set(_TUNABLE.findall(text))
     return found
 
 

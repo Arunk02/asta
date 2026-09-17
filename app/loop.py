@@ -24,6 +24,8 @@ restart. That would be the least expected and least safe behaviour.
 
 from __future__ import annotations
 
+import json
+
 import os
 import time
 
@@ -128,18 +130,72 @@ def budget_left(cid: str) -> bool:
     return _steps.get(cid, 0) < max_steps() and time_left(cid)
 
 
+def _staged_key(cid: str) -> str:
+    return f"staged_send:{cid}"
+
+
+def _kv(op: str, cid: str, value: str = ""):
+    """The one place this module touches the database — and it tolerates exactly
+    one thing: no database yet.
+
+    `loop` was pure in-memory state, and `clear()` runs on every error and every
+    fresh start, including before the schema exists. A missing kv table means
+    nothing was ever staged, so there is nothing to find or clear. Every OTHER
+    database error still raises: a staged send that silently failed to persist
+    is the bug this persistence exists to prevent. (Found by the clean checkout,
+    17 Sep — a fresh database, no tables, and loop.clear() in a test fixture.)
+    """
+    import sqlite3
+
+    from . import store
+    try:
+        if op == "set":
+            return store.kv_set(_staged_key(cid), value)
+        if op == "get":
+            return store.kv_get(_staged_key(cid))
+        return store.kv_del(_staged_key(cid))
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return None
+        raise
+
+
 def stage(cid: str, intent: dict) -> None:
-    """Hold a drafted send until Arun answers."""
+    """Hold a drafted send until Arun answers — in memory AND on disk.
+
+    Memory alone was the 13 September failure in the chat path: restart Asta
+    between "can I send this?" and his "yes", and the draft was gone, so his
+    "yes" went to a brain as an ordinary message. Found on 17 Sep while wiring
+    the draft-and-send graph. The intent is plain JSON, so it is written down
+    the moment it is staged and a new process finds it waiting.
+    """
     if cid:
         _awaiting[cid] = intent
+        _kv("set", cid, json.dumps(intent))
 
 
 def awaiting(cid: str) -> dict | None:
-    return _awaiting.get(cid)
+    if not cid:
+        return None
+    if cid in _awaiting:
+        return _awaiting[cid]
+    raw = _kv("get", cid)
+    if not raw:
+        return None
+    try:
+        intent = json.loads(raw)
+    except ValueError:
+        return None
+    _awaiting[cid] = intent
+    return intent
 
 
 def clear_awaiting(cid: str) -> dict | None:
-    return _awaiting.pop(cid, None)
+    intent = awaiting(cid)
+    _awaiting.pop(cid, None)
+    if cid:
+        _kv("del", cid)
+    return intent
 
 
 def clear(cid: str) -> None:
@@ -148,3 +204,5 @@ def clear(cid: str) -> None:
     _steps.pop(cid, None)
     _started.pop(cid, None)
     _awaiting.pop(cid, None)
+    if cid:
+        _kv("del", cid)

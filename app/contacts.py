@@ -169,9 +169,9 @@ def scoreboard(limit: int = 20) -> list[dict]:
 
 # --- which thread does a name actually mean? ---------------------------------
 #
-# "divya" resolves, in Teams' own search, to a 1:1 titled "Divya" — a real chat
-# with no messages in it. The person Arun actually talks to is "Palikala Divya
-# Maheswari". A message there would reach the wrong person and a CALL would ring
+# "blake" resolves, in Teams' own search, to a 1:1 titled "Blake" — a real chat
+# with no messages in it. The person Arun actually talks to is "Stone Blake
+# Rivers". A message there would reach the wrong person and a CALL would ring
 # them, and neither is undone by noticing afterwards.
 #
 # His own rail is the better authority than Teams' ranking, and Asta already has
@@ -196,7 +196,7 @@ def resolve_name(name: str) -> tuple[str, list[str]]:
     """(the thread he means, all the threads it could be).
 
     An exact match wins. Otherwise a name that matches exactly one real
-    conversation resolves to that one — "divya" is unambiguous among the people he
+    conversation resolves to that one — "blake" is unambiguous among the people he
     talks to, even though Teams' search prefers a different chat with the shorter
     title. Anything matching several is returned undecided, because guessing which
     colleague he meant is the mistake that cannot be walked back.

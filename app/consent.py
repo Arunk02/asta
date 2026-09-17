@@ -16,7 +16,7 @@ door he already opened, and the cost is not politeness — it is that the call d
 not happen.
 
 **Rule two: an act Asta cannot perform is never replaced by a different one.** Asked
-to call Vinish and talk through his review comments, Asta could not reach the call
+to call Alex and talk through his review comments, Asta could not reach the call
 tools (`tool_index` had not selected them), said so — and then dispatched a
 background task to rewrite the code and push it:
 
@@ -91,7 +91,7 @@ _TALK = re.compile(
     r"\s*(?:it|this|that|them)?\s*"
     r"(?:with|to)\b"
     r"|\b(?:ask|check|confirm|clarify|raise\s+it)\s+(?:with|to)\s+"
-    r"(?:him|her|them|vinish|[a-z][\w.'-]*)"
+    r"(?:him|her|them|alex|[a-z][\w.'-]*)"
     r"|\b(?:ask|ping|message|msg|dm|reply\s+to|respond\s+to|follow\s+up\s+with)\s+"
     r"(?:him|her|them|[a-z][\w.'-]*)"
     r"|\bget\s+(?:his|her|their)\s+(?:view|opinion|take|input|thoughts|confirmation)\b"
@@ -141,6 +141,31 @@ def asked_to_talk(text: str) -> bool:
     return _asked(_TALK, text or "") or asked_to_call(text)
 
 
+#: A file he wants in his hands: a sheet, a deck, a document, a PDF.
+#:
+#: Found live on 16 Sep. Asked for "a short deck of my open tasks — and send it",
+#: the chat brain read the repository for five minutes and then spawned a CODE
+#: TASK to write the deck with a script. Every one of those minutes was spent
+#: rebuilding a tool it already had, and the thing he asked for never arrived.
+#: Same shape as 27 August: the act he named does not happen, a heavier and
+#: repo-touching one does, and he learns about it afterwards.
+_FILE_NOUN = re.compile(
+    r"\b(excel|spread\s?sheet|xlsx|csv|deck|slides?|power\s?point|pptx|"
+    r"pdf|word\s+doc\w*|docx|sheet)\b", re.I)
+#: "make me…", "send it as…", "turn that into…" — he is asking to be GIVEN a file,
+#: not for the code that makes files to be changed.
+_FILE_VERB = re.compile(
+    r"\b(make|create|give|send|share|put|turn|export|generate|produce|prepare|"
+    r"draft|write\s+(?:me|up)?)\b", re.I)
+
+
+def asked_for_a_file(text: str) -> bool:
+    """Did he ask to be handed a file? Both halves must be there, so "the pdf
+    parser is broken" is not mistaken for "give me a pdf"."""
+    text = text or ""
+    return bool(_FILE_NOUN.search(text) and _FILE_VERB.search(text))
+
+
 def substitution(turn_text: str, kind: str, repos: tuple[str, ...] = ()) -> str:
     """Why this background task replaces what he actually asked for, or "".
 
@@ -153,12 +178,21 @@ def substitution(turn_text: str, kind: str, repos: tuple[str, ...] = ()) -> str:
     which is nothing like a branch he never approved. So it holds only when he
     asked for a person and asked for no code:
 
-        "call Vinish and discuss the comments"     -> blocked, he wanted a call
-        "call Vinish, then fix the ETA validation" -> allowed, he asked for both
+        "call Alex and discuss the comments"     -> blocked, he wanted a call
+        "call Alex, then fix the ETA validation" -> allowed, he asked for both
         "fix the ETA validation"                   -> allowed, no person named
     """
     if kind != "code" or not (turn_text or "").strip():
         return ""
+    if (asked_for_a_file(turn_text)
+            and not work_intent.is_work_assignment(turn_text, repos)):
+        return ("You asked me for a file, not for a change to a repository. I'm not "
+                "spawning a code task to write it — `make_file` does exactly this: "
+                "decide the rows and the title yourself and call it, and code writes "
+                "the file, checks what it wrote and sends it to him.\n\n"
+                "kind: xlsx | csv | md | docx | pptx | pdf. If the repository really "
+                "does need changing as well, say so and spawn that alongside — not "
+                "in place of the file.")
     if not asked_to_talk(turn_text):
         return ""
     if work_intent.is_work_assignment(turn_text, repos) or _ALSO_WORK.search(turn_text):

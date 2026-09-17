@@ -12,6 +12,13 @@ One code change, end to end. Work in stages and stop where told.
 from cache, so *fewer turns* is the single biggest cost lever — bigger than being
 clever inside a turn. Read once, batch, and never re-derive.
 
+## Branch
+Asta has already cut your branch and checked it out in every repo of your own
+worktree — the "THIS RUN" block names it. Commit there. Never `git checkout -b`,
+never switch branch, and never report yourself blocked for want of a branch: you
+have one. If the change reaches a repo you have no checkout for, SAY SO by name
+and stop — Asta prepares it and continues this same task. Do not start a new one.
+
 ## Boot
 Load orientation in ONE call if the workspace provides a boot command (Asta
 passes it under "This run"). Otherwise read the context index once. Never `cat`

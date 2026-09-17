@@ -4,8 +4,8 @@ Both were found in his live state, not imagined. Three approval requests had
 stacked up unanswered —
 
     🔎 Cyber Security Team asked about something new
-    🔎 Ayontika Bhattacharyya asked about something new
-    🔎 Vinish Kumar asked about something new
+    🔎 Wren Marsh asked about something new
+    🔎 Alex Kumar asked about something new
 
 — and not one of them was worth asking about. A company-wide "Action Required"
 mail, a channel post beginning "Everyone please review PR", and a bare link to a
@@ -14,9 +14,9 @@ word inside the URL. A queue of questions he never answers teaches him to ignore
 the queue, and then the one that matters is ignored too.
 
 The recipient half is worse because it is silent. What he approves is the NAME the
-model typed; Teams opens whatever that name resolves to. "Divya" resolves to a
-real, EMPTY 1:1, while the person he actually talks to is "Palikala Divya
-Maheswari" — the message goes to the wrong person and the approval looks entirely
+model typed; Teams opens whatever that name resolves to. "Blake" resolves to a
+real, EMPTY 1:1, while the person he actually talks to is "Stone Blake
+Rivers" — the message goes to the wrong person and the approval looks entirely
 normal.
 """
 
@@ -32,7 +32,7 @@ from app import main, responder, store
 @pytest.mark.parametrize("who,text", [
     ("Cyber Security Team",
      "Action Required: Review Confluence & Jira Space Permissions Before AI Search"),
-    ("Ayontika Bhattacharyya",
+    ("Wren Marsh",
      "Everyone please review PR for the fix of BEPTELIKOS-10501"),
     ("Release Bot", "Dear all, the deployment window closes at 6pm. Do not reply."),
 ])
@@ -42,8 +42,8 @@ def test_a_broadcast_is_never_turned_into_an_approval(who, text):
 
 
 @pytest.mark.parametrize("who,text", [
-    ("Vinish Kumar", "can you check the production temporal bookings struck"),
-    ("Rupesh Kumar", "Arunkumar can you confirm the ETA fix"),
+    ("Alex Kumar", "can you check the production temporal bookings struck"),
+    ("Noor Kumar", "Arunkumar can you confirm the ETA fix"),
 ])
 def test_a_real_ask_is_not_swept_up_as_a_broadcast(who, text):
     """The gate must not become "ignore everything" — that loses the ones that
@@ -52,10 +52,10 @@ def test_a_real_ask_is_not_swept_up_as_a_broadcast(who, text):
 
 
 def test_a_word_inside_a_link_does_not_classify_the_message():
-    """"https://github.com/VinishKumar1/incident-copilot" was read as a production
+    """"https://github.com/example-dev/incident-copilot" was read as a production
     INCIDENT and queued an approval, on the strength of a repository name."""
     assert responder.what_it_asks(
-        "https://github.com/VinishKumar1/incident-copilot") == ""
+        "https://github.com/example-dev/incident-copilot") == ""
 
 
 def test_the_same_words_outside_a_link_still_count():
@@ -77,8 +77,8 @@ def test_a_broadcast_is_refused_with_a_reason_he_could_read(monkeypatch):
 @pytest.fixture(autouse=True)
 def _threads(monkeypatch):
     monkeypatch.setattr(main, "_known_threads",
-                        lambda: ["Vinish Kumar", "Palikala Divya Maheswari",
-                                 "Komal Jayswal"])
+                        lambda: ["Alex Kumar", "Stone Blake Rivers",
+                                 "Dana Frost"])
 
 
 def _warn(to):
@@ -86,19 +86,19 @@ def _warn(to):
 
 
 def test_the_exact_thread_he_uses_passes_silently():
-    assert _warn("Palikala Divya Maheswari") == ""
+    assert _warn("Stone Blake Rivers") == ""
 
 
 def test_a_short_name_that_is_not_his_thread_is_flagged():
-    """His live case. "Divya" opens a different, empty chat."""
-    out = _warn("Divya")
-    assert "Palikala Divya Maheswari" in out
+    """His live case. "Blake" opens a different, empty chat."""
+    out = _warn("Blake")
+    assert "Stone Blake Rivers" in out
     assert "different chat" in out
 
 
 def test_a_name_matching_several_threads_asks_for_the_full_one():
     import app.main as m
-    m._known_threads = lambda: ["Vinish Kumar", "Rajendra Kumar"]
+    m._known_threads = lambda: ["Alex Kumar", "Sasha Kumar"]
     out = _warn("Kumar")
     assert "matches 2" in out and "in full" in out
 
@@ -122,19 +122,19 @@ def test_email_is_left_alone():
 # --- a call reaches the same wrong person, louder -----------------------------
 
 def test_a_short_name_resolves_to_the_person_he_talks_to(monkeypatch):
-    """Teams' own search ranks a 1:1 titled "Divya" — a real chat with no messages
-    in it — above "Palikala Divya Maheswari". His rail is the better authority."""
+    """Teams' own search ranks a 1:1 titled "Blake" — a real chat with no messages
+    in it — above "Stone Blake Rivers". His rail is the better authority."""
     from app import contacts
     monkeypatch.setattr(contacts, "known_threads",
-                        lambda limit=800: ["Vinish Kumar", "Palikala Divya Maheswari"])
-    assert contacts.resolve_name("divya")[0] == "Palikala Divya Maheswari"
+                        lambda limit=800: ["Alex Kumar", "Stone Blake Rivers"])
+    assert contacts.resolve_name("blake")[0] == "Stone Blake Rivers"
 
 
 def test_an_exact_name_is_left_alone(monkeypatch):
     from app import contacts
     monkeypatch.setattr(contacts, "known_threads",
-                        lambda limit=800: ["Vinish Kumar", "Divya", "Palikala Divya Maheswari"])
-    assert contacts.resolve_name("Divya")[0] == "Divya"
+                        lambda limit=800: ["Alex Kumar", "Blake", "Stone Blake Rivers"])
+    assert contacts.resolve_name("Blake")[0] == "Blake"
 
 
 def test_an_ambiguous_name_is_left_undecided(monkeypatch):
@@ -142,7 +142,7 @@ def test_an_ambiguous_name_is_left_undecided(monkeypatch):
     — especially for a call, which rings them."""
     from app import contacts
     monkeypatch.setattr(contacts, "known_threads",
-                        lambda limit=800: ["Vinish Kumar", "Rajendra Kumar"])
+                        lambda limit=800: ["Alex Kumar", "Sasha Kumar"])
     settled, near = contacts.resolve_name("kumar")
     assert settled == "" and len(near) == 2
 
@@ -157,7 +157,7 @@ def test_calling_an_ambiguous_name_refuses_rather_than_ringing_someone(monkeypat
     # name resolution.
     monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
     monkeypatch.setattr(contacts, "resolve_name",
-                        lambda n: ("", ["Vinish Kumar", "Rajendra Kumar"]))
+                        lambda n: ("", ["Alex Kumar", "Sasha Kumar"]))
     monkeypatch.setattr(meetings, "_CALL", {})
     with pytest.raises(RuntimeError, match="say which one"):
         asyncio.run(meetings.call_person("kumar"))

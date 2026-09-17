@@ -289,7 +289,8 @@ async def post_review(pr: str, workspace: str, repo: str = "",
     return f"{verb} PR #{pr.lstrip('#')}"
 
 
-async def review_own_diff(diff: str, workspace: str = "") -> str:
+async def review_own_diff(diff: str, workspace: str = "", reviewer: str = "",
+                          cwd: str = "") -> str:
     """Reviewer notes on a diff ASTA just wrote. '' when nothing can judge it.
 
     The same machinery that reviews other people's pull requests, pointed at
@@ -314,10 +315,34 @@ async def review_own_diff(diff: str, workspace: str = "") -> str:
         "anything left half-done. No summary of what the change does — Arun can read "
         "the diff. If you genuinely find nothing wrong, reply with exactly: LOOKS SOUND.\n\n"
         "DIFF:\n" + untrusted.wrap(_prioritise_diff(body), "diff written by Asta"))
-    notes = (await memory.cheap_complete(prompt, 500, paid_ok=True) or "").strip()
+    notes = ""
+    if reviewer:
+        notes = await _second_brain(reviewer, prompt, cwd)
+    if not notes:
+        notes = (await memory.cheap_complete(prompt, 500, paid_ok=True) or "").strip()
     if not notes or notes.upper().startswith("LOOKS SOUND"):
         return ""
     return notes
+
+
+async def _second_brain(reviewer: str, prompt: str, cwd: str) -> str:
+    """The review, read by a brain OTHER than the one that wrote the change.
+
+    A model grading its own diff shares every blind spot that produced it. A
+    different model, with the repo open and writing denied, is the cheapest
+    second pair of eyes there is. '' on any failure — the caller falls back.
+    """
+    from . import claude_cli, copilot_cli
+    cli = {"claude": claude_cli, "copilot": copilot_cli}.get(reviewer)
+    if cli is None:
+        return ""
+    try:
+        return (await cli.one_shot(prompt.replace("You wrote this change.",
+                                                  "A colleague's AI wrote this change."),
+                                   cwd=cwd or None, timeout=300, effort="medium",
+                                   plan_only=True) or "").strip()
+    except Exception:                                   # noqa: BLE001
+        return ""
 
 
 #: How a merge is performed. These repos squash by default; a merge commit per

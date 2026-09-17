@@ -112,10 +112,35 @@ async def _outlook_bits() -> tuple[list[str], list[str]]:
 
 # --- morning brief -----------------------------------------------------------
 
+def yesterday_line(cutoff: float) -> str:
+    """One line for what happened while he was not watching — P5's "one morning line".
+
+    Handled, waiting, done alone, read-not-buzzed: the four numbers that say
+    whether yesterday was worth the interruptions it cost him.
+    """
+    from . import authority, digest, store as store_mod
+    rows = store_mod.list_tasks(limit=200)
+    handled = sum(1 for t in rows if t["status"] in ("done", "shipped", "merged")
+                  and float(t.get("finished_at") or 0) >= cutoff)
+    waiting = sum(1 for t in rows if t["status"] == "awaiting_approval")
+    alone = sum(1 for o in store_mod.recent_outcomes(300)
+                if o["kind"] == "authority" and o["outcome"] == "used"
+                and o["created_at"] >= cutoff)
+    quiet_items = len(digest.pending())
+    bits = [f"{handled} handled", f"{waiting} need you"]
+    if alone:
+        bits.append(f"{alone} done under your standing permissions "
+                    f"({len(authority.grants())} granted)")
+    if quiet_items:
+        bits.append(f"{quiet_items} read, not buzzed")
+    return "Yesterday: " + ", ".join(bits) + "."
+
+
 async def morning_brief() -> str:
     day = dt.date.today().strftime("%a %d %b")
     cutoff = time.time() - 24 * 3600
-    parts = [f"☀️ Morning brief — {day}"]
+    parts = [f"☀️ Morning brief — {day}", yesterday_line(cutoff)]
+    parts = [p for p in parts if p]
 
     done_tasks = _finished_since(store.list_tasks(), "finished_at", cutoff)
     done_missions = [m for m in store.list_missions()
@@ -176,37 +201,73 @@ async def morning_brief() -> str:
 # --- standup -----------------------------------------------------------------
 
 async def standup_draft() -> str:
-    commits = await _recent_commits("yesterday.midnight")
-    cutoff = time.time() - 24 * 3600
-    done = [f"task: {t['title']} ({t['status']})"
-            for t in _finished_since(store.list_tasks(), "finished_at", cutoff)]
-    done += [f"mission: {m['title']} ({m['status']})"
-             for m in store.list_missions()
-             if m["status"] in ("done", "failed") and m["updated_at"] >= cutoff]
-    jira_lines = await _jira_recent()
+    """His standup: tickets assigned to him in the CURRENT SPRINT, and nothing else.
 
-    facts = []
-    for repo, lines in commits.items():
-        facts.append(f"{repo} commits:\n" + "\n".join("  " + l for l in lines[:10]))
-    if done:
-        facts.append("Assistant work finished:\n" + "\n".join("  " + d for d in done))
-    if jira_lines:
-        facts.append("Jira updated:\n" + "\n".join("  " + l for l in jira_lines))
-    if not facts:
-        return ("Standup draft: no commits, finished work or Jira movement since "
-                "yesterday — say what you worked on and I'll phrase it.")
+    His words, 17 Sep: "Don't include PR review or some file opening anything
+    related in standup, there u should mention only related to the tickets which
+    gets assigned to u .. remember this always" — and then "That also in the
+    current sprint".
 
-    raw = "\n\n".join(facts)
+    It used to be built from three things he does not want in it: repo commits,
+    Asta's own finished tasks (PR reviews, a deck, an investigation) and every
+    Jira update regardless of sprint. He said so to Asta, a brain agreed and
+    "saved" it into its own notes — and this function never read those notes, so
+    the next standup would have been the same. The rule lives here now, in the
+    code that builds it.
+    """
+    if not jira.configured():
+        return "Standup: Jira isn't set up, so there are no sprint tickets to report."
     try:
-        return await copilot_cli.one_shot(
-            "Draft a concise daily standup update (plain text, three sections: "
-            "Yesterday / Today / Blockers) from this real activity log. Group related "
-            "commits, drop noise (merge commits, version bumps). For 'Today' infer "
-            "likely continuations; for 'Blockers' write 'none' unless the log shows "
-            "one. Max 10 lines total. Output only the standup.\n\n" + raw,
+        tickets = await jira.current_sprint()
+    except jira.JiraAuthError as exc:
+        # Empty-because-rejected must never read as a quiet sprint.
+        return f"Standup: I can't read Jira right now — {exc}"
+    except RuntimeError as exc:
+        return f"Standup: {exc}"
+    if not tickets:
+        return "Standup: nothing assigned to you in the current sprint."
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+
+    def moved(t: dict) -> bool:
+        try:
+            when = dt.datetime.strptime((t.get("updated") or "")[:19], "%Y-%m-%dT%H:%M:%S")
+            return when.replace(tzinfo=dt.timezone.utc) >= cutoff
+        except ValueError:
+            return False
+
+    # What is MOVING. A sprint can stay "open" long after its work is finished —
+    # the first live run brought back 18 Done tickets from months ago out of 21.
+    # Finished counts only if it finished in the last day.
+    def finished(t: dict) -> bool:
+        return (t.get("status") or "").strip().lower() in (
+            "done", "closed", "resolved", "cancelled", "won't do", "rejected")
+
+    current = [t for t in tickets if not finished(t) or moved(t)]
+    if not current:
+        return "Standup: nothing in progress in the current sprint, and nothing moved yesterday."
+    lines = [f"{t['key']} [{t.get('status') or '?'}] {t.get('summary') or ''}"
+             + ("  (moved in the last day)" if moved(t) else "")
+             for t in current]
+    raw = "TICKETS\n" + "\n".join(lines)
+    from . import agent
+    try:
+        phrased = await agent.one_shot_any(
+            "Draft Arun's daily standup (plain text, three short sections: "
+            "Yesterday / Today / Blockers). Use ONLY the Jira tickets below — the "
+            "ones assigned to him in the current sprint. Do NOT mention PR reviews, "
+            "code reviews, file or document work, commits, or anything Asta did "
+            "for him: he has said the standup is only about his sprint tickets. "
+            "Yesterday = tickets marked as moved; Today = the rest that are not "
+            "done; Blockers = anything whose status says blocked, else 'none'. "
+            "Max 8 lines. Output only the standup.\n\n" + raw,
             timeout=120)
+        # His guardrails: no code blocks on WhatsApp. The first live standup came
+        # back wrapped in a ``` fence regardless of "plain text".
+        return re.sub(r"^\s*```[a-z]*\s*\n?|\n?\s*```\s*$", "", phrased.strip()).strip()
     except Exception:
-        return "Standup draft (raw activity — Copilot unavailable):\n\n" + raw[:1500]
+        return "Standup (your sprint tickets — the brain was unavailable to phrase it):\n\n" \
+            + "\n".join(lines)
 
 
 # --- pre-meeting heads-up ----------------------------------------------------

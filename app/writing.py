@@ -1,6 +1,6 @@
 """Making a drafted message read like Arun wrote it, and links that work.
 
-Two faults in one real message he shared, sent to Vinish:
+Two faults in one real message he shared, sent to Alex:
 
     Raised the fix for BEPTELIKOS-10159 — PR #1371: https://github.com/…/pull/1371.
     CANCELLED bookings (regardless of timeout flag) and bookings with
@@ -89,7 +89,7 @@ _TICS = ("na", "u", "ur", "once", "pls", "wont", "ok")
 #: Words that address the person being written to. These do NOT travel.
 #:
 #: "bro" appears 35 times in his history and every one of them is in one chat,
-#: with Vinish. Pooling his messages and calling it "his voice" would put that
+#: with Alex. Pooling his messages and calling it "his voice" would put that
 #: word in front of every colleague he has — and the fix is not to guess which
 #: ones it suits. Guessing that from a name means inferring someone's gender
 #: from their name, which is both wrong often and not something to automate.
@@ -108,7 +108,7 @@ sir madam maam ma'am
 #:
 #: Left out deliberately —
 #:   "all", "team", "everyone", "guys": ordinary words far more often than
-#:     vocatives. "all" was being learned as one of his terms for Vinish purely
+#:     vocatives. "all" was being learned as one of his terms for Alex purely
 #:     because he writes "all merged" and "all sorted", and stripping it turned
 #:     "all merged bro" into "merged";
 #:   "man", "boss": "the man page", "boss of the queue";

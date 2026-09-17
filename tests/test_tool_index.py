@@ -20,13 +20,13 @@ def _sel(query):
 
 
 def test_selection_is_actually_narrower():
-    picked = _sel("any messages from Vinish?")
+    picked = _sel("any messages from Alex?")
     assert picked is not None
     assert len(picked) < len(capabilities.registry()) / 2
 
 
 @pytest.mark.parametrize("query,expected", [
-    ("any messages from Vinish?", "teams_activity"),
+    ("any messages from Alex?", "teams_activity"),
     ("comment on ABC-123 that it's done", "jira_comment"),
     ("remind me to call the team at 5pm", "set_reminder"),
     ("what is broken right now", "health_check"),
@@ -60,7 +60,7 @@ def test_no_signal_means_everything_not_nothing():
 
 def test_disabled_by_env(monkeypatch):
     monkeypatch.setenv("ASTA_TOOL_RAG", "0")
-    assert _sel("any messages from Vinish") is None
+    assert _sel("any messages from Alex") is None
 
 
 @pytest.mark.parametrize("a,b", [
@@ -93,8 +93,8 @@ def test_sticky_selection_is_stable_while_the_subject_is():
     so it happens roughly once every eight new tools rather than on every turn,
     which is what sitting exactly at the cap would have caused.
     """
-    first = tool_index.select_sticky("conv1", "any messages from Vinish?")
-    again = tool_index.select_sticky("conv1", "any messages from Vinish?")
+    first = tool_index.select_sticky("conv1", "any messages from Alex?")
+    again = tool_index.select_sticky("conv1", "any messages from Alex?")
     assert first is not None and again is not None
     assert set(first) == set(again), \
         "the same question twice produced a different tool block, so a turn that " \
@@ -106,7 +106,7 @@ def test_a_conversation_never_grows_to_the_whole_registry():
     from app import capabilities
     tool_index.forget("growth")
     sizes = []
-    for q in ["messages from Vinish", "comment on ABC-123", "check the CI",
+    for q in ["messages from Alex", "comment on ABC-123", "check the CI",
               "draft a mail", "trace a booking", "what is on my calendar"]:
         sel = tool_index.select_sticky("growth", q)
         sizes.append(len(capabilities.registry()) if sel is None else len(sel))
@@ -115,14 +115,14 @@ def test_a_conversation_never_grows_to_the_whole_registry():
 
 
 def test_sticky_is_per_conversation():
-    a = tool_index.select_sticky("convA", "any messages from Vinish?")
+    a = tool_index.select_sticky("convA", "any messages from Alex?")
     b = tool_index.select_sticky("convB", "what is broken right now")
     assert a is not None and b is not None
     assert set(a) != set(b)
 
 
 def test_forget_resets_a_conversation():
-    tool_index.select_sticky("convC", "any messages from Vinish?")
+    tool_index.select_sticky("convC", "any messages from Alex?")
     tool_index.forget("convC")
     assert "convC" not in tool_index._sticky
 
@@ -197,7 +197,7 @@ def test_cache_is_reused_and_invalidated_by_description_changes(monkeypatch, tmp
 def test_embedding_failure_falls_back_to_lexical(monkeypatch, tmp_path):
     monkeypatch.setattr(tool_index, "CACHE", tmp_path / "x.json")
     monkeypatch.setattr("app.memory.local_embed", lambda texts: None)
-    picked = tool_index.select("any messages from Vinish?")
+    picked = tool_index.select("any messages from Alex?")
     assert picked is not None and "teams_activity" in picked
 
 

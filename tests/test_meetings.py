@@ -186,6 +186,9 @@ def test_speaking_outside_a_call_is_refused(monkeypatch):
     # Arun's laptop — where .env supplies a real device — and failed on CI, which
     # has none. Patch the name the code actually reads.
     monkeypatch.setattr(voice, "CALL_DEVICE", "BlackHole 2ch")
+    # A voice needs the Voicebox service too (`can_speak` asks both). It was
+    # running on Arun's laptop, which is the only reason this ever passed there.
+    monkeypatch.setattr(voice, "service_up", lambda: True)
     store.kv_set("teams_in_call", "")
     with pytest.raises(RuntimeError, match="not in a call"):
         asyncio.run(meetings.say_in_call("hello"))
@@ -195,6 +198,7 @@ def test_silent_speech_generation_is_not_reported_as_spoken(monkeypatch):
     """Audio that came back empty means nothing was said, whatever the pipeline
     thought it was doing."""
     monkeypatch.setattr(voice, "CALL_DEVICE", "BlackHole 2ch")
+    monkeypatch.setattr(voice, "service_up", lambda: True)
     store.kv_set("teams_in_call", "https://teams/x")
 
     async def nothing(text, profile="", engine="", voice=""):

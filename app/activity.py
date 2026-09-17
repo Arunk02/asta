@@ -32,10 +32,25 @@ _DONE_ICON = {"done": "✅", "failed": "❌", "cancelled": "⏹", "rejected": "�
               "awaiting_approval": "⏸"}
 
 # Deliberately narrow: only phrasings that are unambiguously "what are you doing",
-# so a real question never gets swallowed by a canned answer.
+# so a real question never gets swallowed by a canned answer. The `$` anchor is
+# what keeps it safe — "what are you doing about the PR?" is a real question and
+# does not match, because it carries an object.
+#
+# It was TOO narrow, though, and the miss was expensive: at 22:45 he asked "got
+# it what u doing ?" four minutes into a live turn, and because neither the "got
+# it" lead-in nor the texted "u" matched, it went to the brain — where it queued
+# behind the very turn it was asking about and was never answered at all. He
+# types the way he texts, and an acknowledgement in front of a question is
+# normal speech, not a different question.
+_LEAD = r"(?:ok(?:ay)?|k|got\s*it|right|cool|hey|so|and|hi)?[\s,.]*"
 _STATUS_ASK = re.compile(
-    r"^\s*(what(?:'s| is)?\s+(?:the\s+)?(?:update|status|going on|happening)"
-    r"|any\s+update|status|progress|are you (?:done|still working)|done\s*\?)\s*[?.!]*\s*$",
+    r"^\s*" + _LEAD +
+    r"(what(?:'s| is|s)?\s+(?:the\s+)?(?:update|status|going on|happening)"
+    r"|w(?:h)?at(?:'s| is|s)?\s+(?:are\s+)?(?:you|u|ya)\s+(?:doing|up\s*to|upto|on)"
+    r"|any\s+update|any\s?thing\s+yet|status|progress"
+    r"|(?:are\s+)?(?:you|u)\s+(?:done|there|still\s+(?:working|going|on\s+it))"
+    r"|still\s+(?:working|going|running|on\s+it)"
+    r"|how\s+(?:long|far)|done\s*\?)\s*[?.!]*\s*$",
     re.I,
 )
 
@@ -61,6 +76,28 @@ _REDIRECT = re.compile(
     re.I)
 
 # Augment = "keep going, and also…". Additive / refinement cues.
+#: "New task ..." — he is starting a SEPARATE piece of work, not adding to the
+#: running one. There was no detector for this at all, and the consequence was
+#: not subtle: on 9 September every message he sent while task #117 was live got
+#: folded into it, including one that literally began "New task". #117 was the
+#: BookingEquipment equals/hashCode fix; what it ended up holding was a set of
+#: clarifying questions about creating three Kafka topics in a different repo.
+#: Its DONE push then carried one task's title over another task's body, and its
+#: PLAN did the same — a plan he could have approved into the wrong repo.
+#:
+#: Worse, `_ADD` MATCHED some of these: "new task: add a retry to the client"
+#: classified as `augment` on the word "add". So an explicit instruction to start
+#: something separate was not merely unnoticed, it was read as the opposite.
+#:
+#: Checked before redirect and add, because it overrides both. The lookbehinds
+#: keep it to the INSTRUCTION — "the new task is failing" is a question about
+#: work already running, not an order to start more.
+_NEW_TASK = re.compile(
+    r"(?<!the )(?<!that )(?<!this )(?<!your )\bnew task\b"
+    r"|\b(?:separate|another|different) task\b"
+    r"|\bas a (?:new|separate|fresh) (?:task|job)\b",
+    re.I)
+
 _ADD = re.compile(
     r"\b(also|and also|additionally|as well|plus\b|one more( thing)?|another( thing)?|"
     r"on top of that|in addition|besides that|don'?t forget( to)?|make sure( to| you)?|"
@@ -107,20 +144,52 @@ def is_read_only_ask(text: str) -> bool:
     return bool(_ASKS.match(t) or t.endswith("?"))
 
 
+#: How far into a message an "also"/"as well" can sit and still mean "add this to
+#: what you are already doing", and how short a message has to be to count as a
+#: fragment whatever the cue's position.
+_ADD_LEAD = 40
+_ADD_FRAGMENT = 70
+
+
+def _is_addition(t: str) -> bool:
+    """An augment cue that actually means "and also do this".
+
+    `_ADD` matched the cue ANYWHERE, and "as well" is the ordinary English tail
+    of a complete instruction. So "Can you update the topic details in the
+    booking and ap and raise PR and inform Alex as well" — a whole piece of
+    work, its own repos, its own recipient — was folded into task #117, a
+    different task in a different repo, on the strength of its last two words.
+
+    A real addition either LEADS with its cue ("also add a null test", "while
+    you're at it…") or is a fragment short enough to be nothing else ("add the
+    ACL too"). A long multi-clause instruction that happens to end "as well" is
+    a request, not an amendment.
+    """
+    m = _ADD.search(t or "")
+    if not m:
+        return False
+    return m.start() <= _ADD_LEAD or len(t.strip()) <= _ADD_FRAGMENT
+
+
 def classify_interjection(text: str) -> str:
     """How a follow-up sent mid-turn relates to the work already running:
-    'status' (just asking for progress), 'augment' (fold in, keep working),
-    'redirect' (stop — it's wrong now), 'independent' (a read-only question with
-    no bearing on it — answer it alongside), or 'ambiguous' (caller decides)."""
+    'status' (just asking for progress), 'new_task' (a SEPARATE piece of work —
+    leave the running one alone), 'augment' (fold in, keep working), 'redirect'
+    (stop — it's wrong now), 'independent' (a read-only question with no bearing
+    on it — answer it alongside), or 'ambiguous' (caller decides)."""
     t = (text or "").strip()
     if not t:
         return "augment"
     if is_status_ask(t):
         return "status"
+    # Before BOTH of the below, because it overrides both: "new task, stop doing
+    # X" still starts a new task, and "new task: add a retry" is not an add.
+    if _NEW_TASK.search(t):
+        return "new_task"
     # Redirect wins over add: "no, also do X" is still fundamentally a redirect.
     if _REDIRECT.search(t):
         return "redirect"
-    if _ADD.search(t):
+    if _is_addition(t):
         return "augment"
     # Only ever narrows what would otherwise be "ambiguous", so nothing that used
     # to fold in or redirect can start running concurrently instead.

@@ -1,8 +1,8 @@
-"""Holding a real two-way call — the four ways it went wrong in front of Vinish.
+"""Holding a real two-way call — the four ways it went wrong in front of Alex.
 
 Each test here is a thing he reported, in his words or Arun's:
 
-    "it called vinish , nothing was spoken"
+    "it called alex , nothing was spoken"
     "he not able to hear u , what he speaking i can able to hear"
     "he keep on asking questions, nothing was spoken"
     "if persons not takes and it reaches till the end , it is not cutting the call"
@@ -42,7 +42,7 @@ class _Meetings:
 
     async def poll_captions(self, page, lines):
         if self._heard:
-            lines.append({"speaker": "Vinish Kumar", "text": self._heard.pop(0)})
+            lines.append({"speaker": "Alex Kumar", "text": self._heard.pop(0)})
 
     def speaker_is_arun(self, speaker):
         return "arun" in (speaker or "").lower()
@@ -98,22 +98,22 @@ def test_nobody_answered_means_nothing_is_spoken(fake):
     """"if persons not takes and it reaches till the end, it is not cutting the
     call" — and worse, it used to talk to the voicemail."""
     m = fake(answer="no answer")
-    out = asyncio.run(conversation.converse("Vinish", "the 1409 review"))
+    out = asyncio.run(conversation.converse("Alex", "the 1409 review"))
     assert m.said == [], "spoke into a call nobody answered"
     assert "no answer" in out
 
 
 def test_an_unknown_state_is_not_treated_as_no_answer(fake):
-    """The bug that cut Vinish off mid-sentence: "unknown" means the detector could
+    """The bug that cut Alex off mid-sentence: "unknown" means the detector could
     not tell, not that the line is dead. Hanging up on it is the destructive read."""
     m = fake(answer="unknown", heard=["yeah I am here, what is it"])
-    asyncio.run(conversation.converse("Vinish", "the 1409 review"))
+    asyncio.run(conversation.converse("Alex", "the 1409 review"))
     assert m.said, "hung up on a live call because the state was unreadable"
 
 
 def test_it_opens_the_conversation_itself(fake):
     m = fake(answer="answered", heard=["sure, go ahead"])
-    asyncio.run(conversation.converse("Vinish", "the 1409 review comments"))
+    asyncio.run(conversation.converse("Alex", "the 1409 review comments"))
     assert m.said
     assert "Arun" in m.said[0]
     assert "the 1409 review comments" in m.said[0]
@@ -130,20 +130,20 @@ def test_it_answers_what_they_actually_said(fake, monkeypatch):
 
     m = fake(answer="answered", heard=["the ETA check returns true even when nothing applied"])
     monkeypatch.setattr(conversation, "answer_from_knowledge", _brain)
-    asyncio.run(conversation.converse("Vinish", "PR 1409"))
+    asyncio.run(conversation.converse("Alex", "PR 1409"))
     assert "returns true even when nothing applied" in seen["prompt"]
     assert "understood, I'll pass that to Arun" in m.said
 
 
 def test_silence_from_the_brain_is_still_spoken_aloud(fake, monkeypatch):
-    """A colleague talking to forty seconds of nothing is the failure Vinish hit.
+    """A colleague talking to forty seconds of nothing is the failure Alex hit.
     If the brain dies, SAY so — do not just hold the line."""
     async def _boom(prompt, ws=""):
         raise RuntimeError("brain down")
 
     m = fake(answer="answered", heard=["so what do you want to do about it"])
     monkeypatch.setattr(conversation, "answer_from_knowledge", _boom)
-    asyncio.run(conversation.converse("Vinish", "PR 1409"))
+    asyncio.run(conversation.converse("Alex", "PR 1409"))
     assert any("check with Arun" in s for s in m.said), m.said
 
 
@@ -156,7 +156,7 @@ def test_the_call_is_always_hung_up(fake, monkeypatch):
     m = fake(answer="answered", heard=["hello"])
     monkeypatch.setattr(conversation, "answer_from_knowledge", _boom)
     with pytest.raises(BaseException):
-        asyncio.run(conversation.converse("Vinish", "PR 1409"))
+        asyncio.run(conversation.converse("Alex", "PR 1409"))
     assert m.left, "the call was left open"
 
 
@@ -164,7 +164,7 @@ def test_a_mute_call_is_reported_as_a_call_not_a_discussion(fake):
     """"i donr see he able to hear u , even i cant hear u , so whole convo was mute."
     Reporting that as a successful discussion is the lie that cost four attempts."""
     m = fake(answer="answered", heard=[])
-    out = asyncio.run(conversation.converse("Vinish", "PR 1409"))
+    out = asyncio.run(conversation.converse("Alex", "PR 1409"))
     assert "captured nothing back" in out
     assert "not a discussion" in out
 
@@ -180,7 +180,7 @@ def test_it_never_commits_arun_to_anything(fake, monkeypatch):
 
     fake(answer="answered", heard=["can arun get this merged today"])
     monkeypatch.setattr(conversation, "answer_from_knowledge", _brain)
-    asyncio.run(conversation.converse("Vinish", "PR 1409"))
+    asyncio.run(conversation.converse("Alex", "PR 1409"))
     assert "never invent a fact about Arun's intentions" in seen["prompt"].lower() \
         or "Never invent a fact about Arun's intentions" in seen["prompt"]
 
@@ -192,7 +192,7 @@ def test_a_call_that_never_connected_says_so(fake, monkeypatch):
         raise RuntimeError("already in a call — leave that one first")
 
     m.call_person = _refuse
-    out = asyncio.run(conversation.converse("Vinish", "PR 1409"))
+    out = asyncio.run(conversation.converse("Alex", "PR 1409"))
     assert "Nothing rang" in out
     assert "already in a call" in out
 

@@ -1,0 +1,448 @@
+# Incidents Arun actually hit. Each scenario names the day it happened, so a
+# failure here is a regression against something he already paid for once.
+#
+# `gap:` marks a scenario that fails TODAY and names the phase of the
+# Astra-class plan that closes it. Removing the marker is how the plan gets
+# ticked off — a gap that starts passing is reported as "CLOSED".
+
+scenarios:
+  - id: plan-announced-as-done
+    title: A plan that ends "PLAN READY … requires your go-ahead" is a plan, not a result
+    why: >
+      11 Sep, task #121. The tail matched none of the three phrases the code
+      looked for, so a plan was pushed as "✅ DONE" with 18 files it had not
+      written, and he had to be told by hand that it was waiting.
+    setup:
+      workspace: booking
+    brains:
+      task:
+        - text: |
+            STRUCTURE
+              KafkaTopicConfig            new topic list, 6 envs
+              TopicProvisionerTest        +3 cases
+
+            FLOW
+              intake       reads the tenant file
+              provisioner  creates the topics   <- change
+
+            1. Add the six environment entries
+            2. Mirror the ACL block
+
+            RISK: a wrong partition count is only visible after the merge
+
+            PLAN READY
+
+            AUTO-PROCEED gate: this requires your go-ahead before implementation.
+    steps:
+      - spawn: {title: "create the lower-env topics", prompt: "create topics for the lower envs", kind: code, workspace: booking, as: t}
+    checks:
+      - task_status: {task: t, is: awaiting_approval}
+      - push_contains: "PLAN #"
+      - push_lacks: "✅ DONE"
+      - kv: {key: "task_gate:1", set: true}
+
+  - id: gate-does-not-swallow-later-messages
+    title: A task parked at a gate stops owning the conversation
+    why: >
+      11 Sep, task #117. Its PR had merged at 12:33 and the task still sat at a
+      gate; every message he sent afterwards was folded into it — "✚ noted for
+      task #117" — including a request about a different repo.
+    setup:
+      workspace: booking
+      tasks:
+        - {as: stale, title: "billing mapping", kind: code, status: awaiting_approval, result: "PLAN READY", age_hours: 6}
+    brains:
+      chat:
+        - {text: "The topics are not created yet."}
+    steps:
+      - say: "are the lower env topics created or not"
+    checks:
+      - reply_lacks: "noted for task"
+      - task_status: {task: stale, is: awaiting_approval}
+
+  - id: a-new-task-is-not-an-addition
+    title: A new task starts its own work and leaves the running one alone
+    why: >
+      10 Sep. A separate request was glued onto a running task as an addendum,
+      which put one task's questions under another task's title.
+    setup:
+      workspace: booking
+      tasks:
+        - {as: running, title: "transport asset priority", kind: code, status: running}
+    steps:
+      - say: "new task have to create new topic for service plan for lower env"
+    checks:
+      - reply_lacks: "adding that to what"
+      - task_status: {task: running, is: running}
+
+  - id: the-same-ask-twice-is-one-task
+    title: Asking twice while it is running does not start a second one
+    why: >
+      "yes many times it creating duplciate tasks and running" — two workers on
+      the same change, two reports, and no way to tell which diff was which.
+    setup:
+      workspace: booking
+    brains:
+      task:
+        - {text: "PLAN READY", when: "topics"}
+        - {text: "PLAN READY", when: "topics"}
+    steps:
+      - spawn: {title: "create the lower-env topics", prompt: "create topics for the lower envs", kind: code, workspace: booking, as: first}
+      - spawn: {title: "create the lower env topics", prompt: "create topics for the lower envs", kind: code, workspace: booking, as: second}
+    checks:
+      - tasks: {kind: code, count: 1, include_setup: true}
+
+  - id: a-merged-pr-ends-its-task
+    title: When the PR merges, the task is finished — once
+    why: >
+      #117 again, from the other side: nothing reconciled a merged PR with the
+      task that shipped it, so the task stayed live and kept claiming messages.
+    setup:
+      tasks:
+        - {as: shipped, title: "email service dto", kind: code, status: shipped, pr_urls: "https://github.com/x/y/pull/1425"}
+      prs:
+        - {url: "https://github.com/x/y/pull/1425", state: MERGED, merged_at: "2026-09-11T12:33:00Z"}
+    steps:
+      - tick: pr_watch
+      - tick: pr_watch
+    checks:
+      - task_status: {task: shipped, is: merged}
+      - push_count: {matching: "Merged", count: 1}
+
+  - id: an-addendum-still-joins-the-running-task
+    title: A real addition is folded in, without restarting the work
+    why: >
+      The other half of the folding fix: "also cover the amend path" while a
+      task runs IS the same task, and making him wait for it to finish would be
+      the opposite failure.
+    setup:
+      workspace: booking
+    brains:
+      chat:
+        - {text: "Working on it.", sleep: 0.4}
+    steps:
+      - say_async: "implement the transport asset priority mapping"
+      - say: "also cover the amend path"
+    checks:
+      - said_contains: "adding that to what|same task"
+
+  - id: a-named-finished-task-takes-the-feedback
+    title: Feedback naming a finished task continues THAT task
+    why: >
+      10 Sep: a message naming a task that had finished was hijacked by the one
+      still running, so the feedback landed on the wrong work.
+    setup:
+      workspace: booking
+      tasks:
+        - {as: finished, title: "email service dto", kind: code, status: done, result: "Implemented in 3 files"}
+    brains:
+      task:
+        - {text: "PLAN READY"}
+    steps:
+      - say: "#1 also add the null check on the mapper"
+    checks:
+      - said_contains: "#1|task 1"
+      - tasks: {kind: code, count: 0}
+
+  - id: two-live-tasks-ask-which-one
+    title: With two tasks live, an unnamed instruction asks which
+    why: >
+      Guessing took the newest and silently steered the wrong one — invisible on
+      WhatsApp, where every task shares one conversation.
+    setup:
+      workspace: booking
+      tasks:
+        - {as: one, title: "topics for lower env", kind: code, status: running}
+        - {as: two, title: "billing mapping", kind: code, status: running}
+    steps:
+      - say: "also cover the amend path"
+    checks:
+      - said_contains: "Which task"
+
+  - id: a-red-check-is-fixed-not-shipped
+    title: A failing check loops to fix and only then calls itself done
+    why: >
+      Every stop signal used to be the model declaring itself done, and a model
+      will do that with the tests red.
+    setup:
+      workspace: booking
+      verify:
+        - {ok: false, tail: "FAIL BookingMapperTest.amend expected <2> but was <1>"}
+        - {ok: true}
+    brains:
+      task:
+        - {text: "PLAN READY"}
+        - {text: "Implemented in 2 files"}
+        - {text: "Fixed the expectation"}
+    steps:
+      - spawn: {title: "add the amend mapping", prompt: "add the amend mapping", kind: code, workspace: booking, as: work}
+      - approve: work
+    checks:
+      - task_status: {task: work, is: done}
+      - outcome: {kind: verify, outcome: passed}
+      - push_contains: "check failed|fixing"
+
+  - id: a-check-that-stays-red-parks-for-him
+    title: Two goes at the same failure stop and ask, rather than shipping red
+    setup:
+      workspace: booking
+      verify:
+        - {ok: false, tail: "FAIL BookingMapperTest.amend expected <2> but was <1>"}
+        - {ok: false, tail: "FAIL BookingMapperTest.amend expected <2> but was <1>"}
+        - {ok: false, tail: "FAIL BookingMapperTest.amend expected <2> but was <1>"}
+    brains:
+      task:
+        - {text: "PLAN READY"}
+        - {text: "Implemented in 2 files"}
+        - {text: "Tried again"}
+        - {text: "Tried once more"}
+    steps:
+      - spawn: {title: "add the amend mapping", prompt: "add the amend mapping", kind: code, workspace: booking, as: work}
+      - approve: work
+    checks:
+      - task_status: {task: work, is: awaiting_approval}
+      - push_contains: "🔴"
+
+  - id: ci-red-is-said-once
+    title: CI going red is news; CI still being red is not
+    why: >
+      "A PR that was red an hour ago and is still red is not news, and saying so
+      every five minutes is how a useful watcher gets muted."
+    setup:
+      tasks:
+        - {as: shipped, title: "mapping change", kind: code, status: shipped, pr_urls: "https://github.com/x/y/pull/1425"}
+      prs:
+        - url: "https://github.com/x/y/pull/1425"
+          state: OPEN
+          checks: [{conclusion: FAILURE}]
+    steps:
+      - tick: pr_watch
+      - tick: pr_watch
+    checks:
+      - push_count: {matching: "CI red", count: 1}
+      - task_status: {task: shipped, is: pr_ci_failed}
+
+  - id: a-review-comment-reaches-him-with-the-words
+    title: A change request arrives with what was actually asked
+    why: >
+      "Changes requested" on its own is not something he can act on from his
+      phone.
+    setup:
+      tasks:
+        - {as: shipped, title: "mapping change", kind: code, status: shipped, pr_urls: "https://github.com/x/y/pull/1425"}
+      prs:
+        - url: "https://github.com/x/y/pull/1425"
+          state: OPEN
+          review: CHANGES_REQUESTED
+          reviews: [{author: {login: "rverma"}, body: "hash equals needs the new field too", state: CHANGES_REQUESTED}]
+    steps:
+      - tick: pr_watch
+    checks:
+      - push_contains: "hash equals"
+
+  - id: a-quota-limit-is-not-a-broken-login
+    title: Health says which ceiling was hit, and when it lifts
+    why: >
+      10 Sep: the limit reset at 14:20 and said so in its own error; Asta still
+      reported an expired login at 18:06 and sent him to fix something that was
+      never broken.
+    setup:
+      kv:
+        claude_cli_quota_down: now-600
+        claude_cli_quota_until: now+7200
+        copilot_quota_down: now-600
+        copilot_quota_exhausted: "1"
+    steps:
+      - tick: health
+    checks:
+      - health_says: ["rate-limited|renews|resets", "billing period|quota"]
+      - health_says: "no task can run"
+
+  - id: a-fresh-start-costs-no-brain
+    title: A fresh start is answered by Asta, not by a model
+    setup:
+      kv: {"claude_session:seed": "abc"}
+    steps:
+      - say: "new chat"
+    checks:
+      - brain_calls: {count: 0}
+      - said_contains: "Fresh start"
+
+  - id: a-grown-session-is-retired-before-the-next-message
+    title: A session that has grown past the cap is retired, and the thread continues
+    why: >
+      Measured 11 Sep: 232k tokens carried into every call, 48 seconds before
+      the first word, and most of the session-limit failures.
+    setup:
+      env: {ASTA_SESSION_MAX_TOKENS: 100000}
+    brains:
+      chat:
+        - {text: "Nothing outstanding.", context_tokens: 232000}
+    steps:
+      - say: "any updates for me"
+    checks:
+      - outcome: {kind: session, outcome: rotated}
+      - kv: {key: "session_recap:1", empty: true}
+
+  - id: stopping-a-task-actually-stops-it
+    title: Stopping a task ends the work rather than letting it finish anyway
+    why: >
+      A rejected task once ran to completion regardless — it kept billing model
+      turns, kept editing, and overwrote its own "rejected" row with "done".
+    setup:
+      workspace: booking
+      tasks:
+        - {as: running, title: "billing mapping", kind: code, status: running}
+    steps:
+      - say: "stop 1"
+    checks:
+      - task_status: {task: running, is_not: done}
+      - said_contains: "stop|cancel"
+
+  - id: an-offer-he-ignores-is-dropped
+    title: Changing the subject drops the open question instead of holding it
+    why: >
+      A stale question that stays armed misreads a much later "yes" as an answer
+      to something he has forgotten.
+    setup:
+      offers:
+        - {subject: "CI on the mapping PR", context: "the build failed", question: "shall I analyse it?", action: "analyse the CI failure"}
+    brains:
+      chat:
+        - {text: "The topics are in uat already."}
+    steps:
+      - say: "are the uat topics created"
+    checks:
+      - tasks: {count: 0}
+
+  - id: muting-a-health-problem-sticks
+    title: A health problem he silences stays silent
+    why: >
+      He has to be able to turn one off without turning the whole health check
+      off — otherwise the next real fault is invisible too.
+    setup:
+      kv:
+        health_problems: '["telegram"]'
+    steps:
+      - say: "ignore telegram"
+      - tick: health_report
+    checks:
+      - said_contains: "Muted telegram"
+      - push_lacks: "telegram"
+      - push_contains: "🩺"
+
+  - id: switching-brains-from-the-phone-sticks
+    title: A brain he picks from WhatsApp is the one that answers next
+    setup:
+      model: claude_cli
+    steps:
+      - say: "use copilot"
+    checks:
+      - said_contains: "copilot"
+      - brain_calls: {count: 0}
+
+  - id: a-room-wide-announcement-is-not-investigated
+    title: A message to a room is not a question for Asta
+    why: >
+      A release-triage channel's standing discussion was delivered to his phone
+      and investigated; none of it was his.
+    steps:
+      - colleague: {who: "Priya Nair", text: "team, we are deploying the release build now"}
+    checks:
+      - tasks: {count: 0}
+
+  - id: a-draft-is-sent-only-on-approve
+    title: A Teams draft waits, then goes exactly once
+    may_send: true
+    setup:
+      tasks:
+        - {as: draft, title: "reply about the schema", kind: teams_draft, status: awaiting_approval, result: "the schema is merged in 2.2.4", teams_chat: "Alex Kumar"}
+    brains:
+      chat:
+        - text: "Sent it."
+          calls:
+            - {tool: approve_task, args: {task_id: 1}}
+    steps:
+      - say: "approve task 1"
+    checks:
+      - sent: {door: teams, count: 1}
+      - task_status: {task: draft, is: sent}
+
+  - id: approving-does-not-need-a-brain
+    title: Pressing approve should not cost a model turn — or need one to be up
+    why: >
+      Until 11 Sep "approve task 1" was routed to a brain, which then called
+      approve_task. With both brains out of quota — his actual state that
+      evening — the approve button on his phone did nothing at all, and the plan
+      it was approving waited for a subscription window to reopen.
+    setup:
+      tasks:
+        - {as: draft, title: "reply about the schema", kind: teams_draft, status: awaiting_approval, result: "the schema is merged", teams_chat: "Alex Kumar"}
+    may_send: true
+    steps:
+      - say: "approve task 1"
+    checks:
+      - brain_calls: {count: 0}
+      - task_status: {task: draft, is: sent}
+
+  - id: a-labelled-work-ask-still-goes-to-the-task-lane
+    title: '"E2E check: fix the add function…" is code work, label or not — it plans, it does not edit in chat'
+    why: >
+      13 Sep, found driving the real Asta end to end: routing only recognised work
+      that STARTED with the verb, so a label in front ("E2E check: …", "Quick
+      check: …", "Task: …") sent it to a chat turn — and the chat brain fixed the
+      file through its shell, with no plan and no approval. His one unconditional rule.
+    setup:
+      workspace: booking
+    brains:
+      chat:
+        - {text: "Fixed calc.py — add was subtracting."}
+    steps:
+      - say: "E2E check: fix the add function in calc.py so the tests pass"
+    checks:
+      - tasks: {kind: code, count: 1}
+      - brain_calls: {kind: chat, count: 0}
+      - said_contains: "plan to approve before anything is written"
+
+  - id: no-to-a-staged-draft-drops-it
+    title: '"no" to a staged draft drops it — no brain, no re-staged draft'
+    why: >
+      13 Sep, live: "no" was handed to a brain as revision feedback, the brain
+      staged the draft again, and his next message was then eaten as feedback on it.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged", to: "A colleague", channel: teams}}]
+          text: "Staged — send it?"
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged!", to: "A colleague", channel: teams}}]
+          text: "Revised and staged again."
+    steps:
+      - say: "tell a colleague the fix is merged"
+      - say: "no"
+    checks:
+      - said_contains: "Dropped the draft"
+      - brain_calls: {kind: chat, count: 1}
+      - no_send: true
+
+  - id: a-command-while-a-draft-waits-is-still-a-command
+    title: '"status of 1" while a draft waits is answered, and the draft still waits for its yes'
+    why: >
+      13 Sep, live: with a draft pending, "drop rule 2" was read as feedback on the
+      draft. An unmistakable command must reach its handler; the draft keeps waiting.
+    twin: false
+    may_send: true
+    setup:
+      tasks:
+        - {as: t, title: "retention to 90 days", kind: code, status: awaiting_approval}
+    brains:
+      chat:
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged", to: "A colleague", channel: teams}}]
+          text: "Staged — send it?"
+    steps:
+      - say: "tell a colleague the fix is merged"
+      - say: "status of 1"
+      - say: "yes"
+    checks:
+      - said_contains: "#1 retention to 90 days"
+      - sent: {door: teams, count: 1}
+      - brain_calls: {kind: chat, count: 1}

@@ -1,0 +1,135 @@
+# Hands — Astra-class P7, layer one: files written by code and checked.
+#
+# "even i ask to create a data in exceel it has to do" — the first message of
+# this plan. A table pasted into chat is not a spreadsheet.
+
+scenarios:
+  - id: a-sheet-he-asks-for-is-a-real-file
+    title: '"give me the topics per environment in Excel" produces a file with those cells'
+    why: >
+      The end state is checkable, which is the whole point of doing this in code:
+      the file exists, it has the header he asked for, and it reached him.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: xlsx, name: topics-per-env, title: "Topics per environment",
+                   rows: [["Environment", "Topic", "Partitions"], ["dev", "booking.events", 3], ["uat", "booking.events", 6]]}}]
+          text: "Sent it over."
+    steps:
+      - say: "give me the topics per environment in excel"
+    checks:
+      - tool_result_contains: {tool: make_file, text: "2 row\\(s\\) × 3 column\\(s\\)"}
+      - made_file: {name: "topics-per-env.xlsx", contains: "booking.events", rows: 3}
+
+  - id: a-file-that-does-not-check-out-is-not-sent
+    title: A spreadsheet that lost its rows is refused, not delivered
+    why: A wrong sheet he trusts is worse than no sheet — so the file is read back before it goes.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: keynote, name: broken, rows: [["a"], ["b"]]}}]
+          text: "That format is not something I can write."
+    steps:
+      - say: "put that in a keynote"
+    checks:
+      - tool_result_contains: {tool: make_file, text: "Not created"}
+      - no_send: true
+
+  - id: a-sheet-he-shares-is-data-not-a-path
+    title: A spreadsheet he shares can be answered from
+    why: Reading is the other half of hands — otherwise Asta can only talk about the file.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: csv, name: shared-topics, send: false,
+                   rows: [["Environment", "Topic"], ["uat", "booking.events"]]}}]
+          text: "Written."
+        - calls: [{tool: read_data_file, args: {path: "SCRATCH/shared-topics.csv"}}]
+          text: "uat has booking.events."
+    steps:
+      - say: "write a small csv of the uat topics"
+      - say: "what is in that csv?"
+    checks:
+      - tool_result_contains: {tool: read_data_file, text: "booking.events"}
+      - said_contains: "uat"
+
+  - id: a-deck-he-can-show-people
+    title: '"turn that into slides" produces a deck with the table on a slide'
+    why: >
+      A deck is the one file he opens in front of other people, so the table has
+      to be IN it — not described in the chat message that carries it.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: pptx, name: uat-readiness, title: "UAT readiness",
+                   rows: [["Environment", "Topic", "Partitions"], ["uat", "booking.events", 6], ["prd", "booking.events", 12]],
+                   text: "Two environments are ready.\n\nPartitions double in prd."}}]
+          text: "Deck is on its way."
+    steps:
+      - say: "turn the uat readiness into slides and send it"
+    checks:
+      - tool_result_contains: {tool: make_file, text: "Sent to his phone"}
+      - made_file: {name: "uat-readiness.pptx", contains: "booking.events", rows: 3}
+
+  - id: a-pdf-keeps-the-words-he-wrote
+    title: A PDF he asks for carries the prose and every row
+    why: >
+      The PDF fonts cannot draw an em dash, and he writes them constantly. The
+      words must still arrive — spelled the long way — or the check refuses the file.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: pdf, name: uat-note, title: "UAT note — week 38",
+                   rows: [["Environment", "Owner"], ["uat", "platform"]],
+                   text: "Where we stand — uat is refreshed and prd follows."}}]
+          text: "Sent the PDF."
+    steps:
+      - say: "send me that note as a pdf"
+    checks:
+      - tool_result_contains: {tool: make_file, text: "Sent to his phone"}
+      - made_file: {name: "uat-note.pdf", contains: "uat is refreshed"}
+
+  - id: a-file-ask-never-becomes-a-code-task
+    title: '"make me a deck" is one tool call, not an engineering task'
+    why: >
+      Found live on 16 Sep: asked for a deck of his open tasks, the chat brain
+      spent five minutes reading the repo and then DELEGATED A CODE TASK to write
+      the file with a script. That is the 27 August substitution in a new costume —
+      the act he asked for does not happen, a different one does, and he finds out
+      later. He has the tool; it must use it.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: delegate_task, args: {title: "Generate and send open-tasks deck",
+                   kind: code, workspace: asta,
+                   prompt: "Use app/files.py to write a pptx of the open tasks and deliver it"}},
+                  {tool: make_file, args: {kind: pptx, name: open-tasks, title: "Open tasks",
+                   rows: [["id", "title", "status"], [116, "Nudge the reviewer", "awaiting_approval"]]}}]
+          text: "Sent the deck."
+    steps:
+      - say: "make me a short deck of my open tasks and send it"
+    checks:
+      - tool_result_contains: {tool: delegate_task, text: "make_file"}
+      - tasks: {count: 0}
+      - made_file: {name: "open-tasks.pptx", rows: 2}
+
+  - id: a-file-ask-tells-the-brain-which-tool-writes-files
+    title: The brain is told make_file exists, in the turn where it matters
+    why: >
+      Live on 16 Sep, twice: the brain read app/files.py, tried to run it through
+      the shell, hit the read-only lock and concluded "make_file is not bound to
+      this session" — while make_file sat in its own tool list. A tool nobody
+      points at is a tool that does not exist. Only on a file ask: an orientation
+      that says everything says nothing.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: make_file, args: {kind: pdf, name: open-tasks, title: "Open tasks",
+                   rows: [["id", "status"], [116, "awaiting_approval"]]}}]
+          text: "Sent the PDF."
+    steps:
+      - say: "send me my open tasks as a pdf"
+    checks:
+      - brain_prompt_contains: "THIS MESSAGE ASKS FOR A FILE"
+      - brain_prompt_contains: "not a piece of engineering"
+      - made_file: {name: "open-tasks.pdf", contains: "awaiting_approval"}

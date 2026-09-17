@@ -75,8 +75,8 @@ def test_reading_replying_and_sending_all_live_on_the_playwright_bridge():
 def test_the_two_triggers_share_one_notion_of_who_you_are(monkeypatch):
     """Both the poll and the watcher decide 'about me' from the same keyword list,
     so enabling the watcher can never disagree with the poll about what counts."""
-    monkeypatch.setenv("TEAMS_WATCH_KEYWORDS", "arun,vinish")
-    assert msnotify.keywords() == ["arun", "vinish"]
+    monkeypatch.setenv("TEAMS_WATCH_KEYWORDS", "arun,alex")
+    assert msnotify.keywords() == ["arun", "alex"]
     # _activity_wanted (the Playwright side) falls back to exactly these keywords
     import inspect
     assert "msnotify.keywords()" in inspect.getsource(teams_bridge._activity_wanted)

@@ -1,6 +1,6 @@
 """The intent-type gate — a question must not silently spawn work.
 
-Grounded in the real incident: "No recent one..?" (a question about whether Vinish
+Grounded in the real incident: "No recent one..?" (a question about whether Alex
 had messaged) caused Asta to run a repo analysis. These lock in that the gate holds
 exactly that shape and — just as important — never nags a genuine request for work.
 """
@@ -45,7 +45,7 @@ def test_a_request_for_work_is_a_command_never_passive(text):
 
 PASSIVE = [
     "No recent one..?",                       # the real incident
-    "Any message from Vinish?",
+    "Any message from Alex?",
     "anything from him?",
     "no newer one?",
     "which one?",
@@ -194,7 +194,7 @@ def test_offtopic_answer_to_a_question_is_recorded(monkeypatch):
     monkeypatch.setenv("ASTA_RELEVANCE", "1")
     monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: "no")
     import asyncio
-    asyncio.run(relevance.judge_answer("Any message from Vinish?",
+    asyncio.run(relevance.judge_answer("Any message from Alex?",
                                        "Repo hygiene of contmark looks fine."))
     assert _relevance_counts() == {"offtopic": 1}
 
@@ -206,8 +206,8 @@ def test_high_overlap_answer_is_free_and_unrecorded(monkeypatch):
     called: list = []
     monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: called.append(1) or "no")
     import asyncio
-    asyncio.run(relevance.judge_answer("Any message from Vinish?",
-                                       "Nothing new from Vinish since his PR review."))
+    asyncio.run(relevance.judge_answer("Any message from Alex?",
+                                       "Nothing new from Alex since his PR review."))
     assert called == []                        # pre-filter settled it — no model spend
     assert _relevance_counts() == {}
 
@@ -216,7 +216,7 @@ def test_local_model_down_skips_rather_than_guessing(monkeypatch):
     monkeypatch.setenv("ASTA_RELEVANCE", "1")
     monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: None)
     import asyncio
-    asyncio.run(relevance.judge_answer("Any message from Vinish?", "Totally unrelated text."))
+    asyncio.run(relevance.judge_answer("Any message from Alex?", "Totally unrelated text."))
     assert _relevance_counts() == {}           # no oracle → no verdict, like the verify gate
 
 
@@ -232,5 +232,5 @@ def test_judge_is_a_noop_when_disabled(monkeypatch):
     monkeypatch.delenv("ASTA_RELEVANCE", raising=False)
     monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: "no")
     import asyncio
-    asyncio.run(relevance.judge_answer("Any message from Vinish?", "Unrelated."))
+    asyncio.run(relevance.judge_answer("Any message from Alex?", "Unrelated."))
     assert _relevance_counts() == {}

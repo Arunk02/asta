@@ -96,6 +96,30 @@ def age_minutes(point: dict) -> int:
     return max(0, int((time.time() - float(point.get("at") or 0)) // 60))
 
 
+#: The line that carries his words inside the handoff. A constant, because two
+#: places read it: the prompt that states it and `ranking_text` that finds it
+#: again. Retyped in both, they drift, and the drift is silent.
+_REQUEST_MARKER = "HIS ORIGINAL REQUEST:\n"
+
+
+def ranking_text(user_text: str) -> str:
+    """What the turn is ABOUT, for anything that ranks on the message.
+
+    A handoff is passed to the brain AS the turn's text, so everything
+    downstream saw the wrapper instead of his request — and tool selection,
+    which reads exactly that, scored "was working on it when it ran out of
+    quota" as conversation. Live on 16 Sep it handed a resumed turn the call
+    and Teams capabilities and left out `make_file`, the one thing the request
+    needed; the brain reported the tool was not in its toolset, correctly, three
+    times. The wrapper is provenance. His sentence is the subject.
+    """
+    text = user_text or ""
+    if _REQUEST_MARKER not in text:
+        return text
+    tail = text.split(_REQUEST_MARKER, 1)[1]
+    return tail.split("\n\n", 1)[0].strip() or text
+
+
 def handoff_prompt(point: dict, taking_over: str = "") -> str:
     """The instruction that continues the work on a different brain.
 
@@ -111,7 +135,7 @@ def handoff_prompt(point: dict, taking_over: str = "") -> str:
         f"Arun asked for this, and {who} was working on it when it ran out of "
         f"quota — you are continuing that work, not starting it over.",
         "",
-        f"HIS ORIGINAL REQUEST:\n{point.get('request', '')}",
+        f"{_REQUEST_MARKER}{point.get('request', '')}",
     ]
     if got:
         lines += [
@@ -122,13 +146,28 @@ def handoff_prompt(point: dict, taking_over: str = "") -> str:
             got,
             "———",
         ]
-    lines += [
-        "",
-        "Continue from there. Do not redo work that is already clearly done, and do "
-        "not re-explain what is above — Arun has already read it. Pick up at the "
-        "next unfinished step and carry the task to the end. If you draft anything "
-        "to send outside this chat, stage it with prepare_to_send.",
-    ]
+    if got:
+        lines += [
+            "",
+            "Continue from there. Do not redo work that is already clearly done, and "
+            "do not re-explain what is above — Arun has already read it. Pick up at "
+            "the next unfinished step and carry the task to the end. If you draft "
+            "anything to send outside this chat, stage it with prepare_to_send.",
+        ]
+    else:
+        # Nothing came out before it stopped, so "do not redo what is done" is
+        # advice about work that does not exist — and on 16 Sep it sent the brain
+        # that took over searching /tmp and the repo for a file the previous run
+        # had never written, until its own budget ran out. Say plainly that the
+        # slate is empty: the cheapest way to finish is to do the thing.
+        lines += [
+            "",
+            "It stopped before producing anything, so there is NOTHING TO RECOVER. "
+            "Do the work now from his request alone — do not go looking for what "
+            "the previous run did, and do not investigate its traces; there are "
+            "none. If his request is a single tool call, make that call. If you "
+            "draft anything to send outside this chat, stage it with prepare_to_send.",
+        ]
     if taking_over:
         lines.append(f"You are {taking_over}.")
     return "\n".join(lines)

@@ -120,3 +120,36 @@ def test_claude_cli_never_inherits_the_api_key(monkeypatch):
         assert k not in env, f"{k} must not reach the CLI"
     assert env["CI"] == "1"
     assert env.get("PATH"), "the rest of the environment is preserved"
+
+
+def test_every_claude_session_runs_without_its_own_private_memory():
+    """Live, 17 Sep: the brain "saved" his standup rule into Claude Code's
+    auto-memory — before he said yes — and narrated its memory directory to his
+    phone. Asta never reads that memory, so the rule changed nothing. Asta's
+    memory is Asta's; the CLI's own is switched off for every session."""
+    from app import claude_cli
+    assert claude_cli._subprocess_env()["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+
+
+def test_a_brain_is_never_handed_whatever_is_on_our_stdin():
+    """17 Sep: the CLI appends piped stdin to the prompt, and a subprocess that
+    inherits stdin let a test's own script reach the standup brain as "the Python
+    snippet at the end of your message". The prompt is only what Asta passes.
+
+    Checked over EVERY spawn in both brain modules, including ones added later —
+    conftest rightly blocks spawning a CLI at runtime, and a rule that holds at
+    two call sites and not a third is the per-site drift this repo keeps paying for.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "app"
+    for name in ("claude_cli.py", "copilot_cli.py"):
+        tree = ast.parse((root / name).read_text())
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and getattr(n.func, "attr", "") == "create_subprocess_exec"]
+        assert calls, f"no spawns found in {name}"
+        for call in calls:
+            stdin = next((k for k in call.keywords if k.arg == "stdin"), None)
+            assert stdin is not None and ast.unparse(stdin.value).endswith("DEVNULL"), \
+                f"{name}:{call.lineno} spawns a brain that inherits stdin"

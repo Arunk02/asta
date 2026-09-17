@@ -34,6 +34,7 @@ network blip never inherits yesterday's penalty.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -140,6 +141,49 @@ def start(name: str, body: Callable[[], Awaitable[None]]) -> asyncio.Task:
     """
     task = asyncio.create_task(supervise(name, body), name=f"daemon:{name}")
     _running.setdefault(name, {})["task"] = task
+    return task
+
+
+#: One-shot background jobs, held so they cannot vanish. Discarded on completion.
+_ONCE: set = set()
+
+
+def once(name: str, coro) -> asyncio.Task:
+    """Run a ONE-SHOT background job that must not disappear or fail in silence.
+
+    `start` supervises a loop and restarts it; that is wrong for a job which is
+    meant to finish. But the reference problem is identical, and this is where it
+    bit hardest: `discuss_in_call` did `create_task(_go())` and kept nothing, so
+    "Calling Alex now — I'll send you what was said" was a claim with nothing
+    behind it. On 2026-09-07 the call left no log line, no notification and no
+    outcome row, and the only honest reading is that it never rang.
+
+    Asyncio holds only a weak reference to a task, so an unreferenced one can be
+    collected mid-flight — the same silent disappearance `start` documents above
+    and this module exists to prevent.
+
+    A failure is reported rather than swallowed. An outward act that quietly did
+    not happen is worse than one that failed loudly: he believes a colleague was
+    called.
+    """
+    async def _guarded() -> None:
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            from . import notify, quiet, store
+            quiet.note(f"background.{name}", exc)
+            store.record_outcome("background", "failed", subject=name,
+                                 detail=f"{type(exc).__name__}: {exc}"[:300])
+            with contextlib.suppress(Exception):
+                await notify.notify(
+                    f"⚠️ {name} did not complete — {type(exc).__name__}: {exc}",
+                    "info")
+
+    task = asyncio.create_task(_guarded(), name=f"once:{name}")
+    _ONCE.add(task)
+    task.add_done_callback(_ONCE.discard)
     return task
 
 

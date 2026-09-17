@@ -1,0 +1,133 @@
+# His standing rules — Astra-class P4. Say it once, and it holds on every path.
+#
+# Synthetic equivalents of the corrections he actually gave. The real ones, in
+# his own words, are replayed from data/workworld/replays (gitignored) by
+# `python -m app.workworld replays`.
+
+scenarios:
+  - id: a-standing-instruction-becomes-a-rule-on-his-yes
+    title: '"don''t check on incidents going forward unless I ask" is proposed once, and his yes makes it hold'
+    why: >
+      9 Sep: he said it; the chat brain agreed; the next incident was investigated
+      anyway, because the rule lived in one brain's memory. Now the message is
+      compiled into a rule, proposed with one tap, and enforced by the code that
+      does the investigating.
+    twin: false
+    setup:
+      env: {ASTA_RESPOND: "1"}          # the responder is what would have investigated
+    steps:
+      - say: "Don't check on any incidents going forward unless I ask you to monitor and analyse"
+      - say: "yes"
+      - colleague: {who: "A colleague", source: teams-chat, text: "INC0012345 is open on the booking consumer, can you check?"}
+    checks:
+      - said_contains: "Make this a standing rule"
+      - said_contains: "Standing rule 1"
+      - brain_calls: {kind: chat, count: 0}
+      - tasks: {count: 0}
+      - kv: {key: responder_muted_kinds, equals: incident}
+
+  - id: a-question-about-a-habit-is-not-a-rule
+    title: '"why do you always stop?" is answered, not turned into a rule'
+    why: A proposal he never meant to make is noise, and it teaches him to ignore the real ones.
+    twin: false
+    brains:
+      chat:
+        - {text: "It stops at the plan gate for your approval."}
+    steps:
+      - say: "why do you always stop?"
+    checks:
+      - said_lacks: "standing rule"
+      - brain_calls: {kind: chat, count: 1}
+
+  - id: a-never-message-rule-stops-the-draft
+    title: A "never message X" rule stops a draft to X before it is even staged
+    why: >
+      A rule the chat brain may read is a suggestion. The staging tool itself
+      now asks the gate, so the draft never reaches him to be approved by mistake.
+    setup:
+      rules:
+        - {kind: never, act: send, target: "Release Channel", words: "never message the release channel"}
+    brains:
+      chat:
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged", to: "Release Channel", channel: teams}}]
+          text: "Your standing rule stopped that one."
+    steps:
+      - say: "post that the fix is merged"
+    checks:
+      - tool_result_contains: {tool: prepare_to_send, text: "Not staged — your standing rule"}
+      - no_send: true
+
+  - id: an-unless-i-ask-rule-yields-when-he-asks
+    title: '"don''t ping X unless I ask" lets his own explicit ask through'
+    why: The exception is part of the rule. A gate that refused his direct request would be a new bug.
+    may_send: true
+    setup:
+      rules:
+        - {kind: never, act: send, target: "Alex Kumar", unless_asked: true, words: "don't ping Alex Kumar unless I ask"}
+    brains:
+      chat:
+        - calls: [{tool: prepare_to_send, args: {what: "the fix is merged", to: "Alex Kumar", channel: teams}}]
+          text: "Staged — send it?"
+    steps:
+      - say: "tell Alex Kumar the fix is merged"
+    checks:
+      - tool_result_contains: {tool: prepare_to_send, text: "Draft staged"}
+
+  - id: his-default-workspace-is-used-when-the-chat-has-none
+    title: '"my favourite workspace is booking" routes code work there from a chat with no workspace'
+    why: >
+      18 Jul he said it; a phone chat has no workspace picker, so code work asked
+      from WhatsApp went to a chat turn instead of the task lane.
+    twin: false
+    setup:
+      rules:
+        - {kind: prefer, act: workspace, value: booking, words: "remember my favourite workspace is booking"}
+    steps:
+      - say: "fix the null check in the booking mapper"
+    checks:
+      - said_contains: "Planning it in booking"
+      - tasks: {kind: code, count: 1}
+
+  - id: a-flat-never-holds-even-on-yes
+    title: A flat "never comment on PROJ tickets" stops a staged comment even after his yes
+    why: >
+      A flat rule has no exception. The recorded op is refused at the moment it
+      would run, and he is told which rule stopped it and how to lift it.
+    twin: false
+    setup:
+      jira: {"PROJ-412": {"fields": {"summary": "schema review"}}}   # the world's Jira, not this machine's
+      rules:
+        - {kind: never, act: comment, target: "PROJ", words: "never comment on PROJ tickets"}
+    brains:
+      chat:
+        - calls: [{tool: jira_comment, args: {key: "PROJ-412", text: "blocked on the schema review"}}]
+          text: "Staged — post it?"
+    steps:
+      - say: "comment on PROJ-412 that it is blocked on the schema review"
+      - say: "yes"
+    checks:
+      - no_send: true
+      - said_contains: "Not done — your standing rule"
+
+  - id: a-standing-rule-is-never-folded-into-the-turn-that-is-running
+    title: '"don''t include PR review in standup … remember this always" is a rule, not an addendum to the PR check'
+    why: >
+      Live on 17 Sep. A PR check was running when he said it. The rule was
+      proposed — and then the same message fell through and a brain decided it
+      was "more of the same", so it was stapled onto the PR check ("✚ adding that
+      to what I'm doing"). That brain then "saved" it into its own notes before
+      he said yes, and narrated its memory directory to his phone. A standing
+      instruction is never an addendum to whatever happens to be running, and
+      binding a message to a job is decided by rules, never by a brain's guess.
+    twin: false
+    brains:
+      chat:
+        - text: "Going through the PR — nothing looks wrong so far."
+          sleep: 0.5
+        - text: "SHOULD NOT BE ASKED"
+    steps:
+      - say_async: "check PR 1440 for me"
+      - say: "Don't include PR review or some file opening anything related in standup, there u should mention only related to the tickets which gets assigned to u .. remember this always"
+    checks:
+      - said_contains: "standing rule"
+      - said_lacks: "adding that to what I"

@@ -321,7 +321,11 @@ async def voice_note(text: str, voice: str = "assistant") -> dict:
             capture_output=True, timeout=60)
         if done.returncode == 0 and opus.exists():
             out, kind = opus, "opus"
-    if kind == "wav":
+    # `afconvert` is macOS-only. Found by CI on 17 Sep: every Linux runner raised
+    # FileNotFoundError here, and the clean checkout never saw it because it runs
+    # on this same Mac. Detected, like ffmpeg above — the last resort is the WAV
+    # Voicebox already produced, which still plays.
+    if kind == "wav" and shutil.which("afconvert"):
         m4a = tmp / "note.m4a"
         done = subprocess.run(["afconvert", "-f", "m4af", "-d", "aac", str(wav), str(m4a)],
                               capture_output=True, timeout=60)

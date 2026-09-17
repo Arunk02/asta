@@ -72,3 +72,22 @@ def test_the_capability_says_what_it_is_for():
     from app import capabilities
     cap = capabilities.registry()["leave_voice_note"]
     assert "walking" in cap.note and "search" in cap.note
+
+
+def test_a_machine_with_no_encoder_still_sends_and_says_what_it_sent(_spoken, monkeypatch):
+    """CI on 17 Sep: `afconvert` is macOS-only, every Linux runner raised
+    FileNotFoundError, and the clean checkout never saw it — it runs on the same
+    Mac. With neither encoder present the WAV goes as it is."""
+    import shutil
+
+    sent: list = []
+
+    async def wa_voice(path, seconds=1):
+        sent.append(path)
+        return True
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(notify, "wa_voice", wa_voice)
+    out = asyncio.run(voice.voice_note("no encoders here"))
+    assert out["sent"] and out["format"] == "wav" and sent[0].endswith(".wav")
+    assert "hold-to-play" in out["note"]

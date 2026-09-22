@@ -209,4 +209,14 @@ def resolve_name(name: str) -> tuple[str, list[str]]:
     if exact:
         return exact[0], exact
     near = [t for t in threads if wanted in t.lower()]
-    return (near[0] if len(near) == 1 else ""), near
+    if len(near) == 1:
+        return near[0], near
+    # "call Jordan" with Jordan in four group chats and one 1:1: the 1:1 is who
+    # he means. A group rings everybody in it, and is never a guess to make.
+    people = [t for t in near if _one_person(t)]
+    return (people[0] if len(people) == 1 else ""), near
+
+
+def _one_person(thread: str) -> bool:
+    """A 1:1 chat title is a person's name; a group's lists several, or "+3"."""
+    return "\n" not in thread and "," not in thread and "+" not in thread

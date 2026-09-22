@@ -140,13 +140,35 @@ async def run_once(k: int = 4) -> str:
     except asyncio.TimeoutError:
         proc.kill()
         return "live bench timed out after an hour"
-    spent = min(legs, k * 3)             # three live scenarios, k runs each
+    calls = await _rehearse_calls()
+    spent = min(legs, k * 3 + 3)         # three live scenarios k times, three calls
     if b.get("week") != _week_of(now):
         b["week"], b["spent_week"] = _week_of(now), 0
     b["spent_week"] = b.get("spent_week", 0) + spent
     b["last_run"] = now.isoformat(timespec="minutes")
     _save(b)
-    return (out or b"").decode()[-400:].strip() or "live bench finished"
+    tail = (out or b"").decode()[-300:].strip() or "live bench finished"
+    return f"{tail} · {calls}"
+
+
+#: The calls rehearsed every night: the ones that broke on real colleagues.
+NIGHTLY_CALLS = ("quick-yes", "interrupts", "voicemail")
+
+
+async def _rehearse_calls() -> str:
+    """A rehearsal call per scenario (app/call_rehearsal.py), in its own process.
+    A Chrome or Teams change that silences calls shows up here, and in health,
+    before anybody's phone rings."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "app.call_rehearsal", *NIGHTLY_CALLS, cwd=str(ROOT),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=1200)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return "call rehearsal timed out"
+    lines = (out or b"").decode().strip().splitlines()
+    return next((ln for ln in reversed(lines) if "rehearsals passed" in ln), "call rehearsal ran")
 
 
 async def loop() -> None:

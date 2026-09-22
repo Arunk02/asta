@@ -555,10 +555,7 @@ async def call_person(who: str, video: bool = False) -> str:
                      answered_at=0.0, speaks=True, who=title, mic_proven=peak,
                      rtc=rtc, log=call_rtc.recorder(title) if rtc else None)
         store.kv_set("teams_in_call", f"call:{title}")
-        if rtc:
-            # People say hello the instant they pick up. Captions are not how
-            # Asta hears on this path, and turning them on took 32 seconds on
-            # 22 Sep — the whole of a colleague's patience.
+        if rtc:   # not how Asta hears here — and switching them on took 32 s on 22 Sep
             _CALL["captions_on"] = False
         else:
             _CALL["captions_on"] = await start_captions(page)
@@ -1226,11 +1223,17 @@ async def watch(poll_seconds: float = 30) -> str:
             await leave()
             return "the call ended"
 
+    ctx = _CALL.get("ctx") if _CALL.get("rtc") else None
+    if ctx is not None:
+        await call_rtc.record(ctx, True)
     while _CALL:
         if overran():
             await leave()
             return f"left — the call passed {MAX_CALL_MINUTES} minutes"
         if page is not None and await call_ended(page):
+            await leave()
+            return "the call ended"
+        if ctx is not None and await call_rtc.ended(ctx):
             await leave()
             return "the call ended"
         if await _never_answered():
@@ -1239,7 +1242,10 @@ async def watch(poll_seconds: float = 30) -> str:
         for _ in range(ticks):
             if not _CALL:
                 break
-            if page is not None:
+            if ctx is not None:   # their own audio, transcribed, instead of captions
+                await call_rtc.listen_into(ctx, lines)
+                react_to(lines)
+            elif page is not None:
                 await poll_captions(page, lines)
                 react_to(lines)
             await asyncio.sleep(CAPTION_POLL_SECONDS)
@@ -1386,7 +1392,7 @@ async def call_watch(title: str = "") -> None:
             f"up — staying on and listening, not speaking. Worth a look at the "
             f"call-screen selectors.", "call", urgency="direct")
 
-    if not _CALL.get("captions_on"):
+    if not _CALL.get("captions_on") and not _CALL.get("rtc"):
         await notify.notify(
             f"🎧 On the call with {who} but live captions wouldn't turn on — I "
             f"can't hear what's said, so there'll be no notes from this one.",

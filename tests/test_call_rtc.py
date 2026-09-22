@@ -175,7 +175,7 @@ def test_a_turn_ends_at_their_pause_and_is_transcribed():
                   recorded=b"RIFFtheir-voice")
     heard = []
 
-    async def transcribe(wav, filename=""):
+    async def transcribe(wav, filename="", **kw):
         heard.append((wav, filename))
         return " yes, I can hear you "
 
@@ -190,7 +190,7 @@ def test_silence_is_not_a_turn():
     clock = Clock()
     frame = Frame([reading(loudMs=0)])
 
-    async def transcribe(wav, filename=""):
+    async def transcribe(wav, filename="", **kw):
         raise AssertionError("nothing was said, so nothing is transcribed")
 
     got = asyncio.run(call_rtc.hear_turn(Ctx(frame), wait=5, clock=clock, nap=clock.nap,
@@ -319,19 +319,26 @@ def test_loopback_in_a_real_browser(tmp_path):
                 seen = []
                 got = await call_rtc.wait_for_them(ctx, seconds=10, quiet_open=1.0, log=seen.append)
                 assert got == "connected", seen[-3:]
-                await call_rtc.record(ctx, True)
+                # One page hears itself here, which the call rightly treats as
+                # echo — so arrival is read from the raw level, not "their voice".
+                # The two-sided rehearsal (app/call_rehearsal.py) covers a real far end.
+                levels = []
+
+                async def sample():
+                    for _ in range(30):
+                        levels.append(await page.evaluate("window.__asta.level || 0"))
+                        await asyncio.sleep(0.05)
+
+                sampling = asyncio.ensure_future(sample())
                 out = await call_rtc.say(ctx, buf.getvalue())
-                await asyncio.sleep(0.6)
-                s = await call_rtc.snapshot(ctx)
-                wav, seconds, peak = await call_rtc.take(ctx)
-                return out, s, seconds, peak
+                await sampling
+                return out, max(levels)
             finally:
                 await ctx.close()
 
-    out, s, seconds, peak = asyncio.run(go())
+    out, loudest = asyncio.run(go())
     assert out["sent"] is True
-    assert s["loudMs"] > 1000, "the far side never heard it"
-    assert seconds > 1.5 and peak > 0.1
+    assert loudest > 0.05, "the far side never heard it"
 
 
 # --- 22 Sep, third call: she said hello into 32 seconds of setup ------------------------
@@ -380,7 +387,7 @@ def _greet(frames, transcribed=""):
     clock = Clock()
     calls = []
 
-    async def transcribe(wav, filename=""):
+    async def transcribe(wav, filename="", **kw):
         calls.append(filename)
         return transcribed
 
@@ -512,7 +519,7 @@ def test_the_last_sentence_is_said_when_written_not_when_the_cli_says_done():
     assert stamps[-1] < 0.15, "the last sentence waited for the CLI's result event"
 
 
-def test_a_reply_is_spoken_sentence_by_sentence_with_a_filler_only_when_slow(monkeypatch):
+def _reply_with(monkeypatch, mind, theirs="yes", quick=0.05):
     from app import conversation
     said = []
 
@@ -523,19 +530,35 @@ def test_a_reply_is_spoken_sentence_by_sentence_with_a_filler_only_when_slow(mon
     async def synth(text, voice_name=""):
         return b"RIFF"
 
+    monkeypatch.setattr(meetings, "say_in_call", say)
+    monkeypatch.setattr(meetings, "synth", synth)
+    monkeypatch.setattr(conversation, "QUICK_REACTION_AFTER", quick)
+    meetings._CALL.clear()
+    ended, interrupted = asyncio.run(conversation._speak_reply(mind, theirs, [], [], True))
+    return said, ended, interrupted
+
+
+def test_a_slow_brain_is_covered_by_a_reaction_from_their_own_words(monkeypatch):
+    """The brain's speed on the day decides nothing about when Asta reacts, and its
+    own "Got it." after Asta already said "Great." would be a stutter."""
     class SlowMind:
         async def sentences(self, theirs, **kw):
             await asyncio.sleep(0.2)
             yield "Got it."
             yield "Anything else? [END]"
 
-    monkeypatch.setattr(meetings, "say_in_call", say)
-    monkeypatch.setattr(meetings, "synth", synth)
-    monkeypatch.setattr(conversation, "MOMENT_AFTER", 0.05)
-    meetings._CALL.clear()
-    ended, interrupted = asyncio.run(conversation._speak_reply(SlowMind(), "yes", [], [], True))
-    assert said[0] in conversation._MOMENTS and said[1:] == ["Got it.", "Anything else?"]
-    assert ended is True and interrupted is False
+    said, ended, interrupted = _reply_with(monkeypatch, SlowMind(), theirs="Yes.")
+    assert said == ["Great.", "Anything else?"] and ended is True and interrupted is False
+
+
+def test_a_quick_brain_speaks_for_itself(monkeypatch):
+    class QuickMind:
+        async def sentences(self, theirs, **kw):
+            yield "Perfect."
+            yield "Anything else?"
+
+    said, ended, interrupted = _reply_with(monkeypatch, QuickMind(), quick=1.0)
+    assert said == ["Perfect.", "Anything else?"]
 
 
 def test_words_are_transcribed_at_the_first_short_pause_and_reused_if_it_was_the_end():
@@ -545,7 +568,7 @@ def test_words_are_transcribed_at_the_first_short_pause_and_reused_if_it_was_the
                    reading(loudMs=900, quietMs=800)], recorded=b"RIFFher-words")
     calls = []
 
-    async def transcribe(wav, filename=""):
+    async def transcribe(wav, filename="", **kw):
         calls.append(wav)
         return "it's good"
 
@@ -561,7 +584,7 @@ def test_if_they_go_on_after_the_first_pause_the_whole_turn_is_transcribed():
                    reading(loudMs=1600, quietMs=800)], recorded=b"RIFFher-words")
     calls = []
 
-    async def transcribe(wav, filename=""):
+    async def transcribe(wav, filename="", **kw):
         calls.append(wav)
         return "it's good, but a bit slow"
 
@@ -578,7 +601,7 @@ def test_a_short_yes_is_an_answer():
     frame = Frame([reading(loudMs=0), reading(loudMs=256, quietMs=80),
                    reading(loudMs=341, quietMs=700)], recorded=b"RIFFyes")
 
-    async def transcribe(wav, filename=""):
+    async def transcribe(wav, filename="", **kw):
         return "Yes."
 
     got = asyncio.run(call_rtc.hear_turn(Ctx(frame), wait=10, clock=clock, nap=clock.nap,
@@ -607,7 +630,7 @@ def test_the_plain_greeting_is_made_before_anything_else(monkeypatch):
     from app import voice
     assert asyncio.run(go()) == "Hi, this is Asta."
     assert made[0] == voice.strip_voice_instruction("Hi, this is Asta.")
-    assert made[1] == voice.strip_voice_instruction(call_mind.REACTIONS[0])
+    assert {voice.strip_voice_instruction(r) for r in call_mind.REACTIONS} <= set(made)
 
 
 def test_a_reaction_at_the_start_of_the_reply_is_played_before_the_rest_is_written():
@@ -705,7 +728,7 @@ def test_whisper_repeating_itself_is_not_an_answer():
 
 
 def test_a_garbled_transcription_becomes_unheard_not_a_reply():
-    async def listen(wav, filename=""):
+    async def listen(wav, filename="", **kw):
         return "Haruki " * 200
 
     assert asyncio.run(call_rtc._quietly(listen, b"RIFF")) == ""
@@ -714,7 +737,7 @@ def test_a_garbled_transcription_becomes_unheard_not_a_reply():
 def test_a_transcription_that_runs_on_is_cut_off(monkeypatch):
     monkeypatch.setattr(call_rtc, "TRANSCRIBE_TIMEOUT", 0.05)
 
-    async def listen(wav, filename=""):
+    async def listen(wav, filename="", **kw):
         await asyncio.sleep(1)
         return "too late"
 
@@ -728,3 +751,110 @@ def test_the_greeting_cannot_be_interrupted_but_what_follows_can():
     greeting = src.index("await meetings.say_in_call(opener)")
     assert src.rindex('meetings._CALL["barge_in"] = False', 0, greeting) < greeting
     assert src.index('meetings._CALL["barge_in"] = rtc', greeting) > greeting
+
+
+def test_nobody_is_rung_when_the_voice_service_is_down(monkeypatch):
+    from app import call_mind, conversation, voice
+    monkeypatch.setenv("ASTA_CALL_RTC", "1")
+    rang = []
+
+    async def down():
+        return False
+
+    async def call_person(who, video=False):
+        rang.append(who)
+        return who
+
+    async def mind(*a, **kw):
+        raise RuntimeError("not needed")
+
+    monkeypatch.setattr(voice, "available", down)
+    monkeypatch.setattr(call_mind, "start", mind)
+    monkeypatch.setattr(meetings, "call_person", call_person)
+    out = asyncio.run(conversation.converse("A colleague", "a quick word"))
+    assert rang == [] and "voice service" in out
+
+
+def test_asta_own_words_are_taken_off_what_was_heard():
+    said = "Great. Can you hear me alright on your end?"
+    assert call_rtc.strip_echo("on your end? Yes.", said) == "Yes"
+    assert call_rtc.strip_echo("Can you hear me alright on your end?", said) == ""
+    assert call_rtc.strip_echo("Yes, I can hear you.", said) == "Yes, I can hear you"
+
+
+def test_a_sentence_that_stops_mid_thought_is_given_time():
+    assert call_rtc.unfinished("So what I think is")
+    assert call_rtc.unfinished("I was going to check with the team and")
+    assert not call_rtc.unfinished("We should try it again tomorrow morning.")
+    assert not call_rtc.unfinished("Yes.")
+
+
+def test_the_listeners_mm_hm_never_touches_their_recording(monkeypatch):
+    """Said while their words are still being gathered: an interruptible line
+    would restart the recording and wipe the sentence it is acknowledging."""
+    from app import call_rtc as rtc
+    calls = []
+
+    async def say(ctx, wav, interruptible=False, **kw):
+        calls.append(interruptible)
+        return {"sent": True}
+
+    async def synth(text, voice_name=""):
+        return b"RIFF"
+
+    monkeypatch.setattr(rtc, "say", say)
+    monkeypatch.setattr(meetings, "synth", synth)
+    meetings._CALL.clear()
+    meetings._CALL.update(ctx=object(), barge_in=True)
+    asyncio.run(rtc.say_quick("Mm-hm."))
+    meetings._CALL.clear()
+    assert calls == [False]
+
+
+def test_a_line_teams_muted_is_said_again_once_unmuted(rtc_call, monkeypatch):
+    from app import voice
+    sent = iter([False, True])
+    said = []
+
+    async def say(ctx, wav, **kw):
+        said.append(wav)
+        return {"seconds": 1.0, "sent": next(sent), "energy": 0.5}
+
+    async def muted(page):
+        return {"muted": True}
+
+    async def unmute(page):
+        return True
+
+    async def window(page):
+        return page
+
+    monkeypatch.setattr(call_rtc, "say", say)
+    monkeypatch.setattr(voice, "mic_is_live", muted)
+    monkeypatch.setattr(voice, "ensure_unmuted", unmute)
+    monkeypatch.setattr(meetings, "_follow_call_window", window)
+    assert "said it in the call" in asyncio.run(meetings.say_in_call("Hi, this is Asta"))
+    assert len(said) == 2
+
+
+def test_a_line_that_did_not_go_out_is_not_repeated_on_a_guess(rtc_call, monkeypatch):
+    """Unreadable mute state: say it once, report it unsaid — never say it twice."""
+    from app import voice
+    said = []
+
+    async def say(ctx, wav, **kw):
+        said.append(wav)
+        return {"seconds": 1.0, "sent": False, "energy": 0.0}
+
+    async def unreadable(page):
+        return {}
+
+    async def window(page):
+        return page
+
+    monkeypatch.setattr(call_rtc, "say", say)
+    monkeypatch.setattr(voice, "mic_is_live", unreadable)
+    monkeypatch.setattr(meetings, "_follow_call_window", window)
+    with pytest.raises(RuntimeError, match="NOT said"):
+        asyncio.run(meetings.say_in_call("Hi, this is Asta"))
+    assert len(said) == 1

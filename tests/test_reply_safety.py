@@ -173,3 +173,12 @@ def test_the_call_path_uses_the_same_resolver_as_the_send_path():
 def meetings_src():
     from app import meetings
     return meetings.call_person
+
+
+def test_a_first_name_means_the_one_person_not_the_groups_they_are_in(monkeypatch):
+    """"call Jordan": four group chats list Jordan, one 1:1 is Jordan. Ringing a
+    group rings everybody in it, so the 1:1 is the only reading."""
+    from app import contacts
+    monkeypatch.setattr(contacts, "known_threads", lambda limit=800: [
+        "Ana\nJordan\nLee\nSam", "Jordan\n, +3", "Sam\nJordan\nMika", "Jordan Park"])
+    assert contacts.resolve_name("jordan")[0] == "Jordan Park"

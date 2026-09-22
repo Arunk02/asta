@@ -48,9 +48,12 @@ _PERSONA = (
     "word, as its own sentence: {reactions} — then say the rest. They are ready to "
     "play instantly, so the other person never waits in silence.\n"
     "- If they ask you something, answer it directly and honestly, briefly.\n"
+    "- Speak the language they speak — English, Hindi, or the mix they use.\n"
     "- If what they said came through garbled, say so naturally and ask again.\n"
     "- Never invent facts about Arun's work or plans, and never commit him to "
     "anything — if something needs him, say you will check with Arun.\n"
+    "- If they say bye, thanks, or that they have to go, close in one short "
+    f"sentence and put {END} at the end — never ask another question then.\n"
     "When the call is done, close warmly in one sentence and put "
     f"{END} at the very end."
 )
@@ -65,7 +68,9 @@ _COMPLETE = object()
 #: The first thing a reply says, from a fixed set whose audio is made while the
 #: phone rings — so the first sound after they stop talking needs no synthesis.
 REACTIONS = ("Got it.", "Okay.", "Great.", "Right.", "Sure.", "Oh, nice.",
-             "Hmm, fair point.", "Thanks.", "Makes sense.", "Good question.")
+             "Hmm, fair point.", "Thanks.", "Makes sense.", "Good question.",
+             "Perfect.", "No worries.", "Sorry.", "Hmm.", "Nice.", "Yes.",
+             "Sounds good.", "Of course.", "Absolutely.")
 
 #: A reply that opens with one of the reactions, however it is punctuated.
 _REACTION_OF = {r.rstrip(".").lower().replace(",", ""): r for r in REACTIONS}
@@ -209,9 +214,9 @@ class Mind:
         """The first line, written while the phone rings."""
         out = await self._ask(
             "The phone is ringing. Write the exact line you will say the moment they "
-            "pick up: greet them by first name, say you are Asta, Arun's assistant, "
-            "say in a few words why you are calling, and ask if now is a good time. "
-            "Just the line.", timeout)
+            "pick up, under fifteen words: greet them by first name, say you are "
+            "Asta, Arun's assistant, and ask if now is a good time. Just the line.",
+            timeout)
         return out.replace(END, "").strip()
 
     async def notes(self, timeout: float = 30) -> str:
@@ -240,10 +245,15 @@ async def start(who: str, topic: str, agenda: str = "", minutes: float = 0) -> M
     # Claude Code's private memory off.
     from .claude_cli import _subprocess_env
     env = _subprocess_env()
+    # Only the call's own brief. Claude Code's default system prompt, his user
+    # settings (hooks) and the MCP servers they bring (Grafana's 43 tools) all
+    # ride along otherwise — measured on 22 Sep: first words in 1.9-4.4 s with
+    # them, 0.9-1.2 s without. A call brain has nothing to look up anyway.
     proc = await asyncio.create_subprocess_exec(
         CLAUDE, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
         "--verbose", "--include-partial-messages", "--model", MODEL, "--tools", "",
-        "--append-system-prompt", _PERSONA.format(
+        "--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        "--system-prompt", _PERSONA.format(
             who=who or "a colleague", topic=topic or "a quick word",
             reactions=" / ".join(f'"{r}"' for r in REACTIONS),
             agenda=f"\nWhat to cover: {agenda}" if agenda else "",

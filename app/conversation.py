@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 
 from . import meetings
 from .call_brain import answer_from_knowledge, spoken_form
@@ -68,11 +69,28 @@ async def _hear_rtc(lines: list[dict], who: str, keep: bool = False) -> str:
     `lines` gets both sides, so the transcript he reads afterwards is the call.
     A turn that was clearly speech but came back unreadable is kept as such,
     so Asta asks them to repeat rather than hanging up on a person mid-answer.
+
+    Anything heard while Asta was talking — a quick "yes" over the end of its
+    line, or its own words off a speakerphone — is kept, and Asta's own words
+    are taken off the front before anyone replies to it. A turn that turns out
+    to be nothing but Asta's echo is not a turn: listen again.
     """
     from . import call_rtc
-    got = await call_rtc.hear_turn(meetings._CALL.get("ctx"), wait=HEAR_SECONDS,
-                                   log=meetings._CALL.get("log"), keep=keep)
-    text = (got.get("text") or "").strip()
+    call = meetings._CALL
+    keep = keep or float(call.get("heard_during") or 0) >= call_rtc.TURN_VOICE_MS
+    for _ in range(3):
+        got = await call_rtc.hear_turn(call.get("ctx"), wait=HEAR_SECONDS,
+                                       log=call.get("log"), keep=keep,
+                                       on_pause=_acknowledge)
+        raw = (got.get("text") or "").strip()
+        text = call_rtc.strip_echo(raw, call.get("last_said", "")) if keep else raw
+        log = call.get("log")
+        if log:
+            log({"heard": raw[:200], "kept": text[:200], "spoke": got.get("spoke")})
+        if keep and raw and not text:
+            keep = False                  # only Asta's echo: listen for them
+            continue
+        break
     if got.get("spoke") and not text:
         text = _UNHEARD
     if text:
@@ -140,6 +158,57 @@ async def _mind_if_ready(task: "asyncio.Task", wait: float = 5):
 
 
 _STILL_THERE = "Are you still there?"
+
+#: Said from their words the moment they are understood, before any brain has
+#: answered — the brain's speed on the day decides nothing about when Asta
+#: reacts. Measured 22 Sep: the same first sentence took 0.8 s on one run and
+#: 6.7 s on the next.
+_REACT_RULES = (
+    (re.compile(r"\bwho (?:is|'?s) (?:this|that|calling)\b|\bwho are you\b", re.I), "Oh, sorry."),
+    (re.compile(r"\b(?:bye|goodbye|talk (?:to you )?later|gotta go|have to go)\b|\bthank(?:s| you)\b", re.I), "Sounds good."),
+    (re.compile(r"^\W*(?:no|nope|not really|not now|busy|later)\b", re.I), "No worries."),
+    (re.compile(r"\?\s*$", re.I), "Sure."),
+    (re.compile(r"^\W*(?:yes|yeah|yep|yup|sure|okay|ok|go ahead|fine|good|haan|ha)\b", re.I), "Great."),
+)
+_DEFAULT_REACTIONS = ("Got it.", "Okay.")
+_defaults = {"n": 0}
+
+
+def quick_reaction(theirs: str) -> str:
+    """The ready-made reaction that fits what they just said."""
+    for pattern, line in _REACT_RULES:
+        if pattern.search(theirs or ""):
+            return line
+    line = _DEFAULT_REACTIONS[_defaults["n"] % len(_DEFAULT_REACTIONS)]
+    _defaults["n"] += 1
+    return line
+
+
+#: How long the brain has to produce its own first sentence before Asta reacts
+#: by itself.
+QUICK_REACTION_AFTER = 0.35
+
+#: What a listener says the instant the other person stops. Not from the reply
+#: reactions ("Okay.", "Great."), so the two never sound like a stutter.
+_ACKS = ("Mm-hm.", "Mm.")
+_acks = {"n": 0}
+
+
+def _acknowledge() -> None:
+    """Say a short "mm-hm" without waiting — the reply is still being thought."""
+    line = _ACKS[_acks["n"] % len(_ACKS)]
+    _acks["n"] += 1
+
+    async def go() -> None:
+        from . import call_rtc
+        with contextlib.suppress(Exception):
+            await call_rtc.say_quick(line)
+    task = asyncio.get_event_loop().create_task(go())
+    _ACKING.add(task)
+    task.add_done_callback(_ACKING.discard)
+
+
+_ACKING: set = set()
 _SAY_AGAIN = "Sorry, I didn't catch that. Could you say it again?"
 
 
@@ -169,44 +238,103 @@ async def _speak_reply(mind, theirs: str, said: list[str], lines: list[dict], rt
         try:
             async for sentence in mind.sentences(theirs, elapsed=elapsed, limit=limit):
                 text = spoken_form(sentence.replace(call_mind.END, "").strip())
-                if text:
-                    asyncio.get_event_loop().create_task(
-                        meetings.synth(voice.strip_voice_instruction(text)))
-                await queue.put((text, call_mind.END in sentence))
+                made = (asyncio.get_event_loop().create_task(
+                    meetings.synth(voice.strip_voice_instruction(text))) if text else None)
+                await queue.put((text, call_mind.END in sentence, made))
         except Exception as exc:                                 # noqa: BLE001
             # Out of its window mid-call: say so like a person and wrap up,
             # never read the brain's error out loud.
             if isinstance(exc, call_mind.Unavailable):
-                await queue.put((_DROPPING_OFF, True))
+                await queue.put((_DROPPING_OFF, True, None))
             else:
-                await queue.put((_SORRY, False))
+                await queue.put((_SORRY, False, None))
         finally:
             await queue.put(None)
 
     asyncio.get_event_loop().create_task(produce())
+    meetings._CALL["last_said"] = ""          # echo is judged against this reply
+    asked_at = asyncio.get_event_loop().time()
+    log = meetings._CALL.get("log")
     ended = interrupted = spoke = covered = False
+    reacted = False
+    ahead: list = []
+    try:
+        first = await asyncio.wait_for(queue.get(), timeout=QUICK_REACTION_AFTER)
+        ahead.append(first)
+    except asyncio.TimeoutError:
+        # The brain is slow today; react now, from their words.
+        await _say(quick_reaction(theirs), said, lines, rtc)
+        reacted = spoke = True
     while True:
-        try:
-            item = await asyncio.wait_for(queue.get(),
-                                          timeout=MOMENT_AFTER if not (spoke or covered) else ANSWER_TIMEOUT)
-        except asyncio.TimeoutError:
-            if spoke or covered:
-                break
-            covered = True
-            await _say(_next_moment(), said, lines, rtc)
-            continue
+        if ahead:
+            item = ahead.pop(0)
+        else:
+            try:
+                item = await asyncio.wait_for(queue.get(),
+                                              timeout=MOMENT_AFTER if not covered else ANSWER_TIMEOUT)
+            except asyncio.TimeoutError:
+                if covered:
+                    break
+                covered = True
+                await _say(_next_moment(), said, lines, rtc)
+                continue
         if item is None:
             break
-        text, last = item
+        text, last, _made = item
         ended = ended or last
-        if text:
-            await _say(text, said, lines, rtc)
-            spoke = True
-            if meetings._CALL.get("interrupted"):
-                interrupted = True
-                ended = False
-                break
+        if log and not spoke:
+            log({"first_sentence_after_s": round(asyncio.get_event_loop().time() - asked_at, 2),
+                 "first": text[:80]})
+        if not text:
+            continue
+        if reacted and text in call_mind.REACTIONS:
+            reacted = False           # already reacted; the brain's own would stutter
+            continue
+        reacted = False
+        if spoke and rtc and await _they_started(meetings._CALL.get("ctx")):
+            # They began talking in the gap between two of Asta's sentences:
+            # stop here and listen, as a person would.
+            interrupted, ended = True, False
+            meetings._CALL["interrupted"] = True
+            break
+        if text in call_mind.REACTIONS and not last:
+            # A reaction runs straight into what follows it; a gap after
+            # "Great." is where the other person takes their turn.
+            nxt = await _next_ready(queue, ahead)
+            if nxt is not None:
+                ahead.append(nxt)
+        await _say(text, said, lines, rtc)
+        spoke = True
+        if meetings._CALL.get("interrupted"):
+            interrupted = True
+            ended = False
+            break
     return ended, interrupted
+
+
+#: How long a reaction waits for the sentence after it to be ready.
+FOLLOW_ON_WAIT = 0.25
+
+
+async def _next_ready(queue: asyncio.Queue, ahead: list):
+    """The next sentence, once its audio is made — or None if it is not coming soon."""
+    try:
+        nxt = await asyncio.wait_for(queue.get(), timeout=FOLLOW_ON_WAIT)
+    except asyncio.TimeoutError:
+        return None
+    if nxt is not None and nxt[2] is not None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(nxt[2]), timeout=FOLLOW_ON_WAIT)
+    return nxt
+
+
+async def _they_started(ctx) -> bool:
+    from . import call_rtc
+    if ctx is None:
+        return False
+    with contextlib.suppress(Exception):
+        return await call_rtc.talking_now(ctx)
+    return False
 
 
 async def _compose_opener(mind_task: "asyncio.Task", fallback: str) -> str:
@@ -217,7 +345,8 @@ async def _compose_opener(mind_task: "asyncio.Task", fallback: str) -> str:
     own brain, which is used if it is ready by the time they answer.
     """
     from . import call_mind
-    await _prepare([fallback, *call_mind.REACTIONS, *_MOMENTS, _SAY_AGAIN, _STILL_THERE])
+    await _prepare([fallback, *call_mind.REACTIONS, "Oh, sorry.", *_ACKS, *_MOMENTS,
+                    _SAY_AGAIN, _STILL_THERE])
     mind = await _mind_if_ready(mind_task, wait=30)
     if mind is None:
         return fallback
@@ -297,8 +426,14 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
     thinking_ahead = asyncio.get_event_loop().create_task(
         call_mind.start(who, topic, agenda=agenda, minutes=round(limit / 60, 1) if seconds else 0))
     asyncio.get_event_loop().create_task(voice.warm_the_ears())
-    # Nobody's phone rings unless something can talk to them. The brain primes in
-    # a few seconds; if it is out of its usage window the call is not placed.
+    # Nobody's phone rings unless something can talk to them: no voice, no call.
+    from . import call_rtc
+    if call_rtc.enabled() and not await voice.available():
+        await _close_mind(thinking_ahead)
+        return (f"Didn't call {who} — the voice service is not answering, so Asta "
+                f"could not speak. Nothing rang.")
+    # The brain primes in a few seconds; if it is out of its usage window the
+    # call is not placed either.
     with contextlib.suppress(Exception):      # slow or broken: the call still goes ahead
         await asyncio.wait_for(asyncio.shield(thinking_ahead), timeout=BRAIN_READY_SECONDS)
     if thinking_ahead.done() and isinstance(thinking_ahead.exception(), call_mind.Unavailable):
@@ -313,8 +448,7 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
     page = (meetings._CALL or {}).get("page")
     said: list[str] = []
     heard_any = False
-    opener = (f"Hi, this is Asta, Arun's assistant. Arun asked me to call you about "
-              f"{topic}. Is now a good time?")
+    opener = f"Hi, it's Asta, Arun's assistant — is now a good time for {topic}?"
     # Made while it rings, so the greeting plays the moment they say hello —
     # people speak the instant they pick up. The plain greeting is made FIRST,
     # before anything else is queued on the voice server: on 22 Sep it waited
@@ -346,6 +480,7 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
         # The greeting plays to the end: people say "hello?" over it as they pick
         # up. After it they may talk over Asta, and it stops and listens.
         meetings._CALL["barge_in"] = False
+        meetings._CALL["last_said"] = ""
         await meetings.say_in_call(opener)
         meetings._CALL["barge_in"] = rtc
         said.append(opener)

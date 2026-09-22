@@ -109,6 +109,10 @@ INIT_JS = r"""
       src.connect(A.dest);
       A.playing.push(src);
       src.onended = () => { A.playing = A.playing.filter(x => x !== src); done(buf.duration); };
+      A.lineStart = performance.now();
+      // Echo is learned only from a line that starts into quiet: if they were
+      // already talking, what comes back is them, not Asta.
+      A.learn = !A.lastLoud || A.lineStart - A.lastLoud > 500;
       src.start();
     });
   };
@@ -148,18 +152,47 @@ INIT_JS = r"""
       silent.gain.value = 0;
       A.tapNode.connect(silent);
       silent.connect(ctx.destination);
+      A.recent = [];
+      A.outs = [];
+      // Asta's own voice, measured as it leaves: what their speaker could send back.
+      A.outAn = ctx.createAnalyser();
+      A.outAn.fftSize = 2048;
+      ctx.createMediaStreamSource(A.dest.stream).connect(A.outAn);
+      const outBuf = new Float32Array(2048);
       A.tapNode.onaudioprocess = (e) => {
         const x = e.inputBuffer.getChannelData(0);
         let sum = 0;
         for (let i = 0; i < x.length; i++) sum += x[i] * x[i];
         A.level = Math.sqrt(sum / x.length);
-        if (A.level > 0.01) {
+        A.outAn.getFloatTimeDomainData(outBuf);
+        let o = 0;
+        for (let i = 0; i < outBuf.length; i++) o += outBuf[i] * outBuf[i];
+        A.outs.push(Math.sqrt(o / outBuf.length));
+        if (A.outs.length > 4) A.outs.shift();
+        // The line's own floor — a hissy speakerphone is not somebody talking.
+        // The quietest moment of the last three seconds, since speech has gaps.
+        A.recent.push(A.level);
+        if (A.recent.length > 36) A.recent.shift();
+        A.floor = Math.min(...A.recent);
+        A.thr = Math.max(0.01, A.floor * 2.5 + 0.004);
+        // Their voice must stand above what Asta's own would echo back at. How
+        // much comes back is learned in the first moments of each of Asta's
+        // lines, when they are almost always listening: none on a normal call,
+        // so any voice counts; a lot on a speakerphone, so only speech that
+        // stands clear of it does.
+        const out = Math.max(...A.outs);
+        if (A.learn && out > 0.02 && A.lineStart && performance.now() - A.lineStart < 800) {
+          A.k = Math.min(1, 0.8 * (A.k || 0) + 0.2 * (A.level / out));
+        }
+        A.echoAt = out > 0.005 ? 1.8 * (A.k || 0) * out : 0;
+        const loud = A.level > A.thr && A.level > A.echoAt;
+        if (loud) {
           A.lastLoud = performance.now();
           A.loudMs += 1000 * x.length / e.inputBuffer.sampleRate;
         }
         if (A.recording) {
           A.chunks.push(new Float32Array(x));
-          A.levels.push(A.level);
+          A.levels.push(loud ? 1 : 0);
           if (A.chunks.length > 900) { A.chunks.shift(); A.levels.shift(); }
         }
       };
@@ -185,6 +218,13 @@ INIT_JS = r"""
     return added;
   };
 
+  // How much of the last `ms` of the recording was somebody talking.
+  A.tailLoudMs = (ms) => {
+    const per = 4096 / (A.ctx ? A.ctx.sampleRate : 48000) * 1000;
+    const n = Math.ceil(ms / per);
+    return A.levels.slice(-n).reduce((a, b) => a + b, 0) * per;
+  };
+
   A.record = (on) => {
     A.recording = !!on;
     A.chunks = [];
@@ -197,9 +237,10 @@ INIT_JS = r"""
     const rate = A.ctx ? A.ctx.sampleRate : 48000;
     // Only the stretch where somebody spoke, with a little either side: long
     // silence is what sends Whisper into repeating one word for ever.
-    let first = A.levels.findIndex(l => l > 0.01);
-    let last = A.levels.length - 1 - [...A.levels].reverse().findIndex(l => l > 0.01);
-    const keepChunks = first < 0 ? [] : A.chunks.slice(Math.max(0, first - 2), Math.min(A.chunks.length, last + 3));
+    let first = A.levels.findIndex(l => l > 0);
+    let last = A.levels.length - 1 - [...A.levels].reverse().findIndex(l => l > 0);
+    // Padded well either side: Whisper hears "Yes." alone as nothing at all.
+    const keepChunks = first < 0 ? [] : A.chunks.slice(Math.max(0, first - 5), Math.min(A.chunks.length, last + 6));
     let n = 0;
     for (const c of keepChunks) n += c.length;
     const pcm = new Float32Array(n);
@@ -424,9 +465,9 @@ async def wait_for_them(ctx, seconds: float = 45, quiet_open: float = 4.0,
     return "no answer"
 
 
-async def hear_turn(ctx, wait: float = 14, pause_ms: float = 600, longest: float = 30,
+async def hear_turn(ctx, wait: float = 14, pause_ms: float = 500, longest: float = 30,
                     clock=time.monotonic, nap=asyncio.sleep, transcribe=None,
-                    log=None, keep: bool = False) -> dict:
+                    log=None, keep: bool = False, on_pause=None) -> dict:
     """What they say next, up to the pause that ends it. {'text', 'seconds', 'spoke'}.
 
     Records their side only — the tap never sees Asta's own voice — so Asta
@@ -439,6 +480,8 @@ async def hear_turn(ctx, wait: float = 14, pause_ms: float = 600, longest: float
     listen = transcribe or voice.transcribe
     start = clock()
     began = 0.0
+    extended = False
+    paused_once = False
     early = None                      # (loudMs when taken, transcription task)
     while True:
         s = await snapshot(ctx)
@@ -455,22 +498,94 @@ async def hear_turn(ctx, wait: float = 14, pause_ms: float = 600, longest: float
         if early is not None and s.get("loudMs", 0) > early[0]:
             early = None              # they went on: that look is out of date
         if began and (quiet >= pause_ms or clock() - began > longest):
-            break
+            # The moment they stop: a listener's "mm-hm" now, whatever comes
+            # next — it answers a finished turn and encourages an unfinished one.
+            if on_pause is not None and not paused_once and s.get("loudMs", 0) >= ACK_AFTER_MS:
+                paused_once = True
+                on_pause()
+            # A thought that stops mid-sentence ("so what I think is…") gets a
+            # moment to finish before Asta takes the floor.
+            if extended or clock() - began > longest:
+                break
+            wav_so_far, _, _ = await take(ctx, keep=True)
+            partial = await early[1] if early is not None else await _quietly(listen, wav_so_far)
+            if not unfinished(partial):
+                early = (s.get("loudMs", 0), _done(partial))
+                break
+            extended = True
+            if not await _resumes(ctx, s.get("loudMs", 0), FINISH_THOUGHT, clock, nap):
+                early = (s.get("loudMs", 0), _done(partial))
+                break
+            early = None
+            paused_once = False       # they went on: acknowledge the end as well
+            continue
         if not began and clock() - start > wait:
             break
         if s.get("pcs") and s.get("closed") >= s.get("pcs"):
             break
-        await nap(0.15)
+        await nap(0.1)
+    ended_at = clock()
     wav, seconds, peak = await take(ctx)
     await record(ctx, False)
     if not began or not wav:
         return {"text": "", "seconds": seconds, "spoke": False}
     text = await early[1] if early is not None else await _quietly(listen, wav)
+    if log:
+        log({"turn": "ended", "extended": extended, "early": early is not None,
+             "transcribed_after_s": round(clock() - ended_at, 2)})
     return {"text": (text or "").strip(), "seconds": seconds, "spoke": True}
+
+
+#: A listener's "mm-hm" belongs after somebody has said something, not after
+#: a one-word "yes" — there it only sounds fussy.
+ACK_AFTER_MS = 1500
+
+#: How long a sentence that stops mid-thought is given to go on.
+FINISH_THOUGHT = 1.5
+
+_CARRIES_ON = re.compile(
+    r"(?:\b(?:and|but|so|because|or|um+|uh+|like|that|which|the|a|an|to|if|when|is|"
+    r"was|are|i|we|you|my|our|of|with|for|think|mean|actually)|[,…]|\.\.\.)\W*$", re.I)
+
+
+def unfinished(text: str) -> bool:
+    """Does this read like the middle of a sentence rather than the end of one?"""
+    t = (text or "").strip()
+    return bool(t) and bool(_CARRIES_ON.search(t))
+
+
+def _done(value):
+    fut = asyncio.get_event_loop().create_future()
+    fut.set_result(value)
+    return fut
+
+
+async def _resumes(ctx, loud_now: float, seconds: float, clock, nap) -> bool:
+    """Did they start talking again within `seconds`?"""
+    until = clock() + seconds
+    while clock() < until:
+        await nap(0.15)
+        if (await snapshot(ctx)).get("loudMs", 0) > loud_now + 100:
+            return True
+    return False
 
 
 #: Silence after which their words are transcribed speculatively.
 EARLY_LOOK_MS = 300
+
+
+def strip_echo(heard: str, asta_said: str) -> str:
+    """Their words with Asta's own taken off the front.
+
+    A speakerphone with no echo cancelling sends Asta's line straight back, and
+    a quick "yes" over the end of Asta's line arrives glued to it. Words Asta
+    just said, at the start of what was heard, are Asta's; what follows is theirs.
+    """
+    ours = set(re.findall(r"[\w']+", (asta_said or "").lower()))
+    words = (heard or "").split()
+    while words and re.sub(r"[^\w']", "", words[0].lower()) in ours:
+        words.pop(0)
+    return " ".join(words).strip(" ,.;:-—?!")
 
 
 #: Longest a transcription may take before the turn counts as not understood —
@@ -491,9 +606,15 @@ def garbled(text: str) -> bool:
     return top / len(words) > 0.5 or len(set(words)) <= 2
 
 
+#: The language call turns are transcribed in. Left to detect it itself, Whisper
+#: heard a one-second "Yeah, sure." as German ("Ja, schul.") on 22 Sep.
+CALL_LANGUAGE = os.environ.get("ASTA_CALL_LANGUAGE", "en").strip()
+
+
 async def _quietly(listen, wav: bytes) -> str:
     try:
-        text = await asyncio.wait_for(listen(wav, filename="turn.wav"), TRANSCRIBE_TIMEOUT)
+        text = await asyncio.wait_for(listen(wav, filename="turn.wav", language=CALL_LANGUAGE),
+                                      TRANSCRIBE_TIMEOUT)
     except Exception:                                          # noqa: BLE001
         return ""
     return "" if garbled(text) else text
@@ -512,7 +633,7 @@ def is_voicemail(text: str) -> bool:
     return bool(_VOICEMAIL.search(text or ""))
 
 
-async def greeting(ctx, pause_ms: float = 700, longest: float = 7.0,
+async def greeting(ctx, pause_ms: float = 450, longest: float = 7.0,
                    clock=time.monotonic, nap=asyncio.sleep, transcribe=None) -> dict:
     """What answered: {'voicemail': bool, 'text': str, 'spoke_ms': float}.
 
@@ -528,7 +649,7 @@ async def greeting(ctx, pause_ms: float = 700, longest: float = 7.0,
         s = await snapshot(ctx)
         spoke = s.get("loudMs", 0)
         waited = clock() - start
-        if (spoke == 0 and waited >= 0.8) or (spoke > 0 and s.get("quietMs", -1) >= pause_ms):
+        if (spoke == 0 and waited >= 0.4) or (spoke > 0 and s.get("quietMs", -1) >= pause_ms):
             break
         if s.get("pcs") and s.get("closed") >= s.get("pcs"):
             break
@@ -581,18 +702,60 @@ async def say(ctx, wav: bytes, interruptible: bool = False,
             if s.get("loudMs", 0) >= BARGE_IN_MS and 0 <= s.get("quietMs", -1) <= 400:
                 interrupted = True
                 await _each(ctx, "window.__asta.stop()")
-                # What was recorded under Asta's own voice may be its echo; the
-                # turn starts from the moment they cut in.
-                await record(ctx, True)
+                # The recording carries on: their first words ("sorry, wait,
+                # who is…") were said before the interruption was certain, and
+                # restarting it here kept only "this.". Echo was never counted
+                # as their voice in the first place.
                 break
     seconds = 0.0
     for p in playing:
         with contextlib.suppress(Exception):
             seconds = max(seconds, float(await p or 0))
-    await nap(0.3)
+    # Long enough for the call's statistics to catch the last of it; any longer
+    # is a pause in the middle of a reply, which a listener hears as "your turn".
+    await nap(0.08)
     after = await snapshot(ctx)
     return {"seconds": seconds, "sent": spoke(before, after), "interrupted": interrupted,
-            "energy": after.get("outEnergy", 0) - before.get("outEnergy", 0)}
+            "energy": after.get("outEnergy", 0) - before.get("outEnergy", 0),
+            "heard_during": after.get("loudMs", 0) if interruptible else 0}
+
+
+async def talking_now(ctx, within_ms: float = 300) -> bool:
+    """Are they speaking this moment? Checked before each sentence of a reply, so
+    Asta never starts a sentence over somebody who has just started one."""
+    s = await snapshot(ctx)
+    q = s.get("quietMs", -1)
+    return s.get("loudMs", 0) >= TURN_VOICE_MS and 0 <= q <= within_ms
+
+
+async def ended(ctx) -> bool:
+    """Every connection of the call has closed."""
+    s = await snapshot(ctx)
+    return bool(s.get("pcs")) and s.get("closed", 0) >= s.get("pcs", 0)
+
+
+#: How much of their audio to gather before transcribing it into the notes.
+LISTEN_EVERY = 15.0
+
+
+async def listen_into(ctx, lines: list[dict], speaker: str = "Them",
+                      clock=time.monotonic) -> None:
+    """For a call Asta sits in rather than drives: every so often, what they said
+    since the last look, transcribed, appended to the call's lines."""
+    from . import voice
+    state = _LISTENING.setdefault(id(ctx), {"at": clock()})
+    if clock() - state["at"] < LISTEN_EVERY:
+        return
+    state["at"] = clock()
+    wav, seconds, _ = await take(ctx)
+    if seconds < 0.3:
+        return
+    text = await _quietly(voice.transcribe, wav)
+    if text:
+        lines.append({"speaker": speaker, "text": text})
+
+
+_LISTENING: dict[int, dict] = {}
 
 
 # --- the call path on top of it -------------------------------------------------
@@ -635,6 +798,30 @@ async def wait_for_answer(page, seconds: float = 0) -> str:
     return got
 
 
+async def say_quick(text: str) -> None:
+    """A listener's "mm-hm", from made audio, that leaves their recording alone.
+
+    Not `say_line`: an interruptible line restarts the recording, and this is
+    said while their words are still being collected."""
+    from . import meetings, voice
+    ctx = meetings._CALL.get("ctx")
+    if ctx is None:
+        return
+    audio = await meetings.synth(voice.strip_voice_instruction(text))
+    if audio:
+        await say(ctx, audio, interruptible=False)
+
+
+async def _unmuted(call: dict) -> bool:
+    """True only when Teams was definitely muted and is not any more."""
+    from . import meetings, voice
+    with contextlib.suppress(Exception):
+        page = await meetings._follow_call_window(call.get("page"))
+        if page is not None and (await voice.mic_is_live(page)).get("muted"):
+            return await voice.ensure_unmuted(page)
+    return False
+
+
 async def say_line(text: str, voice_name: str = "") -> str:
     """Say it through Asta's own microphone, and only report what was SENT.
 
@@ -659,9 +846,20 @@ async def say_line(text: str, voice_name: str = "") -> str:
     audio = await meetings.synth(words, chosen)
     if not audio:
         raise RuntimeError("speech generation produced nothing — said nothing")
-    out = await say(ctx, audio, interruptible=bool(call.get("barge_in")))
-    call["interrupted"] = bool(out.get("interrupted"))
     log = call.get("log")
+    if log:
+        log({"saying": words[:120]})
+    out = await say(ctx, audio, interruptible=bool(call.get("barge_in")))
+    if not out["sent"] and await _unmuted(call):
+        # Teams had muted the line (a meeting that joins people muted does this).
+        # Unmuted, and only then said again — a line is never said twice otherwise.
+        out = await say(ctx, audio, interruptible=bool(call.get("barge_in")))
+    call["interrupted"] = bool(out.get("interrupted"))
+    # They answered over the end of the line (a quick "yes"), or their speaker
+    # sent Asta's words back: either way the recording carries on, and the
+    # transcript is cleaned of Asta's own words before anyone replies to it.
+    call["heard_during"] = float(out.get("heard_during") or 0)
+    call["last_said"] = (" ".join([call.get("last_said", ""), words]))[-600:]
     if log:
         log({"said": words[:200], "sent": out["sent"], "energy": out["energy"],
              "interrupted": call["interrupted"]})

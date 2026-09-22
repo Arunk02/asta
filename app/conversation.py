@@ -140,6 +140,7 @@ async def _mind_if_ready(task: "asyncio.Task", wait: float = 5):
 
 
 _STILL_THERE = "Are you still there?"
+_SAY_AGAIN = "Sorry, I didn't catch that. Could you say it again?"
 
 
 async def _say(text: str, said: list[str], lines: list[dict], rtc: bool) -> None:
@@ -216,7 +217,7 @@ async def _compose_opener(mind_task: "asyncio.Task", fallback: str) -> str:
     own brain, which is used if it is ready by the time they answer.
     """
     from . import call_mind
-    await _prepare([fallback, *call_mind.REACTIONS, *_MOMENTS])
+    await _prepare([fallback, *call_mind.REACTIONS, *_MOMENTS, _SAY_AGAIN, _STILL_THERE])
     mind = await _mind_if_ready(mind_task, wait=30)
     if mind is None:
         return fallback
@@ -342,9 +343,11 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
         # otherwise the plain one, which is ready. Never wait here: they spoke.
         if ready.done() and not ready.cancelled() and ready.exception() is None:
             opener = ready.result() or opener
-        # They may talk over Asta, and should be able to: it stops and listens.
-        meetings._CALL["barge_in"] = rtc
+        # The greeting plays to the end: people say "hello?" over it as they pick
+        # up. After it they may talk over Asta, and it stops and listens.
+        meetings._CALL["barge_in"] = False
         await meetings.say_in_call(opener)
+        meetings._CALL["barge_in"] = rtc
         said.append(opener)
 
         lines: list[dict] = [{"speaker": "Asta", "text": opener}] if rtc else []
@@ -366,7 +369,7 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
             heard_any = True
             turns += 1
             if theirs == _UNHEARD:
-                await _say("Sorry, I didn't catch that. Could you say it again?", said, lines, rtc)
+                await _say(_SAY_AGAIN, said, lines, rtc)
                 interrupted = bool(meetings._CALL.get("interrupted"))
                 continue
             mind = await _mind_if_ready(thinking_ahead)

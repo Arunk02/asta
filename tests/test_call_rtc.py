@@ -693,3 +693,38 @@ def test_running_out_mid_call_is_a_polite_goodbye_not_an_error_read_aloud(monkey
     meetings._CALL.clear()
     ended, interrupted = asyncio.run(conversation._speak_reply(OutMind(), "yes", [], [], True))
     assert said == [conversation._DROPPING_OFF] and ended is True
+
+
+# --- 22 Sep, the call to a second colleague: "Haruki" two hundred times ----------------------
+
+def test_whisper_repeating_itself_is_not_an_answer():
+    assert call_rtc.garbled("Haruki " * 200)
+    assert call_rtc.garbled("the the the the the the the")
+    assert not call_rtc.garbled("Yes, tell me, what is this call about?")
+    assert not call_rtc.garbled("Yes.")
+
+
+def test_a_garbled_transcription_becomes_unheard_not_a_reply():
+    async def listen(wav, filename=""):
+        return "Haruki " * 200
+
+    assert asyncio.run(call_rtc._quietly(listen, b"RIFF")) == ""
+
+
+def test_a_transcription_that_runs_on_is_cut_off(monkeypatch):
+    monkeypatch.setattr(call_rtc, "TRANSCRIBE_TIMEOUT", 0.05)
+
+    async def listen(wav, filename=""):
+        await asyncio.sleep(1)
+        return "too late"
+
+    assert asyncio.run(call_rtc._quietly(listen, b"RIFF")) == ""
+
+
+def test_the_greeting_cannot_be_interrupted_but_what_follows_can():
+    import inspect
+    from app import conversation
+    src = inspect.getsource(conversation.converse)
+    greeting = src.index("await meetings.say_in_call(opener)")
+    assert src.rindex('meetings._CALL["barge_in"] = False', 0, greeting) < greeting
+    assert src.index('meetings._CALL["barge_in"] = rtc', greeting) > greeting

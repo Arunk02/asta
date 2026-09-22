@@ -53,8 +53,8 @@ INIT_JS = r"""
 (() => {
   if (window.__asta) return;
   const A = window.__asta = {pcs: [], ctx: null, dest: null, gum: 0, tapped: {},
-                             chunks: [], recording: false, loudMs: 0, lastLoud: 0,
-                             level: 0, sinks: []};
+                             chunks: [], levels: [], recording: false, loudMs: 0,
+                             lastLoud: 0, level: 0, sinks: []};
 
   const Native = window.RTCPeerConnection;
   if (Native) {
@@ -159,7 +159,8 @@ INIT_JS = r"""
         }
         if (A.recording) {
           A.chunks.push(new Float32Array(x));
-          if (A.chunks.length > 900) A.chunks.shift();
+          A.levels.push(A.level);
+          if (A.chunks.length > 900) { A.chunks.shift(); A.levels.shift(); }
         }
       };
     }
@@ -187,18 +188,24 @@ INIT_JS = r"""
   A.record = (on) => {
     A.recording = !!on;
     A.chunks = [];
+    A.levels = [];
     A.loudMs = 0;
     A.lastLoud = 0;
   };
 
   A.take = (keep) => {
     const rate = A.ctx ? A.ctx.sampleRate : 48000;
+    // Only the stretch where somebody spoke, with a little either side: long
+    // silence is what sends Whisper into repeating one word for ever.
+    let first = A.levels.findIndex(l => l > 0.01);
+    let last = A.levels.length - 1 - [...A.levels].reverse().findIndex(l => l > 0.01);
+    const keepChunks = first < 0 ? [] : A.chunks.slice(Math.max(0, first - 2), Math.min(A.chunks.length, last + 3));
     let n = 0;
-    for (const c of A.chunks) n += c.length;
+    for (const c of keepChunks) n += c.length;
     const pcm = new Float32Array(n);
     let o = 0;
-    for (const c of A.chunks) { pcm.set(c, o); o += c.length; }
-    if (!keep) A.chunks = [];
+    for (const c of keepChunks) { pcm.set(c, o); o += c.length; }
+    if (!keep) { A.chunks = []; A.levels = []; }
     const step = rate / 16000;
     const m = Math.floor(n / step);
     const buf = new ArrayBuffer(44 + m * 2);
@@ -466,11 +473,30 @@ async def hear_turn(ctx, wait: float = 14, pause_ms: float = 600, longest: float
 EARLY_LOOK_MS = 300
 
 
+#: Longest a transcription may take before the turn counts as not understood —
+#: a Whisper that has started repeating itself can run far past this.
+TRANSCRIBE_TIMEOUT = 5.0
+
+
+def garbled(text: str) -> bool:
+    """Whisper's failure mode on noise: one word, over and over.
+
+    22 Sep: a colleague's reply came back as "Haruki" two hundred times, and a
+    reply to that would have been a reply to nothing.
+    """
+    words = re.findall(r"[\w']+", (text or "").lower())
+    if len(words) < 6:
+        return False
+    top = max(words.count(w) for w in set(words))
+    return top / len(words) > 0.5 or len(set(words)) <= 2
+
+
 async def _quietly(listen, wav: bytes) -> str:
     try:
-        return await listen(wav, filename="turn.wav")
+        text = await asyncio.wait_for(listen(wav, filename="turn.wav"), TRANSCRIBE_TIMEOUT)
     except Exception:                                          # noqa: BLE001
         return ""
+    return "" if garbled(text) else text
 
 
 #: A person answers with a word or two and waits. A recorded greeting talks on.
@@ -518,10 +544,12 @@ async def greeting(ctx, pause_ms: float = 700, longest: float = 7.0,
     return {"voicemail": is_voicemail(text), "text": text or "", "spoke_ms": spoke}
 
 
-#: Their voice over Asta's for this long means they are talking, not coughing.
-BARGE_IN_MS = 400
-#: Echo and a breath at the start of Asta's line are not an interruption.
-BARGE_IN_GRACE = 0.6
+#: Their voice over Asta's for this long means they are talking, not coughing —
+#: and not Asta's own voice coming back off their speaker.
+BARGE_IN_MS = 600
+#: A breath, a "hello?" and an echo at the start of Asta's line are not an
+#: interruption.
+BARGE_IN_GRACE = 1.0
 
 
 async def say(ctx, wav: bytes, interruptible: bool = False,
@@ -553,6 +581,9 @@ async def say(ctx, wav: bytes, interruptible: bool = False,
             if s.get("loudMs", 0) >= BARGE_IN_MS and 0 <= s.get("quietMs", -1) <= 400:
                 interrupted = True
                 await _each(ctx, "window.__asta.stop()")
+                # What was recorded under Asta's own voice may be its echo; the
+                # turn starts from the moment they cut in.
+                await record(ctx, True)
                 break
     seconds = 0.0
     for p in playing:

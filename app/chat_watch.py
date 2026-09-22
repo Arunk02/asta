@@ -651,7 +651,7 @@ async def sweep(notify=None) -> list[dict]:
                 attention.mark_acted(key, why="he replied")
                 attention.settle_with(who)
                 continue
-            handled.append({"chat": chat, "who": who, "text": text, "priority": pri})
+            handled.append({"chat": chat, "who": who, "text": text, "priority": pri, "key": key})
             lines.append(render(chat, who, text, pri, known=known))
             # The few lines BEFORE this one, from the same person. People paste
             # the link and ask about it in the next breath — Alex's booking id
@@ -680,7 +680,7 @@ async def sweep(notify=None) -> list[dict]:
                      urgency="direct" if started or any(
                          h["priority"] is not None and h["priority"] <= attention.P_TODAY
                          for h in handled) else "ambient",
-                     considered=True)
+                     considered=True, keys=tuple(h["key"] for h in handled))
     return handled
 
 

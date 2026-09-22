@@ -268,6 +268,18 @@ _IMPERATIVE = re.compile(
     r"(?:favou?rite|default|preferred))\b", re.I)
 
 
+_BACK = re.compile(
+    r"^\W*(?:ok(?:ay)?\W+)?(?:i'?m|i am|am) back\b"
+    r"|\b(?:end|stop|cancel|lift|turn off)\s+(?:the\s+|my\s+)?(?:quiet|silence|silent mode|dnd|do not disturb)\b"
+    r"|\bunmute\b|\b(?:you can|u can)\s+(?:notify|ping|message)\s+me\b"
+    r"|\b(?:notifications?|pings?)\s+(?:back\s+)?on\b|\bresume\s+notifications?\b", re.I)
+
+
+def ends_quiet(text: str) -> bool:
+    """"I'm back" — only meaningful while his quiet time holds (the caller checks)."""
+    return bool(_BACK.search((text or "").replace("’", "'")))
+
+
 def standing_instruction(text: str):
     """The rule a standing instruction states — once per distinct instruction.
 
@@ -279,18 +291,29 @@ def standing_instruction(text: str):
     t = (text or "").replace("’", "'").strip()
     if not t or t.endswith("?"):
         return None
-    if not (_IMPERATIVE.search(t) or instructions.states_a_default(t)):
-        return None
     cand = instructions.compile(t)
     if cand is None:
         return None
+    # A typed rule (quiet time, a mute, a never, a default) is heard wherever it
+    # sits in the message — his weekend rule began "And also…", and a detector
+    # that only listened to messages opening with an imperative never heard it.
+    # A free-text note still needs the imperative, or every remark with
+    # "always" in it would become a proposal.
+    if cand.kind == "note" and not (_IMPERATIVE.search(t) or instructions.states_a_default(t)):
+        return None
+    return cand if first_time(cand, t) else None
+
+
+def first_time(cand, text: str) -> bool:
+    """True the first time this rule is offered — from the front desk or from a
+    brain's `remember` — so he is never asked the same thing twice."""
     key = f"rule_proposed:{cand.kind}:{cand.act}:{cand.target.lower()}:{cand.value}"
     if cand.kind == "note":
-        key += ":" + re.sub(r"\W+", "", t.lower())[:60]
+        key += ":" + re.sub(r"\W+", "", (text or "").lower())[:60]
     if store.kv_get(key):
-        return None
+        return False
     store.kv_set(key, "1")
-    return cand
+    return True
 
 
 #: Words that say an instruction is meant to last. A "note" rule is the compiler's

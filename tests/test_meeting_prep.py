@@ -165,3 +165,51 @@ def test_a_blank_answer_counts_as_no_answer(monkeypatch):
     monkeypatch.setattr(agent, "best_model_name",
                         lambda: (_ for _ in ()).throw(RuntimeError()))
     assert asyncio.run(memory.cheap_complete("x", paid_ok=True)) is None
+
+
+# --- the prep ping, only where there is something to prepare --------------------------
+
+def _meeting(title: str, minutes: int, status: str = "") -> dict:
+    h, m = divmod(minutes, 60)
+    return {"start": f"{h:02d}:{m:02d}", "end": "", "title": title, "organizer": "",
+            "minutes": minutes, "ends": minutes + 30, "status": status, "join_url": ""}
+
+
+def test_a_tentative_meeting_with_nothing_to_prepare_rings_only_the_bell(monkeypatch):
+    """73 of 75 prep pings in the three weeks to 22 Sep were for meetings his
+    calendar marks tentative; "want me to prep anything?" was never answered."""
+    import asyncio
+    import datetime as dt
+    from app import briefing, notify, store
+    monkeypatch.setenv("ASTA_MEET2", "1")
+    now = dt.datetime(2026, 9, 29, 10, 0)                       # a Tuesday
+    meetings = [_meeting("Code Refactor", 10 * 60 + 30, "Tentative"),
+                _meeting("Team Daily Scrum", 10 * 60 + 30, "Tentative"),
+                _meeting("Architecture walkthrough", 10 * 60 + 30)]
+
+    async def fake_meetings():
+        return meetings
+
+    async def fake_draft():
+        return "yesterday: the fix; today: the review"
+
+    pushed: list[str] = []
+
+    async def fake_notify(text, *a, **k):
+        pushed.append(text)
+
+    monkeypatch.setattr(briefing, "_cached_meetings", fake_meetings)
+    monkeypatch.setattr(briefing, "standup_draft", fake_draft)
+    monkeypatch.setattr(notify, "notify", fake_notify)
+
+    async def no_prep(title):
+        return ""
+
+    from app import agent as agent_mod
+    monkeypatch.setattr(agent_mod, "meeting_prep", no_prep)
+    asyncio.run(briefing.premeeting_tick(now))
+    assert not any("Code Refactor" in p for p in pushed)
+    assert any("Code Refactor" in n["text"] and "not pushed" in n["text"]
+               for n in store.list_notifications(limit=10))
+    assert any("Daily Scrum" in p for p in pushed)       # a speaking one keeps its draft
+    assert any("Architecture walkthrough" in p for p in pushed)   # accepted: unchanged

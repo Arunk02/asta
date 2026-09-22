@@ -148,14 +148,22 @@ def _hold(text: str) -> None:
     store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))
 
 
-async def deliver(text: str) -> dict:
+async def deliver(text: str, *, force: bool = False, keys: tuple = ()) -> dict:
     """Actually put it on his phone, and remember that something just went out.
 
     Split out of `notify` so the coalescing flush can send a merged batch through
     exactly the same path — and so `note_sent` is stamped in ONE place. Stamping
     it per call site is how a batching window starts disagreeing with itself.
+
+    The ONE door: the digest, a batch, a held flush and `notify` itself all end
+    here, so a quiet rule checked here holds for every one of them. On 19 Sep
+    the digest and the batch flush called this directly and went around every
+    check `notify` made. `force` is only for the summary a quiet rule releases.
     """
     from . import budget, delivery
+    if not force and quiet_rule() is not None:
+        _keep_for_quiet(text, "batch", keys)
+        return {"bell": True, "held": True, "quiet": True, "whatsapp": False, "telegram": False}
     wa = await wa_send(text)
     tg = await telegram.send(text)
     delivery.note_sent()
@@ -181,7 +189,8 @@ def _ledger_priority(urgency: str, priority: int | None) -> int:
 
 async def notify(text: str, level: str = "info", urgency: str = "direct",
                  priority: int | None = None, *, source: str = "",
-                 key: str = "", considered: bool = False) -> dict:
+                 key: str = "", considered: bool = False, asked: bool = False,
+                 keys: tuple | list = ()) -> dict:
     """Record for the UI bell and fan out to WhatsApp + Telegram.
 
     urgency="direct"  — someone is actually addressing Arun (1:1 message, @mention,
@@ -197,6 +206,7 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     no one was looking at.
     """
     store.add_notification(text, level)  # the bell always gets everything
+    keys = tuple(keys or ()) + ((key,) if key else ())
 
     # The ledger decides WHETHER, the same way `delivery` below decides WHEN.
     # It used to be consulted by three call sites out of fifty-six, so the
@@ -218,6 +228,7 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     if not considered:
         from . import attention, triage
         ledger_key = key or triage.stable_key(text)
+        keys = keys + (ledger_key,)
         from . import clip as clip_mod
         if not attention.consider(source or attention.SELF_SOURCE, ledger_key,
                                   # `what` is rendered back to him in chases and
@@ -230,13 +241,25 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
             return {"bell": True, "held": False, "suppressed": True,
                     "whatsapp": False, "telegram": False}
 
+    # His quiet time — a rule he made ("weekends off, summarise on Monday"). It
+    # outranks everything below it, breakage included: he is off. What arrives
+    # is kept and lands in one summary when the rule ends. `asked` is his own
+    # ask coming back to him — a reminder he set still rings.
+    if quiet_rule() is not None:
+        if not asked and not (level in HIS_WORK and talking_to_asta()):
+            _keep_for_quiet(text, level, keys)
+            return {"bell": True, "held": True, "quiet": True, "whatsapp": False, "telegram": False}
+        # Straight out, past the batch: nothing else is going to his phone today
+        # for it to ride along with, and the door itself would hold it.
+        return await deliver(text, force=True, keys=keys)
+
     from . import budget, delivery
     # The day's budget of interruptions. Breakage and things he is blocked on are
     # never counted against it; everything ordinary that arrives once the budget
     # is gone is read in the digest instead of buzzing his pocket.
     if not budget.allows(priority, urgency, level=level):
         from . import digest
-        digest.add(text, source=level, why="past today's budget of interruptions")
+        digest.add(text, source=level, why="past today's budget of interruptions", keys=keys)
         return {"bell": True, "held": True, "digested": True,
                 "whatsapp": False, "telegram": False}
     # Night first, because it outranks every other reason to speak. Held items
@@ -245,6 +268,14 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     if delivery.hold_for_quiet(urgency, priority):
         _hold(text)
         return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
+    # A direct Teams message while he is at the laptop: he may be answering it
+    # in Teams right now, and a WhatsApp push a minute later is the same news
+    # twice. It waits a moment, and goes only if he has not answered.
+    if level == "teams" and urgency == "direct" and keys and REPLY_GRACE > 0:
+        from . import presence
+        if await presence.at_laptop():
+            _hold_for_reply(text, keys)
+            return {"bell": True, "held": True, "grace": True, "whatsapp": False, "telegram": False}
     if urgency == "ambient":
         from . import presence
         if await presence.at_laptop():
@@ -312,15 +343,15 @@ async def flush_held(reason: str = "while you were at the laptop") -> dict:
     body = "\n\n".join(texts[-10:])
     if len(texts) > 10:
         body += f"\n\n(+{len(texts) - 10} more in the app)"
-    wa = await wa_send(head + body)
-    tg = await telegram.send(head + body)
-    if not (wa or tg):
-        store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))   # nothing landed — keep it
-        store.kv_set("last_push_failure",
-                     json.dumps({"at": time.time(), "text": head[:120]}))
+    # Through the one door: quiet rules hold it, the budget counts it — this
+    # flush used to send straight to WhatsApp, past both.
+    out = await deliver(head + body)
+    if out.get("quiet"):
         return {"held": True, "whatsapp": False, "telegram": False}
-    delivery.note_sent()
-    return {"held": False, "whatsapp": wa, "telegram": tg}
+    if not (out["whatsapp"] or out["telegram"]):
+        store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))   # nothing landed — keep it
+        return {"held": True, "whatsapp": False, "telegram": False}
+    return {"held": False, "whatsapp": out["whatsapp"], "telegram": out["telegram"]}
 
 
 async def held_watch_loop() -> None:
@@ -341,5 +372,143 @@ async def held_watch_loop() -> None:
             elif _stale(_held_items()):
                 await flush_held(reason="waited long enough")
             was_present = present
+            await release_grace()
         except Exception:
             pass
+
+
+# --- quiet time, and not telling him twice -------------------------------------------
+
+QUIET_KEY = "quiet_held"
+QUIET_MAX = 200
+GRACE_KEY = "grace_pending"
+
+#: Seconds a direct Teams message waits, while he is at the laptop, for him to
+#: answer it in Teams before it goes to his phone. 0 = send at once, as before.
+REPLY_GRACE = int(os.environ.get("ASTA_REPLY_GRACE", "180"))
+
+
+#: What Asta is doing FOR him — a task he started, a call he asked for. On a
+#: quiet Saturday he can still ask Asta for something, and the answer must not
+#: wait for Monday; colleagues, CI and meetings still do.
+HIS_WORK = ("task", "action", "calls", "reply", "files")
+ENGAGED_SECONDS = 1800
+
+
+def talking_to_asta(now: float | None = None) -> bool:
+    """He has written to Asta in the last half hour."""
+    now = time.time() if now is None else now
+    return now - store.last_user_message_at() < ENGAGED_SECONDS
+
+
+def quiet_rule(now: float | None = None):
+    """The quiet rule holding right now (or at `now`), or None."""
+    from . import policy
+    return policy.quiet_holding(time.time() if now is None else now)
+
+
+def _items(key: str) -> list[dict]:
+    try:
+        rows = json.loads(store.kv_get(key) or "[]")
+    except ValueError:
+        return []
+    return [r for r in rows if isinstance(r, dict) and r.get("text")]
+
+
+def _keep_for_quiet(text: str, level: str, keys=()) -> None:
+    rows = _items(QUIET_KEY)
+    rows.append({"at": time.time(), "text": text, "level": level, "keys": list(keys or ())})
+    store.kv_set(QUIET_KEY, json.dumps(rows[-QUIET_MAX:]))
+
+
+def answered(keys) -> bool:
+    """He has dealt with every ledger item behind this push. A push with no
+    keys is never "answered".
+
+    "acted", not "settled": the hourly sweep drops anything unanswered for a
+    week as ignored, and a week of quiet is exactly when he was not there to
+    answer — dropped would have thinned the very summary he asked for.
+    """
+    from . import attention
+    keys = [k for k in (keys or ()) if k]
+    if not keys:
+        return False
+    for k in keys:
+        row = store.attention_get(k)
+        if not row:
+            return False
+        if row.get("state") == "acted":
+            continue
+        if not attention.he_replied_since(row):
+            return False
+        attention.mark_acted(k, why="he replied")
+    return True
+
+
+def _hold_for_reply(text: str, keys) -> None:
+    rows = _items(GRACE_KEY)
+    rows.append({"at": time.time(), "text": text, "keys": list(keys or ())})
+    store.kv_set(GRACE_KEY, json.dumps(rows[-HELD_MAX:]))
+
+
+async def release_grace(now: float | None = None) -> int:
+    """Send the Teams messages he has not answered after the grace; drop the ones
+    he has. Returns how many went out."""
+    now = time.time() if now is None else now
+    sent, keep = 0, []
+    for it in _items(GRACE_KEY):
+        if answered(it.get("keys")):
+            store.record_outcome("attention", "answered in Teams — not pushed",
+                                 detail=it["text"][:120])
+            continue
+        if now - float(it.get("at") or 0) >= REPLY_GRACE:
+            await deliver(it["text"], keys=tuple(it.get("keys") or ()))
+            sent += 1
+            continue
+        keep.append(it)
+    store.kv_set(GRACE_KEY, json.dumps(keep))
+    return sent
+
+
+async def release_quiet(now: float | None = None) -> dict:
+    """When his quiet time has ended: everything it held, in one message.
+
+    Everything still unanswered goes in — the pushes the rule stopped and the
+    digest that could not go out — first what came from people, then the rest.
+    """
+    from . import digest
+    from . import policy
+    now = time.time() if now is None else now
+    if quiet_rule(now) is not None:
+        return {"sent": False, "items": 0}
+    policy.expire_quiet(now)
+    held = [r for r in _items(QUIET_KEY) if not answered(r.get("keys"))]
+    pending = digest.take() if held else []
+    if not held and not pending:
+        store.kv_set(QUIET_KEY, "[]")
+        return {"sent": False, "items": 0}
+    store.kv_set(QUIET_KEY, "[]")
+    first = min((r["at"] for r in held), default=now)
+    since = time.strftime("%a %d %b %H:%M", time.localtime(first))
+    people = [r for r in held if r.get("level") in ("teams", "teams-chat", "outlook", "call")]
+    rest = [r for r in held if r not in people]
+    lines = [f"🗓 While you were off (since {since}): {len(held) + len(pending)} things."]
+    if people:
+        lines.append("\n*From people*")
+        lines += [f"• {r['text'][:200]}" for r in people[:15]]
+    if rest:
+        lines.append("\n*Everything else*")
+        lines += [f"• {r['text'][:160]}" for r in rest[:15]]
+    if pending:
+        lines.append("\n" + digest.render(pending, "held while you were off"))
+    body = "\n".join(lines)
+    store.add_notification(body, "digest")
+    out = await deliver(body, force=True)
+    # He is hearing about these now, not when they arrived: the week-old sweep
+    # would otherwise label what a long quiet held back as "ignored" the hour
+    # it reached him, and teach the filter that its senders are noise.
+    for r in held:
+        for k in r.get("keys") or ():
+            store.attention_set(k, notified_at=now)
+    store.record_outcome("quiet", "released", detail=f"{len(held)} held, {len(pending)} digest")
+    return {"sent": True, "items": len(held) + len(pending), **out}

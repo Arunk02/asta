@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import time
 from dataclasses import asdict, dataclass
 
 from . import store
@@ -82,9 +83,166 @@ def states_a_default(text: str) -> bool:
     return bool(_PREFER.search((text or "").replace("’", "'")))
 
 
+# --- quiet time, as he says it -------------------------------------------------------
+# "sat and Sunday be on silent … don't have to notify me anything … summarise all
+# on Monday mrng", "go silent for a week", "don't ping me until tomorrow 11:30".
+
+#: Asking for quiet — for HIS phone. "Don't message Sam on Sunday" is a rule
+#: about Sam, not quiet time, so a verb needs "me" after it; "be on silent",
+#: "go quiet", "do not disturb" and "no notifications" need nothing more.
+_SILENCE = re.compile(
+    r"\b(?:be|go|stay|keep(?: it)?|put (?:me|it|everything) on)\s+(?:on\s+)?(?:silent|quiet|mute)\b"
+    r"|\bsilent mode\b|\bon (?:silent|mute)\b|\bdo not disturb\b|\bdnd\b"
+    r"|\bmute (?:everything|all|notifications?|pings?|alerts?)\b"
+    r"|\b(?:don'?t|dont|do not|no need to|never)\s+(?:\w+\s+){0,3}?"
+    r"(?:notify|ping|message|disturb|push|buzz|text|alert)\w*\s+(?:me|arun)\b"
+    r"|\bno (?:notifications?|pings?|messages?|alerts?|pushes)\b", re.I)
+_DAY_WORDS = {"mon": 0, "monday": 0, "tue": 1, "tuesday": 1, "wed": 2, "wednesday": 2,
+              "thu": 3, "thursday": 3, "fri": 4, "friday": 4, "sat": 5, "saturday": 5,
+              "sun": 6, "sunday": 6}
+_FULL_DAYS = {k: v for k, v in _DAY_WORDS.items() if k.endswith("day")}
+_SHORT_DAYS = {"mon": 0, "tue": 1, "tues": 1, "wed": 2, "thu": 3, "thur": 3, "thurs": 3,
+               "fri": 4, "sat": 5, "sun": 6}
+#: Words around a short day name that make it a day — "sat and Sunday" is one,
+#: "I sat at my desk" and "the sun" are not.
+_DAY_NEIGHBOURS = {"on", "every", "this", "next", "and", "&", ",", "/", "till", "until", "or"}
+_WEEKDAY = (r"mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|"
+            r"sat(?:urday)?|sun(?:day)?")
+
+
+def _days_in(text: str) -> list[int]:
+    """The weekdays a sentence names, 0 = Monday."""
+    words = re.findall(r"[a-z]+|[,&/]", (text or "").lower())
+    out: set[int] = set()
+    for i, w in enumerate(words):
+        if w in ("weekend", "weekends"):
+            out |= {5, 6}
+        elif w in _FULL_DAYS or (w.endswith("s") and w[:-1] in _FULL_DAYS):
+            out.add(_FULL_DAYS[w if w in _FULL_DAYS else w[:-1]])
+        elif w in _SHORT_DAYS:
+            prev = words[i - 1] if i else ""
+            nxt = words[i + 1] if i + 1 < len(words) else ""
+            if prev in _DAY_NEIGHBOURS or nxt in _DAY_NEIGHBOURS:
+                out.add(_SHORT_DAYS[w])
+    return sorted(out)
+
+
+_RELEASE = re.compile(
+    r"\b(?:summari[sz]e|summary|update|tell|brief|catch me up)\b.{0,40}?"
+    rf"\b({_WEEKDAY}|tomorrow)\b(?:\s+(morning|mrng|mrg|mng|am|evening|night))?", re.I)
+#: A day named once is that day; these make it every week.
+_EVERY = re.compile(r"\b(?:every|each|always|going forward|from now on|weekly)\b"
+                    r"|\b(?:weekends|(?:mon|tues|wednes|thurs|fri|satur|sun)days)\b", re.I)
+_THIS = re.compile(rf"\b(?:this|next|coming)\s+(weekend|{_WEEKDAY})\b", re.I)
+_FOR = re.compile(r"\bfor (?:the )?(?:(a|an|one|1|two|2|three|3|\d+) )?(week|day|hour|hr|minute|min)s?\b",
+                  re.I)
+_UNTIL = re.compile(
+    rf"\b(?:until|till|til|upto|up to)\s+(?:(tomorrow|today|tonight|{_WEEKDAY})\s*)?"
+    r"(?:(morning|mrng|noon|evening|night)|(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?", re.I)
+_TODAY = re.compile(r"\b(?:today|tonight|rest of the day|for the day)\b", re.I)
+_TOMORROW = re.compile(r"\btomorrow\b", re.I)
+_NUM = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3}
+_UNIT = {"week": 7 * 86400, "day": 86400, "hour": 3600, "hr": 3600, "minute": 60, "min": 60}
+
+
+def _day_at(base: dt.datetime, days: int, hour: int = 9, minute: int = 0) -> dt.datetime:
+    return (base + dt.timedelta(days=days)).replace(hour=hour, minute=minute,
+                                                    second=0, microsecond=0)
+
+
+def _window(start: dt.datetime, until: dt.datetime) -> str:
+    return f"from={int(start.timestamp())};until={int(until.timestamp())}"
+
+
+def quiet_spec(text: str, now: float | None = None) -> str:
+    """The quiet rule a message asks for, as policy data — or '' when it asks none.
+
+    Weekly ("Saturdays and Sundays … going forward") becomes days + a release
+    time; anything else is one window, from/until, which ends by itself.
+    """
+    t = text or ""
+    if not _SILENCE.search(t):
+        return ""
+    now = time.time() if now is None else now
+    at = dt.datetime.fromtimestamp(now)
+    midnight = at.replace(hour=0, minute=0, second=0, microsecond=0)
+    release = _RELEASE.search(t)
+    # The day he wants the summary on is not a quiet day: "…summarise all on
+    # Monday mrng" named Monday, and read naively made it silent too.
+    quiet_part = t[:release.start()] + t[release.end():] if release else t
+    until_m = _UNTIL.search(quiet_part)
+    if until_m and not any(until_m.groups()):
+        until_m = None                    # "until" with nothing after it
+    if until_m:
+        quiet_part = quiet_part[:until_m.start()] + quiet_part[until_m.end():]
+    days = _days_in(quiet_part)
+    if days and _EVERY.search(t) and not _THIS.search(t):
+        rel = ""
+        if release and release.group(1).lower() != "tomorrow":
+            hour = "18:00" if (release.group(2) or "").lower() in ("evening", "night") else "09:00"
+            rel = f"release={release.group(1).lower()[:3]} {hour}"
+        if not rel:
+            # The morning after the last quiet day, unless he named a time.
+            after = (days[-1] + 1) % 7
+            rel = f"release={('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')[after]} 09:00"
+        names = ",".join(("mon", "tue", "wed", "thu", "fri", "sat", "sun")[d] for d in days)
+        return f"days={names};{rel}"
+    if days:
+        # Those days, once: from the next of them (now, when today is one) over
+        # the run of days that follows it, to the morning after. "This weekend"
+        # said on a Sunday is today, not a week on Saturday.
+        ahead = sorted((d - at.weekday()) % 7 for d in days)
+        first = last = ahead[0]
+        while last + 1 in ahead:
+            last += 1
+        start = max(at, _day_at(midnight, first, 0))
+        return _window(start, _day_at(midnight, last + 1))
+    m = _FOR.search(t)
+    if m:
+        n = _NUM.get((m.group(1) or "a").lower()) or int(m.group(1))
+        span = n * _UNIT[m.group(2).lower()]
+        until = at + dt.timedelta(seconds=span)
+        if span >= 86400:
+            until = until.replace(hour=9, minute=0, second=0, microsecond=0)
+        return _window(at, until)
+    if until_m:
+        day, part, hh, mm, ampm = until_m.groups()
+        day = (day or "").lower()
+        if day == "tomorrow":
+            offset = 1
+        elif day in ("", "today", "tonight"):
+            offset = 0
+        else:
+            offset = (_DAY_WORDS[day[:3]] - at.weekday()) % 7 or 7
+        hour, minute = 9, 0
+        if part:
+            hour = {"noon": 12, "evening": 18, "night": 21}.get(part.lower(), 9)
+            if part.lower() in ("morning", "mrng") and offset == 0:
+                offset = 1                  # "till morning" said today is tomorrow's
+        elif hh:
+            hour, minute = int(hh), int(mm or 0)
+            if (ampm or "").lower() == "pm" and hour < 12:
+                hour += 12
+        until = _day_at(midnight, offset, hour, minute)
+        if until <= at:
+            until += dt.timedelta(days=1)   # "until 9" said at ten means tomorrow
+        return _window(at, until)
+    if _TOMORROW.search(quiet_part):
+        return _window(max(at, _day_at(midnight, 1, 0)), _day_at(midnight, 2))
+    if _TODAY.search(quiet_part):
+        return _window(at, _day_at(midnight, 1))
+    return ""
+
+
 def compile(text: str) -> Candidate | None:  # noqa: A001 — the word for what it does
     """The rule a standing instruction states, or None when it isn't one."""
     t = " ".join((text or "").replace("’", "'").split())
+    # Quiet time is a rule whether or not it says "going forward": "go silent
+    # until tomorrow 11:30" is as binding for its window as a weekly one.
+    if t and not t.rstrip().endswith("?"):
+        spec = quiet_spec(t)
+        if spec:
+            return Candidate("quiet", "push", value=spec, words=t)
     if not is_standing(t):
         return None
     unless = bool(_UNLESS.search(t))
@@ -122,6 +280,24 @@ def propose(text: str, cand: Candidate) -> str:
                         question=q)
     store.record_outcome("rule", "proposed", detail=cand.render()[:200])
     return f"📌 {q}\nReply yes to keep it everywhere, or no."
+
+
+def go_quiet(cand: Candidate) -> str:
+    """A quiet window he asked for, in so many words: it starts now, no offer.
+
+    "Don't notify me until 11:30" is the act itself, not a habit to agree to —
+    asking him "make this a standing rule?" first is the delay he asked to be
+    spared. It ends by itself; a weekly rule still goes through `propose`.
+    """
+    from . import policy
+    rule = policy.add("quiet", "push", value=cand.value, words=cand.words)
+    store.record_outcome("rule", "quiet window", detail=rule.render()[:200])
+    return (f"🔕 {rule.render()}. Reminders you set still ring. "
+            "Say “I'm back” to end it early.")
+
+
+def is_one_off_quiet(cand: Candidate | None) -> bool:
+    return bool(cand) and cand.kind == "quiet" and "until=" in (cand.value or "")
 
 
 def adopt(args: dict) -> str:
@@ -171,6 +347,12 @@ def replay_scenario(rule, said_on: str = "") -> dict | None:
                                     "kind": "code", "workspace": "booking", "as": "job"}},
                          {"approve": "job"}]
         base["checks"] = [{"sent": {"door": "git", "text": "push", "count": 0}}]
+    elif r.kind == "quiet":
+        base["real_notify"] = True
+        base["setup"]["clock"] = _a_quiet_moment(r.value)
+        base["steps"] = [{"inbound": {"who": "A colleague", "source": "teams-chat",
+                                      "text": "can you check why the build is red?", "priority": 1}}]
+        base["checks"] = [{"push_lacks": "build is red"}]
     elif r.kind == "prefer" and r.act == "workspace":
         base["setup"]["workspace"] = None
         base["steps"] = [{"say": "fix the null check in the booking mapper"}]
@@ -180,6 +362,19 @@ def replay_scenario(rule, said_on: str = "") -> dict | None:
         base["steps"] = [{"say": "what's next on my list?"}]
         base["checks"] = [{"brain_prompt_contains": re.escape(r.words[:60])}]
     return base
+
+
+def _a_quiet_moment(value: str) -> str:
+    """A time the rule holds, for its replay: noon on its first quiet day next
+    week, or just after it starts."""
+    from . import policy
+    q = policy.parse_quiet(value)
+    now = dt.datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+    if q.get("days"):
+        ahead = (q["days"][0] - now.weekday()) % 7 or 7
+        return (now + dt.timedelta(days=ahead)).strftime("%Y-%m-%d %H:%M")
+    start = dt.datetime.fromtimestamp(q.get("from", now.timestamp()) + 60)
+    return start.strftime("%Y-%m-%d %H:%M")
 
 
 def replay_dir():

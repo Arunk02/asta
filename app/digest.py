@@ -27,13 +27,18 @@ MAX_ITEMS = 60
 MIDDAY, EVENING = 13, 19
 
 
-def add(text: str, source: str = "", why: str = "") -> None:
-    """Hold one item for the next digest. The bell and the ledger already have it."""
+def add(text: str, source: str = "", why: str = "", keys=()) -> None:
+    """Hold one item for the next digest. The bell and the ledger already have it.
+
+    `keys` are the ledger items behind it, so a line he has since answered can be
+    left out when the digest goes (see `take`).
+    """
     line = " ".join((text or "").split())
     if not line:
         return
     rows = pending()
-    rows.append({"at": time.time(), "text": line[:400], "source": source[:60], "why": why[:80]})
+    rows.append({"at": time.time(), "text": line[:400], "source": source[:60], "why": why[:80],
+                 "keys": [k for k in (keys or ()) if k]})
     store.kv_set(KEY, json.dumps(rows[-MAX_ITEMS:]))
 
 
@@ -46,9 +51,18 @@ def pending() -> list[dict]:
 
 
 def take() -> list[dict]:
+    """Everything pending, minus what he has answered since it arrived.
+
+    A digest is what he did not need to be interrupted for — a line about a
+    message he already replied to in Teams is not news, it is noise.
+    """
+    from . import notify
     rows = pending()
     store.kv_set(KEY, "[]")
-    return rows
+    live = [r for r in rows if not notify.answered(r.get("keys"))]
+    if len(live) < len(rows):
+        store.record_outcome("digest", "dropped answered", detail=f"{len(rows) - len(live)} items")
+    return live
 
 
 def render(rows: list[dict], reason: str = "") -> str:
@@ -111,7 +125,18 @@ def mark_sent(slot: str, now: float | None = None) -> None:
 
 
 async def tick(now: float | None = None) -> dict:
-    """Send the midday or evening digest when its hour has come. Called by the loop."""
+    """Send the midday or evening digest when its hour has come. Called by the loop.
+
+    His quiet time comes first: while a quiet rule holds, no slot fires — its
+    items wait for the one summary the rule's end releases, which goes out here
+    too, the first tick after the quiet is over.
+    """
+    from . import notify
+    released = await notify.release_quiet(now)
+    if released.get("sent"):
+        return released
+    if notify.quiet_rule(now) is not None:
+        return {"sent": False, "items": 0, "quiet": True}
     slot = due(now)
     if not slot or not pending():
         return {"sent": False, "items": 0}

@@ -339,74 +339,84 @@ async def _offer_to_join(ev: dict, now: dt.datetime) -> None:
 
 
 async def premeeting_loop() -> None:
-    """Ping ~30 min before each meeting.
-
-    Speaking meetings (standup, sync, 1:1) arrive with a draft already written —
-    that's the point of the heads-up. Everything else just asks, because
-    pre-writing prep for a meeting that needs none is wasted tokens.
-    """
-    from . import notify
+    """Ping ~30 min before each meeting — one `premeeting_tick` a minute."""
     while True:
         try:
-            now = dt.datetime.now()
-            if now.weekday() < 5:
-                nowmin = now.hour * 60 + now.minute
-                from . import agenda
-                for ev in await _cached_meetings():
-                    lead = ev["minutes"] - nowmin
-                    # A 1:1 needs a moment to gather a thought, not half an hour of
-                    # runway; a broadcast needs a nudge and no prep at all. One
-                    # fixed lead treated them identically.
-                    want = agenda.lead_minutes(ev, PREMEET_MINUTES) if agenda.enabled() \
-                        else PREMEET_MINUTES
-                    # "notify me meeting starting and someone trying to pull me, u
-                    # want me to join and take forward" — a separate, later ping
-                    # whose only question is whether Asta should go. The prep ping
-                    # fires 15-30 minutes out, which is the wrong moment to ask:
-                    # he cannot answer it yet, and by the time he can it is stale.
-                    if 0 <= lead <= STARTING_LEAD:
-                        await _offer_to_join(ev, now)
-                    # One tick's worth of window, so a ping can't be missed or doubled.
-                    if not (want - 2 <= lead <= want + 2):
-                        continue
-                    # Advisory only: a meeting Asta guessed was optional is the one
-                    # mistake here he finds out about by missing it, so this moves
-                    # the ping from interrupting to ambient and never suppresses it.
-                    needed, why = agenda.attendance(ev) if agenda.enabled() else (True, "")
-                    urgency = "direct" if needed else "ambient"
-                    key = f"premeet:{now.date().isoformat()}:{ev['start']}:{ev['title'][:30]}"
-                    if store.kv_get(key):
-                        continue
-                    store.kv_set(key, "1")
-                    who = f" (by {ev['organizer']})" if ev["organizer"] else ""
-                    head = f"📅 In {lead} min — {ev['title']}{who}, {ev['start']}"
-                    if why:
-                        head += f"\n   ↳ you may not need this one — {why}"
-                    if _SPEAKING_MEETING.search(ev["title"]):
-                        # Standups get the standup draft; a 1:1/sync/review gets prep
-                        # specific to THAT meeting (talking points, watch-outs).
-                        if re.search(r"stand[- ]?up|scrum|daily", ev["title"], re.I):
-                            draft = await standup_draft()
-                        else:
-                            from . import agent as agent_mod
-                            draft = await agent_mod.meeting_prep(ev["title"])
-                        # No draft means no draft. Announcing "📝 Draft for it:"
-                        # above nothing is the worst of both: it promises content,
-                        # delivers none, and still costs him the read.
-                        body = (draft or "").strip()
-                        await notify.notify(
-                            f"{head}\n\n📝 Draft for it:\n\n{body}" if body
-                            else f"{head}\n\nNo prep drafted — say the word and I'll "
-                                 f"pull it together now.",
-                            "premeeting", urgency=urgency)
-                    else:
-                        await notify.notify(
-                            f"{head}\n\nWant me to prep anything for it? "
-                            "Reply with what you need and I'll pull it together.",
-                            "premeeting", urgency=urgency)
+            await premeeting_tick(dt.datetime.now())
         except Exception:
             pass
         await asyncio.sleep(60)
+
+
+async def premeeting_tick(now: dt.datetime) -> None:
+    """Speaking meetings (standup, sync, 1:1) arrive with a draft already written —
+    that's the point of the heads-up. Everything else just asks, because
+    pre-writing prep for a meeting that needs none is wasted tokens.
+    """
+    from . import agenda, notify
+    if now.weekday() >= 5:
+        return
+    nowmin = now.hour * 60 + now.minute
+    for ev in await _cached_meetings():
+        lead = ev["minutes"] - nowmin
+        # A 1:1 needs a moment to gather a thought, not half an hour of
+        # runway; a broadcast needs a nudge and no prep at all. One
+        # fixed lead treated them identically.
+        want = agenda.lead_minutes(ev, PREMEET_MINUTES) if agenda.enabled() \
+            else PREMEET_MINUTES
+        # "notify me meeting starting and someone trying to pull me, u
+        # want me to join and take forward" — a separate, later ping
+        # whose only question is whether Asta should go. The prep ping
+        # fires 15-30 minutes out, which is the wrong moment to ask:
+        # he cannot answer it yet, and by the time he can it is stale.
+        if 0 <= lead <= STARTING_LEAD:
+            await _offer_to_join(ev, now)
+        # One tick's worth of window, so a ping can't be missed or doubled.
+        if not (want - 2 <= lead <= want + 2):
+            continue
+        needed, why = agenda.attendance(ev) if agenda.enabled() else (True, "")
+        key = f"premeet:{now.date().isoformat()}:{ev['start']}:{ev['title'][:30]}"
+        if store.kv_get(key):
+            continue
+        store.kv_set(key, "1")
+        who = f" (by {ev['organizer']})" if ev["organizer"] else ""
+        head = f"📅 In {lead} min — {ev['title']}{who}, {ev['start']}"
+        speaking = bool(_SPEAKING_MEETING.search(ev["title"]))
+        if not needed and not speaking:
+            # Tentative or a broadcast, with nothing to prepare: the bell only.
+            # 73 of 75 prep pings in three weeks (to 22 Sep) were for meetings
+            # like this, "want me to prep anything?" was never answered, and
+            # the join offer as it starts — which he asked for — still comes.
+            store.add_notification(f"{head}\n   ↳ not pushed — {why}", "premeeting")
+            continue
+        # Advisory only: a meeting Asta guessed was optional is the one
+        # mistake here he finds out about by missing it, so a speaking one
+        # moves from interrupting to ambient and is never suppressed.
+        urgency = "direct" if needed else "ambient"
+        if why:
+            head += f"\n   ↳ you may not need this one — {why}"
+        if speaking:
+            # Standups get the standup draft; a 1:1/sync/review gets prep
+            # specific to THAT meeting (talking points, watch-outs).
+            if re.search(r"stand[- ]?up|scrum|daily", ev["title"], re.I):
+                draft = await standup_draft()
+            else:
+                from . import agent as agent_mod
+                draft = await agent_mod.meeting_prep(ev["title"])
+            # No draft means no draft. Announcing "📝 Draft for it:"
+            # above nothing is the worst of both: it promises content,
+            # delivers none, and still costs him the read.
+            body = (draft or "").strip()
+            await notify.notify(
+                f"{head}\n\n📝 Draft for it:\n\n{body}" if body
+                else f"{head}\n\nNo prep drafted — say the word and I'll "
+                     f"pull it together now.",
+                "premeeting", urgency=urgency)
+        else:
+            await notify.notify(
+                f"{head}\n\nWant me to prep anything for it? "
+                "Reply with what you need and I'll pull it together.",
+                "premeeting", urgency=urgency)
 
 
 # --- scheduler ---------------------------------------------------------------

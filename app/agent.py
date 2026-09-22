@@ -982,8 +982,36 @@ def model_settings(name: str):
 def remember(title: str, fact: str, kind: str = "fact") -> str:
     """Store a durable memory. kind: fact | preference | gotcha | fix.
     Use for corrections, preferences, root causes, environment quirks."""
+    ruled = _a_rule_not_a_memory(fact)
+    if ruled:
+        return ruled
     path = memory.remember(title, fact, kind)
     return f"Remembered in {path}"
+
+
+def _a_rule_not_a_memory(fact: str) -> str:
+    """An instruction the code can enforce is offered as a rule, not filed as a note.
+
+    19 Sep: "sat and Sunday be on silent … summarise all on Monday mrng" reached
+    the chat brain, which called `remember` and answered "Saved" — and a memory
+    note is read by the brain that recalls it, never by the code sending pushes.
+    Thirteen notifications followed that weekend. Every brain calls this same
+    function, so the route holds whichever one he was talking to.
+    """
+    import re as _re
+    from . import frontdesk, instructions
+    # Memories are written about him ("don't notify him"); rules are compiled
+    # from what he says ("don't notify me").
+    said = _re.sub(r"\b(?:him|arun)\b", "me", fact or "", flags=_re.I)
+    cand = instructions.compile(said)
+    if cand is None or cand.kind == "note":
+        return ""
+    if not frontdesk.first_time(cand, said):
+        return ("Not saved as a memory: this is already offered to him as a standing "
+                "rule and waits on his yes.")
+    line = instructions.propose(said, cand)
+    return ("Not saved as a memory — a note is not enforced, a rule is. It is offered "
+            f"to him as a standing rule; tell him exactly this:\n{line}")
 
 
 def load_skill(name: str) -> str:

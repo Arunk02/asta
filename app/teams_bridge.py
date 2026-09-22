@@ -1417,6 +1417,7 @@ async def _push_activity(notify, wanted: list[str]) -> None:
     #: rather than merely that someone asked. "X is asking about Y" is another
     #: thing on his list; "X is asking about Y, I'm checking" is one fewer.
     started: list[str] = []
+    keys: list[str] = []            # the ledger items this push is about
     for it in wanted[:12]:
         who, _, rest = it.partition(" — ")
         addressed = any(m in it.lower() for m in _DIRECT_MARKERS)
@@ -1434,6 +1435,7 @@ async def _push_activity(notify, wanted: list[str]) -> None:
                                   why=why, priority=pri, due_at=due):
             continue
         verdicts.append(v.ranked(pri, why, due) if attention.enabled() else v)
+        keys.append(led_key)
         # The actuator. Everything above this line decides how loudly to tell
         # him; this is the part that goes and finds out. Read-only, so it needs
         # no permission, and it does not consult presence — he asked for this to
@@ -1462,7 +1464,8 @@ async def _push_activity(notify, wanted: list[str]) -> None:
         await notify.notify(text, "teams",
                             urgency="direct" if wants_him else "ambient",
                             priority=top,
-                            considered=True)   # attention.consider ran above
+                            considered=True,   # attention.consider ran above
+                            keys=tuple(keys))
 
 
 async def activity_watch_loop() -> None:

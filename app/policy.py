@@ -12,6 +12,7 @@ A rule here is data with a kind:
     never    do not do this act (to this target)       act=send         target=<person>
     prefer   a default he has stated                   act=workspace    value=booking
     note     a standing instruction for the brains     (routed through guardrails.md)
+    quiet    nothing reaches his phone for a while      act=push  value=days=sat,sun;release=mon 09:00
 
 and `check(act, target)` is the one question every doer asks before acting.
 "Unless I ask" is part of the rule: `asked=True` — he requested this act in so
@@ -28,7 +29,7 @@ from dataclasses import dataclass
 
 from . import store
 
-KINDS = ("mute", "never", "prefer", "note")
+KINDS = ("mute", "never", "prefer", "note", "quiet")
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,8 @@ class Rule:
             return f"{verb}{who}{tail}"
         if self.kind == "prefer":
             return f"Default {self.act}: {self.value}"
+        if self.kind == "quiet":
+            return describe_quiet(self.value)
         # Cut at a word, with a mark that it was cut. [:160] ended his standup
         # rule on "rememb" in the one message whose whole job is to show him the
         # rule he is agreeing to.
@@ -168,3 +171,130 @@ def summary() -> str:
     if not live:
         return "No standing rules yet."
     return "Your standing rules:\n" + "\n".join(f"  {r.id}. {r.render()}" for r in live)
+
+
+# --- quiet time ---------------------------------------------------------------------
+#
+# 19 Sep: "sat and Sunday be on silent … summarise all on Monday mrng". There was
+# no kind of rule that could hold a schedule, so it became a memory note that
+# nothing sending a push ever read. A quiet rule is read at the one door every
+# push goes through (app/notify.py): while it holds, nothing reaches his phone
+# and everything is kept; when it ends, it all arrives as one summary.
+#
+# value, as data: "days=sat,sun;release=mon 09:00" (every week) or
+# "from=<epoch>;until=<epoch>" (once). Local time — the clock he is speaking in.
+
+import datetime as _dt
+
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def parse_quiet(value: str) -> dict:
+    out: dict = {}
+    for part in (value or "").split(";"):
+        key, _, val = part.partition("=")
+        key, val = key.strip(), val.strip()
+        if key == "days":
+            out["days"] = [_WEEKDAYS.index(d) for d in val.split(",") if d.strip() in _WEEKDAYS]
+        elif key == "release":
+            day, _, hhmm = val.rpartition(" ") if " " in val else ("", "", val)
+            h, _, m = hhmm.partition(":")
+            out["release"] = (_WEEKDAYS.index(day) if day in _WEEKDAYS else None,
+                              int(h or 9), int(m or 0))
+        elif key in ("from", "until"):
+            out[key] = float(val)
+    return out
+
+
+def describe_quiet(value: str) -> str:
+    q = parse_quiet(value)
+    if q.get("days"):
+        names = [("Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays",
+                  "Saturdays", "Sundays")[d] for d in q["days"]]
+        when = " and ".join(names) if len(names) < 3 else ", ".join(names[:-1]) + " and " + names[-1]
+        line = f"Quiet on {when}"
+    elif q.get("until"):
+        fmt = "%a %d %b %H:%M"
+        line = "Quiet until " + _dt.datetime.fromtimestamp(q["until"]).strftime(fmt)
+        if q.get("from", 0) > time.time() + 60:
+            line = ("Quiet from " + _dt.datetime.fromtimestamp(q["from"]).strftime(fmt)
+                    + line[len("Quiet"):])
+        return line + " — then one summary of what came in"
+    else:
+        line = "Quiet"
+    rel = q.get("release")
+    if rel:
+        day = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+               "Sunday")[rel[0]] + " " if rel[0] is not None else ""
+        line += f" — one summary {day}{rel[1]:02d}:{rel[2]:02d}"
+    return line
+
+
+def _quiet_holds(q: dict, now: float, since: float = 0.0) -> bool:
+    if "until" in q:
+        return q.get("from", since) <= now < q["until"]
+    days = q.get("days") or []
+    if not days:
+        return False
+    at = _dt.datetime.fromtimestamp(now)
+    if at.weekday() in days:
+        return True
+    # "…summarise on Monday morning": the quiet runs on to the release, so
+    # Sunday night's pushes do not all fire at 00:01 on Monday.
+    rel = q.get("release")
+    if rel and rel[0] == at.weekday() and (at.weekday() - 1) % 7 in days:
+        return (at.hour, at.minute) < (rel[1], rel[2])
+    return False
+
+
+LIFTED_KEY = "quiet_lifted_until"
+
+
+def quiet_holding(now: float | None = None):
+    """The quiet rule in force right now, or None."""
+    now = time.time() if now is None else now
+    try:
+        if float(store.kv_get(LIFTED_KEY) or 0) > now:
+            return None                     # "I'm back" — for the rest of this stretch
+    except ValueError:
+        pass
+    for r in rules("quiet"):
+        if _quiet_holds(parse_quiet(r.value), now):
+            return r
+    return None
+
+
+def quiet_ends(rule: Rule, now: float | None = None) -> float:
+    """When this stretch of quiet stops holding."""
+    now = time.time() if now is None else now
+    q = parse_quiet(rule.value)
+    if "until" in q:
+        return q["until"]
+    at = now
+    while at < now + 8 * 86400 and _quiet_holds(q, at):
+        at += 900
+    return at
+
+
+def lift_quiet(now: float | None = None):
+    """He is back before his quiet time ends: lift it until it would have ended.
+    A weekly rule stays his rule — only this stretch of it is lifted."""
+    now = time.time() if now is None else now
+    rule = quiet_holding(now)
+    if rule is None:
+        return None
+    store.kv_set(LIFTED_KEY, str(quiet_ends(rule, now)))
+    return rule
+
+
+def expire_quiet(now: float | None = None) -> int:
+    """A one-off quiet window that has ended is no longer a rule he has — it
+    would sit in "my rules" for ever. Weekly ones never expire."""
+    now = time.time() if now is None else now
+    n = 0
+    for r in rules("quiet"):
+        until = parse_quiet(r.value).get("until")
+        if until and now >= until:
+            drop(r.id)
+            n += 1
+    return n

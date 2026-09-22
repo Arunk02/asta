@@ -55,7 +55,7 @@ def test_only_sprint_tickets_reach_the_standup(monkeypatch, _brain):
     monkeypatch.setattr(jira, "current_sprint", sprint)
     monkeypatch.setattr(jira, "configured", lambda: True)
     monkeypatch.setattr(briefing, "_recent_commits", commits)
-    t = store.create_task("Komal Jayswal's review on PR #1440: is it right?",
+    t = store.create_task("Alex Kumar's review on PR #1440: is it right?",
                           "analysis", "p", None)
     store.update_task(t["id"], status="done")
 

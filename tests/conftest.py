@@ -133,6 +133,13 @@ def _no_machine_side_effects(monkeypatch):
     monkeypatch.setattr(apps, "SHORTCUTS", "/nonexistent/shortcuts")
     monkeypatch.delenv("ASTA_APPS", raising=False)
     monkeypatch.delenv("ASTA_SCREEN", raising=False)
+    # The call tests were written against the device chain (BlackHole, the Mac's
+    # input). Asta's in-browser microphone is the default live, and has its own
+    # tests (test_call_rtc.py), which switch it on themselves.
+    monkeypatch.setenv("ASTA_CALL_RTC", "0")
+    # A call's warm brain is a real Claude process; tests get none.
+    from app import call_mind
+    monkeypatch.setattr(call_mind, "CLAUDE", "/nonexistent/claude")
     yield
 
 

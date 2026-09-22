@@ -340,6 +340,14 @@ async def voice_note(text: str, voice: str = "assistant") -> dict:
                      "install ffmpeg for Opus and it becomes a proper voice note")}
 
 
+#: The one Whisper model every transcription asks for. Voicebox keeps a single
+#: speech model loaded, so two callers asking for different ones swap it in and
+#: out on every request — measured 22 Sep: "base" took 5-8 s a clip while
+#: "turbo" was the loaded one, and a model swap mid-call left a colleague
+#: waiting 77 seconds. Warm turbo answers in ~0.8 s and gets names right.
+STT_MODEL = os.environ.get("ASTA_STT_MODEL", "turbo").strip()
+
+
 async def transcribe(data: bytes, filename: str = "speech.webm",
                      language: str = "") -> str:
     """Whisper transcription of a recorded clip.
@@ -348,15 +356,38 @@ async def transcribe(data: bytes, filename: str = "speech.webm",
     colleague switching to Hindi mid-conversation is transcribed as Hindi
     instead of being mangled into English-sounding nonsense.
     """
+    form = {"language": language} if language else {}
+    if STT_MODEL:
+        form["model"] = STT_MODEL
     async with httpx.AsyncClient(timeout=GENERATE_TIMEOUT) as c:
         r = await c.post(
             f"{BASE}/transcribe",
             files={"file": (filename, data, "application/octet-stream")},
-            data={"language": language} if language else {},
+            data=form,
         )
         if r.status_code != 200:
             raise RuntimeError(f"voicebox /transcribe returned {r.status_code}: {r.text[:200]}")
         return (r.json().get("text") or "").strip()
+
+
+def silent_wav(seconds: float = 0.4, rate: int = 16000) -> bytes:
+    """A short silent WAV — enough to make Voicebox load its speech model."""
+    import io
+    import wave as _wave
+    buf = io.BytesIO()
+    with _wave.open(buf, "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\x00\x00" * int(rate * seconds))
+    return buf.getvalue()
+
+
+async def warm_the_ears() -> None:
+    """Load the speech-to-text model before anyone speaks. A cold load costs
+    seconds; paid while the phone rings, nobody hears it."""
+    with contextlib.suppress(Exception):
+        await transcribe(silent_wav(), filename="warm.wav")
 
 
 # --- cloning Arun's own voice ------------------------------------------------
@@ -740,6 +771,36 @@ async def browser_hears_us(page, ms: int = 2000) -> dict:
     return (await listen) or {}
 
 
+async def _self_test_in_browser() -> dict:
+    """The same question for Asta's own microphone: does it load in the real Teams
+    page, and does it carry sound? Nobody is called and his input is untouched.
+
+    The Teams page is the test that matters — a page that did not take the
+    injected script, or an audio engine Chrome left suspended, is exactly what
+    would make a call silent.
+    """
+    from . import call_rtc, teams_bridge
+    out: dict = {"device": "Asta's microphone (in the browser)", "restored": True}
+    pw = ctx = None
+    try:
+        await teams_bridge.close_pool()          # one writer per profile
+        pw, ctx = await teams_bridge._launch(headless=False)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        await page.goto("https://teams.microsoft.com/v2/",
+                        wait_until="domcontentloaded", timeout=60000)
+        peak = await call_rtc.mic_ready(page)
+        out.update(peak=peak, heard=peak > 0.01, label=out["device"])
+    except Exception as exc:                                     # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        with contextlib.suppress(Exception):
+            if ctx is not None:
+                await ctx.close()
+            if pw is not None:
+                await pw.stop()
+    return out
+
+
 async def self_test() -> dict:
     """Can Asta actually BE HEARD from this process? Measured, not assumed.
 
@@ -760,7 +821,9 @@ async def self_test() -> dict:
     call does. The system input is restored in a `finally`: leaving it on BlackHole
     breaks his own Teams calls, which happened twice in one day.
     """
-    from . import call_audio, meetings, teams_bridge
+    from . import call_audio, call_rtc, meetings, teams_bridge
+    if call_rtc.enabled():
+        return await _self_test_in_browser()
     out: dict = {"device": CALL_DEVICE, "restored": False}
     if not CALL_DEVICE:
         out["error"] = "no virtual microphone configured (ASTA_CALL_AUDIO_DEVICE)"

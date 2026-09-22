@@ -31,7 +31,7 @@ def test_a_title_is_passed_as_an_argument_never_pasted_into_the_script(monkeypat
     """His titles have quotes and em dashes in them. A script built by string
     concatenation is the AppleScript spelling of SQL injection."""
     calls: list = []
-    nasty = 'Ring "Vinish" — don\'t forget; quit application "Calendar"'
+    nasty = 'Ring "Alex" — don\'t forget; quit application "Calendar"'
     _fake_runner(monkeypatch, wrote=calls, reads=nasty)
     out = asyncio.run(apps.run("reminder_add", title=nasty, note=""))
     assert out["ok"] and out["verified"] == nasty
@@ -152,8 +152,8 @@ def test_a_reminder_can_carry_the_time_he_said(monkeypatch):
     """Live on 17 Sep: "remind me tomorrow morning" put the reminder in his list
     with no time on it — the one thing that makes a reminder a reminder."""
     calls: list = []
-    _fake_runner(monkeypatch, wrote=calls, reads="Chase Vinish on the three PRs")
-    out = asyncio.run(apps.run("reminder_add", title="Chase Vinish on the three PRs",
+    _fake_runner(monkeypatch, wrote=calls, reads="Chase Alex on the three PRs")
+    out = asyncio.run(apps.run("reminder_add", title="Chase Alex on the three PRs",
                                due="2026-09-18 09:00"))
     assert out["ok"]
     assert "2026-09-18 09:00" in calls[0]["args"]

@@ -86,6 +86,26 @@ def test_the_title_says_which_job_it_is():
                                                  "comments on your PR 1409")
 
 
+def test_both_of_his_github_accounts_are_him(monkeypatch):
+    """He has two logins, and `gh` can only be active as one — so his own pull
+    request under the other account read as somebody else's, which is the one
+    fact the whole framing turns on."""
+    monkeypatch.setenv("ASTA_GITHUB_LOGINS", "workacct, personalacct")
+
+    async def gh(cwd, *args, timeout=120, stdin=""):
+        return 0, "github.com\n  - Active account: true\n  - account workacct (keyring)"
+
+    async def active_login():
+        return "workacct"
+
+    from app import ci_watch
+    monkeypatch.setattr(review.repo_ops, "git", gh)
+    monkeypatch.setattr(ci_watch, "my_login", active_login)
+    assert asyncio.run(review.whose_pr({"author": {"login": "PersonalAcct"}})) == "his"
+    assert asyncio.run(review.whose_pr({"author": {"login": "workacct"}})) == "his"
+    assert asyncio.run(review.whose_pr({"author": {"login": "a-colleague"}})) == "theirs"
+
+
 # --- findings become comments on lines -------------------------------------------------
 
 _NOTES = """VERDICT: REQUEST CHANGES — the retry loop can drop a message.

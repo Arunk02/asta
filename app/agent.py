@@ -1475,10 +1475,53 @@ async def refresh_context(workspace: str) -> str:
     return await refresh.refresh_workspace(workspace, reason="requested in chat")
 
 
-async def review_pr(pr: str, workspace: str, repo: str = "") -> str:
+async def propose_pr_review(pr: str, notes: str, workspace: str = "",
+                            repo: str = "") -> str:
+    """Turn review notes into a real GitHub review, staged for Arun's yes.
+
+    pr: the number or the link. notes: your review, in the shape the brief asked
+    for (VERDICT, then `path:line — what is wrong → what to do` bullets).
+
+    Each bullet becomes a comment on that line of the diff, and they go up as ONE
+    review with the verdict you stated. Nothing is posted here: approving or
+    commenting on someone's change carries Arun's name, so it waits for his yes.
+
+    Call this at the end of every review. Notes that stay in your answer reach
+    nobody — that is the failure this path exists to fix."""
+    from . import offers, review
+    findings = review.parse_findings(notes)
+    action = review.verdict_of(notes)
+    if not findings and action != "approve":
+        return ("No finding named a file and a line, so there is nothing to attach. "
+                "Write each point as `path/to/File.ext:line — what is wrong → what to do`.")
+    head = (notes or "").strip().splitlines()
+    summary = next((line for line in head if line.upper().startswith("VERDICT")), "")
+    blocking = [f for f in findings if f["blocking"]]
+    preview = "\n".join(f"• {f['path']}:{f['line']} — {f['body'][:110]}"
+                         for f in findings[:6])
+    if len(findings) > 6:
+        preview += f"\n• …and {len(findings) - 6} more"
+    number, target = review.pr_target(pr)
+    where = f" in {target}" if target else ""
+    verb = {"approve": "Approve", "comment": "Comment on",
+            "request_changes": "Request changes on"}[action]
+    offers.staged_write(
+        "pr_review_inline",
+        {"pr": pr, "workspace": workspace, "repo": repo, "action": action,
+         "body": summary, "comments": findings},
+        f"🔎 {verb} PR #{number}{where} — {len(findings)} inline comment(s)",
+        (summary + "\n\n" + preview).strip()[:900],
+        f"Post this review on PR #{number} as you?", kind="pr_write")
+    return (f"Staged a {action.replace('_', ' ')} review on PR #{number}: "
+            f"{len(findings)} inline comment(s), {len(blocking)} blocking. "
+            f"Waiting for Arun's yes.")
+
+
+async def review_pr(pr: str, workspace: str = "", repo: str = "") -> str:
     """Review a pull request and produce reviewer notes for Arun to post.
 
-    pr: a number ("123"), a URL, or a branch. repo: the service directory, needed when the
+    pr: a number ("123"), a link (which is enough on its own — no clone needed), or a
+    branch. repo: the service directory, needed only when a bare number is given and the
     workspace holds several repos. Gathers the PR, its diff, its CI checks and the project
     context, then runs the review as a background task — reviews are slow, so the chat
     stays free and Arun is notified when the notes are ready. Read-only: it never comments

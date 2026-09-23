@@ -116,6 +116,27 @@ _PR = re.compile(
     r"|\b(?:comment|review|feedback)\w*\b.{0,30}\b(?:pr|pull\s*request)\s*#?\s*(\d{2,6})?",
     re.I)
 
+#: THEY are asking HIM to review THEIR change. The other reading — a colleague
+#: leaving feedback on HIS pull request — is the one the brief used to assume for
+#: both, so "please review my PR" sent Asta off to check whether the author's own
+#: points about his own code were right. Whose PR it is decides the entire job.
+_WANTS_MY_REVIEW = re.compile(
+    r"\b(?:please|pls|kindly|can|could|would)\b[^.?!]{0,30}\breview\b"
+    r"|\breview\s+(?:this|these|my|the)\b"
+    r"|\b(?:my|our)\s+(?:pr|pull\s*request|mr|merge\s*request|change|branch)\b"
+    r"|\braise[d]?\s+(?:a\s+)?(?:pr|pull\s*request)\b"
+    r"|\b(?:pr|pull\s*request)\s+(?:is\s+)?(?:up|ready|raised|open)\b", re.I)
+
+#: THEY have already reviewed HIS change and he needs to know if they are right.
+_THEIR_FEEDBACK = re.compile(
+    r"\b(?:left|added|raised|posted|put)\b[^.?!]{0,24}\b(?:comment|review|feedback|nit)"
+    r"|\b(?:comment|review|feedback|nit)\w*\b[^.?!]{0,24}\bon\s+your\b"
+    r"|\byour\s+(?:pr|pull\s*request|change|branch)\b"
+    # "please review MY FEEDBACK on PR 1409" — the thing to look at is their
+    # comments, not their code, however much it starts like a review request.
+    r"|\bmy\s+(?:feedback|comments?|nits?|remarks?|review)\b"
+    r"|\bi\s+(?:have\s+)?review(?:ed)?\b", re.I)
+
 #: "please review <link>" with no PR number rendered — still a review ask.
 _REVIEW_ASK = re.compile(
     r"\b(?:please|pls|kindly|can\s+you|could\s+you)\b.{0,24}\breview\b"
@@ -198,7 +219,11 @@ def what_it_asks(text: str) -> str:
     if _INCIDENT.search(blob):
         return "incident"
     if _PR.search(blob) or _REVIEW_ASK.search(blob):
-        return "pr_review"
+        # Their feedback on his change, or their change wanting his eyes. The
+        # words decide here; the review itself confirms from the PR's author.
+        if _THEIR_FEEDBACK.search(blob):
+            return "pr_review"
+        return "review_request" if _WANTS_MY_REVIEW.search(blob) else "pr_review"
     if _DEBUG.search(blob):
         return "debug"
     # Anything triage reads as a genuine ask. One detector for "is this an ask",
@@ -211,10 +236,20 @@ def what_it_asks(text: str) -> str:
 
 
 def pr_number(text: str) -> str:
-    m = _PR.search(text or "")
-    if not m:
-        return ""
-    return next((g for g in m.groups() if g), "")
+    """The PR number named anywhere in the message, or ''.
+
+    Every match, not the first: "please review my PR <link>" matches the
+    word-shaped alternative — which carries no number — before it reaches the
+    link that has one, and the first match alone answered "" for the most common
+    review request there is. The link parser settles anything left over.
+    """
+    for m in _PR.finditer(text or ""):
+        found = next((g for g in m.groups() if g), "")
+        if found:
+            return found
+    from . import review
+    number, target = review.pr_target(text or "")
+    return number if target and number.isdigit() else ""
 
 
 # --- the brief ----------------------------------------------------------------
@@ -276,6 +311,18 @@ _BRIEFS = {
         "settles it. Do not assume the reviewer is right, and do not change any "
         "code."
     ),
+    "review_request": (
+        "{who} is asking Arun to REVIEW their pull request {pr}:\n\n"
+        "  \"{text}\"\n\n"
+        "This is their code, not his — review it as a senior engineer on the team. "
+        "Call `review_pr` with the link or number they gave (a link needs no local "
+        "clone) to get the PR, its diff, its CI and the project context, then judge "
+        "it: correctness first, then data loss, security, breaking changes and "
+        "unhandled failure paths. Every point names a `path:line`.\n\n"
+        "Finish by calling `propose_pr_review` with your notes — that stages one "
+        "GitHub review with a comment on each line, for Arun's yes. Do not change "
+        "any code, and do not approve anything yourself."
+    ),
     "debug": (
         "{who} is asking Arun to look into something on Teams:\n\n"
         "  \"{text}\"\n\n"
@@ -326,6 +373,8 @@ def title_for(kind: str, who: str, text: str) -> str:
     if kind == "pr_review":
         return f"{who}'s review on PR #{pr}: is it right?" if pr \
             else f"{who}'s PR feedback: is it right?"
+    if kind == "review_request":
+        return f"Review {who}'s PR #{pr}" if pr else f"Review {who}'s pull request"
     gist = _gist(message_of(text))
     if kind == "incident":
         return f"{who} asked: is that really happening in prod? — {gist}"
@@ -472,7 +521,15 @@ _HANDLE = re.compile(
     # them — its link previews turn "host/path" into "host: path", which is what
     # Alex's booking link actually arrived as.
     r"|\b[\w.-]*maersk[\w.-]*\.(?:net|io|com|dev)\b[\s:]{0,3}\S*/\S{3,}"
-    r"|\b[A-Z][A-Z0-9]{1,9}-\d+\b", re.I)                       # Jira key
+    r"|\b[A-Z][A-Z0-9]{1,9}-\d+\b"                             # Jira key
+    # A pull request someone points at IS the thing to look at, in every shape it
+    # arrives: a link, owner/repo#N, or the punctuation-stripped rendering Teams
+    # produces. Without this a colleague sending "please review my PR <link>"
+    # was new ground, so Asta asked for permission to read a PR it had been
+    # handed — which is the shape of not answering.
+    r"|(?:github[.\s]+com[/\s]+[\w.-]+[/\s]+[\w.-]+[/\s]+pull[/\s]+\d{1,7})"
+    r"|\b[\w.-]+/[\w.-]+#\d{1,7}\b"
+    r"|\b(?:pr|pull\s*request)\s*#?\s*\d{2,6}\b", re.I)
 
 
 def handed_over(text: str) -> str:
@@ -606,5 +663,6 @@ def line_for(task: dict, who: str, kind: str) -> str:
     """
     what = {"incident": "whether that's actually happening in prod",
             "pr_review": "whether that review is right",
+            "review_request": "their PR now — you'll get the review to approve",
             "debug": "it"}.get(kind, "it")
     return f"🔎 {who or 'Someone'} asked — I'm checking {what} now (task #{task['id']})."

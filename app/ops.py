@@ -131,6 +131,16 @@ async def _pr_review(pr: str = "", workspace: str = "", repo: str = "",
     return "✅ " + await review.post_review(pr, workspace, repo, action, body)
 
 
+@op("pr_review_inline", lambda a: f"{a.get('action', 'comment').replace('_', ' ').title()} "
+                                  f"PR #{str(a.get('pr', '?')).lstrip('#')} with "
+                                  f"{len(a.get('comments') or [])} inline comment(s)")
+async def _pr_review_inline(pr: str = "", workspace: str = "", repo: str = "",
+                            action: str = "comment", body: str = "",
+                            comments: list | None = None) -> str:
+    return "✅ " + await review.post_inline_review(pr, workspace, repo, action,
+                                                  body, comments or [])
+
+
 @op("pr_merge", lambda a: f"Merge PR #{str(a.get('pr', '?')).lstrip('#')} "
                           f"({a.get('method', 'squash')})")
 async def _pr_merge(pr: str = "", workspace: str = "", repo: str = "",

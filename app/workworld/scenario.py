@@ -556,6 +556,11 @@ def _check_tasks(arg, world, state):
         # Only the world as it was FOUND is excluded. A task a step created —
         # even one the scenario named — is exactly what is being counted.
         rows = [t for t in rows if t["id"] not in state["setup_ids"]]
+    if arg.get("title"):
+        # The title is the subject line he reads hours later, and for a review it
+        # is the proof of WHICH job was understood: "Review Sam's PR" against
+        # "Sam's review on PR: is it right?".
+        rows = [t for t in rows if re.search(arg["title"], t.get("title", ""), re.I)]
     n = len(rows)
     kind = arg.get("kind", "")
     if "count" in arg and n != arg["count"]:

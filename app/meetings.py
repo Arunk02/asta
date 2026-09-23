@@ -37,7 +37,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 from . import quiet, store
-from . import call_audio, call_screen
+from . import call_audio, call_rtc, call_screen
 from .call_audio import (  # noqa: F401  (constants only — the FUNCTIONS are
     AUDIO_DEVICE, HIS_MIC, SWITCH_AUDIO,   # called through `call_audio.` so the
     current_mic, set_call_mic, _restore_mic)  # borrow and the restore share one
@@ -174,12 +174,16 @@ async def join(join_url: str, muted: bool = True, camera: bool = False,
     if _CALL:
         raise RuntimeError("already in a call — leave that one first")
     from . import voice as _voice
-    if speak and not _voice.can_speak():
+    # With Asta's own microphone (call_rtc) an unmuted join carries only what
+    # Asta says — never the room he is sitting in — so no device is needed.
+    rtc = call_rtc.enabled()
+    if speak and not rtc and not _voice.can_speak():
         raise RuntimeError("can't take part — no virtual microphone configured, and "
                            "joining unmuted without one would broadcast your real "
                            "mic. " + speaking_hint())
     warm_the_voice()                  # cold start lands here, not in the meeting
-    await call_audio.set_call_mic(device=AUDIO_DEVICE)   # before Teams binds a track
+    if not rtc:
+        await call_audio.set_call_mic(device=AUDIO_DEVICE)   # before Teams binds a track
     await teams_bridge.close_pool()   # one writer per profile — see call_person
     pw, ctx = await teams_bridge._launch(headless=False)   # a call needs a real window
     joined = False
@@ -202,12 +206,13 @@ async def join(join_url: str, muted: bool = True, camera: bool = False,
         _CALL.update(pw=pw, ctx=ctx, page=page, url=join_url,
                      joined_at=_now(), captions=[],
                      answered_at=_now(), speaks=bool(speak),
-                     who="")
+                     who="", rtc=rtc,
+                     log=call_rtc.recorder("meeting") if rtc else None)
         store.kv_set("teams_in_call", join_url)
         # Captions are what make a recap possible at all. Failing to turn them on
         # is not a reason to abandon a call that has already been joined, so it
         # is recorded and reported later rather than raised now.
-        _CALL["captions_on"] = await start_captions(page)
+        _CALL["captions_on"] = False if rtc else await start_captions(page)
         note = "" if _CALL["captions_on"] else " (no live captions — recap will be thin)"
         if speak:
             with contextlib.suppress(Exception):
@@ -280,6 +285,8 @@ async def wait_for_answer(page, seconds: float = 0) -> str:
     because hanging up on a call that is actually connected is a far worse
     outcome than staying on one that is not.
     """
+    if _CALL.get("rtc") and _CALL.get("ctx") is not None:
+        return await call_rtc.wait_for_answer(page, seconds)
     deadline = _now() + (seconds or RING_SECONDS)
     state = "unknown"
     saw_ringing = False
@@ -454,7 +461,12 @@ async def call_person(who: str, video: bool = False) -> str:
     # say_in_call did, cannot move an open track. Measured: the browser handed
     # Teams the built-in mic while BlackHole sat unselected, so Alex heard the
     # laptop while Asta played into a device nobody listened to.
-    await call_audio.set_call_mic(device=AUDIO_DEVICE)
+    #
+    # With Asta's own in-browser microphone (call_rtc) none of that chain is
+    # used: his input is never touched, so there is nothing to claim or restore.
+    rtc = call_rtc.enabled()
+    if not rtc:
+        await call_audio.set_call_mic(device=AUDIO_DEVICE)
     # CLAIM the browser before touching it, not after the dial succeeds.
     #
     # `_CALL` is what tells every background reader to stand down, and it used to
@@ -498,11 +510,23 @@ async def call_person(who: str, video: bool = False) -> str:
         # `voice_check`: macOS attributes microphone access to the responsible
         # process, so a green reading from one launcher says nothing about the
         # Chromium a call actually opens.
-        from . import voice as _v
-        # Plays a tone while listening — a bare mic read with nothing playing
-        # measures silence and blocks every call. See voice.browser_hears_us.
-        heard = await _v.browser_hears_us(page)
-        if heard and not heard.get("error") and float(heard.get("peak") or 0) <= 0.01:
+        if rtc:
+            heard = await call_rtc.dial_check(page, who)
+        else:
+            from . import voice as _v
+            # Plays a tone while listening — a bare mic read with nothing
+            # playing measures silence and blocks every call. See
+            # voice.browser_hears_us.
+            heard = await _v.browser_hears_us(page)
+        peak = float((heard or {}).get("peak") or 0)
+        if not heard or heard.get("error"):
+            # A check that could not measure proves nothing, and dialling on no
+            # proof is how a colleague gets a call with nobody speaking in it.
+            raise RuntimeError(
+                f"not dialling {who} — could not prove Asta can be heard "
+                f"({(heard or {}).get('error') or 'no test tone could be made'}). "
+                f"Nobody was rung.")
+        if peak <= 0.01:
             raise RuntimeError(
                 f"not dialling {who} — this browser receives digital silence on "
                 f"{heard.get('label') or 'its mic'}, so they would answer and hear "
@@ -524,11 +548,17 @@ async def call_person(who: str, video: bool = False) -> str:
         # not on. The moment he is heard in it this flips off for good — see
         # `_note_speaker`. Ringing is not talking, so nothing is said until
         # `wait_for_answer` has seen somebody pick up.
+        # `mic_proven` carries the tone this browser heard before the dial, so
+        # say_in_call does not second-guess it with a read taken in silence.
         _CALL.update(pw=pw, ctx=ctx, page=page, url=f"teams-call:{title}",
                      joined_at=_now(), captions=[],
-                     answered_at=0.0, speaks=True, who=title)
+                     answered_at=0.0, speaks=True, who=title, mic_proven=peak,
+                     rtc=rtc, log=call_rtc.recorder(title) if rtc else None)
         store.kv_set("teams_in_call", f"call:{title}")
-        _CALL["captions_on"] = await start_captions(page)
+        if rtc:   # not how Asta hears here — and switching them on took 32 s on 22 Sep
+            _CALL["captions_on"] = False
+        else:
+            _CALL["captions_on"] = await start_captions(page)
         warm_the_voice()
         return title
     finally:
@@ -736,6 +766,8 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
     never his voice by accident.
     """
     from . import voice
+    if _CALL.get("rtc") and _CALL.get("ctx") is not None:
+        return await call_rtc.say_line(text, voice_name)
     if not can_speak():
         raise RuntimeError("no virtual microphone configured — " + speaking_hint())
     if not store.kv_get("teams_in_call"):
@@ -782,23 +814,37 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
             raise RuntimeError(
                 "Teams is muted — said nothing rather than reporting speech "
                 "nobody would hear")
-        heard = await voice.browser_mic_delivers(page)
-        if heard and not heard.get("error") and heard.get("peak", 1.0) == 0:
-            raise RuntimeError(
-                f"the browser receives digital silence on {heard.get('label') or 'its mic'} "
-                f"— macOS has not granted microphone access to Google Chrome for "
-                f"Testing. System Settings → Privacy & Security → Microphone. "
-                f"Said nothing rather than reporting speech nobody would hear.")
         borrowed = await call_audio.set_call_mic(page, AUDIO_DEVICE)
         if not borrowed:
             raise RuntimeError(
                 f"could not point Teams at {AUDIO_DEVICE} — said nothing. "
                 f"Set it manually in Teams → Settings → Devices.")
+    listening = None
     try:
+        # With no proof from before the dial (a meeting joined, a call answered),
+        # listen WHILE the line plays. Reading the mic with nothing playing is
+        # BlackHole being quiet, not macOS refusing it: that misreading hung up
+        # on a colleague who had just picked up, on 22 Sep.
+        if page is not None and not _CALL.get("mic_proven"):
+            listening = asyncio.create_task(voice.browser_mic_delivers(page, 1500))
+            await asyncio.sleep(0.3)
         # Blocking: it has to have FINISHED before this reports that it spoke, or
         # a second line starts over the top of the first.
         played = await asyncio.to_thread(voice.play_to_device, audio, AUDIO_DEVICE)
+        if listening is not None:
+            heard = await listening
+            if heard and not heard.get("error"):
+                if float(heard.get("peak") or 0) <= 0.01:
+                    raise RuntimeError(
+                        f"played it, but the browser received digital silence on "
+                        f"{heard.get('label') or 'its mic'} — macOS has not granted "
+                        f"microphone access to Google Chrome for Testing (System "
+                        f"Settings → Privacy & Security → Microphone). Treat it as "
+                        f"NOT said.")
+                _CALL["mic_proven"] = float(heard.get("peak") or 0)
     finally:
+        if listening is not None and not listening.done():
+            listening.cancel()
         # Whatever happened above — including an exception — he gets his
         # microphone back. This is the line that keeps him from going silently
         # mute for the rest of the call.
@@ -866,7 +912,11 @@ async def leave() -> str:
     #
     # Here, not in the callers: `leave` is the ONE path every call and meeting
     # ends through, which is exactly why the browser is closed here too.
-    await call_audio._restore_mic(None)
+    #
+    # A call on Asta's own microphone never borrowed his, so there is nothing
+    # to give back — and "restoring" would move an AirPods user to the laptop mic.
+    if not call.get("rtc"):
+        await call_audio._restore_mic(None)
     return "left the call"
 
 
@@ -1173,11 +1223,17 @@ async def watch(poll_seconds: float = 30) -> str:
             await leave()
             return "the call ended"
 
+    ctx = _CALL.get("ctx") if _CALL.get("rtc") else None
+    if ctx is not None:
+        await call_rtc.record(ctx, True)
     while _CALL:
         if overran():
             await leave()
             return f"left — the call passed {MAX_CALL_MINUTES} minutes"
         if page is not None and await call_ended(page):
+            await leave()
+            return "the call ended"
+        if ctx is not None and await call_rtc.ended(ctx):
             await leave()
             return "the call ended"
         if await _never_answered():
@@ -1186,7 +1242,10 @@ async def watch(poll_seconds: float = 30) -> str:
         for _ in range(ticks):
             if not _CALL:
                 break
-            if page is not None:
+            if ctx is not None:   # their own audio, transcribed, instead of captions
+                await call_rtc.listen_into(ctx, lines)
+                react_to(lines)
+            elif page is not None:
                 await poll_captions(page, lines)
                 react_to(lines)
             await asyncio.sleep(CAPTION_POLL_SECONDS)
@@ -1333,7 +1392,7 @@ async def call_watch(title: str = "") -> None:
             f"up — staying on and listening, not speaking. Worth a look at the "
             f"call-screen selectors.", "call", urgency="direct")
 
-    if not _CALL.get("captions_on"):
+    if not _CALL.get("captions_on") and not _CALL.get("rtc"):
         await notify.notify(
             f"🎧 On the call with {who} but live captions wouldn't turn on — I "
             f"can't hear what's said, so there'll be no notes from this one.",

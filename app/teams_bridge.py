@@ -129,6 +129,17 @@ async def _launch_ctx(pw, channel: str, headless: bool):
 
 
 async def _open_ctx(pw, channel: str, headless: bool):
+    ctx = await _open_ctx_bare(pw, channel, headless)
+    # Asta's own microphone and the call's own statistics, in every page and
+    # frame, before Teams loads. See app/call_rtc.py for why the Mac's
+    # microphone chain is no longer what a call depends on.
+    from . import call_rtc
+    if call_rtc.enabled():
+        await call_rtc.install(ctx)
+    return ctx
+
+
+async def _open_ctx_bare(pw, channel: str, headless: bool):
     return await pw.chromium.launch_persistent_context(
         str(PROFILE_DIR),
         headless=headless,
@@ -151,6 +162,9 @@ async def _open_ctx(pw, channel: str, headless: bool):
             # it — and it sits over the Teams window Arun can see. `--test-type`
             # is what suppresses it; `--disable-infobars` no longer does.
             "--test-type",
+            # Asta's microphone is an AudioContext, and Chrome starts one
+            # suspended until a person clicks something. Nobody clicks here.
+            "--autoplay-policy=no-user-gesture-required",
         ],
     )
 

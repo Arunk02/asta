@@ -254,6 +254,12 @@ async def checks() -> dict[str, str]:
     for bad in quiet.loud():
         problems[f"repeated:{bad['where']}"] = (
             f"failed {bad['count']}x and was ignored each time — {bad['error'][:70]}")
+    # The last call rehearsal (nightly, app/call_rehearsal.py): a call path that
+    # fails there will fail on a colleague next — say so before anyone is rung.
+    from . import call_rehearsal
+    failing = call_rehearsal.latest_failures()
+    if failing:
+        problems["calls"] = f"call rehearsal failing: {failing}"
     return problems
 
 

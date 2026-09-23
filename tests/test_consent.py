@@ -270,7 +270,7 @@ def test_discuss_returns_at_once_and_talks_in_the_background(monkeypatch, _teams
     from app import conversation
     ran = asyncio.Event()
 
-    async def _fake_converse(who, topic, workspace=""):
+    async def _fake_converse(who, topic, workspace="", **kw):
         ran.set()
         return f"Talked to {who} about {topic}"
 

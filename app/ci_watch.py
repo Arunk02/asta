@@ -207,7 +207,14 @@ async def _poll_repo(repo: str) -> list[str]:
     seen = json.loads(store.kv_get(seen_key) or "{}")
     wb = json.loads(store.kv_get(wb_key) or "{}")
     first_poll = not seen
-    notes: list[str] = []
+    # In the order they happened. `gh` lists newest first, and reading it that
+    # way left the stored state on the OLDER run — a pipeline that went red and
+    # then green was remembered as red.
+    runs = sorted(runs, key=lambda r: int(str(r.get("databaseId") or 0) or 0))
+    # One net change per workflow+branch per poll. A poll that sees a failed run
+    # AND the re-run that fixed it reported both, in the same second: 4 of the 19
+    # CI pushes to 22 Sep were that.
+    moved: dict[str, dict] = {}
     for r in runs:
         rid, concl = str(r["databaseId"]), (r.get("conclusion") or "")
         if r.get("status") != "completed" or seen.get(rid) == "completed":
@@ -215,19 +222,29 @@ async def _poll_repo(repo: str) -> list[str]:
         seen[rid] = "completed"
         wbk = f"{r['workflowName']}|{r['headBranch']}"
         prev, streak = _prev_state(wb.get(wbk))
+        m = moved.setdefault(wbk, {"before": prev, "failed": False,
+                                   "fails": streak if prev in BAD else 0})
         repeat = concl in BAD and prev in BAD
         wb[wbk] = [concl, streak + 1 if repeat else 1]
-        if first_poll:
-            continue  # baseline history silently
-        name = repo.split("/")[-1]
+        m.update(last=r, concl=concl)
         if concl in BAD:
-            if repeat:
+            m["failed"] = True
+            m["fails"] = wb[wbk][1]
+    notes: list[str] = []
+    name = repo.split("/")[-1]
+    for m in ([] if first_poll else moved.values()):   # the first poll baselines silently
+        r, concl, before = m["last"], m["concl"], m["before"]
+        if concl in BAD:
+            if before in BAD:
                 continue  # he already knows this workflow+branch is red; one ping is enough
             notes.append(f"🔴 CI {concl}: {name} · {r['workflowName']} "
                          f"({r['headBranch']}) — {r['displayTitle'][:60]}\n{r['url']}")
-        elif concl == "success" and prev in BAD:
-            after = f" after {streak} failures" if streak > 1 else ""
+        elif concl == "success" and before in BAD:
+            after = f" after {m['fails']} failures" if m["fails"] > 1 else ""
             notes.append(f"🟢 CI recovered{after}: {name} · {r['workflowName']} "
+                         f"({r['headBranch']})")
+        elif concl == "success" and m["failed"]:
+            notes.append(f"🟡 CI flaked and recovered: {name} · {r['workflowName']} "
                          f"({r['headBranch']})")
     store.kv_set(seen_key, json.dumps(dict(list(seen.items())[-40:])))
     store.kv_set(wb_key, json.dumps(wb))
@@ -275,31 +292,39 @@ async def recent_runs(limit: int = 8) -> str:
     return "\n".join(lines) or "No recent workflow runs found."
 
 
+async def announce(note: str) -> None:
+    """Tell him about one change — a failure on his phone, good news in the digest."""
+    from . import digest, notify, offers
+    if note.startswith("🔴"):
+        # A red pipeline goes out IMMEDIATELY, not held until he steps
+        # away. It is his own branch and the useful moment to hear
+        # about it is while he is still in the change that caused it —
+        # which is precisely when the ambient hold was suppressing it.
+        #
+        # And it is an offer, not just a report: he can reply "yes"
+        # from his phone and the investigation starts without him
+        # opening a laptop. Nothing runs unasked.
+        o = offers.offer("analyse", note.split("\n")[0],
+                         "\n".join(note.split("\n")[1:]),
+                         "Want me to analyse the failure?",
+                         payload=_analyse_payload(note))
+        await notify.notify(o.render(), "ci", urgency="direct")
+    else:
+        # Recovery is good news, and good news does not interrupt: an ambient
+        # push still reached his phone once he stepped away — 7 of the 19 CI
+        # pushes to 22 Sep. The digest is where it belongs.
+        store.add_notification(note, "ci")
+        digest.add(note, source="ci", why="good news does not interrupt")
+
+
 async def loop() -> None:
-    from . import notify, offers
     while True:
         try:
             if not await gh_ok():
                 await asyncio.sleep(RETRY_UNAUTH_SECONDS)
                 continue
             for note in await check_all():
-                if note.startswith("🔴"):
-                    # A red pipeline goes out IMMEDIATELY, not held until he steps
-                    # away. It is his own branch and the useful moment to hear
-                    # about it is while he is still in the change that caused it —
-                    # which is precisely when the ambient hold was suppressing it.
-                    #
-                    # And it is an offer, not just a report: he can reply "yes"
-                    # from his phone and the investigation starts without him
-                    # opening a laptop. Nothing runs unasked.
-                    o = offers.offer("analyse", note.split("\n")[0],
-                                     "\n".join(note.split("\n")[1:]),
-                                     "Want me to analyse the failure?",
-                                     payload=_analyse_payload(note))
-                    await notify.notify(o.render(), "ci", urgency="direct")
-                else:
-                    # Recovery is good news and good news does not interrupt.
-                    await notify.notify(note, "ci", urgency="ambient")
+                await announce(note)
         except Exception:
             pass
         await asyncio.sleep(POLL_SECONDS)

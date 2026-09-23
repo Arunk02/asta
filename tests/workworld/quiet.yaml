@@ -1,0 +1,156 @@
+# Quiet time and not telling him twice — Round 3, P8.
+#
+# 19 Sep: he wrote that Saturday and Sunday are his days off, that nothing should
+# notify him, and that everything should be summarised on Monday morning. The
+# brain answered "Saved" and saved a memory note that nothing sending a push ever
+# reads; thirteen notifications followed over the weekend. These hold the rule
+# where the pushes actually go out.
+
+scenarios:
+  - id: his-weekend-instruction-becomes-a-quiet-rule
+    title: '"sat and Sunday be on silent … summarise all on Monday mrng" is proposed as a rule, and his yes keeps it'
+    why: >
+      It started "And also…", so the old detector — which only listened to
+      messages opening with always/never/don't — never heard it, and there was
+      no kind of rule that could hold a schedule anyway.
+    twin: false
+    steps:
+      - say: "And also sat and Sunday be on silent since it is off leave for me. So don't have to notify me anything .. if there is anything summarise all on Monday mrng .. follow the same going forward"
+      - say: "yes"
+    checks:
+      - said_contains: "Make this a standing rule"
+      - said_contains: "Standing rule 1"
+      - rules: {kind: quiet, count: 1}
+      - brain_calls: {kind: chat, count: 0}
+
+  - id: a-quiet-weekend-pushes-nothing-and-monday-gets-one-summary
+    title: Saturday and Sunday reach his phone not once; Monday 09:00 brings one summary of all of it
+    why: The weekend of 19–20 Sep raised 13 notifications after he said this.
+    twin: false
+    real_notify: true
+    setup:
+      clock: "2026-09-26 14:00"               # a Saturday
+      rules:
+        - {kind: quiet, act: push, value: "days=sat,sun;release=mon 09:00", words: "weekends off, summarise on Monday morning"}
+    steps:
+      - inbound: {who: "A colleague", source: teams-chat, text: "can you check why the build is red?", priority: 1}
+      - inbound: {who: "Alerts", source: outlook, text: "Grafana alert (firing): prod memory above 85%", priority: 0}
+      - announce: {text: "🔴 CI failure: booking-service · build (main)", level: ci, urgency: ambient}
+      - clock_to: "2026-09-27 19:05"          # Sunday evening: the digest slot must not fire
+      - tick: digest_slot
+      - clock_to: "2026-09-28 09:05"          # Monday morning
+      - tick: digest_slot
+    checks:
+      - push_count: {matching: "build is red|memory above 85|CI failure", count: 1}
+      - push_contains: "While you were off"
+      - push_contains: "build is red"
+      - push_contains: "memory above 85"
+
+  - id: a-reminder-he-set-still-fires-on-a-quiet-day
+    title: A reminder he set for Saturday is his own ask, and still reaches him
+    why: Quiet means Asta stays quiet, not that his own alarm clock stops working.
+    twin: false
+    real_notify: true
+    setup:
+      clock: "2026-09-26 10:00"
+      rules:
+        - {kind: quiet, act: push, value: "days=sat,sun;release=mon 09:00", words: "weekends off"}
+    steps:
+      - remind: {text: "call the plumber"}
+    checks:
+      - push_contains: "call the plumber"
+
+  - id: a-message-he-answers-in-teams-never-reaches-whatsapp
+    title: At the laptop, a direct Teams message waits a moment — and is dropped once he has replied in Teams
+    why: >
+      "if i already responded and talked in chat, after pushing the same
+      notifications in whatsapp wont makes sense" — the push went out the second
+      the message arrived, while he was already answering it.
+    twin: false
+    real_notify: true
+    setup:
+      clock: "2026-09-29 11:00"
+      at_laptop: true
+    steps:
+      - inbound: {who: "A colleague", source: teams-chat, text: "can you check the booking consumer lag?", priority: 1, as_watcher: true}
+      - clock_to: "2026-09-29 11:01"
+      - he_replies: {who: "A colleague"}
+      - clock_to: "2026-09-29 11:04"
+      - tick: grace
+    checks:
+      - push_lacks: "booking consumer lag"
+
+  - id: an-unanswered-message-still-reaches-him-after-the-grace
+    title: If he does not answer it in Teams, the message reaches his phone a couple of minutes later
+    why: The grace is a courtesy for a reply in progress, never a way to lose a question.
+    twin: false
+    real_notify: true
+    setup:
+      clock: "2026-09-29 11:00"
+      at_laptop: true
+    steps:
+      - inbound: {who: "A colleague", source: teams-chat, text: "can you check the booking consumer lag?", priority: 1, as_watcher: true}
+      - clock_to: "2026-09-29 11:04"
+      - tick: grace
+    checks:
+      - push_contains: "booking consumer lag"
+
+  - id: the-digest-drops-what-he-has-already-answered
+    title: A digest line about a message he has since answered in Teams is left out
+    why: A digest is what he did not need to be interrupted for — not a list of things he already handled.
+    twin: false
+    real_notify: true
+    setup:
+      clock: "2026-09-29 12:30"
+      pushes_today: 20
+    steps:
+      - inbound: {who: "A colleague", source: teams-chat, text: "I merged the doc update", priority: 2}
+      - inbound: {who: "Another colleague", source: teams-chat, text: "shared the release notes", priority: 2}
+      - he_replies: {who: "A colleague"}
+      - clock_to: "2026-09-29 13:05"
+      - tick: digest
+    checks:
+      - push_contains: "release notes"
+      - push_lacks: "merged the doc update"
+
+  - id: a-quiet-window-he-asks-for-starts-at-once
+    title: '"don''t notify me anything until 11:30" starts at once — no offer to agree to — and ends by itself'
+    why: >
+      15 Sep: "go silent for a week" and "until 11:30" were each saved as a memory
+      note and nothing went quiet. A window he asks for is the act itself, not a
+      habit to confirm.
+    twin: false
+    real_notify: true
+    setup:
+      clock: "2026-09-29 10:00"
+    steps:
+      - say: "don't notify me anything until 11:30"
+      - announce: {text: "🔴 CI failure: booking-service · build (main)", level: ci}
+      - clock_to: "2026-09-29 11:35"
+      - tick: digest_slot
+    checks:
+      - said_contains: "Quiet until"
+      - said_lacks: "Make this a standing rule"
+      - brain_calls: {kind: chat, count: 0}
+      - push_count: {matching: "CI failure", count: 1}
+      - push_contains: "While you were off"
+      - rules: {kind: quiet, count: 0}
+
+  - id: im-back-lifts-the-quiet-and-hands-him-what-it-kept
+    title: '"I''m back" on a quiet Saturday lifts the quiet for the day, sends what it held, and keeps his weekly rule'
+    why: A quiet rule he cannot end early is a trap; ending it must not delete the rule itself.
+    twin: false
+    real_notify: true
+    setup:
+      clock: "2026-09-26 14:00"
+      rules:
+        - {kind: quiet, act: push, value: "days=sat,sun;release=mon 09:00", words: "weekends off"}
+    steps:
+      - announce: {text: "🔴 CI failure: booking-service · build (main)", level: ci}
+      - say: "I'm back"
+      - announce: {text: "✅ Task #12 finished: the fix is merged", level: task}
+    checks:
+      - said_contains: "back on"
+      - push_contains: "While you were off"
+      - push_contains: "the fix is merged"
+      - rules: {kind: quiet, count: 1}

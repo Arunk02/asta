@@ -172,7 +172,7 @@ async def startup() -> None:
     daemon.start("ci_watch", ci_watch.loop)
     daemon.start("resume_paused", tasks.resume_paused_loop)
     # Midday and evening: everything that was worth reading and not worth a buzz.
-    daemon.start("digest", digest.loop)
+    daemon.start("notify_digest", digest.loop)
     # Nightly: look at yesterday, prove one small change against the bench, and
     # keep it only if it wins. Off unless ASTA_EVOLVE is on.
     daemon.start("evolve", evolve.loop)
@@ -3061,11 +3061,22 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # favourite workspace is booking" — is proposed as a rule the code enforces,
     # once, with a one-tap yes. Said on its own, that proposal IS the reply: no
     # brain, and nothing folded into whatever task happens to be live.
+    if frontdesk.enabled() and frontdesk.ends_quiet(user_text) and notify.quiet_rule() is not None:
+        # "I'm back" while his quiet time holds: lift it, and hand him what it kept.
+        frontdesk.record("rule", "quiet lifted")
+        policy.lift_quiet()
+        await sink.send({"type": "note", "text": "🔔 Notifications are back on."})
+        await notify.release_quiet()
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
     if frontdesk.enabled():
         proposal = frontdesk.standing_instruction(user_text)
         if proposal:
             frontdesk.record("rule", proposal.kind)
-            await sink.send({"type": "note", "text": instructions.propose(user_text, proposal)})
+            line = (instructions.go_quiet(proposal) if instructions.is_one_off_quiet(proposal)
+                    else instructions.propose(user_text, proposal))
+            await sink.send({"type": "note", "text": line})
             if frontdesk.instruction_only(user_text, proposal):
                 if channel == "web":
                     await sink.send({"type": "done", "tools": []})

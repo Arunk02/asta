@@ -63,10 +63,22 @@ def test_ambient_is_held_while_he_is_at_the_laptop(monkeypatch, pushed):
 
 
 def test_direct_always_goes_regardless_of_presence(monkeypatch, pushed):
+    """Someone is waiting on him, so it is never held for his departure. At the
+    laptop a Teams message waits the short reply grace first — he may be
+    answering it in Teams already — and then goes."""
+    _at_laptop(monkeypatch, True)
+    r = asyncio.run(notify.notify("Priya needs you", "teams", urgency="direct"))
+    assert r.get("grace") and not pushed
+    asyncio.run(notify.release_grace(time.time() + notify.REPLY_GRACE + 1))
+    assert pushed                                    # someone is waiting on him
+
+
+def test_with_no_reply_grace_direct_goes_at_once(monkeypatch, pushed):
+    monkeypatch.setattr(notify, "REPLY_GRACE", 0)
     _at_laptop(monkeypatch, True)
     r = asyncio.run(notify.notify("Priya needs you", "teams", urgency="direct"))
     assert r["held"] is False
-    assert pushed                                    # someone is waiting on him
+    assert pushed
 
 
 # --- ...but a hold now expires (the online/offline fix) ---------------------

@@ -460,6 +460,13 @@ def add_ui_message(conv_id: str, role: str, content: str, meta: dict | None = No
                      (time.time(), conv_id))
 
 
+def last_user_message_at() -> float:
+    """When he last wrote to Asta, on any channel — 0 when never."""
+    with _connect() as conn:
+        row = conn.execute("SELECT MAX(created_at) FROM ui_messages WHERE role='user'").fetchone()
+    return float(row[0] or 0) if row else 0.0
+
+
 def list_ui_messages(conv_id: str) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(

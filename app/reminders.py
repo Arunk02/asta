@@ -69,7 +69,8 @@ async def fire_due() -> int:
             store.update_reminder(r["id"], status="done", fired_at=time.time())
         late = time.time() - r["due_at"]
         late_note = f" (was due {int(late // 60)} min ago)" if late > 120 else ""
-        await notify.notify(f"⏰ Reminder: {r['text']}{late_note}", "reminder")
+        # His own ask coming back to him: it rings through his quiet time too.
+        await notify.notify(f"⏰ Reminder: {r['text']}{late_note}", "reminder", asked=True)
         fired += 1
     return fired
 

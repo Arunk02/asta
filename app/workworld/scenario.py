@@ -286,6 +286,15 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
         from app import policy
         policy.add(r["kind"], r.get("act", ""), r.get("target", ""), r.get("value", ""),
                    bool(r.get("unless_asked")), r.get("words", ""))
+    if s.get("clock"):
+        # A particular hour of a particular day — a Saturday, 09:05 on a Monday —
+        # because "quiet at the weekend" cannot be tested on whatever day CI runs.
+        world.use_clock(_local(s["clock"]))
+    if s.get("at_laptop"):
+        from app import presence
+        async def _here() -> bool:
+            return True
+        world._patch.set(presence, "at_laptop", _here)
 
 
 async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) -> None:
@@ -354,10 +363,10 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
                 # is what hid that a colleague's direct question was budgeted.
                 await notify.notify(f"💬 Teams\n🔴 {who}: {text}", "teams",
                                     urgency="direct" if pri <= attention.P_TODAY else "ambient",
-                                    considered=True)
+                                    considered=True, keys=(key,))
             else:
                 await notify.notify(text, source, urgency=arg.get("urgency", "direct"),
-                                    priority=pri, considered=True)
+                                    priority=pri, considered=True, keys=(key,))
     elif kind == "announce":
         # Asta speaking on its own initiative — a plan gate, a finished task.
         from app import notify
@@ -368,6 +377,20 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
         digest.add(arg.get("text", ""), source=arg.get("source", ""), why=arg.get("why", ""))
     elif kind == "tick":
         await _tick(arg, world, state)
+    elif kind == "clock_to":
+        world.clock.now = _local(arg)
+    elif kind == "he_replies":
+        # He answered them in Teams — what chat_watch records when it sees it.
+        from app import attention
+        attention.settle_with(arg.get("who", "A colleague"))
+    elif kind == "remind":
+        # A reminder he set, falling due now.
+        import datetime as _dt
+        from app import reminders
+        now = world.clock.time() if getattr(world, "clock", None) else time.time()
+        reminders.create(arg.get("text", "something"),
+                         _dt.datetime.fromtimestamp(now - 1).isoformat(timespec="seconds"))
+        await reminders.fire_due()
     elif kind == "restart":
         # What a launchd restart leaves behind: the rows, none of the workers.
         # A worker mid-leg dies with the process — cancelled here, without the
@@ -403,6 +426,14 @@ async def _tick(what: str, world: W.World, state: dict) -> None:
     elif what == "digest":
         from app import digest
         await digest.flush(reason="midday digest")
+    elif what == "digest_slot":
+        # The loop's own tick: a slot fires only at its hour, and a quiet rule
+        # holds it — or releases what it held, when the rule has ended.
+        from app import digest
+        await digest.tick()
+    elif what == "grace":
+        from app import notify
+        await notify.release_grace()
     elif what == "resume_due":
         await tasks._resume_due()
     elif what == "resume_due_later":
@@ -421,6 +452,12 @@ async def _tick(what: str, world: W.World, state: dict) -> None:
         state["health"] = await health.run_check(notify_transitions=(what == "health_report"))
     else:
         raise ValueError(f"unknown tick {what!r}")
+
+
+def _local(when: str) -> float:
+    """'2026-09-26 14:00' as local epoch seconds."""
+    import datetime as _dt
+    return _dt.datetime.strptime(str(when), "%Y-%m-%d %H:%M").timestamp()
 
 
 def _clock(value) -> str:
@@ -689,6 +726,15 @@ def _check_setting(arg, world, state):
     return ""
 
 
+def _check_rules(arg, world, state):
+    from app import policy
+    live = policy.rules(arg.get("kind", ""))
+    if "count" in arg and len(live) != arg["count"]:
+        return [f"expected {arg['count']} {arg.get('kind', '')} rule(s), found {len(live)}: "
+                f"{[r.render() for r in live]}"]
+    return []
+
+
 def _check_permissions(arg, world, state):
     from app import authority
     live = authority.grants()
@@ -750,6 +796,7 @@ CHECKS = {
     "frontdesk": _check_frontdesk,
     "digest": _check_digest,
     "permissions": _check_permissions,
+    "rules": _check_rules,
     "setting": _check_setting,
     "made_file": _check_made_file,
     "scratch_file": _check_scratch_file,

@@ -255,9 +255,11 @@ class World:
 
     def use_clock(self, start: float) -> Clock:
         """Run the sandbox on a simulated clock (see Clock)."""
-        from app import attention, delivery, digest, notify, outlook, quiet
+        from app import (attention, delivery, digest, instructions, notify, outlook, policy,
+                         quiet, reminders)
         self.clock = Clock(start)
-        for mod in (notify, delivery, attention, digest, quiet, outlook):
+        for mod in (notify, delivery, attention, digest, quiet, outlook, reminders, policy,
+                    instructions):
             if hasattr(mod, "time"):
                 self._patch.set(mod, "time", self.clock)
         return self.clock

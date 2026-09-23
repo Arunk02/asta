@@ -167,3 +167,54 @@ def test_a_failed_pr_lookup_falls_back_to_his_own_runs(monkeypatch):
     _poll()                       # priming poll
     notes = _poll()
     assert notes == [] or "🔴" in notes[0]      # never raises
+
+
+# --- one net change per workflow, and good news does not buzz -------------------------
+#
+# To 22 Sep: 7 of 19 CI pushes were "recovered" lines, 4 of them in the same second
+# as the failure they recovered from — one poll saw a failed run and the re-run
+# that fixed it, and reported both.
+
+def test_a_failure_fixed_before_the_next_poll_is_one_flake_line_not_two_pushes(monkeypatch):
+    _prime(monkeypatch, [_run("1", concl="success")], ["1", "2", "3"], [])
+    # gh lists newest first: the re-run that passed, then the run that failed.
+    _gh(monkeypatch, [_run("3", concl="success"), _run("2")], ["1", "2", "3"], [])
+    notes = _poll()
+    assert len(notes) == 1 and "flaked and recovered" in notes[0]
+    assert not any(n.startswith("🔴") for n in notes)
+
+
+def test_a_poll_reads_runs_in_the_order_they_happened(monkeypatch):
+    """Newest-first processing left the stored state on the OLDER run: a
+    pipeline that went red and then green was remembered as red."""
+    _prime(monkeypatch, [_run("1", concl="success")], ["1", "2", "3", "4"], [])
+    _gh(monkeypatch, [_run("3", concl="success"), _run("2")], ["1", "2", "3", "4"], [])
+    _poll()
+    _gh(monkeypatch, [_run("4")], ["1", "2", "3", "4"], [])
+    notes = _poll()
+    assert len(notes) == 1 and notes[0].startswith("🔴")   # green → red: a real failure
+
+
+def test_a_red_pipeline_that_goes_green_says_so_once(monkeypatch):
+    _prime(monkeypatch, [_run("1", concl="success")], ["1", "2", "3"], [])
+    _gh(monkeypatch, [_run("2")], ["1", "2", "3"], [])
+    assert _poll()[0].startswith("🔴")
+    _gh(monkeypatch, [_run("3", concl="success")], ["1", "2", "3"], [])
+    notes = _poll()
+    assert len(notes) == 1 and "recovered" in notes[0]
+
+
+def test_good_news_goes_to_the_digest_and_a_failure_to_his_phone(monkeypatch):
+    from app import digest, notify
+    pushed: list[str] = []
+
+    async def fake_notify(text, *a, **k):
+        pushed.append(text)
+
+    monkeypatch.setattr(notify, "notify", fake_notify)
+    asyncio.run(ci_watch.announce("🟢 CI recovered: asta · build.yml (main)"))
+    asyncio.run(ci_watch.announce("🟡 CI flaked and recovered: asta · build.yml (main)"))
+    assert pushed == []
+    assert len(digest.pending()) == 2
+    asyncio.run(ci_watch.announce("🔴 CI failure: asta · build.yml (main) — x\nhttps://gh/2"))
+    assert len(pushed) == 1 and "CI failure" in pushed[0]

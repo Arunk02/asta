@@ -676,7 +676,7 @@ def reconcile(now: float | None = None) -> int:
     behind, using the same evidence: a message of his, in that thread, later than
     the ask.
     """
-    from . import chat_watch, store as _store
+    from . import store as _store
     settled = 0
     for row in _store.attention_open(limit=2000, max_priority=P_MUTE):
         if self_originated(row):
@@ -699,20 +699,33 @@ def reconcile(now: float | None = None) -> int:
             mark_dropped(row["key"])
             settled += 1
             continue
-        if not who:
-            continue
-        seen_at = row.get("first_seen") or 0
-        try:
-            # Windowed on the row's own timestamp — see `answered_by_him` for why
-            # an unwindowed read of a long thread can never contain his reply.
-            msgs = _store.teams_messages(chat=who, since=seen_at, limit=100)
-        except Exception:                                      # noqa: BLE001
-            continue
-        if any(chat_watch.is_from_him(m.get("sender", "")) and m.get("sent_at")
-               and m["sent_at"] > seen_at for m in msgs):
+        if he_replied_since(row):
             mark_acted(row["key"], now=now, why="he replied")
             settled += 1
     return settled
+
+
+def he_replied_since(row: dict) -> bool:
+    """Is there a message of his in this person's thread, later than the ask?
+
+    The evidence `reconcile` uses, callable for one row: the reply-grace in
+    app/notify.py asks it before a held Teams message goes to his phone, because
+    nothing else settles an ask he answered by typing in Teams himself — the
+    watcher skips his own messages, and they only land in the stored thread.
+    """
+    from . import chat_watch
+    who = (row.get("who") or "").strip()
+    if not who:
+        return False
+    seen_at = row.get("first_seen") or 0
+    try:
+        # Windowed on the row's own timestamp — see `answered_by_him` for why
+        # an unwindowed read of a long thread can never contain his reply.
+        msgs = store.teams_messages(chat=who, since=seen_at, limit=100)
+    except Exception:                                          # noqa: BLE001
+        return False
+    return any(chat_watch.is_from_him(m.get("sender", "")) and m.get("sent_at")
+               and m["sent_at"] > seen_at for m in msgs)
 
 
 def mark_dropped(key: str, why: str = "") -> None:

@@ -92,6 +92,10 @@ _TABLE: tuple[Capability, ...] = (
                     "Calendar, Notes, a Mail DRAFT, Finder. Named recipes only, and "
                     "every write is read back before it counts as done. Call "
                     "app_recipes() first to see what exists."),
+    Capability("open_app", "hands", write=True,
+               http='POST /api/open {"what":"intellij"} or {"what":"youtube","browser":"chrome"}',
+               note="Put an app or a site in front of him — \"open intellij\", "
+                    "\"open youtube\". Only opens; to write INTO an app use use_app."),
     Capability("app_recipes", "hands", http="GET /api/apps",
                note="The app recipes and what each one takes. Read before use_app."),
     Capability("leave_voice_note", "hands", write=True,

@@ -55,3 +55,45 @@ scenarios:
     checks:
       - app_door: {recipe: mail_draft, args_contain: "Kafka topics"}
       - no_send: true
+
+  - id: open-intellij-opens-intellij
+    title: '"open intellij" opens IntelliJ, with no brain and no guessing which one'
+    why: >
+      "i ask to open intelij, open chrome, open youtube it has to open" — there
+      were seven named recipes and no way to open anything. A launch that waits
+      on a chat turn has already failed at the thing he asked for.
+    twin: false
+    steps:
+      - say: "open intellij"
+    checks:
+      - app_door: {recipe: open, args_contain: "IntelliJ IDEA.app"}
+      - said_contains: "IntelliJ IDEA is open"
+      - said_contains: "also installed"          # IntelliJ IDEA CE, said rather than hidden
+      - brain_calls: {kind: chat, count: 0}
+
+  - id: open-youtube-opens-the-site
+    title: '"open youtube in chrome" opens the site in the browser he named'
+    twin: false
+    steps:
+      - say: "open youtube in chrome"
+    checks:
+      - app_door: {recipe: open, args_contain: "youtube.com"}
+      - app_door: {recipe: open, args_contain: "Google Chrome.app"}
+      - said_contains: "Opened https://www.youtube.com in Google Chrome"
+      - brain_calls: {kind: chat, count: 0}
+
+  - id: opening-my-reminders-is-about-the-list-not-the-window
+    title: '"open my reminders" asks Reminders what is on the list; it does not just launch it'
+    why: >
+      The fast path is for windows. A question about what is IN an app has to
+      reach the recipe that reads it, or the shortcut has eaten the question.
+    twin: false
+    brains:
+      chat:
+        - calls: [{tool: use_app, args: {recipe: reminders_open, args: {}}}]
+          text: "Here's what's on your list."
+    steps:
+      - say: "open my reminders"
+    checks:
+      - app_door: {recipe: reminders_open}
+      - app_door: {recipe: open, count: 0}

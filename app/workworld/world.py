@@ -389,6 +389,37 @@ class World:
         p.set(apps, "run", use_app)
         p.set(apps, "enabled", lambda: True)
 
+        # Opening an app or a site. The DECIDING is real — which app he meant,
+        # whether "open my reminders" is a launch at all, and the check that it
+        # actually started — and only the machine is fake. A fixed list of
+        # applications, because a scenario that reads /Applications passes on
+        # his laptop and fails on CI.
+        from pathlib import Path as _Path
+        fake_apps = [_Path(f"/Applications/{n}.app") for n in
+                     ("IntelliJ IDEA", "IntelliJ IDEA CE", "Google Chrome", "Safari",
+                      "Microsoft Teams", "Microsoft Outlook", "Reminders", "Calendar")]
+        running: set[str] = {"test.safari"}
+
+        def _bid(app) -> str:
+            return f"test.{_Path(app).stem.lower()}"
+
+        async def opened(*argv):
+            self.app_calls.append({"recipe": "open", "args": {"argv": [str(a) for a in argv]}})
+            named = [a for a in argv[1:] if str(a).endswith(".app")]
+            for a in named:
+                running.add(_bid(a))
+            if not named:
+                running.add("com.google.chrome")      # his default browser took it
+            return 0, ""
+
+        async def now_running():
+            return set(running)
+
+        p.set(apps, "installed_apps", lambda refresh=False: list(fake_apps))
+        p.set(apps, "bundle_id", _bid)
+        p.set(apps, "_run", opened)
+        p.set(apps, "running_bundles", now_running)
+
         # The screen fallback (layer three) runs for REAL in the bench — its
         # refusals and its after-every-step checking are the behaviour worth
         # testing — with only the interpreter replaced. A scenario writes the

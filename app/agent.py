@@ -1819,6 +1819,21 @@ async def use_app(recipe: str, args: dict | None = None) -> str:
             else f"Done in {out['app']}: {out['did']}.")
 
 
+async def open_app(what: str, browser: str = "") -> str:
+    """Open an application or a website on Arun's Mac and put it in front of him.
+
+    what: an app by name ("intellij", "chrome", "outlook") or a site ("youtube",
+    "docs.python.org"). browser: which browser a site should open in, when he
+    named one.
+
+    This only brings something to the front. To put something INTO an app — a
+    reminder, an event, a draft — use `use_app`, which reads the app back
+    afterwards. An app that does not actually start is reported as not started."""
+    from . import apps
+    kind = "url" if apps.site_url(what) else "app"
+    return await apps.open_it(kind, what, browser)
+
+
 async def use_screen(process: str, steps: list | None = None,
                      why: str = "", remember_as: str = "") -> str:
     """Drive an app by clicking it — only when it has no other way in.

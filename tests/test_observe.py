@@ -114,6 +114,41 @@ def test_two_of_the_same_error_are_one_signature_whatever_the_ids():
     assert len(found["signatures"]) == 1 and found["dominant"]["count"] == 2
 
 
+def test_structured_logs_group_by_what_was_said_not_by_the_blob():
+    """A JSON line carries a timestamp, a thread, a trace id and a span id before
+    it reaches the message. Normalising the whole blob made 500 real lines into
+    362 "distinct" errors — a log dump wearing a summary's clothes."""
+    def row(trace: str, uri: str) -> str:
+        return json.dumps({"timestamp": "2026-09-23 08:08:42.286", "level": "ERROR",
+                           "thread": "http-nio-8080-exec-1",
+                           "mdc": {"trace_id": trace, "span_id": trace[:8]},
+                           "logger": "com.example.security.SecurityUtils",
+                           "message": f"Error Details : Response(uri={uri}, status=401)"})
+    found = grafana.summarise(grafana.parse(_payload([
+        ("error", row("aaaa1111bbbb2222", "/orders")),
+        ("error", row("cccc3333dddd4444", "/invoices")),
+        ("error", row("eeee5555ffff6666", "/bookings")),
+    ])))
+    assert len(found["signatures"]) == 1 and found["dominant"]["count"] == 3
+    assert "SecurityUtils" in found["dominant"]["signature"]
+
+
+def test_the_payload_that_differs_between_two_of_the_same_error_is_not_the_error():
+    found = grafana.summarise(grafana.parse(_payload([
+        ("error", "ERROR BillingPersistence - Shard key not found for [job-7781, tenant-a]"),
+        ("error", "ERROR BillingPersistence - Shard key not found for [job-9912, tenant-b]"),
+    ])))
+    assert len(found["signatures"]) == 1 and found["dominant"]["count"] == 2
+
+
+def test_two_genuinely_different_errors_stay_apart():
+    found = grafana.summarise(grafana.parse(_payload([
+        ("error", "ERROR BillingPersistence - Shard key not found for [job-1]"),
+        ("error", "ERROR RateService - no rate for lane [lane-2]"),
+    ])))
+    assert len(found["signatures"]) == 2
+
+
 def test_trace_ids_come_back_because_that_is_what_gets_traced():
     line = '{"level":"ERROR","trace_id":"3255cd7b40b4b5d03c48c9eb9a4cb916","msg":"boom"}'
     found = grafana.summarise(grafana.parse(_payload([("error", line)])))

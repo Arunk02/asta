@@ -286,16 +286,46 @@ def stack_frames(lines: list[str]) -> list[dict]:
     return out
 
 
+def _json_body(line: str) -> dict:
+    """The JSON object a structured log line carries, or {}."""
+    start = line.find("{")
+    if start < 0 or "}" not in line:
+        return {}
+    try:
+        found = json.loads(line[start:])
+    except ValueError:
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
 def signature(line: str) -> str:
-    """A stable name for an error, so two of the same defect count as two."""
+    """A stable name for an error, so two of the same defect count as one.
+
+    Structured logs are why this is not just "normalise the line": a JSON line
+    carries a timestamp, a thread name, a trace id and a span id before it gets
+    anywhere near the message, and normalising the whole blob made 500 lines into
+    361 "distinct" errors — which is a log dump wearing a summary's clothes.
+    """
     exc, frames = exception_class(line), stack_frames([line])
     if exc and frames:
         return f"{exc} @ {frames[0]['method'].rsplit('.', 1)[-1]}():{frames[0]['line']}"
     if exc:
         return exc
+    body = _json_body(line)
+    if body:
+        said = str(body.get("message") or body.get("msg") or body.get("error")
+                   or body.get("exception") or "")
+        logger = str(body.get("logger") or body.get("loggerName") or body.get("class") or "")
+        if said:
+            line = (f"{logger.rsplit('.', 1)[-1]}: {said}" if logger else said)
     flat = re.sub(r"[0-9a-fA-F]{8,}", "*", line)
     flat = re.sub(r"\d+", "N", flat)
-    return re.sub(r"\s+", " ", flat).strip()[:120]
+    # The payload is what varies between two of the SAME error: one request's
+    # uri, another's ids. Keeping it split 500 lines into 362 "distinct" errors.
+    flat = re.sub(r"\([^)]{10,}\)", "(…)", flat)
+    flat = re.sub(r'"[^"]{10,}"', '"…"', flat)
+    flat = re.sub(r"\[[^\]]{10,}\]", "[…]", flat)
+    return re.sub(r"\s+", " ", flat).strip()[:80]
 
 
 def parse(payload: dict) -> list[dict]:

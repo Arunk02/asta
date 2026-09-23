@@ -176,17 +176,38 @@ async def gather(pr: str, workspace: str = "", repo: str = "") -> dict:
     return meta
 
 
+async def my_logins() -> set[str]:
+    """Every GitHub login that is HIM, lowercased.
+
+    He has two: the work account and the personal one this repository lives
+    under. `ci_watch.my_login` answers with whichever `gh` is active, so asking
+    it alone called his own pull request somebody else's — and "whose PR is it"
+    decides the entire job.
+    """
+    import os
+    from . import ci_watch
+    out = {n.strip().lower() for n in
+           (os.environ.get("ASTA_GITHUB_LOGINS") or "").split(",") if n.strip()}
+    active = (await ci_watch.my_login() or "").strip().lower()
+    if active:
+        out.add(active)
+    # Whatever else gh is signed in as, on any host it knows.
+    rc, said = await repo_ops.git(Path.home(), "gh", "auth", "status", timeout=20)
+    if rc == 0:
+        out |= {m.group(1).lower() for m in
+                re.finditer(r"account\s+([\w-]+)\s+\(", said)}
+    return out
+
+
 async def whose_pr(meta: dict) -> str:
     """"his" when Arun opened it, "theirs" otherwise — which decides the whole job.
 
     "Please review my PR" was read as "a colleague left feedback on YOUR PR", so
     Asta went off to check whether their points were right, on a PR that had no
-    points and was not his. The author settles it; his own login comes from gh.
+    points and was not his. The author settles it.
     """
-    from . import ci_watch
     author = ((meta.get("author") or {}).get("login") or "").lower()
-    me = (await ci_watch.my_login() or "").lower()
-    return "his" if author and me and author == me else "theirs"
+    return "his" if author and author in await my_logins() else "theirs"
 
 
 def _fmt_checks(checks: list[dict]) -> str:

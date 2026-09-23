@@ -690,6 +690,44 @@ def site_url(name: str) -> str:
     return ""
 
 
+#: Searching a site he names. Only the explicit forms: "search youtube for X"
+#: and "search for X on youtube". Never a bare "google the error" — that is
+#: usually him asking Asta to find out, not to open a browser window.
+SEARCHES = {
+    "youtube": "https://www.youtube.com/results?search_query={q}",
+    "google": "https://www.google.com/search?q={q}",
+    "github": "https://github.com/search?q={q}",
+    "stack overflow": "https://stackoverflow.com/search?q={q}",
+    "stackoverflow": "https://stackoverflow.com/search?q={q}",
+}
+_SITES_RE = "|".join(sorted((re.escape(k) for k in SEARCHES), key=len, reverse=True))
+_SEARCH_ASK = (
+    re.compile(rf"^\W*(?:can you\s+|could you\s+|please\s+)?(?:search|look up|find)\s+"
+               rf"(?:on\s+|in\s+)?(?P<site>{_SITES_RE})\s+for\s+(?P<q>.{{1,120}}?)"
+               rf"(?:\s+(?:in|on|with)\s+(?P<browser>chrome|safari|firefox|edge|brave|arc))?"
+               r"\W*$", re.I),
+    re.compile(rf"^\W*(?:can you\s+|could you\s+|please\s+)?(?:search|look up|find)\s+"
+               rf"(?:for\s+)?(?P<q>.{{1,120}}?)\s+(?:on|in)\s+(?P<site>{_SITES_RE})"
+               rf"(?:\s+(?:in|on|with)\s+(?P<browser>chrome|safari|firefox|edge|brave|arc))?"
+               r"\W*$", re.I),
+)
+
+
+def search_url(text: str) -> tuple[str, str] | None:
+    """(url, browser) when he is asking for a search on a site he named."""
+    from urllib.parse import quote_plus
+    t = " ".join((text or "").split())
+    for pattern in _SEARCH_ASK:
+        m = pattern.match(t)
+        if m:
+            q = m.group("q").strip(" .!?,")
+            if not q:
+                return None
+            return (SEARCHES[_norm(m.group("site"))].format(q=quote_plus(q)),
+                    (m.group("browser") or ""))
+    return None
+
+
 #: "open X", "launch X", "fire up X" — and nothing else. A verb list rather
 #: than a brain, because this has to be instant and it has to be predictable.
 _OPEN_ASK = re.compile(
@@ -714,7 +752,12 @@ def open_ask(text: str) -> tuple[str, str, str] | None:
     brain — "open the PR" is not a launch.
     """
     t = " ".join((text or "").split())
-    if not t or t.endswith("?"):
+    if not t:
+        return None
+    found = search_url(t)
+    if found:
+        return ("url", found[0], found[1])
+    if t.endswith("?"):
         return None                      # a question about what is open is not an ask
     m = _OPEN_ASK.match(t)
     if not m:

@@ -98,6 +98,28 @@ def test_only_a_launch_takes_the_fast_path(said, want):
     assert apps.open_ask(said) == want
 
 
+@pytest.mark.parametrize("said, url, browser", [
+    ("search youtube for lofi beats",
+     "https://www.youtube.com/results?search_query=lofi+beats", ""),
+    ("search for python asyncio on stack overflow",
+     "https://stackoverflow.com/search?q=python+asyncio", ""),
+    ("look up langgraph on github", "https://github.com/search?q=langgraph", ""),
+    ("search youtube for lofi in chrome",
+     "https://www.youtube.com/results?search_query=lofi", "chrome"),
+])
+def test_a_search_on_a_site_he_names_opens_that_search(said, url, browser):
+    assert apps.open_ask(said) == ("url", url, browser)
+
+
+@pytest.mark.parametrize("said", [
+    "can you google the error",        # he wants the answer, not a browser window
+    "search the logs for timeout",
+    "find the booking in solar",
+])
+def test_asking_asta_to_find_out_is_not_a_browser_window(said):
+    assert apps.open_ask(said) is None
+
+
 # --- and did it actually open? ---------------------------------------------------
 
 def test_opening_an_app_says_so_only_after_seeing_it_running(machine):

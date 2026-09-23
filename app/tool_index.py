@@ -195,6 +195,17 @@ _REQUIRED = (
                        "teams_send_message", "teams_resolve", "draft_voice")),
 )
 
+#: Asking what production is doing. The ranker put `task_result` and
+#: `trace_report` above `grafana_logs` for "why is the billing service throwing
+#: errors in prod?" — the scores in the middle of the pack sit inside their own
+#: noise, and a brain without the log tool investigates by guessing.
+_ABOUT_PRODUCTION = re.compile(
+    r"\b(logs?|log ?lines?|stack ?trace|exception|errors?|failing|failure|crash\w*|"
+    r"oom\w*|killed|restart\w*|latency|timeout|throwing|5\d\d|not working|broken)\b", re.I)
+_ABOUT_WORKFLOWS = re.compile(
+    r"\b(workflow|workflows|temporal|activity|activities|retry|retries|stuck|"
+    r"replay|saga|orchestrat\w+)\b", re.I)
+
 
 def required_for(query: str) -> list[str]:
     """Capabilities this message names outright, whatever the ranker thinks."""
@@ -207,6 +218,10 @@ def required_for(query: str) -> list[str]:
            for m in _JIRA_KEY.finditer(query or "")):
         from . import capabilities
         out += [n for n, c in capabilities.registry().items() if c.group == "jira"]
+    if _ABOUT_PRODUCTION.search(query or ""):
+        out.append("grafana_logs")
+    if _ABOUT_WORKFLOWS.search(query or ""):
+        out += ["temporal_workflows", "temporal_workflow"]
     return out
 
 

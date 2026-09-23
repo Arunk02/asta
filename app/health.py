@@ -260,6 +260,17 @@ async def checks() -> dict[str, str]:
     failing = call_rehearsal.latest_failures()
     if failing:
         problems["calls"] = f"call rehearsal failing: {failing}"
+    # Production's own eyes. A token that expired or a certificate that was never
+    # fetched looks, from a task's side, exactly like "there was nothing to find".
+    from . import grafana, temporal
+    if grafana.enabled():
+        ok, why = await grafana.health()
+        if not ok:
+            problems["grafana"] = f"cannot read production logs — {why}"
+    if temporal.envs():
+        ok, why = await temporal.health()
+        if not ok:
+            problems["temporal"] = f"cannot read workflows — {why}"
     return problems
 
 

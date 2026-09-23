@@ -157,6 +157,9 @@ class World:
     pushes: list[dict] = field(default_factory=list)          # to his phone
     documents: list[dict] = field(default_factory=list)       # files that reached it
     app_calls: list[dict] = field(default_factory=list)       # doors into his own apps
+    observed: list[dict] = field(default_factory=list)       # reads of production
+    log_lines: list[dict] = field(default_factory=list)      # what Loki holds this run
+    workflows: list[dict] = field(default_factory=list)      # what Temporal holds
     screen_frames: list[str] = field(default_factory=list)    # what the UI tree answers
     spoke: list[str] = field(default_factory=list)            # what it said out loud
     replies: list[dict] = field(default_factory=list)         # in the chat
@@ -415,6 +418,57 @@ class World:
         async def now_running():
             return set(running)
 
+        # Production's own eyes. The deciding is real — the query is built by the
+        # real code and the records are summarised by it — and only the network is
+        # replaced: a scenario states what Loki holds, nothing leaves the machine.
+        from app import grafana as grafana_mod, temporal as temporal_mod
+
+        async def read_logs(service: str = "", terms=(), minutes: int = 0, ns: str = "",
+                            errors_only: bool = True, limit: int = 0, end=None):
+            query = grafana_mod.build_query(ns or "bench-prod", service=service or None,
+                                            terms=list(terms or []),
+                                            errors_only=errors_only, names=["bench-1"],
+                                            excluded="")
+            self.observed.append({"tool": "grafana_logs", "service": service,
+                                  "terms": list(terms or []), "minutes": minutes,
+                                  "query": query})
+            wanted = [r for r in self.log_lines
+                      if (not service or service.lower() in str(r.get("app", "")).lower())
+                      and all(str(t).lower() in str(r.get("line", "")).lower()
+                              for t in terms or [])]
+            payload = {"data": {"result": [
+                {"stream": {"app": r.get("app", "bench"), "level": r.get("level", "error")},
+                 "values": [[str(int(r.get("at", 1790000000)) * 10 ** 9), r.get("line", "")]]}
+                for r in wanted]}}
+            found = grafana_mod.summarise(grafana_mod.parse(payload))
+            found.update(query=query, namespace=ns or "bench-prod", service=service,
+                         minutes=minutes or 30, via="api", fallback_reason="", took_ms=1)
+            return found
+
+        async def read_workflows(env: str, query: str = "", limit: int = 20):
+            self.observed.append({"tool": "temporal_workflows", "env": env, "query": query})
+            return [w for w in self.workflows
+                    if not query or str(w.get("status", "")).lower() in query.lower()
+                    or query.lower() in json.dumps(w).lower()]
+
+        async def count_workflows(env: str, query: str = ""):
+            return len(await read_workflows(env, query))
+
+        async def describe_workflow(env: str, workflow_id: str, run_id: str = ""):
+            self.observed.append({"tool": "temporal_workflow", "env": env,
+                                  "workflow_id": workflow_id})
+            for w in self.workflows:
+                if workflow_id in json.dumps(w):
+                    return w
+            raise temporal_mod.TemporalError(f"no workflow {workflow_id} in {env}")
+
+        p.set(grafana_mod, "logs", read_logs)
+        p.set(grafana_mod, "enabled", lambda: True)
+        p.set(temporal_mod, "envs", lambda: {"prod": {"address": "bench", "namespace": "b",
+                                                      "cert": "bench"}})
+        p.set(temporal_mod, "workflows", read_workflows)
+        p.set(temporal_mod, "count", count_workflows)
+        p.set(temporal_mod, "describe", describe_workflow)
         p.set(apps, "installed_apps", lambda refresh=False: list(fake_apps))
         p.set(apps, "bundle_id", _bid)
         p.set(apps, "_run", opened)
@@ -588,10 +642,16 @@ class World:
         return door
 
     def assert_sandboxed(self) -> None:
-        from app import store
+        from app import grafana, store, temporal
         live = (ROOT / "data" / "asta.db").resolve()
         if store.DB_PATH is None or Path(store.DB_PATH).resolve() == live:
             raise SandboxBreach("the scenario would have written to the live database")
+        # The same rule as the database, for production: a bench run that queried
+        # his real Loki would be reading live traffic to decide a test.
+        if getattr(grafana.logs, "__module__", "").startswith("app.grafana"):
+            raise SandboxBreach("the scenario would have queried the real Grafana")
+        if getattr(temporal.workflows, "__module__", "").startswith("app.temporal"):
+            raise SandboxBreach("the scenario would have queried the real Temporal")
 
     def uninstall(self) -> None:
         if hasattr(self, "_rails_undo"):

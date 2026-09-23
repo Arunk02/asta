@@ -1228,6 +1228,29 @@ async def api_use_screen(request: Request):
         b.get("remember_as", ""))}
 
 
+@app.post("/api/grafana/logs", dependencies=[Depends(require_auth)])
+async def api_grafana_logs(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.grafana_logs(
+        b.get("service", ""), b.get("terms", ()), int(b.get("minutes", 0) or 0),
+        b.get("namespace", ""), bool(b.get("errors_only", True)))}
+
+
+@app.post("/api/temporal/workflows", dependencies=[Depends(require_auth)])
+async def api_temporal_workflows(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.temporal_workflows(
+        b.get("env", ""), b.get("query", ""), int(b.get("limit", 10) or 10))}
+
+
+@app.post("/api/temporal/workflow", dependencies=[Depends(require_auth)])
+async def api_temporal_workflow(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.temporal_workflow(
+        b.get("env", ""), b.get("workflow_id", ""), b.get("run_id", ""),
+        bool(b.get("history", False)))}
+
+
 @app.post("/api/open", dependencies=[Depends(require_auth)])
 async def api_open_app(request: Request):
     b = await request.json()

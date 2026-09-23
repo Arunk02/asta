@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import time
@@ -201,6 +202,12 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
                                 "statusCheckRollup": pr.get("checks", [])}
     for step in s.get("verify", []) or []:
         world.verify.append(step)
+    # What production holds this run: log lines Loki would return, and the
+    # workflows Temporal would list. Stated by the scenario, never fetched.
+    for line in s.get("logs", []) or []:
+        world.log_lines.append(dict(line))
+    for flow in s.get("workflows", []) or []:
+        world.workflows.append(dict(flow))
     for key, value in (s.get("kv") or {}).items():
         store.kv_set(key, _clock(value))
     for key, value in (s.get("env") or {}).items():
@@ -595,6 +602,24 @@ def _check_sent(arg, world, state):
     return ""
 
 
+def _check_observed(arg, world, state):
+    """A read of production — `{tool: grafana_logs, query_contains: "namespace=", count: 1}`.
+
+    The query matters as much as the count: a query without both labels is the
+    one Loki rejects, and a brain that wrote its own would show up here.
+    """
+    hits = [c for c in world.observed
+            if (not arg.get("tool") or c.get("tool") == arg["tool"])
+            and (not arg.get("query_contains")
+                 or re.search(arg["query_contains"], str(c.get("query", "")), re.I))
+            and (not arg.get("args_contain")
+                 or re.search(arg["args_contain"], json.dumps(c), re.I))]
+    want = arg.get("count", 1)
+    if len(hits) != want:
+        return f"{len(hits)} read(s) of production matching {arg}, expected {want}: {world.observed}"
+    return ""
+
+
 def _check_app_door(arg, world, state):
     """A door into one of his own apps — `{recipe: reminder_add, count: 1}`.
 
@@ -788,6 +813,7 @@ CHECKS = {
     "no_send": _check_no_send,
     "sent": _check_sent,
     "app_door": _check_app_door,
+    "observed": _check_observed,
     "outcome": _check_outcome,
     "kv": _check_kv,
     "brain_calls": _check_brain_calls,

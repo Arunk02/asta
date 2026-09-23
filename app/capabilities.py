@@ -92,6 +92,20 @@ _TABLE: tuple[Capability, ...] = (
                     "Calendar, Notes, a Mail DRAFT, Finder. Named recipes only, and "
                     "every write is read back before it counts as done. Call "
                     "app_recipes() first to see what exists."),
+    Capability("grafana_logs", "observe",
+               http='POST /api/grafana/logs {"service":"billing","terms":"MH4DRHV7","minutes":60}',
+               note="THE way to read production logs. Code builds the LogQL (Loki "
+                    "needs namespace AND cluster labels) and groups what comes back "
+                    "into error signatures. Never write LogQL yourself, and never "
+                    "ask for raw lines — 89 of 194 hand-written queries failed."),
+    Capability("temporal_workflows", "observe",
+               http='POST /api/temporal/workflows {"env":"prod","query":"ExecutionStatus=\"Failed\""}',
+               note="Temporal workflows by environment (dev/qa/sit/uat/perf/preprod/"
+                    "prod). Read-only: list and count."),
+    Capability("temporal_workflow", "observe",
+               http='POST /api/temporal/workflow {"env":"prod","workflow_id":"…","history":false}',
+               note="One workflow: status, what it waits on, why it failed. "
+                    "history=true for the events that ended it."),
     Capability("open_app", "hands", write=True,
                http='POST /api/open {"what":"intellij"} or {"what":"youtube","browser":"chrome"}',
                note="Put an app or a site in front of him — \"open intellij\", "

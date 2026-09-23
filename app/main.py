@@ -1228,6 +1228,14 @@ async def api_use_screen(request: Request):
         b.get("remember_as", ""))}
 
 
+@app.post("/api/review/propose", dependencies=[Depends(require_auth)])
+async def api_propose_review(request: Request):
+    b = await request.json()
+    return _staged(await agent_mod.propose_pr_review(
+        str(b.get("pr", "")), b.get("notes", ""), b.get("workspace", ""),
+        b.get("repo", "")))
+
+
 @app.post("/api/grafana/logs", dependencies=[Depends(require_auth)])
 async def api_grafana_logs(request: Request):
     b = await request.json()

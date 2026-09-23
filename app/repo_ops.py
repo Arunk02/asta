@@ -98,17 +98,24 @@ def default_executor() -> str:
     return os.environ.get("ASTA_EXECUTOR", "copilot")
 
 
-async def git(cwd: Path, *args: str, timeout: float = 120) -> tuple[int, str]:
+async def git(cwd: Path, *args: str, timeout: float = 120,
+              stdin: str = "") -> tuple[int, str]:
     """Run a git/gh command, returning (returncode, combined output).
 
     Never raises on a non-zero exit — callers decide what a failure means, and
     several of them treat one (an existing PR, a clean tree) as success.
+
+    `stdin` is for the commands that take a body rather than a flag —
+    `gh api --input -`, whose payload is a JSON document with newlines in it and
+    has no business being an argv string.
     """
     proc = await asyncio.create_subprocess_exec(
         *args, cwd=str(cwd),
+        stdin=asyncio.subprocess.PIPE if stdin else None,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     try:
-        raw, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        raw, _ = await asyncio.wait_for(
+            proc.communicate(stdin.encode() if stdin else None), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         return 1, f"timed out: {' '.join(args)}"

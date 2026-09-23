@@ -496,3 +496,54 @@ scenarios:
       - observed: {tool: temporal_workflow, args_contain: "REPRICING-2737185"}
       - tool_result_contains: {tool: temporal_workflow, text: "waiting on ChargeCustomer"}
       - tool_result_contains: {tool: temporal_workflow, text: "payment gateway timeout"}
+
+  - id: a-colleague-asking-for-a-review-gets-a-real-one
+    title: '"please review my PR" is reviewed as THEIR code, and the review is staged with a comment per line'
+    why: >
+      "PR review it telling it analysing but it doesnt able to do and summarise or
+      add comments in PR". The brief assumed the colleague had left feedback on
+      HIS pull request, so the worker checked whether their points about their own
+      code were right — and nothing was ever posted.
+    twin: false
+    may_send: true
+    setup:
+      # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
+      env: {ASTA_RESPOND: "1"}
+    brains:
+      task:
+        - calls:
+            - {tool: propose_pr_review, args: {pr: "https://github.com/acme/booking/pull/1409",
+               notes: "VERDICT: REQUEST CHANGES — the retry loop can drop a message.\n\nBLOCKING (must fix):\n- `src/Consumer.java:88` — the offset is committed before the handler returns → commit after the handler\n\nNON-BLOCKING (worth raising, not gating):\n- `src/Config.java:14` — magic number → name it\n"}}
+          text: "Reviewed it — one blocking finding on the offset commit."
+    steps:
+      - colleague: {who: "A colleague", source: teams-chat,
+                    text: "hi arun, please review my PR https github com acme booking pull 1409"}
+    checks:
+      - tasks: {count: 1, title: "Review .*PR #?1409"}
+      - tool_result_contains: {tool: propose_pr_review, text: "Staged a request changes review"}
+      - tool_result_contains: {tool: propose_pr_review, text: "2 inline comment"}
+      - sent: {count: 0}                     # staged only — nothing posted without his yes
+
+  - id: his-yes-posts-the-review-on-the-lines-it-is-about
+    title: His yes sends one GitHub review carrying each finding on its own line
+    why: A review posted as one wall of text is a review the author cannot act on.
+    twin: false
+    may_send: true
+    setup:
+      # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
+      env: {ASTA_RESPOND: "1"}
+    brains:
+      task:
+        - calls:
+            - {tool: propose_pr_review, args: {pr: "https://github.com/acme/booking/pull/1409",
+               notes: "VERDICT: COMMENT — two small things.\n\nNON-BLOCKING (worth raising, not gating):\n- `src/Consumer.java:88` — the offset is committed early → commit after the handler\n- `src/Config.java:14` — magic number → name it\n"}}
+          text: "Reviewed."
+      chat:
+        - text: "Posted it."
+    steps:
+      - colleague: {who: "A colleague", source: teams-chat,
+                    text: "hi arun, please review my PR https github com acme booking pull 1409"}
+      - say: "yes"
+    checks:
+      - sent: {door: git, text: "repos/acme/booking/pulls/1409/reviews"}
+      - sent: {door: git, text: "src/Consumer.java"}

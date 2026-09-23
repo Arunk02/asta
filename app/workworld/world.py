@@ -518,13 +518,19 @@ class World:
         #    branches, fetches and checks out — so the whole of git is confined
         #    to a scratch directory here, and anything outside it is a breach,
         #    not a surprise on his working tree.
-        async def git(repo, *args, timeout=120):
+        async def git(repo, *args, timeout=120, stdin=""):
             cmd = " ".join(str(a) for a in args)
-            if str(Path(repo).resolve()) != str(self.scratch.resolve()) and \
-                    self.scratch.resolve() not in Path(repo).resolve().parents:
+            # `gh` talking to GitHub touches no working tree, and a PR read from a
+            # link is answered from anywhere — so it is judged as the outward act
+            # it is (recorded, never performed) rather than as an escape from the
+            # sandbox. Everything else must stay inside the scratch directory.
+            reaches_github = args and str(args[0]) == "gh"
+            if not reaches_github and str(Path(repo).resolve()) != str(self.scratch.resolve()) \
+                    and self.scratch.resolve() not in Path(repo).resolve().parents:
                 self.breaches.append(f"git outside the sandbox: {repo} — {cmd[:60]}")
                 return 1, "blocked by the sandbox"
-            self.sent.append({"door": "git", "cmd": cmd, "repo": str(repo)})
+            self.sent.append({"door": "git", "cmd": cmd, "repo": str(repo),
+                              "body": stdin[:2000]})
             if "gh pr create" in cmd:
                 url = f"https://github.com/x/y/pull/{900 + len(self.sent)}"
                 self.prs.setdefault(url, {"state": "OPEN", "statusCheckRollup": [],

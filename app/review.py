@@ -89,11 +89,42 @@ Hard rules:
 - Do NOT restate what the diff does — Arun can read it. Nothing a linter would catch.
 - If a file you needed was not in the diff (see any NOTE above), say which, and do not
   guess at what it contains.
+
+Then CALL `propose_pr_review` with the pull request and your notes exactly as written
+above. That is what turns a review into comments the author can act on, each on its own
+line of the diff; it posts nothing — Arun sees the review and his yes sends it. Finishing
+with the notes in your answer and no call is the failure this whole path exists to fix:
+"it telling it analysing but it doesnt able to do and summarise or add comments in PR".
 """
 
 
 async def _gh(cwd: Path, *args: str, timeout: float = 120) -> tuple[int, str]:
     return await repo_ops.git(cwd, "gh", *args, timeout=timeout)
+
+
+#: A PR named the way a colleague actually sends it: a full link, or owner/repo#N.
+#: Teams strips punctuation out of links in its feed, so `pull/1409` arrives as
+#: `pull 1409` — matched either way, because that rendering is the common one.
+_PR_LINK = re.compile(
+    r"(?:https?://)?(?:www[.\s]+)?github[.\s]+com[/\s]+([\w.-]+)[/\s]+([\w.-]+)"
+    r"[/\s]+pull[/\s]+(\d{1,7})"
+    r"|\b([\w.-]+)/([\w.-]+)#(\d{1,7})\b", re.I)
+
+
+def pr_target(pr: str) -> tuple[str, str]:
+    """(number, "owner/repo") for a PR he names — repo empty when he gave a bare number.
+
+    "Please review https://github.com/acme/booking/pull/1409" carries everything
+    needed, and that is how a review request arrives. Requiring a local clone for
+    it — which `_repo_dir` did — turned a complete request into "name the repo as
+    well", which is the shape of not answering.
+    """
+    found = _PR_LINK.search(str(pr or ""))
+    if found:
+        owner, repo, number = (found.group(1), found.group(2), found.group(3)) \
+            if found.group(3) else (found.group(4), found.group(5), found.group(6))
+        return number, f"{owner}/{repo}"
+    return str(pr or "").strip().lstrip("#"), ""
 
 
 def _repo_dir(workspace: str, repo: str = "") -> Path:
@@ -103,28 +134,59 @@ def _repo_dir(workspace: str, repo: str = "") -> Path:
     return Path(root) if (Path(root) / ".git").is_dir() else Path(root)
 
 
-async def gather(pr: str, workspace: str, repo: str = "") -> dict:
-    """Everything about a PR, from gh. Raises RuntimeError with gh's own message."""
+def _where(pr: str, workspace: str, repo: str = "") -> tuple[str, list[str], Path]:
+    """(number, extra gh args, cwd) — from the link when there is one, else the clone.
+
+    `gh -R owner/repo` needs no repository around it, so a link is answered from
+    anywhere. A bare number still needs the clone that says which repo it means.
+    """
+    number, target = pr_target(pr)
+    if target:
+        return number, ["-R", target], Path.home()
     cwd = _repo_dir(workspace, repo)
     if not (cwd / ".git").is_dir():
-        raise RuntimeError(f"{cwd} is not a git repository — name the repo as well.")
-    rc, out = await _gh(cwd, "pr", "view", pr, "--json",
+        raise RuntimeError(f"{cwd} is not a git repository — send the PR link, "
+                           f"or name the repo as well.")
+    return number, [], cwd
+
+
+async def gather(pr: str, workspace: str = "", repo: str = "") -> dict:
+    """Everything about a PR, from gh. Raises RuntimeError with gh's own message."""
+    number, where, cwd = _where(pr, workspace, repo)
+    rc, out = await _gh(cwd, "pr", "view", number, *where, "--json",
                         "number,title,author,body,baseRefName,headRefName,url,"
-                        "additions,deletions,changedFiles,files,state,isDraft")
+                        "additions,deletions,changedFiles,files,state,isDraft,"
+                        "headRepositoryOwner,headRepository")
     if rc != 0:
         raise RuntimeError(f"gh pr view failed: {out[:300]}")
     try:
         meta = json.loads(out)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"could not parse gh output: {exc}") from exc
-    rc, diff = await _gh(cwd, "pr", "diff", pr, timeout=180)
+    rc, diff = await _gh(cwd, "pr", "diff", number, *where, timeout=180)
     if rc != 0:
         diff = f"(diff unavailable: {diff[:200]})"
-    rc, checks = await _gh(cwd, "pr", "checks", pr, "--json", "name,state")
+    rc, checks = await _gh(cwd, "pr", "checks", number, *where, "--json", "name,state")
     meta["checks"] = json.loads(checks) if rc == 0 and checks.strip() else []
     meta["diff"] = diff
     meta["repo_dir"] = str(cwd)
+    meta["target"] = (where[1] if where else
+                      f"{(meta.get('headRepositoryOwner') or {}).get('login', '')}/"
+                      f"{(meta.get('headRepository') or {}).get('name', '')}".strip("/"))
     return meta
+
+
+async def whose_pr(meta: dict) -> str:
+    """"his" when Arun opened it, "theirs" otherwise — which decides the whole job.
+
+    "Please review my PR" was read as "a colleague left feedback on YOUR PR", so
+    Asta went off to check whether their points were right, on a PR that had no
+    points and was not his. The author settles it; his own login comes from gh.
+    """
+    from . import ci_watch
+    author = ((meta.get("author") or {}).get("login") or "").lower()
+    me = (await ci_watch.my_login() or "").lower()
+    return "his" if author and me and author == me else "theirs"
 
 
 def _fmt_checks(checks: list[dict]) -> str:
@@ -275,10 +337,8 @@ async def post_review(pr: str, workspace: str, repo: str = "",
     body = (body or "").strip()
     if not body and action != "approve":
         raise RuntimeError(f"a '{action}' review needs a body — write the comment first")
-    cwd = _repo_dir(workspace, repo)
-    if not (cwd / ".git").is_dir():
-        raise RuntimeError(f"{cwd} is not a git repository — name the repo as well.")
-    args = ["pr", "review", pr, flag]
+    number, where, cwd = _where(pr, workspace, repo)
+    args = ["pr", "review", number, *where, flag]
     if body:
         args += ["--body", body]
     rc, out = await _gh(cwd, *args)
@@ -448,3 +508,111 @@ async def merge(pr: str, workspace: str, repo: str = "", method: str = "squash",
         raise RuntimeError(f"merge failed: {out.strip()[:300]}")
     return (f"merged #{state['number']} ({method}) into {state['base']}"
             + (" and deleted the branch" if delete_branch else ""))
+
+
+# --- findings, as comments on the lines they are about --------------------------------
+#
+# "PR review it telling it analysing but it doesnt able to do and summarise or add
+# comments in PR". The brief already asks for `path:line — what is wrong → what to
+# do`, and every one of those was flattened into one blob of text posted as a
+# single comment, if it was posted at all. A review the author can act on is a
+# comment ON THE LINE, and GitHub takes them all in one review.
+
+#: `- \`path/to/File.java:88\` — what is wrong → what to do`, in any of the shapes
+#: a model writes it: backticks or not, an em dash, a colon or an arrow.
+_FINDING = re.compile(
+    r"^\s*[-*]\s*`?([\w./+-]+\.[\w]{1,8})`?\s*[:#]\s*L?(\d{1,6})`?\s*"
+    r"(?:[—\-–:]|->|→)?\s*(.+)$", re.M)
+
+#: The headings the brief asks for, and whether a finding under one blocks a merge.
+_SECTIONS = (("BLOCKING", True), ("NON-BLOCKING", False), ("TESTS", False),
+             ("QUESTIONS", False))
+
+
+def parse_findings(notes: str) -> list[dict]:
+    """[{path, line, body, blocking}] from a worker's review notes.
+
+    Anything that does not name a file and a line stays out: a comment GitHub
+    cannot attach is a comment that silently disappears, and a review that half
+    lands is worse than one that does not.
+    """
+    out: list[dict] = []
+    section, blocking = "", False
+    for raw in (notes or "").splitlines():
+        head = raw.strip().rstrip(":").upper()
+        for name, blocks in _SECTIONS:
+            if head.startswith(name):
+                section, blocking = name, blocks
+                break
+        found = _FINDING.match(raw)
+        if not found:
+            continue
+        body = found.group(3).strip(" -—–").strip()
+        if not body:
+            continue
+        if section == "QUESTIONS":
+            body = "Question: " + body
+        out.append({"path": found.group(1), "line": int(found.group(2)),
+                    "body": body[:1500], "blocking": blocking and section == "BLOCKING"})
+    return out
+
+
+def verdict_of(notes: str) -> str:
+    """APPROVE / COMMENT / REQUEST CHANGES as the worker stated it, lowercased to
+    the action names. Anything unclear is a comment: never an approval by default."""
+    found = re.search(r"^\s*VERDICT:\s*(APPROVE|COMMENT|REQUEST[ _]CHANGES)",
+                      notes or "", re.I | re.M)
+    if not found:
+        return "comment"
+    said = found.group(1).upper().replace(" ", "_")
+    return {"APPROVE": "approve", "COMMENT": "comment",
+            "REQUEST_CHANGES": "request_changes"}[said]
+
+
+async def post_inline_review(pr: str, workspace: str = "", repo: str = "",
+                             action: str = "comment", body: str = "",
+                             comments: list | None = None) -> str:
+    """One review carrying inline comments, through GitHub's own reviews API.
+
+    `gh pr review` can only post a single body, which is why every finding used
+    to arrive as one wall of text. The API takes `comments: [{path, line, body}]`,
+    and they land on the lines they are about.
+
+    A comment on a line outside the diff is rejected by GitHub with the whole
+    review — so a rejection is retried once, as a plain review body carrying the
+    same findings, rather than losing them.
+    """
+    flag = ACTIONS.get(action)
+    if flag is None:
+        raise RuntimeError(f"unknown review action '{action}' — one of: "
+                           + ", ".join(sorted(ACTIONS)))
+    number, where, cwd = _where(pr, workspace, repo)
+    target = where[1] if where else ""
+    if not target:
+        rc, out = await _gh(cwd, "repo", "view", "--json", "nameWithOwner",
+                            "--jq", ".nameWithOwner")
+        target = out.strip() if rc == 0 else ""
+    if not target:
+        raise RuntimeError("could not tell which repository that PR is in")
+    rows = [c for c in (comments or []) if c.get("path") and c.get("line")]
+    if not rows:
+        return await post_review(pr, workspace, repo, action, body)
+    payload = {"event": {"approve": "APPROVE", "comment": "COMMENT",
+                         "request_changes": "REQUEST_CHANGES"}[action],
+               "body": (body or "").strip(),
+               "comments": [{"path": c["path"], "line": int(c["line"]), "side": "RIGHT",
+                             "body": str(c["body"])[:1500]} for c in rows]}
+    rc, out = await repo_ops.git(cwd, "gh", "api", "--method", "POST",
+                                 f"repos/{target}/pulls/{number}/reviews",
+                                 "--input", "-", stdin=json.dumps(payload), timeout=120)
+    if rc != 0:
+        # Most often: a line that is not part of the diff. Say so, and still
+        # deliver the findings rather than dropping them on the floor.
+        listed = "\n".join(f"- `{c['path']}:{c['line']}` — {c['body']}" for c in rows)
+        note = ((body or "").strip() + "\n\n" + listed).strip()
+        await post_review(pr, workspace, repo, action, note)
+        return (f"Posted the review on PR #{number} as one comment — GitHub would not "
+                f"take the inline ones ({out.strip()[:120]})")
+    verb = {"approve": "Approved", "comment": "Commented on",
+            "request_changes": "Requested changes on"}[action]
+    return f"{verb} PR #{number} with {len(rows)} inline comment(s)"

@@ -97,7 +97,11 @@ def test_ordinary_chatter_starts_nothing(spawned):
     ("prod bookings are stuck since morning", "incident"),
     ("temporal workflows failing in production", "incident"),
     ("there is an incident on the booking service", "incident"),
+    # Whose PR it is decides the job: "review MY FEEDBACK" is their comments on
+    # his change; "please review my PR" is their change wanting his eyes.
     ("please review my feedback on pull request 1409", "pr_review"),
+    ("please review my PR 1409", "review_request"),
+    ("PR is up for the consumer fix, pull 1409", "review_request"),
     ("any idea why the build is red", "debug"),
     ("please check the logs for this error", "debug"),
     ("lunch at 1?", ""),
@@ -275,8 +279,13 @@ def test_the_title_never_cuts_a_word_in_half():
 def test_a_shared_pr_link_is_a_review_ask(row):
     """"same for pr 1049 when he shared the message it should known automatically."
     Teams strips punctuation out of links in the feed, so `pull/1409` arrives as
-    `pull 1409` — both forms must match."""
-    assert responder.what_it_asks(row) == "pr_review", row
+    `pull 1409` — both forms must match.
+
+    Either kind counts here: what this pins is that a shared PR is HEARD at all.
+    Which job it is — their feedback on his change, or their change wanting his
+    eyes — is `test_what_it_asks`'s business.
+    """
+    assert responder.what_it_asks(row) in ("pr_review", "review_request"), row
 
 
 def test_the_pr_number_survives_the_url_form():
@@ -405,8 +414,32 @@ def test_the_offer_carries_the_brief_his_yes_will_run(monkeypatch, spawned):
     monkeypatch.setattr(st, "list_tasks", lambda n=200: [])
     asked = {}
     monkeypatch.setattr(offers, "propose", lambda **kw: asked.update(kw) or object())
+    responder.respond("teams", "Alex", TEMPORAL, priority=attention.P_TODAY)
+    assert asked["action"] == responder.brief_for(
+        responder.what_it_asks(TEMPORAL), "Alex", TEMPORAL)
+
+
+def test_a_pull_request_someone_points_at_is_looked_at_not_asked_about(monkeypatch,
+                                                                       spawned):
+    """A PR number IS somebody saying "here, this one" — "they gave tickets and
+    details to check but it is not automatically going and debugging"."""
+    from app import offers, store as st
+    monkeypatch.setattr(st, "list_tasks", lambda n=200: [])
+    monkeypatch.setattr(offers, "propose",
+                        lambda **kw: (_ for _ in ()).throw(AssertionError("asked instead")))
     responder.respond("teams", "Alex", PR_FEEDBACK, priority=attention.P_TODAY)
-    assert "Do not assume the reviewer is right" in asked["action"]
+    assert spawned and "Do not assume the reviewer is right" in spawned[0]["prompt"]
+
+
+def test_a_colleagues_own_pr_is_reviewed_as_their_code(monkeypatch, spawned):
+    from app import store as st
+    monkeypatch.setattr(st, "list_tasks", lambda n=200: [])
+    responder.respond("teams", "Sam", "please review my PR 1409",
+                      priority=attention.P_TODAY)
+    assert spawned and spawned[0]["title"] == "Review Sam's PR #1409"
+    prompt = spawned[0]["prompt"]
+    assert "REVIEW their pull request #1409" in prompt
+    assert "propose_pr_review" in prompt
 
 
 def test_familiar_ground_is_acted_on_without_asking(monkeypatch, spawned):

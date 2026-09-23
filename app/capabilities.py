@@ -342,6 +342,11 @@ _TABLE: tuple[Capability, ...] = (
                note="Spends a brain call per case, so not routine. Say the score AND "
                     "which cases failed — a bare percentage tells him nothing about "
                     "what to fix."),
+    Capability("propose_pr_review", "tasks", write=True,
+               http='POST /api/review/propose {"pr":"https://github.com/o/r/pull/12","notes":"VERDICT: …"}',
+               note="The END of every review: turns your notes into one GitHub "
+                    "review with a comment on each line. Posts nothing — it waits "
+                    "for his yes. Notes that stay in your answer reach nobody."),
     Capability("pr_review_post", "tasks",
                http='POST /api/pr-review {"pr":"123","action":"approve|comment|'
                     'request_changes","body":"…","workspace":"…","repo":""}',

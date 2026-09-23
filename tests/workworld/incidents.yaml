@@ -446,3 +446,53 @@ scenarios:
       - said_contains: "#1 retention to 90 days"
       - sent: {door: teams, count: 1}
       - brain_calls: {kind: chat, count: 1}
+
+  - id: a-production-question-is-answered-from-production
+    title: '"why is billing throwing errors in prod" reads Loki through the API and answers with the error, not a log dump'
+    why: >
+      Three weeks to 22 Sep: 194 Grafana MCP calls, 89 of them failed — every one
+      a query the model wrote. 56 came back too large to read and 13 were rejected
+      for too few label matchers. The query is built in code now.
+    twin: false
+    setup:
+      logs:
+        - {app: billing, level: error, at: 1790000001, line: "java.lang.IllegalStateException: no rate for lane\n\tat com.example.billing.RateService.price(RateService.java:88)"}
+        - {app: billing, level: error, at: 1790000002, line: "java.lang.IllegalStateException: no rate for lane\n\tat com.example.billing.RateService.price(RateService.java:88)"}
+        - {app: billing, level: info, at: 1790000003, line: "started fine"}
+        - {app: other-service, level: error, at: 1790000004, line: "unrelated failure"}
+    brains:
+      chat:
+        - calls: [{tool: grafana_logs, args: {service: billing, minutes: 30}}]
+          text: "Billing is throwing IllegalStateException at RateService.price():88 — twice in the last half hour."
+    steps:
+      - say: "why is billing throwing errors in prod?"
+    checks:
+      - observed: {tool: grafana_logs, query_contains: 'namespace=".+".*k8s_cluster'}
+      - tool_result_contains: {tool: grafana_logs, text: "IllegalStateException"}
+      - tool_result_contains: {tool: grafana_logs, text: 'price\(\):88'}
+      - tool_result_contains: {tool: grafana_logs, text: "×2"}
+      - said_contains: "RateService.price"
+
+  - id: a-stuck-workflow-is-read-from-temporal
+    title: '"is the repricing workflow stuck" reads Temporal and says what it is waiting on'
+    why: >
+      The proxy and its certificates worked all along — prod answered in under
+      four seconds — and no brain doing the work had it attached. Zero Temporal
+      calls in three weeks.
+    twin: false
+    setup:
+      workflows:
+        - {execution: {workflowId: "REPRICING-2737185"}, type: {name: RepricingWorkflow},
+           status: "WORKFLOW_EXECUTION_STATUS_RUNNING", startTime: "2026-09-23T07:46:34Z",
+           pendingActivities: [{activityType: {name: ChargeCustomer}, attempt: 7,
+                                lastFailure: {message: "payment gateway timeout"}}]}
+    brains:
+      chat:
+        - calls: [{tool: temporal_workflow, args: {env: prod, workflow_id: "REPRICING-2737185"}}]
+          text: "It is running but retrying ChargeCustomer — attempt 7, payment gateway timeout."
+    steps:
+      - say: "is the repricing workflow REPRICING-2737185 stuck in prod?"
+    checks:
+      - observed: {tool: temporal_workflow, args_contain: "REPRICING-2737185"}
+      - tool_result_contains: {tool: temporal_workflow, text: "waiting on ChargeCustomer"}
+      - tool_result_contains: {tool: temporal_workflow, text: "payment gateway timeout"}

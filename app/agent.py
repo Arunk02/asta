@@ -1819,6 +1819,83 @@ async def use_app(recipe: str, args: dict | None = None) -> str:
             else f"Done in {out['app']}: {out['did']}.")
 
 
+def _terms(terms) -> list[str]:
+    """Search terms as a list, however a brain sent them."""
+    if isinstance(terms, str):
+        return [t.strip() for t in terms.replace(",", " ").split() if t.strip()]
+    return [str(t).strip() for t in (terms or []) if str(t).strip()]
+
+
+async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
+                       namespace: str = "", errors_only: bool = True) -> str:
+    """Search production logs (Loki) and get back what is WRONG, not a log dump.
+
+    service: part of an app name ("billing", "booking-consumer"), or blank for the
+    whole namespace. terms: identifiers to narrow by — a booking id, a trace id, an
+    exception class. minutes: how far back (default 30). namespace: another
+    environment's namespace; blank means the default one. errors_only=False when
+    you are tracing an identifier rather than hunting a failure.
+
+    You do not write LogQL here. The query is built in code — it always carries the
+    namespace and cluster labels Loki requires, and your terms become filters Loki
+    applies. What comes back is grouped into error signatures: the dominant one,
+    how often, first and last seen, the top stack frames and trace ids. Ask once
+    and reason from the answer; do not re-query for a detail you were already sent.
+    """
+    from . import grafana
+    try:
+        found = await grafana.logs(service=service, terms=_terms(terms), minutes=minutes,
+                                   ns=namespace, errors_only=bool(errors_only))
+    except grafana.GrafanaError as exc:
+        return f"Could not read the logs — {exc}"
+    return grafana.render(found)
+
+
+async def temporal_workflows(env: str = "", query: str = "", limit: int = 10) -> str:
+    """List Temporal workflows in one environment, or count them.
+
+    env: dev, qa, sit, uat, perf, preprod or prod — required, it chooses the
+    cluster, the namespace and the certificate. query: a Temporal visibility
+    query, e.g. 'ExecutionStatus="Failed"' or
+    'WorkflowType="RepricingWorkflow" AND ExecutionStatus="Running"'.
+
+    Read-only. Use it to answer "is it stuck", "did it run", "how many failed" —
+    and `temporal_workflow` for one workflow's own story."""
+    from . import temporal
+    if not env:
+        return f"Which environment? One of: {', '.join(temporal.envs()) or '(none configured)'}"
+    try:
+        rows = await temporal.workflows(env, query, limit)
+        total = await temporal.count(env, query)
+    except temporal.TemporalError as exc:
+        return f"Temporal — {exc}"
+    head = f"{total} in total matching." if total > len(rows) else ""
+    return (temporal.render(rows, env, query) + ("\n  " + head if head else "")).strip()
+
+
+async def temporal_workflow(env: str = "", workflow_id: str = "", run_id: str = "",
+                            history: bool = False) -> str:
+    """One Temporal workflow: its status, what it is waiting on, and why it failed.
+
+    history=True returns its events instead — the sequence that ended it. Use this
+    once `temporal_workflows` has found the id, or when he gives you one."""
+    from . import temporal
+    if not env or not workflow_id:
+        return "Which environment and which workflow id?"
+    try:
+        if history:
+            events = await temporal.history(env, workflow_id, run_id)
+            tail = [e for e in events if str(e.get("eventType", "")).lower().find("fail") >= 0]
+            shown = (tail or events)[-8:]
+            return (f"{len(events)} events for {workflow_id} in {env}"
+                    + (f", {len(tail)} of them failures" if tail else "") + ":\n"
+                    + "\n".join(f"  {e.get('eventId', '?')}: {e.get('eventType', '?')} "
+                                 f"{str(e.get('attributes') or '')[:200]}" for e in shown))
+        return temporal.render_one(await temporal.describe(env, workflow_id, run_id), env)
+    except temporal.TemporalError as exc:
+        return f"Temporal — {exc}"
+
+
 async def open_app(what: str, browser: str = "") -> str:
     """Open an application or a website on Arun's Mac and put it in front of him.
 

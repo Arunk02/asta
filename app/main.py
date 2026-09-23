@@ -1228,6 +1228,13 @@ async def api_use_screen(request: Request):
         b.get("remember_as", ""))}
 
 
+@app.post("/api/open", dependencies=[Depends(require_auth)])
+async def api_open_app(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.open_app(b.get("what", ""),
+                                                           b.get("browser", ""))}
+
+
 @app.get("/api/apps", dependencies=[Depends(require_auth)])
 def api_app_recipes():
     return {"detail": agent_mod.app_recipes()}
@@ -3061,6 +3068,18 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # favourite workspace is booking" — is proposed as a rule the code enforces,
     # once, with a one-tap yes. Said on its own, that proposal IS the reply: no
     # brain, and nothing folded into whatever task happens to be live.
+    # "open intellij" / "open youtube" — a window, now. No brain: a launch that
+    # waits on a chat turn has already failed at the thing he asked for.
+    from . import apps
+    if frontdesk.enabled() and apps.enabled():
+        wants_open = apps.open_ask(user_text)
+        if wants_open:
+            frontdesk.record("open", wants_open[0])
+            await sink.send({"type": "delta" if channel == "web" else "note",
+                             "text": await apps.open_it(*wants_open)})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
     if frontdesk.enabled() and frontdesk.ends_quiet(user_text) and notify.quiet_rule() is not None:
         # "I'm back" while his quiet time holds: lift it, and hand him what it kept.
         frontdesk.record("rule", "quiet lifted")

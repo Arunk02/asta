@@ -31,14 +31,19 @@ from __future__ import annotations
 
 import asyncio
 import os
+import plistlib
+import re
 import shutil
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 #: The interpreters. Constants so a test can point them at nothing, exactly as
 #: conftest does for the audio switcher: a suite that writes to his Calendar is
 #: not a suite.
 OSASCRIPT = "/usr/bin/osascript"
 SHORTCUTS = "/usr/bin/shortcuts"
+OPEN = "/usr/bin/open"
 #: Long enough for an app that has to launch, short enough that a stuck
 #: permission dialog does not hold his turn open.
 TIMEOUT = 25
@@ -452,3 +457,288 @@ def catalogue() -> str:
         lines.append(f"{r.name} ({r.app}): {r.does}. takes: {takes}"
                      f"{' [writes, read back after]' if r.writes else ''}")
     return "\n".join(lines)
+
+
+# --- opening anything he names ---------------------------------------------------------
+#
+# "i ask to open intelij, open chrome, open youtube it has to open". The recipes
+# above are for putting something INTO an app; this is just "put it in front of
+# me", which needs no script at all — `open -a` does it, and the honest part is
+# afterwards: an app that did not start must be reported as not started.
+
+#: Where macOS keeps applications. Utilities is listed because it is where a
+#: fair number of the things he asks for by name actually live.
+APP_FOLDERS = ("/Applications", "/Applications/Utilities",
+               "/System/Applications", "/System/Applications/Utilities",
+               "~/Applications")
+
+#: Sites by the name he says rather than the address he would type. Deliberately
+#: short and public: anything with a dot in it is opened as typed, so his own
+#: systems need no entry here (and this repo carries no internal hostnames).
+SITES = {
+    "youtube": "https://www.youtube.com",
+    "google": "https://www.google.com",
+    "gmail": "https://mail.google.com",
+    "github": "https://github.com",
+    "google drive": "https://drive.google.com",
+    "google maps": "https://maps.google.com",
+    "stack overflow": "https://stackoverflow.com",
+}
+
+#: Browsers, by the name he would use for them.
+BROWSERS = {"chrome": "Google Chrome", "google chrome": "Google Chrome",
+            "safari": "Safari", "firefox": "Firefox", "edge": "Microsoft Edge",
+            "brave": "Brave Browser", "arc": "Arc"}
+
+_apps_cache: tuple[float, list[Path]] = (0.0, [])
+APPS_TTL = 300
+
+
+def installed_apps(refresh: bool = False) -> list[Path]:
+    """Every application on this machine, cached — a scan per turn is wasteful
+    and the list changes about once a month."""
+    global _apps_cache
+    when, found = _apps_cache
+    if found and not refresh and time.time() - when < APPS_TTL:
+        return found
+    out: list[Path] = []
+    for folder in APP_FOLDERS:
+        base = Path(os.path.expanduser(folder))
+        try:
+            out += [p for p in base.iterdir() if p.suffix == ".app"]
+        except OSError:
+            continue
+    out.sort(key=lambda p: p.name.lower())
+    _apps_cache = (time.time(), out)
+    return out
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", "", (text or "").lower()).strip()
+
+
+def find_app(name: str) -> tuple[Path | None, list[str]]:
+    """The app he means, and the other candidates.
+
+    He types "intellij" and this machine has both IntelliJ IDEA and IntelliJ
+    IDEA CE. The shortest name that contains what he wrote is the plain one,
+    which is the one people mean — but the alternatives are handed back so the
+    answer can say which was chosen and what else was there.
+    """
+    want = _norm(name)
+    if not want:
+        return None, []
+    apps = installed_apps()
+    exact = [p for p in apps if _norm(p.stem) == want]
+    if exact:
+        return exact[0], [p.stem for p in exact[1:]]
+    starts = [p for p in apps if _norm(p.stem).startswith(want)]
+    holds = [p for p in apps if want in _norm(p.stem) and p not in starts]
+    # Every word he wrote, in any order: "teams microsoft" is Microsoft Teams.
+    words = want.split()
+    loose = [p for p in apps
+             if p not in starts and p not in holds
+             and all(w in _norm(p.stem) for w in words)]
+    ranked = sorted(starts, key=lambda p: len(p.stem)) + \
+        sorted(holds, key=lambda p: len(p.stem)) + sorted(loose, key=lambda p: len(p.stem))
+    if ranked:
+        return ranked[0], [p.stem for p in ranked[1:4]]
+    import difflib
+    near = difflib.get_close_matches(want, [_norm(p.stem) for p in apps], n=3, cutoff=0.6)
+    return None, [p.stem for p in apps if _norm(p.stem) in near]
+
+
+def bundle_id(app: Path) -> str:
+    """An app's identifier, read from its own Info.plist — no subprocess."""
+    try:
+        with open(app / "Contents" / "Info.plist", "rb") as fh:
+            return str(plistlib.load(fh).get("CFBundleIdentifier") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+async def _run(*argv: str) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return 124, f"{argv[0]} did not finish within {TIMEOUT}s"
+    return proc.returncode, out.decode(errors="replace").strip()
+
+
+async def running_bundles() -> set[str] | None:
+    """The identifiers of everything running right now, or None when macOS will
+    not say.
+
+    Read from System Events rather than by asking each app whether it is
+    running — that question LAUNCHES an app that is not, which would make the
+    check its own answer.
+
+    None is not an empty set. Until this Mac allows Asta to ask System Events
+    (Privacy & Security → Automation), the honest answer is "I cannot tell",
+    and reporting that as "it did not open" would call every successful launch
+    a failure.
+    """
+    script = ('on run argv\n  tell application "System Events" to return '
+              '(bundle identifier of every process) as text\nend run')
+    try:
+        said = await _osascript(script, [])
+    except AppError:
+        return None
+    return {b.strip() for b in said.split(",") if b.strip()}
+
+
+#: How long to wait for an app to appear after asking macOS to open it. A cold
+#: IntelliJ takes several seconds; a test sets this to a fraction.
+START_WAIT = 12.0
+
+
+async def _became_running(bid: str, seconds: float | None = None) -> bool | None:
+    """Wait for it to actually appear: True, False, or None when we cannot see."""
+    if not bid:
+        return None
+    deadline = time.time() + (START_WAIT if seconds is None else seconds)
+    seen = None
+    while time.time() < deadline:
+        seen = await running_bundles()
+        if seen is None:
+            return None                  # macOS will not answer; do not guess
+        if bid.lower() in {b.lower() for b in seen}:
+            return True
+        await asyncio.sleep(0.5)
+    return False
+
+
+#: Said once, where it can be acted on: the check needs this permission.
+BLIND = ("opened, but I can't confirm it is running — this Mac has not allowed "
+         "Asta to ask System Events (Privacy & Security → Automation → python3.13)")
+
+
+async def open_app(name: str, asked: bool = True) -> dict:
+    """Bring an application on his Mac to the front, and check it really came."""
+    if not enabled():
+        raise AppError("app doors are off — set ASTA_APPS=1 to let Asta use them")
+    app, others = find_app(name)
+    if app is None:
+        near = f" Closest I can see: {', '.join(others)}." if others else ""
+        raise AppError(f"no app called {name!r} on this Mac.{near}")
+    from . import policy
+    verdict = policy.check("app", app.stem.lower(), asked=asked)
+    if not verdict.ok:
+        raise AppError(f"a rule of his stops that: {verdict.why}")
+    code, said = await _run(OPEN, "-a", str(app))
+    if code != 0:
+        raise AppError(f"could not open {app.stem}: {said[:200] or f'open exited {code}'}")
+    seen = await _became_running(bundle_id(app))
+    said = {True: f"{app.stem} is open.",
+            None: f"{app.stem} {BLIND}.",
+            False: f"Asked macOS to open {app.stem}, but it is not running — "
+                   f"reporting that rather than assuming."}[seen]
+    return {"ok": seen is not False, "verified": seen, "app": app.stem,
+            "others": others, "said": said}
+
+
+async def open_url(where: str, browser: str = "") -> dict:
+    """Open a site. `browser` names one, otherwise his default takes it."""
+    if not enabled():
+        raise AppError("app doors are off — set ASTA_APPS=1 to let Asta use them")
+    url = site_url(where) or where.strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", url):
+        url = "https://" + url.lstrip("/")
+    if not re.match(r"^https?://[^\s/]+\.[^\s/]+", url):
+        raise AppError(f"{where!r} is not a site I can open")
+    argv = [OPEN, url]
+    app = None
+    if browser:
+        app, _ = find_app(BROWSERS.get(_norm(browser), browser))
+        if app is None:
+            raise AppError(f"no browser called {browser!r} on this Mac")
+        argv = [OPEN, "-a", str(app), url]
+    code, said = await _run(*argv)
+    if code != 0:
+        raise AppError(f"could not open {url}: {said[:200] or f'open exited {code}'}")
+    # With no browser named, the honest check is that SOME browser is now up:
+    # which one is his default is LaunchServices' business, not Asta's.
+    if app is not None:
+        seen = await _became_running(bundle_id(app))
+        where_at = f" in {app.stem}"
+    else:
+        running = await running_bundles()
+        where_at = ""
+        seen = None if running is None else any(
+            b.lower().startswith(("com.google.chrome", "com.apple.safari", "org.mozilla",
+                                  "com.microsoft.edgemac", "com.brave.browser",
+                                  "company.thebrowser")) for b in running)
+    said = {True: f"Opened {url}{where_at}.",
+            None: f"{url}{where_at} {BLIND}.",
+            False: f"Asked macOS to open {url}, but I cannot see a browser running — "
+                   f"reporting that rather than assuming."}[seen]
+    return {"ok": seen is not False, "verified": seen, "url": url,
+            "app": app.stem if app else "", "said": said}
+
+
+def site_url(name: str) -> str:
+    """The address for a site he names ("youtube"), or '' when it is not one."""
+    key = _norm(name)
+    if key in SITES:
+        return SITES[key]
+    # A bare domain he typed: "youtube.com", "docs.python.org/3".
+    if re.match(r"^(?:https?://)?[\w.-]+\.[a-z]{2,}(?:[/?#]\S*)?$", name.strip(), re.I):
+        return name.strip()
+    return ""
+
+
+#: "open X", "launch X", "fire up X" — and nothing else. A verb list rather
+#: than a brain, because this has to be instant and it has to be predictable.
+_OPEN_ASK = re.compile(
+    r"^\W*(?:hey\s+|asta[,\s]+)?(?:can you\s+|could you\s+|please\s+|pls\s+)?"
+    r"(?:open|launch|start|fire up|bring up|show me)\s+"
+    r"(?:the\s+|my\s+)?(?P<what>.{1,60}?)"
+    r"(?:\s+(?:in|on|with)\s+(?P<browser>chrome|safari|firefox|edge|brave|arc))?"
+    r"(?:\s+(?:for me|please|now))?\W*$", re.I)
+
+#: Words that say he wants what is INSIDE an app, not the app in front of him.
+#: "open my reminders" is a question about his list; the recipes answer those.
+#: "open reminders" is not — that one is just a window.
+_ABOUT_CONTENT = re.compile(r"\b(my|list|todo|inbox|unread|pr|ticket|task|log|doc|"
+                            r"file|folder|draft)\b", re.I)
+
+
+def open_ask(text: str) -> tuple[str, str, str] | None:
+    """("app"|"url", what, browser) when he is asking for something to be opened.
+
+    Deliberately narrow. Anything with a path in it, anything that reads as a
+    question about content, and anything longer than a few words is left to a
+    brain — "open the PR" is not a launch.
+    """
+    t = " ".join((text or "").split())
+    if not t or t.endswith("?"):
+        return None                      # a question about what is open is not an ask
+    m = _OPEN_ASK.match(t)
+    if not m:
+        return None
+    what = m.group("what").strip(" .!,")
+    browser = (m.group("browser") or "").strip()
+    if not what or len(what.split()) > 4:
+        return None
+    if site_url(what):
+        return ("url", what, browser)
+    if _ABOUT_CONTENT.search(t):
+        return None                      # about content, not about a window
+    if find_app(what)[0] is None:
+        return None                      # not installed: let a brain say something useful
+    return ("app", what, browser)
+
+
+async def open_it(kind: str, what: str, browser: str = "") -> str:
+    """One line for him: what was opened, or what happened instead."""
+    try:
+        out = await (open_url(what, browser) if kind == "url" else open_app(what))
+    except AppError as exc:
+        return f"⚠️ {exc}"
+    line = out["said"]
+    if out.get("others"):
+        line += f" (also installed: {', '.join(out['others'])})"
+    return ("🖥 " if out["verified"] is not False else "⚠️ ") + line

@@ -261,6 +261,13 @@ async def speak(text: str, profile: str = "", engine: str = "",
     """
     if voice and not (profile or engine):
         profile, engine = voice_settings(voice)
+        if voice == VOICE_ASSISTANT:
+            # Naming the assistant voice must not pin its ENGLISH profile: that
+            # is what sent a Devanagari reply to the English voice, which read
+            # "बिलिंग" as "बलींग". Left empty, `pick_profile` reads the script
+            # and picks the Hindi voice for a Hindi sentence. His own clone
+            # stays pinned — there is only one of it.
+            profile = ""
     body: dict = {"text": text[:10000], "engine": engine or DEFAULT_ENGINE}
     chosen = pick_profile(text, profile)
     pid = await profile_id(chosen) if chosen else ""
@@ -405,6 +412,24 @@ async def warm_the_ears() -> None:
     seconds; paid while the phone rings, nobody hears it."""
     with contextlib.suppress(Exception):
         await transcribe(silent_wav(), filename="warm.wav")
+
+
+async def warm_the_voice(languages: str = "") -> None:
+    """Load every voice this call may need, while the phone is still ringing.
+
+    The Hindi voice pack took 95 SECONDS to load the first time it was asked
+    for. On a call that is the whole conversation spent waiting for one
+    sentence, and it is paid the first time somebody speaks Hindi — which is
+    exactly the moment it must not be paid.
+    """
+    wanted = [DEFAULT_PROFILE]
+    if "hi" in [x.strip().lower() for x in (languages or "").replace("|", ",").split(",")]:
+        wanted.append(HINDI_PROFILE or DEFAULT_PROFILE)
+    for profile in dict.fromkeys(p for p in wanted if p):
+        with contextlib.suppress(Exception):
+            # Devanagari for the Hindi voice: the script is what routes it.
+            said = "नमस्ते।" if profile == HINDI_PROFILE else "Hello."
+            await speak(said, profile=profile, engine=DEFAULT_ENGINE)
 
 
 # --- cloning Arun's own voice ------------------------------------------------

@@ -610,13 +610,100 @@ def garbled(text: str) -> bool:
 #: heard a one-second "Yeah, sure." as German ("Ja, schul.") on 22 Sep.
 CALL_LANGUAGE = os.environ.get("ASTA_CALL_LANGUAGE", "en").strip()
 
+#: A call where two languages are in play (English and Hindi, say) cannot pin
+#: one: Whisper takes a single code, and pinning "en" turns a Hindi sentence
+#: into nonsense. Detection is only unsafe on the SHORT clips — that German
+#: "Ja, schul." was one second of "Yeah, sure." — so the rule is to detect only
+#: when there is enough audio to detect from, and to use the first language
+#: named for anything shorter, where "haan" and "yeah" land in the same place
+#: anyway.
+DETECT_AFTER_MS = int(os.environ.get("ASTA_CALL_DETECT_AFTER_MS", "1500"))
+_spoken: dict = {"languages": ""}
 
-async def _quietly(listen, wav: bytes) -> str:
+
+def speaking(languages: str = "") -> list[str]:
+    """The languages this call may be in — set once when it is placed."""
+    if languages:
+        _spoken["languages"] = languages
+    named = _spoken["languages"] or CALL_LANGUAGE
+    return [x.strip() for x in named.replace("|", ",").split(",") if x.strip()]
+
+
+def _wav_ms(wav: bytes) -> float:
+    """How long the clip is. 16 kHz mono, 16-bit — the format `take` produces."""
+    import wave
+    from io import BytesIO
     try:
-        text = await asyncio.wait_for(listen(wav, filename="turn.wav", language=CALL_LANGUAGE),
+        with wave.open(BytesIO(wav)) as w:
+            return 1000.0 * w.getnframes() / (w.getframerate() or 16000)
+    except Exception:                                          # noqa: BLE001
+        return 0.0
+
+
+def language_for(wav: bytes) -> str:
+    """Which language to transcribe this clip as — '' means let Whisper decide."""
+    langs = speaking()
+    if len(langs) < 2:
+        return langs[0] if langs else ""
+    return "" if _wav_ms(wav) >= DETECT_AFTER_MS else langs[0]
+
+
+def _content(text: str) -> int:
+    """How much real speech a transcription contains — letters, any script.
+
+    The discriminator for "which language was that", measured on real clips on
+    24 Sep. Neither forcing nor detection works alone, but the RIGHT language
+    always comes back with far more content than the wrong one:
+
+        her Hindi  → forced hi: 41 Devanagari letters (correct)
+                     forced en:  1 letter ("Hиииииииии…")
+        her English→ forced en: 50 letters (correct)
+                     forced hi: 30 letters of Devanagari nonsense
+
+    So: ask in every language the call may be in, and keep the fuller answer.
+    """
+    # Only the scripts this call is actually in. Whisper answering a Hindi clip
+    # in Cyrillic ("Hиииииииии…") is not content, and counting every letter
+    # equally let that nonsense outscore the correct Devanagari.
+    return sum(1 for ch in (text or "")
+               if (ch.isascii() and ch.isalpha()) or "ऀ" <= ch <= "ॿ")
+
+
+def _better(first: tuple[str, str], second: tuple[str, str]) -> tuple[str, str]:
+    """The better of two (language, text) attempts. Ties go to the first, which
+    is the language named first — most of the call is in that one."""
+    (_, a), (_, b) = first, second
+    if garbled(a) and not garbled(b):
+        return second
+    if garbled(b):
+        return first
+    # A clear win only: a near-tie stays with the primary, so a one-word "yeah"
+    # is not handed to the other language on a couple of letters.
+    return second if _content(b) > _content(a) * 1.2 else first
+
+
+async def _heard_as(listen, wav: bytes, language: str) -> tuple[str, str]:
+    try:
+        text = await asyncio.wait_for(listen(wav, filename="turn.wav", language=language),
                                       TRANSCRIBE_TIMEOUT)
     except Exception:                                          # noqa: BLE001
-        return ""
+        return language, ""
+    return language, text or ""
+
+
+async def _quietly(listen, wav: bytes) -> str:
+    langs = speaking()
+    if len(langs) > 1 and _wav_ms(wav) >= DETECT_AFTER_MS:
+        # Both at once: two transcriptions cost the time of the slower, not the
+        # sum, and only the longer clips — where a language is actually spoken
+        # rather than a "yeah" — pay for the second one at all.
+        tries = await asyncio.gather(*(_heard_as(listen, wav, lang) for lang in langs))
+        best = tries[0]
+        for other in tries[1:]:
+            best = _better(best, other)
+        text = best[1]
+    else:
+        _, text = await _heard_as(listen, wav, language_for(wav))
     return "" if garbled(text) else text
 
 

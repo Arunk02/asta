@@ -940,3 +940,110 @@ def test_a_statement_still_gets_a_reaction_so_nobody_waits_in_silence():
     assert conversation.quick_reaction("the build is red") == "Got it."
     assert conversation.quick_reaction("No, I didn't get a chance") == "No worries."
     assert conversation.quick_reaction("yes that works for me") == "Great."
+
+
+# --- a call that runs in two languages ------------------------------------------------
+
+def test_a_short_clip_is_heard_as_the_first_language_and_a_long_one_is_detected():
+    """Whisper takes ONE language code. Pinning "en" turns a Hindi sentence into
+    nonsense; letting it detect turned a one-second "Yeah, sure." into German.
+    So: detect only when there is enough audio to detect from."""
+    import io
+    import wave
+    from app import call_rtc
+
+    def clip(ms: int) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * int(16000 * ms / 1000))
+        return buf.getvalue()
+
+    call_rtc.speaking("en,hi")
+    assert call_rtc.language_for(clip(600)) == "en"      # too short to judge
+    assert call_rtc.language_for(clip(3000)) == ""       # long enough: let it detect
+    call_rtc.speaking("en")                              # one language: always pinned
+    assert call_rtc.language_for(clip(3000)) == "en"
+    call_rtc.speaking("en")                              # leave the module as found
+
+
+def test_a_hindi_reply_goes_to_the_hindi_voice_even_when_the_assistant_is_named():
+    """Naming the assistant voice used to pin its ENGLISH profile, so Devanagari
+    was read by the English voice — "बिलिंग" came back as "बलींग"."""
+    from app import voice
+    assert voice.pick_profile("हाँ, मैंने देखा है।") == voice.HINDI_PROFILE
+    assert voice.pick_profile("Yes, I checked it.") == voice.DEFAULT_PROFILE
+    # An explicitly requested profile still wins — that is how his clone stays his.
+    assert voice.pick_profile("हाँ", "Arun D-slow1") == "Arun D-slow1"
+
+
+def test_the_persona_asks_for_devanagari_so_hindi_is_pronounced():
+    from app import call_mind
+    assert "DEVANAGARI" in call_mind._PERSONA
+
+
+# --- hearing a call that runs in two languages ----------------------------------------
+#
+# Live with a colleague, 24 Sep: she was asked to speak Hindi and it came back as
+# "Hei af hana, ámgeða." — Whisper detected the wrong language on a short clip,
+# the same trap as the one-second "Yeah, sure." heard as German. Asked again, her
+# Hindi came through perfectly. It should not have needed asking twice.
+
+_HI_REAL = "हा मैंने देखा है, बलींग की एरड़ आब एकी सिगनेचर पढ़ है"
+_HI_NONSENSE = "ये चेखेगे टे बिलिग एर दोन तोन जिगनेटर"      # English audio, forced Hindi
+_EN_REAL = "Yes, I checked it, the billing errors are down to one signature."
+_EN_GARBAGE = "H" + "и" * 55                                  # Hindi audio, forced English
+_WRONG_LANGUAGE = "Hei af hana, ámgeða."                      # what she actually got
+
+
+def test_content_counts_only_the_scripts_the_call_is_in():
+    from app import call_rtc
+    assert call_rtc._content(_HI_REAL) > 30
+    assert call_rtc._content(_EN_REAL) > 30
+    # A Cyrillic run is not content; counting every letter let it outscore Hindi.
+    assert call_rtc._content(_EN_GARBAGE) <= 1
+
+
+@pytest.mark.parametrize("english, hindi, winner", [
+    (_EN_GARBAGE, _HI_REAL, "hi"),          # she spoke Hindi
+    (_EN_REAL, _HI_NONSENSE, "en"),         # she spoke English
+    (_WRONG_LANGUAGE, _HI_REAL, "hi"),      # the live failure
+    ("yeah", "याह", "en"),                  # near tie stays with the first language
+])
+def test_the_fuller_answer_wins(english, hindi, winner):
+    from app import call_rtc
+    assert call_rtc._better(("en", english), ("hi", hindi))[0] == winner
+
+
+def test_a_bilingual_call_asks_in_both_and_a_single_language_call_asks_once():
+    import io
+    import wave
+    from app import call_rtc
+
+    def clip(ms: int) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x00" * int(16000 * ms / 1000))
+        return buf.getvalue()
+
+    asked: list[str] = []
+
+    async def listen(wav, filename="turn.wav", language=""):
+        asked.append(language)
+        return _HI_REAL if language == "hi" else _EN_GARBAGE
+
+    call_rtc.speaking("en,hi")
+    heard = asyncio.run(call_rtc._quietly(listen, clip(3000)))
+    assert sorted(asked) == ["en", "hi"]          # both, concurrently
+    assert heard == _HI_REAL                      # and the real one is kept
+
+    asked.clear()
+    call_rtc.speaking("en")
+    asyncio.run(call_rtc._quietly(listen, clip(3000)))
+    assert asked == ["en"]                        # one language, one transcription
+    call_rtc.speaking("en")

@@ -464,7 +464,7 @@ async def _close_mind(task: "asyncio.Task") -> None:
 
 
 async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0,
-                   agenda: str = "") -> str:
+                   agenda: str = "", languages: str = "") -> str:
     """Ring `who` and actually talk with them about `topic`. Returns how it went.
 
     The shape is: ring, wait to be answered, turn captions on, open, then listen
@@ -490,11 +490,16 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
 
     limit = seconds or CONVERSE_SECONDS
     max_turns = max(MAX_TURNS, int(limit // 10))
+    # Which languages this call may be in ("en,hi" for a call that runs in both).
+    # Set before a word is heard: it decides how every turn is transcribed.
+    from . import call_rtc as _rtc
+    _rtc.speaking(languages)
     # The call's own brain starts now, so it is warm by the time they answer.
     from . import call_mind, voice
     thinking_ahead = asyncio.get_event_loop().create_task(
         call_mind.start(who, topic, agenda=agenda, minutes=round(limit / 60, 1) if seconds else 0))
     asyncio.get_event_loop().create_task(voice.warm_the_ears())
+    asyncio.get_event_loop().create_task(voice.warm_the_voice(languages))
     # Nobody's phone rings unless something can talk to them: no voice, no call.
     from . import call_rtc
     if call_rtc.enabled() and not await voice.available():

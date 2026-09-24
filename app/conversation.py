@@ -163,25 +163,68 @@ _STILL_THERE = "Are you still there?"
 #: answered — the brain's speed on the day decides nothing about when Asta
 #: reacts. Measured 22 Sep: the same first sentence took 0.8 s on one run and
 #: 6.7 s on the next.
+#: Just saying hello back. Asta's own greeting answers this, so a canned word
+#: in front of it is the stutter Harika heard: "Hello?" → "Sure."
+#: Only an actual hello. "Yes." mid-call is agreement, and it has its own
+#: reaction — a greeting pattern that swallowed it would mute the answer.
+_GREETING = re.compile(r"^\W*(?:hi|hey|hello|hallo|namaste)\b[\s\W]*$"
+                       r"|^\W*(?:hi|hey|hello)[,\s]+(?:how can i help|there|Asta)", re.I)
+
 _REACT_RULES = (
     (re.compile(r"\bwho (?:is|'?s) (?:this|that|calling)\b|\bwho are you\b", re.I), "Oh, sorry."),
     (re.compile(r"\b(?:bye|goodbye|talk (?:to you )?later|gotta go|have to go)\b|\bthank(?:s| you)\b", re.I), "Sounds good."),
     (re.compile(r"^\W*(?:no|nope|not really|not now|busy|later)\b", re.I), "No worries."),
-    (re.compile(r"\?\s*$", re.I), "Sure."),
     (re.compile(r"^\W*(?:yes|yeah|yep|yup|sure|okay|ok|go ahead|fine|good|haan|ha)\b", re.I), "Great."),
 )
 _DEFAULT_REACTIONS = ("Got it.", "Okay.")
 _defaults = {"n": 0}
 
+#: What to say while thinking about a QUESTION. "Sure." used to answer every
+#: sentence ending in a question mark, so "Hello?" and "how can I help you?"
+#: both got "Sure." — a word that answers a request, not a question, and the
+#: first thing that made Asta sound like a machine on the 24 Sep call.
+_THINKING = "Mm."
+
 
 def quick_reaction(theirs: str) -> str:
-    """The ready-made reaction that fits what they just said."""
+    """The ready-made reaction that fits what they just said — '' for none.
+
+    Nothing is safer than the wrong thing. A greeting is answered by Asta's own
+    next sentence, and a question gets a thinking noise rather than a word that
+    pretends to answer it.
+    """
+    theirs = theirs or ""
+    if _GREETING.search(theirs):
+        return ""
     for pattern, line in _REACT_RULES:
-        if pattern.search(theirs or ""):
+        if pattern.search(theirs):
             return line
+    if theirs.rstrip().endswith("?"):
+        return _THINKING
     line = _DEFAULT_REACTIONS[_defaults["n"] % len(_DEFAULT_REACTIONS)]
     _defaults["n"] += 1
     return line
+
+
+def without_echo(text: str, reaction: str) -> str:
+    """The brain's sentence with an opener Asta has JUST said taken off.
+
+    "No worries." followed by "No worries — do you have a rough sense…" is how
+    it actually came out on the call. The old guard only caught a sentence that
+    was nothing BUT a reaction, so a reaction with the answer attached to it
+    said the same two words twice.
+    """
+    said = (reaction or "").strip().strip(".!,").lower()
+    if not said or not text:
+        return text
+    body = text.lstrip()
+    if body.lower().startswith(said):
+        rest = body[len(said):].lstrip(" ,.—–-!:;")
+        # Only when something is actually left: "No worries." on its own stays
+        # the brain's whole answer, and is dropped by the caller instead.
+        if rest:
+            return rest[0].upper() + rest[1:] if rest[0].islower() else rest
+    return text
 
 
 #: How long the brain has to produce its own first sentence before Asta reacts
@@ -263,8 +306,10 @@ async def _speak_reply(mind, theirs: str, said: list[str], lines: list[dict], rt
         ahead.append(first)
     except asyncio.TimeoutError:
         # The brain is slow today; react now, from their words.
-        await _say(quick_reaction(theirs), said, lines, rtc)
-        reacted = spoke = True
+        reaction = quick_reaction(theirs)
+        if reaction:
+            await _say(reaction, said, lines, rtc)
+            reacted = spoke = True
     while True:
         if ahead:
             item = ahead.pop(0)
@@ -287,10 +332,15 @@ async def _speak_reply(mind, theirs: str, said: list[str], lines: list[dict], rt
                  "first": text[:80]})
         if not text:
             continue
-        if reacted and text in call_mind.REACTIONS:
-            reacted = False           # already reacted; the brain's own would stutter
-            continue
-        reacted = False
+        if reacted:
+            if text in call_mind.REACTIONS:
+                reacted = False       # already reacted; the brain's own would stutter
+                continue
+            # Or the brain opened its answer with the same words Asta just said.
+            trimmed = without_echo(text, said[-1] if said else "")
+            reacted = False
+            if trimmed != text:
+                text = trimmed
         if spoke and rtc and await _they_started(meetings._CALL.get("ctx")):
             # They began talking in the gap between two of Asta's sentences:
             # stop here and listen, as a person would.

@@ -858,3 +858,50 @@ def test_a_line_that_did_not_go_out_is_not_repeated_on_a_guess(rtc_call, monkeyp
     with pytest.raises(RuntimeError, match="NOT said"):
         asyncio.run(meetings.say_in_call("Hi, this is Asta"))
     assert len(said) == 1
+
+
+# --- what the 24 Sep call with a colleague exposed -----------------------------------
+
+def test_a_greeting_gets_no_canned_word_in_front_of_the_answer():
+    """Live, 24 Sep: she said "Hello?" and Asta said "Sure." — then "Hello, how
+    can I help you?" and Asta said "Sure." again. Every sentence ending in a
+    question mark was getting "Sure.", a word that answers a request, not a
+    question. Asta's own next sentence greets her; nothing belongs in front."""
+    from app import conversation
+    assert conversation.quick_reaction("Hello?") == ""
+    assert conversation.quick_reaction("Hello, how can I help you?") == ""
+    assert conversation.quick_reaction("hi") == ""
+
+
+def test_a_question_gets_a_thinking_noise_not_an_answer_word():
+    from app import conversation
+    assert conversation.quick_reaction("can you send me the link?") == "Mm."
+
+
+def test_the_reactions_that_do_fit_still_fire():
+    from app import conversation
+    assert conversation.quick_reaction("No, I didn't get a chance") == "No worries."
+    assert conversation.quick_reaction("yes that works") == "Great."
+    assert conversation.quick_reaction("who is this?") == "Oh, sorry."
+    assert conversation.quick_reaction("thanks, bye") == "Sounds good."
+
+
+@pytest.mark.parametrize("sentence, reaction, spoken", [
+    # The live one: "No worries." then "No worries — do you have a rough sense…"
+    ("No worries — do you have a rough sense of when?", "No worries.",
+     "Do you have a rough sense of when?"),
+    ("Great, I'll check with Arun.", "Great.", "I'll check with Arun."),
+    ("Got it. The build is green.", "Got it.", "The build is green."),
+    # Not an echo: left exactly as the brain wrote it.
+    ("The build is green.", "Got it.", "The build is green."),
+    ("No worries.", "No worries.", "No worries."),      # nothing left — caller drops it
+])
+def test_an_opener_asta_just_said_is_not_said_twice(sentence, reaction, spoken):
+    from app import conversation
+    assert conversation.without_echo(sentence, reaction) == spoken
+
+
+def test_the_persona_forbids_introducing_itself_twice():
+    from app import call_mind
+    assert "do NOT introduce yourself" in call_mind._PERSONA
+    assert "ask ONCE for a rough sense" in call_mind._PERSONA

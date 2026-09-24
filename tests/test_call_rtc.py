@@ -905,3 +905,38 @@ def test_the_persona_forbids_introducing_itself_twice():
     from app import call_mind
     assert "do NOT introduce yourself" in call_mind._PERSONA
     assert "ask ONCE for a rough sense" in call_mind._PERSONA
+
+
+def test_the_ending_she_called_out_of_sync(monkeypatch):
+    """Her feedback on the 24 Sep call was that the conclusion was off. It was:
+
+        Her:  No, apart from this can you discuss any other things?
+        Asta: No worries.                      <- answers the word "no", not the question
+        Asta: That's actually the main thing I called about…
+        Her:  Okay
+        Asta: Great.                           <- filler
+        Asta: Sounds good — thanks for the update, Harika!   <- second filler, and
+                                                  she had given no update
+
+    Three separate faults, one exchange."""
+    from app import conversation
+    # A question wins over the word it happens to start with.
+    assert conversation.quick_reaction(
+        "No, apart from this can you discuss any other things?") == "Mm."
+    # A bare acknowledgement gets nothing: what follows is the closing line.
+    assert conversation.quick_reaction("Okay") == ""
+    assert conversation.quick_reaction("thanks") == ""
+    assert conversation.quick_reaction("alright") == ""
+    # And the closing itself is no longer allowed to invent an update.
+    from app import call_mind
+    assert "thanks for the" in call_mind._PERSONA and "did not give" in call_mind._PERSONA
+    assert "ANSWER it" in call_mind._PERSONA
+
+
+def test_a_statement_still_gets_a_reaction_so_nobody_waits_in_silence():
+    """The fillers exist because the brain takes 3-4 s. Silencing the wrong ones
+    must not silence the right ones."""
+    from app import conversation
+    assert conversation.quick_reaction("the build is red") == "Got it."
+    assert conversation.quick_reaction("No, I didn't get a chance") == "No worries."
+    assert conversation.quick_reaction("yes that works for me") == "Great."

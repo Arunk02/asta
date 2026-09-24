@@ -170,11 +170,29 @@ _STILL_THERE = "Are you still there?"
 _GREETING = re.compile(r"^\W*(?:hi|hey|hello|hallo|namaste)\b[\s\W]*$"
                        r"|^\W*(?:hi|hey|hello)[,\s]+(?:how can i help|there|Asta)", re.I)
 
+#: A bare acknowledgement — "okay", "sure", "got it", "thanks" with nothing else
+#: in it. There is nothing to react TO: what follows is Asta's closing line, and
+#: a canned word in front of it is the stutter Harika heard at the end of the
+#: 24 Sep call ("Okay" → "Great." → "Sounds good — thanks for the update").
+_ACKNOWLEDGEMENT = re.compile(
+    r"^\W*(?:ok|okay|k|alright|all right|right|sure|fine|good|great|cool|"
+    r"got it|understood|noted|thanks|thank you|thanks a lot|hmm|mm|yeah|yep|ya)"
+    r"[\s\W]*$", re.I)
+
+#: (pattern, what to say, may it fire on a QUESTION). The flag is the lesson of
+#: "No, apart from this can you discuss any other things?" — that sentence starts
+#: with "no" and is a question, and it got "No worries.", which answers the word
+#: rather than the sentence. Only a rule that makes sense as a reply to a
+#: question may fire on one.
 _REACT_RULES = (
-    (re.compile(r"\bwho (?:is|'?s) (?:this|that|calling)\b|\bwho are you\b", re.I), "Oh, sorry."),
-    (re.compile(r"\b(?:bye|goodbye|talk (?:to you )?later|gotta go|have to go)\b|\bthank(?:s| you)\b", re.I), "Sounds good."),
-    (re.compile(r"^\W*(?:no|nope|not really|not now|busy|later)\b", re.I), "No worries."),
-    (re.compile(r"^\W*(?:yes|yeah|yep|yup|sure|okay|ok|go ahead|fine|good|haan|ha)\b", re.I), "Great."),
+    (re.compile(r"\bwho (?:is|'?s) (?:this|that|calling)\b|\bwho are you\b", re.I),
+     "Oh, sorry.", True),
+    (re.compile(r"\b(?:bye|goodbye|talk (?:to you )?later|gotta go|have to go)\b|\bthank(?:s| you)\b", re.I),
+     "Sounds good.", False),
+    (re.compile(r"^\W*(?:no|nope|not really|not now|busy|later)\b", re.I),
+     "No worries.", False),
+    (re.compile(r"^\W*(?:yes|yeah|yep|yup|sure|okay|ok|go ahead|fine|good|haan|ha)\b", re.I),
+     "Great.", False),
 )
 _DEFAULT_REACTIONS = ("Got it.", "Okay.")
 _defaults = {"n": 0}
@@ -194,12 +212,13 @@ def quick_reaction(theirs: str) -> str:
     pretends to answer it.
     """
     theirs = theirs or ""
-    if _GREETING.search(theirs):
+    if _GREETING.search(theirs) or _ACKNOWLEDGEMENT.search(theirs):
         return ""
-    for pattern, line in _REACT_RULES:
-        if pattern.search(theirs):
+    question = theirs.rstrip().endswith("?")
+    for pattern, line, on_question in _REACT_RULES:
+        if pattern.search(theirs) and (on_question or not question):
             return line
-    if theirs.rstrip().endswith("?"):
+    if question:
         return _THINKING
     line = _DEFAULT_REACTIONS[_defaults["n"] % len(_DEFAULT_REACTIONS)]
     _defaults["n"] += 1

@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import json
 import os
+import pathlib
 import re
 import time
 import traceback
@@ -208,6 +209,19 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
         world.log_lines.append(dict(line))
     for flow in s.get("workflows", []) or []:
         world.workflows.append(dict(flow))
+    # Documents in his knowledge folder, written into a sandbox for this run —
+    # the real folder is his and a scenario must never read or touch it.
+    docs = s.get("knowledge") or {}
+    if docs:
+        import tempfile
+        root = pathlib.Path(tempfile.mkdtemp(prefix="asta-knowledge-"))
+        for name, body in docs.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(body)
+        state["env_undo"].append(("ASTA_KNOWLEDGE_DIR", os.environ.get("ASTA_KNOWLEDGE_DIR")))
+        os.environ["ASTA_KNOWLEDGE_DIR"] = str(root)
+        from app import knowledge as _k
+        _k.reindex()
     for key, value in (s.get("kv") or {}).items():
         store.kv_set(key, _clock(value))
     for key, value in (s.get("env") or {}).items():

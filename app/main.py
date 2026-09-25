@@ -1238,6 +1238,26 @@ async def api_propose_review(request: Request):
         b.get("repo", "")))
 
 
+@app.post("/api/knowledge/search", dependencies=[Depends(require_auth)])
+async def api_knowledge_search(request: Request):
+    """His own documents, searched with citations — over HTTP like everything
+    else, so the CLI brains and the MCP server can reach it too."""
+    b = await request.json()
+    if not (b.get("question") or "").strip():
+        raise HTTPException(400, "question is required")
+    return {"ok": True, "detail": await agent_mod.search_knowledge(
+        b["question"], int(b.get("limit", 3) or 3))}
+
+
+@app.post("/api/knowledge/reindex", dependencies=[Depends(require_auth)])
+async def api_knowledge_reindex(request: Request):
+    from app import knowledge
+    b = {}
+    with contextlib.suppress(Exception):
+        b = await request.json()
+    return {"ok": True, **knowledge.reindex((b or {}).get("workspace", ""))}
+
+
 @app.post("/api/grafana/logs", dependencies=[Depends(require_auth)])
 async def api_grafana_logs(request: Request):
     b = await request.json()

@@ -92,6 +92,13 @@ _TABLE: tuple[Capability, ...] = (
                     "Calendar, Notes, a Mail DRAFT, Finder. Named recipes only, and "
                     "every write is read back before it counts as done. Call "
                     "app_recipes() first to see what exists."),
+    Capability("search_knowledge", "observe",
+               http='POST /api/knowledge/search {"question":"what happens when a booking is cancelled"}',
+               note="Arun's own documents — the inland booking flow, the Telikos "
+                    "end-to-end flow — searched with CITATIONS. Ask this before "
+                    "guessing at how a flow works: a guess about the booking "
+                    "flow reads exactly like knowledge. Answers carry the "
+                    "document and the page or heading, so he can check them."),
     Capability("grafana_logs", "observe",
                http='POST /api/grafana/logs {"service":"billing","terms":"MH4DRHV7","minutes":60}',
                note="THE way to read production logs. Code builds the LogQL (Loki "

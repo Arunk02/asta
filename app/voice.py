@@ -24,7 +24,6 @@ import os
 import re
 
 import httpx
-import numpy as np
 
 #: Where Voicebox is configured to listen. Kept apart from BASE, which is what
 #: calls actually use — tests point BASE at nothing so no test can reach the
@@ -623,12 +622,16 @@ def without_rumble(wav: bytes, below_hz: float = 0.0) -> bytes:
     down, which is how far wrong a measurement can go for a reason that has
     nothing to do with what it is measuring.
 
-    Zero-phase, done in the frequency domain: there is no real-time constraint
-    here, and nothing about the timing of his speech should move. Anything that
-    is not a readable 16-bit WAV is handed straight back rather than mangled.
+    A second-order Butterworth high-pass run forwards and then backwards, so it
+    is zero-phase and nothing about the timing of his speech moves. Written out
+    by hand rather than reached for from scipy or numpy: this runs once per take
+    at clone time, and the alternative is a dependency the server does not have
+    and would then fail to start without. Anything that is not a readable
+    16-bit mono WAV is handed straight back rather than mangled.
     """
     import array
     import io
+    import math
     import wave as _w
     cut = below_hz or RUMBLE_BELOW_HZ
     try:
@@ -636,47 +639,75 @@ def without_rumble(wav: bytes, below_hz: float = 0.0) -> bytes:
             if r.getsampwidth() != 2 or r.getnchannels() != 1:
                 return wav
             rate, frames = r.getframerate(), r.readframes(r.getnframes())
-        y = np.array(array.array("h", frames), dtype=float)
-        if not len(y):
+        y = array.array("h", frames)
+        if not len(y) or cut <= 0 or cut >= rate / 2:
             return wav
-        spectrum = np.fft.rfft(y)
-        freqs = np.fft.rfftfreq(len(y), 1.0 / rate)
-        # Tapered rather than a brick wall: a hard edge rings, and ringing is
-        # exactly the artefact that would show up as a new sound in his voice.
-        keep = np.clip((freqs - cut * 0.6) / (cut * 0.4), 0.0, 1.0)
-        y = np.fft.irfft(spectrum * keep, n=len(y))
-        peak = np.max(np.abs(y))
-        if peak > 0:
-            y = y * (0.95 * 32767.0 / peak)
+        w0 = 2 * math.pi * cut / rate
+        alpha = math.sin(w0) / (2 * 0.7071)               # Q for Butterworth
+        cw = math.cos(w0)
+        a0 = 1 + alpha
+        b = ((1 + cw) / 2 / a0, -(1 + cw) / a0, (1 + cw) / 2 / a0)
+        a = (-2 * cw / a0, (1 - alpha) / a0)
+
+        def once(xs: list) -> list:
+            x1 = x2 = y1 = y2 = 0.0
+            out = []
+            for x in xs:
+                v = b[0] * x + b[1] * x1 + b[2] * x2 - a[0] * y1 - a[1] * y2
+                x2, x1 = x1, x
+                y2, y1 = y1, v
+                out.append(v)
+            return out
+
+        # Filtered and nothing else. Peak-normalising here would put back
+        # exactly what was taken out — a take that is ALL rumble would come
+        # back at full level, and a quiet take would be silently re-levelled
+        # without anyone asking for it.
+        vals = once(once([float(v) for v in y])[::-1])[::-1]
         out = io.BytesIO()
         with _w.open(out, "w") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
             w.setframerate(rate)
-            w.writeframes(array.array("h", np.clip(y, -32767, 32767).astype(int)).tobytes())
+            w.writeframes(array.array(
+                "h", [max(-32767, min(32767, int(v))) for v in vals]).tobytes())
         return out.getvalue()
     except Exception:                                           # noqa: BLE001
         return wav
 
 
+def loudness(wav: bytes) -> float:
+    """RMS of a 16-bit mono WAV, 0-1 — how much sound is actually in it."""
+    import array
+    import io
+    import math
+    import wave as _w
+    try:
+        with _w.open(io.BytesIO(wav)) as r:
+            y = array.array("h", r.readframes(r.getnframes()))
+        return math.sqrt(sum(float(v) * v for v in y) / len(y)) / 32767.0 if len(y) else 0.0
+    except Exception:                                           # noqa: BLE001
+        return 0.0
+
+
 def mixed(first: bytes, second: bytes) -> bytes:
-    """Two WAVs of the same shape added together — for testing what a take with
-    rumble under it actually does."""
+    """Two 16-bit mono WAVs added together — a voice with rumble under it, for
+    proving what the filter does to a take that is both at once."""
     import array
     import io
     import wave as _w
     with _w.open(io.BytesIO(first)) as a, _w.open(io.BytesIO(second)) as b:
         rate = a.getframerate()
-        x = np.array(array.array("h", a.readframes(a.getnframes())), dtype=float)
-        y = np.array(array.array("h", b.readframes(b.getnframes())), dtype=float)
+        x = array.array("h", a.readframes(a.getnframes()))
+        y = array.array("h", b.readframes(b.getnframes()))
     n = min(len(x), len(y))
-    both = np.clip(x[:n] + y[:n], -32767, 32767).astype(int)
+    both = array.array("h", [max(-32767, min(32767, x[i] + y[i])) for i in range(n)])
     out = io.BytesIO()
     with _w.open(out, "w") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(rate)
-        w.writeframes(array.array("h", both).tobytes())
+        w.writeframes(both.tobytes())
     return out.getvalue()
 
 

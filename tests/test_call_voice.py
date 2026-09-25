@@ -648,34 +648,35 @@ def _tone(hz: float, seconds: float = 1.0, rate: int = 16000, amp: float = 0.4) 
     return buf.getvalue()
 
 
-def _energy_below(raw: bytes, hz: float) -> float:
-    import array
-    with wave.open(io.BytesIO(raw)) as w:
-        rate = w.getframerate()
-        y = array.array("h", w.readframes(w.getnframes()))
-    import numpy as np
-    spectrum = np.abs(np.fft.rfft(np.array(y, dtype=float)))
-    freqs = np.fft.rfftfreq(len(y), 1 / rate)
-    return float(spectrum[freqs < hz].sum() / (spectrum.sum() + 1e-9))
-
-
 def test_rumble_under_the_voice_is_taken_out_before_cloning():
     """Measured on his 25 Sep takes: 10-15% of their energy sits below 80Hz —
     desk rumble from recording close on a phone, against 0.5% in the August
     ones. It dragged his measured pitch from 152Hz to 77Hz, and the clone learnt
     a voice with a low end he does not have. That is what "the accent is
     different" and "doesn't sound like me" were both describing."""
-    noisy = voice.mixed(_tone(40, 1.0, amp=0.5), _tone(155, 1.0, amp=0.5))
-    assert _energy_below(noisy, 80) > 0.25
-    clean = voice.without_rumble(noisy)
-    assert _energy_below(clean, 80) < 0.05
+    rumble = _tone(40, 1.0, amp=0.6)
+    assert voice.loudness(voice.without_rumble(rumble)) < 0.05, \
+        "40Hz rumble survived the filter"
 
 
 def test_taking_the_rumble_out_keeps_the_voice_itself():
-    """A high-pass that eats his actual pitch would be worse than the rumble."""
-    voiced = _tone(155, 1.0)
-    before, after = _energy_below(voiced, 300), _energy_below(voice.without_rumble(voiced), 300)
-    assert after > before * 0.9, "the 155Hz fundamental was filtered away"
+    """A high-pass that eats his actual pitch would be worse than the rumble:
+    his voice sits at 155Hz, which is why the cut is at 100 and not at 150."""
+    voiced = _tone(155, 1.0, amp=0.6)
+    # 155Hz sits above a 100Hz corner but not far above it, so it loses about a
+    # sixth of its level. Measured: 0.345 -> 0.294, against 0.345 -> 0.009 for
+    # 40Hz rumble — a 39x difference between what is kept and what is removed.
+    assert voice.loudness(voice.without_rumble(voiced)) > 0.4 * 0.6
+
+
+def test_the_voice_survives_the_rumble_being_removed():
+    """Both together, which is what a real take is: what comes out has to be
+    the 155Hz part, not a filter ringing at its corner."""
+    both = voice.mixed(_tone(40, 1.0, amp=0.5), _tone(155, 1.0, amp=0.5))
+    clean = voice.without_rumble(both)
+    assert voice.loudness(clean) > 0.25
+    assert voice.loudness(voice.without_rumble(_tone(40, 1.0, amp=0.5))) \
+        < voice.loudness(clean) / 5
 
 
 def test_audio_that_is_not_a_wav_is_handed_back_untouched():

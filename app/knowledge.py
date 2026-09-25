@@ -77,23 +77,30 @@ def folder(workspace: str = "") -> Path:
 
 # --- reading a document ------------------------------------------------------
 
-def read(path: Path) -> list[tuple[str, str]]:
-    """[(where, text)] — the document as anchored chunks, or [] if unreadable.
+def read(path: Path) -> tuple[list[tuple[str, str]], str]:
+    """(chunks, problem) — the document as anchored chunks, and why not if empty.
 
     `where` is what a citation points at: a page for a PDF, the heading above
     the text for everything else. It is never empty, because "somewhere in a
     120-page document" is not a citation.
+
+    The problem is RETURNED rather than swallowed. The first version caught
+    everything and returned [], and his real 4 MB Word document — 105
+    paragraphs, 12 tables — was skipped by an AttributeError that appeared
+    nowhere: no error, no log line, just a knowledge base that quietly did not
+    contain the document he had put in it.
     """
     suffix = path.suffix.lower()
     try:
         if suffix == ".pdf":
-            return _read_pdf(path)
+            return _read_pdf(path), ""
         if suffix == ".docx":
-            return _read_docx(path)
-        return _by_heading(path.read_text(errors="replace"))
-    except Exception:                                           # noqa: BLE001
-        # One unreadable file must never stop the other nineteen being indexed.
-        return []
+            return _read_docx(path), ""
+        return _by_heading(path.read_text(errors="replace")), ""
+    except Exception as exc:                                    # noqa: BLE001
+        # One unreadable file must not stop the other nineteen being indexed —
+        # but it must be named, not lost.
+        return [], f"{path.name}: {type(exc).__name__}: {exc}"[:200]
 
 
 def _read_pdf(path: Path) -> list[tuple[str, str]]:
@@ -124,7 +131,11 @@ def _read_docx(path: Path) -> list[tuple[str, str]]:
         text = (para.text or "").strip()
         if not text:
             continue
-        if (para.style.name or "").lower().startswith("heading"):
+        # A paragraph's style can be None in a real document — python-docx
+        # allows it, and `para.style.name` on it is the AttributeError that
+        # silently cost us his whole booking document.
+        style = getattr(getattr(para, "style", None), "name", "") or ""
+        if style.lower().startswith("heading"):
             flush()
             heading = text
         else:
@@ -198,6 +209,7 @@ def reindex(workspace: str = "") -> dict:
     found = {p for p in root.rglob("*")
              if p.is_file() and p.suffix.lower() in READABLE and not p.name.startswith(".")}
     read_count = passages = 0
+    unreadable: list[str] = []
     with store._connect() as conn:
         known = {r["path"]: r["fingerprint"] for r in
                  conn.execute("SELECT path, fingerprint FROM knowledge_docs WHERE folder=?",
@@ -206,7 +218,10 @@ def reindex(workspace: str = "") -> dict:
             key, fp = str(path), _fingerprint(path)
             if known.get(key) == fp:
                 continue
-            chunks = _passages(read(path))
+            chunks, problem = read(path)
+            chunks = _passages(chunks)
+            if problem:
+                unreadable.append(problem)
             if not chunks:
                 # Unreadable or empty: forget it rather than leave yesterday's
                 # text answering for a file that no longer says it.
@@ -232,7 +247,8 @@ def reindex(workspace: str = "") -> dict:
         for gone in set(known) - alive:
             conn.execute("DELETE FROM knowledge_passages WHERE path=?", (gone,))
             conn.execute("DELETE FROM knowledge_docs WHERE path=?", (gone,))
-    return {"documents": len(found), "read": read_count, "passages": passages}
+    return {"documents": len(found), "read": read_count, "passages": passages,
+            **({"unreadable": unreadable} if unreadable else {})}
 
 
 # --- searching ---------------------------------------------------------------

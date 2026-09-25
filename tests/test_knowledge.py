@@ -245,3 +245,33 @@ def test_a_pdf_is_read_and_cited_by_page():
     hit = knowledge.search("quibblesnort")[0]
     assert hit["document"] == "flow.pdf" and hit["where"] == "page 2"
     assert "flow.pdf (page 2)" in knowledge.cite([hit])
+
+
+def test_a_paragraph_with_no_style_does_not_lose_the_document():
+    """His real 4 MB .docx has paragraphs whose style is None — python-docx
+    allows it and a generated test file never produces it. `para.style.name`
+    raised AttributeError, the blanket except returned [], and a 105-paragraph
+    document was silently skipped with no error anywhere."""
+    import os
+    from pathlib import Path
+
+    import docx
+    doc = docx.Document()
+    doc.add_heading("Cancellation", level=1)
+    para = doc.add_paragraph("A cancelled booking releases the transport order.")
+    para.style = None                                    # what his document has
+    doc.save(str(Path(os.environ["ASTA_KNOWLEDGE_DIR"]) / "styleless.docx"))
+    assert knowledge.reindex()["documents"] == 1
+    assert knowledge.search("cancelled booking transport order")
+
+
+def test_a_document_that_cannot_be_read_is_reported_not_swallowed():
+    """Silently skipping is how a 4 MB document was missing from the index with
+    nothing anywhere to say so. Unreadable must be loud."""
+    import os
+    from pathlib import Path
+    # A .docx that is not a zip at all: python-docx raises, and it must say so.
+    (Path(os.environ["ASTA_KNOWLEDGE_DIR"]) / "broken.docx").write_bytes(b"not a docx")
+    out = knowledge.reindex()
+    assert out["documents"] == 0
+    assert out["unreadable"] and "broken.docx" in out["unreadable"][0]

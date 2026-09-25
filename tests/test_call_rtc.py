@@ -748,7 +748,7 @@ def test_the_greeting_cannot_be_interrupted_but_what_follows_can():
     import inspect
     from app import conversation
     src = inspect.getsource(conversation.converse)
-    greeting = src.index("await meetings.say_in_call(opener)")
+    greeting = src.index("await meetings.say_in_call(hello)")
     assert src.rindex('meetings._CALL["barge_in"] = False', 0, greeting) < greeting
     assert src.index('meetings._CALL["barge_in"] = rtc', greeting) > greeting
 
@@ -1047,3 +1047,42 @@ def test_a_bilingual_call_asks_in_both_and_a_single_language_call_asks_once():
     asyncio.run(call_rtc._quietly(listen, clip(3000)))
     assert asked == ["en"]                        # one language, one transcription
     call_rtc.speaking("en")
+
+
+# --- 25 Sep, Harika again: a demand is not an agreement --------------------------------
+
+@pytest.mark.parametrize("theirs", [
+    "Yeah, sure. I want to know the reason for this call or disconnect",
+    "yes, tell me why you are calling",
+    "yeah ok so what is this about",
+    "right, can you explain what you need",
+    "sure, let me know what this is regarding",
+])
+def test_a_request_for_information_never_gets_a_canned_yes(theirs):
+    """Live, 25 Sep: "Yeah, sure. I want to know the reason for this call or
+    disconnect" → "Great." Whisper writes no question mark, so the old test —
+    does it end in "?" — read a demand as an agreement and cheerfully agreed
+    with it. What makes it a question is that it ASKS for something."""
+    from app import conversation
+    assert conversation.quick_reaction(theirs) in ("", conversation._THINKING)
+
+
+@pytest.mark.parametrize("theirs, reaction", [
+    ("yeah, that works for me", "Great."),
+    ("no, I haven't looked at it yet", "No worries."),
+])
+def test_a_plain_answer_still_gets_its_reaction(theirs, reaction):
+    """The fix must not mute the reactions that make Asta sound human."""
+    from app import conversation
+    assert conversation.quick_reaction(theirs) == reaction
+
+
+def test_asta_does_not_apologise_twice_for_the_same_silence():
+    """Live, 25 Sep: "That came through a bit garbled, could you say that again?"
+    followed immediately by "Sorry, I didn't catch that. Could you say it
+    again?" — two apologies for one unheard turn, which is where the call
+    started sounding broken."""
+    from app import conversation
+    already = "That came through a bit garbled, could you say that again?"
+    assert conversation.ask_again(already) == ""
+    assert conversation.ask_again("So, how is the migration going?") == conversation._SAY_AGAIN

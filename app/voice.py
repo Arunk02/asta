@@ -55,6 +55,33 @@ VOICE_ASSISTANT = "assistant"
 #: created; the assistant keeps whatever the .env default is.
 CLONE_PROFILE = os.environ.get("VOICEBOX_CLONE_PROFILE", "Arun")
 CLONE_ENGINE = os.environ.get("VOICEBOX_CLONE_ENGINE", "chatterbox")
+#: His clone through a faster engine, for the scripts that engine can read.
+#: Measured on his M1 Pro, one clone, the same five sentences:
+#:   chatterbox  6-13s a line (a fixed ~6s per request, whatever the length)
+#:   luxtts      0.8-1.3s a line
+#: A colleague cannot wait 13 seconds for "yes", so English goes the fast way.
+#: luxtts has no Devanagari frontend at all — every Hindi line, short or long,
+#: raises "Kernel size can't be greater than actual input size" — so Hindi in
+#: his voice goes to chatterbox and costs its seconds. Same clone either way.
+CLONE_ENGINE_FAST = os.environ.get("VOICEBOX_CLONE_ENGINE_FAST", "luxtts")
+#: The fast engine garbles the START of a line rather than clipping it: "No, we
+#: cannot ship that today" came back as "We cannot ship that today", which is a
+#: reversal, not a glitch. Sweeping num_steps 4/8/12/16 changed nothing, so it
+#: is not under-sampling. A disposable opener in front absorbs it.
+#: How much is disposable was measured, not guessed: a bare "So," saved 3/5 long
+#: lines but still ate "Yes," off a short one, because the garble runs for a
+#: fixed stretch of audio rather than a fixed number of words. Two syllables in
+#: front held 4/4 — and Whisper hears only the second of them, which is the
+#: point: the first is eaten, the connector survives.
+#: Rotated, because the same opener on every line is a verbal tic, and a person
+#: who says "Right, so," four times running sounds like a machine with a script.
+CLONE_LEAD = os.environ.get(
+    "VOICEBOX_CLONE_LEAD", "Um, so,|Okay so,|Right, so,|Yeah, so,")
+_LED = {"n": 0}
+
+
+def clone_leads() -> list[str]:
+    return [x.strip() for x in (CLONE_LEAD or "").split("|") if x.strip()]
 
 _SAY_AS_MINE = re.compile(
     r"\b(?:talk|speak|say\s+it|reply|answer)?\s*(?:like|as|in)\s+"
@@ -85,6 +112,60 @@ def voice_settings(voice: str) -> tuple[str, str]:
     if voice == VOICE_MINE:
         return CLONE_PROFILE, CLONE_ENGINE
     return DEFAULT_PROFILE, DEFAULT_ENGINE
+
+
+#: Whose voice the call in progress is spoken in. Set once when the call is
+#: placed, exactly like the languages it may be held in, because a call has one
+#: voice and four places that open their mouth — the opener, the brain's
+#: sentences, the holding lines and the "mm-hm". Each of those used to default
+#: to the assistant on its own, so a call asked for in his voice came out half
+#: his and half Asta's, which is worse than either.
+_IN_CALL = {"voice": ""}
+
+
+def in_voice(name: str = "") -> str:
+    """Read — or set — the voice the call in progress is spoken in.
+
+    Unrecognised names fall back to the assistant rather than his clone: the
+    safe reading of an unclear instruction about whose voice to use is "not
+    his" (see `pick_voice`). Set it back to the assistant when a call ends, so
+    the next call is never his voice by inheritance.
+    """
+    if name:
+        _IN_CALL["voice"] = (name if name in (VOICE_MINE, VOICE_ASSISTANT)
+                             else VOICE_ASSISTANT)
+    return _IN_CALL["voice"] or VOICE_ASSISTANT
+
+
+def clone_settings(text: str) -> tuple[str, str]:
+    """(profile, engine) for HIS voice saying `text` — routed by script.
+
+    The same choice `pick_profile` makes for Asta, one level down: there the
+    script picks the voice, here it picks the engine, because only one of his
+    two engines can read Devanagari and the other is ten times faster at the
+    Latin script. Either way it is his clone; nothing about him changes.
+    """
+    if _devanagari(text):
+        return CLONE_PROFILE, CLONE_ENGINE
+    return CLONE_PROFILE, CLONE_ENGINE_FAST
+
+
+def lead_in(text: str, engine: str) -> str:
+    """`text` with a disposable word in front, for the engine that needs one.
+
+    Only the fast clone engine does: it garbles whatever it starts with. The
+    word is said out loud, so it is one a person would actually open with —
+    and it is never added twice, or to any other engine.
+    """
+    said = (text or "").strip()
+    leads = clone_leads()
+    if engine != CLONE_ENGINE_FAST or not said or not leads:
+        return said
+    if any(said.lower().startswith(lead.lower()) for lead in leads):
+        return said
+    lead = leads[_LED["n"] % len(leads)]
+    _LED["n"] += 1
+    return f"{lead} {said}"
 
 
 def strip_voice_instruction(text: str) -> str:
@@ -260,7 +341,8 @@ async def speak(text: str, profile: str = "", engine: str = "",
     browser's built-in voice instead of playing silence.
     """
     if voice and not (profile or engine):
-        profile, engine = voice_settings(voice)
+        profile, engine = (clone_settings(text) if voice == VOICE_MINE
+                           else voice_settings(voice))
         if voice == VOICE_ASSISTANT:
             # Naming the assistant voice must not pin its ENGLISH profile: that
             # is what sent a Devanagari reply to the English voice, which read
@@ -268,7 +350,8 @@ async def speak(text: str, profile: str = "", engine: str = "",
             # and picks the Hindi voice for a Hindi sentence. His own clone
             # stays pinned — there is only one of it.
             profile = ""
-    body: dict = {"text": text[:10000], "engine": engine or DEFAULT_ENGINE}
+    engine = engine or DEFAULT_ENGINE
+    body: dict = {"text": lead_in(text, engine)[:10000], "engine": engine}
     chosen = pick_profile(text, profile)
     pid = await profile_id(chosen) if chosen else ""
     if chosen:
@@ -414,7 +497,7 @@ async def warm_the_ears() -> None:
         await transcribe(silent_wav(), filename="warm.wav")
 
 
-async def warm_the_voice(languages: str = "") -> None:
+async def warm_the_voice(languages: str = "", voice_name: str = "") -> None:
     """Load every voice this call may need, while the phone is still ringing.
 
     The Hindi voice pack took 95 SECONDS to load the first time it was asked
@@ -422,8 +505,20 @@ async def warm_the_voice(languages: str = "") -> None:
     sentence, and it is paid the first time somebody speaks Hindi — which is
     exactly the moment it must not be paid.
     """
+    hindi = "hi" in [x.strip().lower()
+                     for x in (languages or "").replace("|", ",").split(",")]
+    if voice_name == VOICE_MINE:
+        # His clone is the expensive one: ~30s for its first line and ~7s after,
+        # so warming it is not an optimisation, it is the difference between a
+        # fair test of his voice and a colleague listening to silence.
+        with contextlib.suppress(Exception):
+            await speak("Hello.", profile=CLONE_PROFILE, engine=CLONE_ENGINE)
+        if hindi:
+            with contextlib.suppress(Exception):
+                await speak("नमस्ते।", profile=CLONE_PROFILE, engine=CLONE_ENGINE)
+        return
     wanted = [DEFAULT_PROFILE]
-    if "hi" in [x.strip().lower() for x in (languages or "").replace("|", ",").split(",")]:
+    if hindi:
         wanted.append(HINDI_PROFILE or DEFAULT_PROFILE)
     for profile in dict.fromkeys(p for p in wanted if p):
         with contextlib.suppress(Exception):
@@ -510,19 +605,132 @@ CLONE_PROMPTS: dict[str, str] = {
 CLONE_SCRIPT = CLONE_SCRIPTS["1-status"]
 
 
-async def clone_from_sample(name: str, samples: list[tuple[str, bytes]],
-                            language: str = "en") -> dict:
+#: Everything below this is rumble, not him. His voice sits at 155Hz, so a
+#: hundred is comfortably under the fundamental and well above where desk
+#: knocks, handling noise and the proximity bass of a phone held close live.
+RUMBLE_BELOW_HZ = float(os.environ.get("VOICEBOX_RUMBLE_BELOW_HZ", "100"))
+
+
+def without_rumble(wav: bytes, below_hz: float = 0.0) -> bytes:
+    """A take with the low-frequency rumble taken out of it.
+
+    His 25 Sep recordings carried 10-15% of their energy below 80Hz, against
+    0.5% in the August ones — the difference between a phone held close on a
+    desk and a proper distance. It is not audible as noise; it is audible as a
+    DIFFERENT VOICE, because a clone reproduces the whole spectrum it is given.
+    It also fooled the pitch detector into reading his 152Hz as 77Hz, an octave
+    down, which is how far wrong a measurement can go for a reason that has
+    nothing to do with what it is measuring.
+
+    A second-order Butterworth high-pass run forwards and then backwards, so it
+    is zero-phase and nothing about the timing of his speech moves. Written out
+    by hand rather than reached for from scipy or numpy: this runs once per take
+    at clone time, and the alternative is a dependency the server does not have
+    and would then fail to start without. Anything that is not a readable
+    16-bit mono WAV is handed straight back rather than mangled.
+    """
+    import array
+    import io
+    import math
+    import wave as _w
+    cut = below_hz or RUMBLE_BELOW_HZ
+    try:
+        with _w.open(io.BytesIO(wav)) as r:
+            if r.getsampwidth() != 2 or r.getnchannels() != 1:
+                return wav
+            rate, frames = r.getframerate(), r.readframes(r.getnframes())
+        y = array.array("h", frames)
+        if not len(y) or cut <= 0 or cut >= rate / 2:
+            return wav
+        w0 = 2 * math.pi * cut / rate
+        alpha = math.sin(w0) / (2 * 0.7071)               # Q for Butterworth
+        cw = math.cos(w0)
+        a0 = 1 + alpha
+        b = ((1 + cw) / 2 / a0, -(1 + cw) / a0, (1 + cw) / 2 / a0)
+        a = (-2 * cw / a0, (1 - alpha) / a0)
+
+        def once(xs: list) -> list:
+            x1 = x2 = y1 = y2 = 0.0
+            out = []
+            for x in xs:
+                v = b[0] * x + b[1] * x1 + b[2] * x2 - a[0] * y1 - a[1] * y2
+                x2, x1 = x1, x
+                y2, y1 = y1, v
+                out.append(v)
+            return out
+
+        # Filtered and nothing else. Peak-normalising here would put back
+        # exactly what was taken out — a take that is ALL rumble would come
+        # back at full level, and a quiet take would be silently re-levelled
+        # without anyone asking for it.
+        vals = once(once([float(v) for v in y])[::-1])[::-1]
+        out = io.BytesIO()
+        with _w.open(out, "w") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(array.array(
+                "h", [max(-32767, min(32767, int(v))) for v in vals]).tobytes())
+        return out.getvalue()
+    except Exception:                                           # noqa: BLE001
+        return wav
+
+
+def loudness(wav: bytes) -> float:
+    """RMS of a 16-bit mono WAV, 0-1 — how much sound is actually in it."""
+    import array
+    import io
+    import math
+    import wave as _w
+    try:
+        with _w.open(io.BytesIO(wav)) as r:
+            y = array.array("h", r.readframes(r.getnframes()))
+        return math.sqrt(sum(float(v) * v for v in y) / len(y)) / 32767.0 if len(y) else 0.0
+    except Exception:                                           # noqa: BLE001
+        return 0.0
+
+
+def mixed(first: bytes, second: bytes) -> bytes:
+    """Two 16-bit mono WAVs added together — a voice with rumble under it, for
+    proving what the filter does to a take that is both at once."""
+    import array
+    import io
+    import wave as _w
+    with _w.open(io.BytesIO(first)) as a, _w.open(io.BytesIO(second)) as b:
+        rate = a.getframerate()
+        x = array.array("h", a.readframes(a.getnframes()))
+        y = array.array("h", b.readframes(b.getnframes()))
+    n = min(len(x), len(y))
+    both = array.array("h", [max(-32767, min(32767, x[i] + y[i])) for i in range(n)])
+    out = io.BytesIO()
+    with _w.open(out, "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(both.tobytes())
+    return out.getvalue()
+
+
+async def clone_from_sample(name: str, samples: list, language: str = "en") -> dict:
     """Create a voice profile from one or more read-aloud takes.
 
-    samples: (filename, audio bytes) — several short takes covering different
-    deliveries beat one long monotone one, because Voicebox concatenates them
-    all into a single combined reference.
+    samples: (filename, audio bytes) or (filename, audio bytes, reference text)
+    — several short takes covering different deliveries beat one long monotone
+    one, because Voicebox concatenates them all into a single combined
+    reference.
 
-    The reference text for each take comes from WHISPER, not from the script we
+    With no text given, it comes from WHISPER rather than from the script we
     handed out: the engine aligns audio against that transcript, so it has to be
     what was actually said. Pairing files to scripts positionally breaks the
     moment a word is misread or takes are recorded out of order — transcribing
     each one is both more robust and lets Arun ad-lib.
+
+    But Whisper is not a perfect listener either. On his 25 Sep takes it heard
+    "done bro" as "Damn bro", "all merged" as "All meds", "latency" as "the
+    legacy" and "billing workflow" as "building workflow". Each of those teaches
+    the clone one of his sounds against the wrong word, and he asked for exactly
+    this: "even if i missed one word correct it". So a take may be handed over
+    with the words he actually said, and then they are used as given.
 
     Everything stays on the laptop: Voicebox is bound to 127.0.0.1.
     """
@@ -545,8 +753,11 @@ async def clone_from_sample(name: str, samples: list[tuple[str, bytes]],
             raise RuntimeError("voicebox created no profile id")
 
         added = []
-        for filename, audio in samples:
-            text = await transcribe(audio, filename)
+        for sample in samples:
+            filename, audio = sample[0], without_rumble(sample[1])
+            text = sample[2] if len(sample) == 3 and sample[2] else ""
+            if not text:
+                text = await transcribe(audio, filename)
             if not text:
                 raise RuntimeError(f"could not transcribe {filename} — is it silent?")
             r2 = await c.post(

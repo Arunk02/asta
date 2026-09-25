@@ -894,7 +894,9 @@ async def say_quick(text: str) -> None:
     ctx = meetings._CALL.get("ctx")
     if ctx is None:
         return
-    audio = await meetings.synth(voice.strip_voice_instruction(text))
+    # The call's own voice: an ack in Asta's voice, inside a call being held in
+    # his, is the most audible way to give away that two mouths are talking.
+    audio = await meetings.synth(voice.strip_voice_instruction(text), voice.in_voice())
     if audio:
         await say(ctx, audio, interruptible=False)
 
@@ -929,7 +931,7 @@ async def say_line(text: str, voice_name: str = "") -> str:
     words = voice.strip_voice_instruction(text)
     if not words:
         raise RuntimeError("nothing left to say once the instruction was removed")
-    chosen = voice.pick_voice(text, voice_name or voice.VOICE_ASSISTANT)
+    chosen = voice.pick_voice(text, voice_name or voice.in_voice())
     audio = await meetings.synth(words, chosen)
     if not audio:
         raise RuntimeError("speech generation produced nothing — said nothing")

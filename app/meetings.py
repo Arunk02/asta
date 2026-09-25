@@ -719,11 +719,12 @@ async def synth(text: str, voice_name: str = "") -> bytes:
     them more than once is buying the same 1.1 seconds over and over.
     """
     from . import voice
-    key = _cache_key(text, voice_name or voice.VOICE_ASSISTANT)
+    chosen = voice_name or voice.in_voice()
+    key = _cache_key(text, chosen)
     cached = _VOICE_CACHE.get(key)
     if cached:
         return cached
-    audio = await voice.speak(text, voice=voice_name or voice.VOICE_ASSISTANT)
+    audio = await voice.speak(text, voice=chosen)
     if audio:
         _VOICE_CACHE[key] = audio
     return audio
@@ -762,10 +763,11 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
     is listening to, and raises on every other path — he must never be told a
     point was made in a call when nothing was said.
 
-    `voice_name` is "mine" (his clone) or "assistant". Unrecognised → assistant,
-    never his voice by accident.
+    `voice_name` is "mine" (his clone) or "assistant"; left out, the call's own
+    voice (`voice.in_voice`) is used. Unrecognised → assistant, never his.
     """
     from . import voice
+    voice_name = voice_name or voice.in_voice()
     if _CALL.get("rtc") and _CALL.get("ctx") is not None:
         return await call_rtc.say_line(text, voice_name)
     if not can_speak():

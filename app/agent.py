@@ -2714,7 +2714,8 @@ async def teams_call(who: str, video: bool = False) -> str:
 
 
 async def discuss_in_call(who: str, topic: str, workspace: str = "", minutes: float = 0,
-                          agenda: str = "", languages: str = "") -> str:
+                          agenda: str = "", languages: str = "",
+                          voice_name: str = "") -> str:
     """Ring someone and HOLD THE CONVERSATION — listen to them, reply, hang up.
 
     This is the tool for "call X and discuss Y", "call X and sort out Z". It is not
@@ -2729,7 +2730,11 @@ async def discuss_in_call(who: str, topic: str, workspace: str = "", minutes: fl
     `languages` is for a call that runs in more than one — "en,hi" for English and
     Hindi. Name them and each turn is heard in whichever was actually spoken;
     leave it empty and the call is heard as English only, which turns a Hindi
-    sentence into nonsense."""
+    sentence into nonsense.
+
+    `voice_name` is "mine" to hold the call in Arun's own cloned voice — only when
+    he asks for it — or "assistant" (the default). A call in his voice says so in
+    its first sentence, so nobody is left thinking Arun himself rang them."""
     import asyncio as _asyncio
 
     from . import conversation, teams_bridge
@@ -2740,7 +2745,7 @@ async def discuss_in_call(who: str, topic: str, workspace: str = "", minutes: fl
         from . import notify
         outcome = await conversation.converse(who, topic, workspace,
                                               seconds=float(minutes or 0) * 60, agenda=agenda,
-                                              languages=languages)
+                                              languages=languages, voice_name=voice_name)
         with contextlib.suppress(Exception):
             await notify.notify(f"📞 {outcome}", "calls", urgency="direct")
 

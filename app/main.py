@@ -1055,7 +1055,9 @@ async def api_discuss_in_call(request: Request):
     if not b.get("who") or not b.get("topic"):
         raise HTTPException(400, "who and topic are required")
     return {"message": await agent_mod.discuss_in_call(
-        b["who"], b["topic"], b.get("workspace", ""))}
+        b["who"], b["topic"], b.get("workspace", ""),
+        minutes=float(b.get("minutes") or 0), agenda=b.get("agenda", ""),
+        languages=b.get("languages", ""), voice_name=b.get("voice", ""))}
 
 
 @app.post("/api/ci/watch", dependencies=[Depends(require_auth)])

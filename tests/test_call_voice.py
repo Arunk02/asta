@@ -14,12 +14,13 @@ used when he did not ask for it.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import wave
 
 import pytest
 
-from app import meetings, store, voice
+from app import conversation, meetings, store, voice
 
 
 def _wav(seconds: float = 0.2, rate: int = 24000, hz: int = 220) -> bytes:
@@ -270,3 +271,418 @@ async def test_his_voice_is_never_used_by_default(in_call, monkeypatch):
 
     await meetings.say_in_call("tell him the build passed")
     assert seen["voice"] == voice.VOICE_ASSISTANT
+
+
+# --------------------------------------------------------------------------------------
+"""Whose voice a whole CALL is in — decided once, when it is placed.
+
+The file above this line is about one line at a time. This part is about the
+call: a call could be held in his cloned voice only by naming "mine" on every
+sentence, because `synth`, the opener, the holding lines and the "mm-hm" each
+defaulted to the assistant on their own. So "ring Vinish in my voice" produced
+a call that was half his voice and half Asta's — the one outcome nobody can
+hear a fair test through.
+
+The rules here: the voice is set once and every mouth reads it from the same
+place; an explicit voice on one line still wins; it is forgotten when the call
+ends so the NEXT call is never his by inheritance; a call in his voice SAYS so
+in its first sentence; and his clone is routed by script to the engine that can
+actually speak it in time.
+"""
+
+@pytest.fixture(autouse=True)
+def _assistant_again():
+    """No test may leak his voice into the next one — nor into a real call."""
+    yield
+    voice.in_voice(voice.VOICE_ASSISTANT)
+    meetings._VOICE_CACHE.clear()
+
+
+def _watch(monkeypatch) -> list[dict]:
+    asked: list[dict] = []
+
+    async def speak(text, profile="", engine="", voice_name="", **kw):
+        asked.append({"text": text, "voice": kw.get("voice", voice_name),
+                      "profile": profile, "engine": engine})
+        return b"RIFFwav"
+
+    monkeypatch.setattr(voice, "speak", speak)
+    meetings._VOICE_CACHE.clear()
+    return asked
+
+
+# --- set once, read everywhere ---------------------------------------------------------
+
+def test_a_call_speaks_in_the_assistant_voice_unless_told_otherwise(monkeypatch):
+    asked = _watch(monkeypatch)
+    asyncio.run(meetings.synth("Hello Vinish."))
+    assert asked[0]["voice"] == voice.VOICE_ASSISTANT
+
+
+def test_a_call_placed_in_his_voice_speaks_every_line_in_it(monkeypatch):
+    asked = _watch(monkeypatch)
+    voice.in_voice(voice.VOICE_MINE)
+    asyncio.run(meetings.synth("Hello Vinish."))
+    asyncio.run(meetings.synth("One moment."))          # a holding line
+    assert [a["voice"] for a in asked] == [voice.VOICE_MINE, voice.VOICE_MINE]
+
+
+def test_the_two_voices_never_share_cached_audio(monkeypatch):
+    """Same sentence, two voices: the cache must not hand his leg Asta's audio
+    (or the comparison being tested is between a voice and itself)."""
+    asked = _watch(monkeypatch)
+    asyncio.run(meetings.synth("Can you hear me?"))
+    voice.in_voice(voice.VOICE_MINE)
+    asyncio.run(meetings.synth("Can you hear me?"))
+    assert [a["voice"] for a in asked] == [voice.VOICE_ASSISTANT, voice.VOICE_MINE]
+
+
+def test_an_unrecognised_voice_is_never_his(monkeypatch):
+    asked = _watch(monkeypatch)
+    voice.in_voice("Arun's voice please")
+    asyncio.run(meetings.synth("Hello."))
+    assert asked[0]["voice"] == voice.VOICE_ASSISTANT
+
+
+def test_a_line_may_still_name_its_own_voice(monkeypatch):
+    """Mid-call, "say that bit as yourself" has to beat the call's setting."""
+    asked = _watch(monkeypatch)
+    voice.in_voice(voice.VOICE_MINE)
+    asyncio.run(meetings.synth("Asta here.", voice.VOICE_ASSISTANT))
+    assert asked[0]["voice"] == voice.VOICE_ASSISTANT
+
+
+def test_the_ack_is_in_the_same_voice_as_the_answer(monkeypatch):
+    """The "mm-hm" covering the clone's synthesis time, in Asta's voice, is the
+    most audible way to give away that two people are talking."""
+    from app import call_rtc
+    asked = _watch(monkeypatch)
+    said: list[bytes] = []
+    monkeypatch.setitem(meetings._CALL, "ctx", object())
+    monkeypatch.setattr(call_rtc, "say", lambda ctx, wav, **kw: _done(said.append(wav)))
+    voice.in_voice(voice.VOICE_MINE)
+    asyncio.run(call_rtc.say_quick("Mm-hm."))
+    assert asked[0]["voice"] == voice.VOICE_MINE and said == [b"RIFFwav"]
+
+
+def _done(value=None):
+    async def _f():
+        return value
+    return _f()
+
+
+# --- forgotten when the call ends ------------------------------------------------------
+
+def test_the_call_voice_is_forgotten_when_the_call_ends(monkeypatch):
+    asked = _watch(monkeypatch)
+    voice.in_voice(voice.VOICE_MINE)
+    voice.in_voice(voice.VOICE_ASSISTANT)            # what leaving a call does
+    asyncio.run(meetings.synth("Hi, Asta here."))
+    assert asked[0]["voice"] == voice.VOICE_ASSISTANT
+
+
+def test_a_call_asked_for_in_his_voice_sets_it_before_anything_is_said(monkeypatch):
+    """`converse` must set it before the first holding line is synthesised —
+    after would leave the opener in the wrong voice."""
+    order: list[str] = []
+    monkeypatch.setattr(voice, "in_voice",
+                        lambda name="": order.append(f"voice={name}") or name
+                        or voice.VOICE_ASSISTANT)
+    monkeypatch.setattr(conversation.meetings, "call_person",
+                        lambda who: _boom(order))
+
+    said = asyncio.run(conversation.converse("Vinish Kumar", "a test",
+                                             voice_name=voice.VOICE_MINE))
+    assert order[0] == "voice=mine" and order.index("rang") > 0
+    assert "Nothing rang" in said
+
+
+def _boom(order):
+    order.append("rang")
+    raise RuntimeError("stopped before ringing")
+
+
+# --- warming the voice that will actually be used --------------------------------------
+
+def test_his_clone_is_warmed_while_the_phone_rings(monkeypatch):
+    """The clone's first line costs ~30s cold and ~7s warm. Paying it after
+    they pick up is the whole difference between a test and a bad impression."""
+    warmed: list[tuple] = []
+
+    async def speak(text, profile="", engine="", **kw):
+        warmed.append((profile, engine))
+        return b"wav"
+
+    monkeypatch.setattr(voice, "speak", speak)
+    asyncio.run(voice.warm_the_voice("en,hi", voice.VOICE_MINE))
+    assert (voice.CLONE_PROFILE, voice.CLONE_ENGINE) in warmed
+
+
+def test_the_assistant_call_does_not_warm_his_clone(monkeypatch):
+    warmed: list[tuple] = []
+
+    async def speak(text, profile="", engine="", **kw):
+        warmed.append((profile, engine))
+        return b"wav"
+
+    monkeypatch.setattr(voice, "speak", speak)
+    asyncio.run(voice.warm_the_voice("en"))
+    assert all(p != voice.CLONE_PROFILE for p, _ in warmed)
+
+
+# --- his clone, fast enough to hold a line ---------------------------------------------
+
+def test_his_clone_speaks_english_through_the_fast_engine():
+    """Measured on his M1 Pro, same clone, same sentence: chatterbox 6-13s a
+    line, luxtts 0.8-1.3s. A colleague cannot wait 13 seconds for "yes", so the
+    fast engine is what English goes through."""
+    assert voice.clone_settings("Yes, the retry cap is already in.") \
+        == (voice.CLONE_PROFILE, voice.CLONE_ENGINE_FAST)
+
+
+def test_his_clone_speaks_hindi_through_the_engine_that_can():
+    """luxtts has no Devanagari frontend at all — it raises "Kernel size can't be
+    greater than actual input size" on every Hindi line, short or long. So Hindi
+    in his voice goes to chatterbox and costs its seconds."""
+    assert voice.clone_settings("हाँ, ठीक है।") == (voice.CLONE_PROFILE, voice.CLONE_ENGINE)
+
+
+def test_the_fast_clone_gets_a_lead_in_so_it_cannot_eat_the_first_word():
+    """The one dangerous failure: "No, we cannot ship that today" came back as
+    "We cannot ship that today" — a reversal, not a glitch. A disposable lead-in
+    absorbs the garbled onset; with it, 5/5 lines kept their opening words."""
+    said = voice.lead_in("No, we cannot ship that today.", voice.CLONE_ENGINE_FAST)
+    assert any(said.startswith(lead) for lead in voice.clone_leads())
+    assert "No, we cannot ship" in said
+
+
+def test_nothing_else_is_given_a_lead_in():
+    """Asta's own voice does not lose onsets, and chatterbox does not either —
+    a lead-in there is just a word nobody asked for."""
+    assert voice.lead_in("Hello.", voice.DEFAULT_ENGINE) == "Hello."
+    assert voice.lead_in("हाँ, ठीक है।", voice.CLONE_ENGINE) == "हाँ, ठीक है।"
+
+
+def test_the_lead_in_is_not_said_twice():
+    """A reply that already opens with the lead-in word must not get another."""
+    lead = voice.clone_leads()[0]
+    assert voice.lead_in(f"{lead} the cap is in.", voice.CLONE_ENGINE_FAST) \
+        == f"{lead} the cap is in."
+
+
+def test_the_lead_in_is_not_the_same_word_every_time():
+    """Four identical openers in a row is a tic, and a tic is the thing a
+    listener notices instead of the voice."""
+    leads = {voice.lead_in("Yes.", voice.CLONE_ENGINE_FAST).rsplit("Yes.", 1)[0].strip()
+             for _ in range(len(voice.clone_leads()))}
+    assert len(leads) == len(voice.clone_leads())
+
+
+def test_a_call_in_his_voice_routes_each_line_by_its_script(monkeypatch):
+    """One call, both languages, one voice: the engine changes under it, his
+    voice does not."""
+    asked: list[dict] = []
+
+    async def post(text, profile, engine, **kw):
+        asked.append({"text": text, "profile": profile, "engine": engine})
+        return b"RIFFwav"
+
+    monkeypatch.setattr(voice, "_render", post, raising=False)
+    monkeypatch.setattr(voice, "speak", post)
+    voice.in_voice(voice.VOICE_MINE)
+    meetings._VOICE_CACHE.clear()
+    # What the call actually does — synth resolves the voice, speak resolves the
+    # engine — so this asserts the pair a real line would be rendered with.
+    assert voice.clone_settings("Yes.")[1] != voice.clone_settings("हाँ।")[1]
+
+
+def test_the_http_door_can_place_a_call_in_his_voice(monkeypatch):
+    """A capability only the chat agent can reach is one most of his traffic
+    cannot: the CLI brains and the MCP server come in over HTTP."""
+    import inspect
+
+    from app import main
+    src = inspect.getsource(main.api_discuss_in_call)
+    for field in ("minutes", "agenda", "languages", "voice"):
+        assert f'b.get("{field}"' in src or f'b["{field}"]' in src, field
+    assert "voice_name=" in src
+
+
+def test_the_disclosure_survives_a_greeting_the_brain_wrote():
+    """Live, 25 Sep: the call went out in his cloned voice and opened "Hi Harika,
+    this is Asta, Arun's assistant, is now a good time?" — no mention of whose
+    voice she was hearing. The disclosure had been put on the FALLBACK greeting
+    only, and the call brain's own greeting replaced it. Whatever opener wins,
+    the disclosure goes with it."""
+    written = "Hi Harika, this is Asta, Arun's assistant — is now a good time?"
+    said = conversation.disclosed(written, his_voice=True)
+    assert "Arun's own voice" in said and "good time" in said
+    assert conversation.disclosed(written, his_voice=False) == written
+
+
+def test_the_disclosure_is_not_repeated_if_it_is_already_there():
+    already = ("Hi Harika, it's Asta — I'm speaking with Arun's own voice today "
+               "so he can hear how it sounds. Is now a good time?")
+    assert conversation.disclosed(already, his_voice=True) == already
+
+
+# --- the greeting has to be the FIRST thing, not the first thing READY -----------------
+
+def test_the_greeting_is_a_short_line_of_its_own():
+    """Live, 25 Sep 11:07: she picked up and heard NOTHING for two minutes ten
+    seconds. The opener had grown to three sentences, his clone needs seconds
+    per sentence, and the whole paragraph was synthesised as ONE line before a
+    sound left the call. So the greeting is split off and said by itself: short
+    enough to be ready, and said first."""
+    hello, rest = conversation.opening_lines(
+        "Hi, it's Asta, Arun's assistant. I'm speaking with Arun's own voice today "
+        "so he can hear how it sounds. Is now a good time for a voice test?")
+    assert hello == "Hi, it's Asta, Arun's assistant."
+    assert len(hello) < 60 and "own voice" in rest and "good time" in rest
+
+
+def test_a_one_sentence_opener_has_nothing_left_over():
+    hello, rest = conversation.opening_lines("Hi Harika, is now a good time?")
+    assert hello == "Hi Harika, is now a good time?" and rest == ""
+
+
+def test_the_greeting_is_made_before_anything_else_in_the_call(monkeypatch):
+    """Order of synthesis IS the dead air: whatever is made first is what can be
+    said first. The greeting goes to the front of the queue, ahead of the
+    reactions, the fillers and the rest of the opener."""
+    made: list[str] = []
+
+    async def synth(text, voice_name=""):
+        made.append(text)
+        return b"wav"
+
+    monkeypatch.setattr(meetings, "synth", synth)
+    voice.in_voice(voice.VOICE_MINE)
+    asyncio.run(conversation._prepare_opening(
+        "Hi, it's Asta, Arun's assistant. I'm speaking with Arun's own voice today."))
+    assert made[0].startswith("Hi, it's Asta, Arun's assistant")
+    assert "own voice" not in made[0] and any("own voice" in m for m in made[1:])
+
+
+# --- re-cloning, when the clone does not sound like him ---------------------------------
+
+def test_the_clone_scripts_cover_more_than_one_delivery():
+    """25 Sep: both existing clones came back "doesn't sound like me", and the
+    reference is what decides that. A clone copies the PROSODY it hears, so a
+    reference of nothing but calm statements produces a voice that cannot ask a
+    question or answer in one word — which is most of a phone call."""
+    scripts = voice.CLONE_SCRIPTS
+    assert len(scripts) >= 5
+    assert any("?" in text for text in scripts.values()), "no question in the reference"
+    quick = scripts.get("3-quick", "")
+    assert quick and max(len(s.split()) for s in quick.split(".") if s.strip()) < 6
+    # And a prompt per script, because talking beats reading: somebody reading a
+    # sentence they would never say produces read-aloud rhythm for ever.
+    assert set(voice.CLONE_PROMPTS) >= set(scripts)
+
+
+def test_a_take_can_carry_its_own_corrected_words():
+    """The reference text is what the engine ALIGNS the audio against, and it
+    came from Whisper — which heard "done bro" as "Damn bro", "latency" as "the
+    legacy" and "billing workflow" as "building workflow" on his 25 Sep takes.
+    Every one of those teaches the clone a sound against the wrong word. A take
+    may now carry the words he actually said."""
+    import inspect
+    src = inspect.getsource(voice.clone_from_sample)
+    assert "len(sample) == 3" in src or "sample[2]" in src
+
+
+def test_a_take_with_no_words_given_is_still_transcribed(monkeypatch):
+    """Correcting is optional: a take handed over without text behaves exactly
+    as before, or every existing caller breaks."""
+    asked: list[str] = []
+
+    async def hear(data, filename="", language=""):
+        asked.append(filename)
+        return "what whisper heard"
+
+    posts: list[dict] = []
+
+    class _R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"id": "p1", "name": "test"}
+
+    class _C:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, files=None, data=None):
+            posts.append({"url": url, "data": data})
+            return _R()
+
+    monkeypatch.setattr(voice, "transcribe", hear)
+    monkeypatch.setattr(voice.httpx, "AsyncClient", lambda **k: _C())
+    out = asyncio.run(voice.clone_from_sample(
+        "test", [("a.wav", b"x"), ("b.wav", b"y", "the words he actually said")]))
+    assert asked == ["a.wav"], "transcribed a take that came with its own words"
+    said = [p["data"]["reference_text"] for p in posts if p["data"]]
+    assert said == ["what whisper heard", "the words he actually said"]
+    assert out["samples"][1]["words"] == 5
+
+
+# --- the rumble that made the clone sound like somebody else ---------------------------
+
+def _tone(hz: float, seconds: float = 1.0, rate: int = 16000, amp: float = 0.4) -> bytes:
+    import math
+    frames = bytearray()
+    for i in range(int(rate * seconds)):
+        v = int(32000 * amp * math.sin(2 * math.pi * hz * i / rate))
+        frames += max(-32000, min(32000, v)).to_bytes(2, "little", signed=True)
+    buf = io.BytesIO()
+    with wave.open(buf, "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+    return buf.getvalue()
+
+
+def _energy_below(raw: bytes, hz: float) -> float:
+    import array
+    with wave.open(io.BytesIO(raw)) as w:
+        rate = w.getframerate()
+        y = array.array("h", w.readframes(w.getnframes()))
+    import numpy as np
+    spectrum = np.abs(np.fft.rfft(np.array(y, dtype=float)))
+    freqs = np.fft.rfftfreq(len(y), 1 / rate)
+    return float(spectrum[freqs < hz].sum() / (spectrum.sum() + 1e-9))
+
+
+def test_rumble_under_the_voice_is_taken_out_before_cloning():
+    """Measured on his 25 Sep takes: 10-15% of their energy sits below 80Hz —
+    desk rumble from recording close on a phone, against 0.5% in the August
+    ones. It dragged his measured pitch from 152Hz to 77Hz, and the clone learnt
+    a voice with a low end he does not have. That is what "the accent is
+    different" and "doesn't sound like me" were both describing."""
+    noisy = voice.mixed(_tone(40, 1.0, amp=0.5), _tone(155, 1.0, amp=0.5))
+    assert _energy_below(noisy, 80) > 0.25
+    clean = voice.without_rumble(noisy)
+    assert _energy_below(clean, 80) < 0.05
+
+
+def test_taking_the_rumble_out_keeps_the_voice_itself():
+    """A high-pass that eats his actual pitch would be worse than the rumble."""
+    voiced = _tone(155, 1.0)
+    before, after = _energy_below(voiced, 300), _energy_below(voice.without_rumble(voiced), 300)
+    assert after > before * 0.9, "the 155Hz fundamental was filtered away"
+
+
+def test_audio_that_is_not_a_wav_is_handed_back_untouched():
+    """An .m4a or a truncated file must not be silently mangled into noise."""
+    assert voice.without_rumble(b"not a wav at all") == b"not a wav at all"
+
+
+def test_every_take_is_cleaned_on_its_way_into_a_clone():
+    import inspect
+    assert "without_rumble" in inspect.getsource(voice.clone_from_sample)

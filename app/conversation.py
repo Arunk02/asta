@@ -197,6 +197,19 @@ _REACT_RULES = (
 _DEFAULT_REACTIONS = ("Got it.", "Okay.")
 _defaults = {"n": 0}
 
+#: A sentence that ASKS for something, whether or not it ends in a question
+#: mark. Whisper writes no punctuation it did not hear, and a demand is not
+#: phrased as a question anyway: "Yeah, sure. I want to know the reason for this
+#: call or disconnect" got "Great." on the 25 Sep call — Asta agreeing brightly
+#: with somebody who was asking why it had rung them. The leading "yeah" is what
+#: the old rule matched on, so what a sentence STARTS with cannot be the test.
+_ASKING = re.compile(
+    r"\b(?:i (?:want|need|would like) to know|tell me|let me know|explain|"
+    r"what(?:'?s| is| are|s)? (?:this|that|it|the)|why (?:are|is|did|do|you)|"
+    r"can you (?:tell|explain|say|share)|could you (?:tell|explain|say|share)|"
+    r"who (?:is|'?s|are)|what (?:do|did|does) you|reason for (?:this|the) call)\b",
+    re.I)
+
 #: What to say while thinking about a QUESTION. "Sure." used to answer every
 #: sentence ending in a question mark, so "Hello?" and "how can I help you?"
 #: both got "Sure." — a word that answers a request, not a question, and the
@@ -214,7 +227,7 @@ def quick_reaction(theirs: str) -> str:
     theirs = theirs or ""
     if _GREETING.search(theirs) or _ACKNOWLEDGEMENT.search(theirs):
         return ""
-    question = theirs.rstrip().endswith("?")
+    question = theirs.rstrip().endswith("?") or bool(_ASKING.search(theirs))
     for pattern, line, on_question in _REACT_RULES:
         if pattern.search(theirs) and (on_question or not question):
             return line
@@ -272,6 +285,19 @@ def _acknowledge() -> None:
 
 _ACKING: set = set()
 _SAY_AGAIN = "Sorry, I didn't catch that. Could you say it again?"
+
+#: Asta has ALREADY asked them to repeat themselves — in its own words, from the
+#: brain, rather than in the canned line. Saying the canned one on top of it is
+#: two apologies for one unheard turn, which is what the 25 Sep call opened with.
+_ALREADY_ASKED = re.compile(
+    r"\b(?:say (?:that|it) again|repeat (?:that|it)|didn'?t (?:catch|get) that|"
+    r"came through .{0,20}garbled|could not make (?:that )?out)\b", re.I)
+
+
+def ask_again(last_said: str) -> str:
+    """The line to say when their turn could not be heard — '' if Asta has just
+    asked for exactly that and is still waiting for it."""
+    return "" if _ALREADY_ASKED.search(last_said or "") else _SAY_AGAIN
 
 
 async def _say(text: str, said: list[str], lines: list[dict], rtc: bool) -> None:
@@ -406,6 +432,70 @@ async def _they_started(ctx) -> bool:
     return False
 
 
+#: Said in the first sentence of a call held in HIS voice. Arun's own voice
+#: saying "it's Asta, Arun's assistant" leaves the person thinking Arun rang
+#: them — so whoever picks up is told what they are hearing before anything
+#: else is discussed, whichever greeting ends up being used.
+_DISCLOSURE = "I'm speaking with Arun's own voice today so he can hear how it sounds."
+
+
+def disclosed(opener: str, his_voice: bool) -> str:
+    """`opener` with the voice disclosure in it, when the call is in his voice.
+
+    Applied to whatever greeting actually gets said, not only to the fallback:
+    on 25 Sep the call brain wrote its own greeting, that greeting won, and the
+    disclosure went out of the call with the one it had been attached to.
+    """
+    line = (opener or "").strip()
+    if not his_voice or "arun's own voice" in line.lower():
+        return line
+    # Goes in FRONT of the question they are meant to answer — "is now a good
+    # time?" is the last thing said, so nothing is asked before they have been
+    # told what they are listening to.
+    for dash in ("—", "–", " - "):
+        head, sep, tail = line.partition(dash)
+        if sep and tail.strip():
+            tail = tail.strip()
+            return f"{head.rstrip(' ,')}. {_DISCLOSURE} {tail[0].upper()}{tail[1:]}"
+    if line.endswith("?") and ". " in line:
+        head, _, tail = line.rpartition(". ")
+        return f"{head}. {_DISCLOSURE} {tail}"
+    if line.endswith("?"):
+        return f"{_DISCLOSURE} {line}"
+    return f"{line} {_DISCLOSURE}"
+
+
+def opening_lines(opener: str) -> tuple[str, str]:
+    """The greeting, and everything after it.
+
+    Said as two lines rather than one because of what one line costs: on 25 Sep
+    a three-sentence opener in his cloned voice was synthesised whole before any
+    of it left the call, and the colleague who picked up heard two minutes and
+    ten seconds of nothing. A greeting is short, so a greeting on its own is
+    ready in a fraction of the time — and it is the part that must not wait.
+    """
+    line = (opener or "").strip()
+    cut = -1
+    for stop in (". ", "! ", "? "):
+        at = line.find(stop)
+        if at != -1 and (cut == -1 or at < cut):
+            cut = at
+    if cut == -1:
+        return line, ""
+    return line[:cut + 1].strip(), line[cut + 2:].strip()
+
+
+async def _prepare_opening(opener: str) -> None:
+    """Make the greeting FIRST, then the rest of the opener.
+
+    Order of synthesis is the dead air: whatever is made first is what can be
+    said first, and everything queued in front of the greeting is silence on a
+    line somebody has just answered.
+    """
+    hello, rest = opening_lines(opener)
+    await _prepare([x for x in (hello, rest) if x])
+
+
 async def _compose_opener(mind_task: "asyncio.Task", fallback: str) -> str:
     """The first line, made before they can pick up.
 
@@ -414,15 +504,25 @@ async def _compose_opener(mind_task: "asyncio.Task", fallback: str) -> str:
     own brain, which is used if it is ready by the time they answer.
     """
     from . import call_mind
-    await _prepare([fallback, *call_mind.REACTIONS, "Oh, sorry.", *_ACKS, *_MOMENTS,
-                    _SAY_AGAIN, _STILL_THERE])
+    hello, rest = opening_lines(fallback)
+    order = [hello, rest, *call_mind.REACTIONS, "Oh, sorry.", *_ACKS, *_MOMENTS,
+             _SAY_AGAIN, _STILL_THERE]
+    from . import voice as _voice
+    if _voice.in_voice() == _voice.VOICE_MINE:
+        # His clone costs ~7s a line against Kokoro's ~0.4s, so the whole list
+        # does not fit in one ring. The acks come first after the greeting: an
+        # ack exists to cover synthesis time, and an uncached one costs exactly
+        # the silence it was meant to hide.
+        order = [hello, rest, *_ACKS, *_MOMENTS, *call_mind.REACTIONS, "Oh, sorry.",
+                 _SAY_AGAIN, _STILL_THERE]
+    await _prepare([x for x in order if x])
     mind = await _mind_if_ready(mind_task, wait=30)
     if mind is None:
         return fallback
     with contextlib.suppress(Exception):
         line = spoken_form(await mind.opener())
         if line:
-            await _prepare([line])
+            await _prepare_opening(line)
             return line
     return fallback
 
@@ -464,7 +564,8 @@ async def _close_mind(task: "asyncio.Task") -> None:
 
 
 async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0,
-                   agenda: str = "", languages: str = "") -> str:
+                   agenda: str = "", languages: str = "",
+                   voice_name: str = "") -> str:
     """Ring `who` and actually talk with them about `topic`. Returns how it went.
 
     The shape is: ring, wait to be answered, turn captions on, open, then listen
@@ -493,13 +594,20 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
     # Which languages this call may be in ("en,hi" for a call that runs in both).
     # Set before a word is heard: it decides how every turn is transcribed.
     from . import call_rtc as _rtc
+    from . import voice as _voice
     _rtc.speaking(languages)
+    # And whose voice it is held in, set before a single line is synthesised —
+    # the opener is made while the phone rings, so any later would leave the
+    # first thing they hear in the wrong voice.
+    _voice.in_voice(voice_name or _voice.VOICE_ASSISTANT)
+    his_voice = _voice.in_voice() == _voice.VOICE_MINE
     # The call's own brain starts now, so it is warm by the time they answer.
     from . import call_mind, voice
     thinking_ahead = asyncio.get_event_loop().create_task(
         call_mind.start(who, topic, agenda=agenda, minutes=round(limit / 60, 1) if seconds else 0))
     asyncio.get_event_loop().create_task(voice.warm_the_ears())
-    asyncio.get_event_loop().create_task(voice.warm_the_voice(languages))
+    asyncio.get_event_loop().create_task(
+        voice.warm_the_voice(languages, _voice.in_voice()))
     # Nobody's phone rings unless something can talk to them: no voice, no call.
     from . import call_rtc
     if call_rtc.enabled() and not await voice.available():
@@ -522,7 +630,8 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
     page = (meetings._CALL or {}).get("page")
     said: list[str] = []
     heard_any = False
-    opener = f"Hi, it's Asta, Arun's assistant — is now a good time for {topic}?"
+    opener = disclosed(
+        f"Hi, it's Asta, Arun's assistant — is now a good time for {topic}?", his_voice)
     # Made while it rings, so the greeting plays the moment they say hello —
     # people speak the instant they pick up. The plain greeting is made FIRST,
     # before anything else is queued on the voice server: on 22 Sep it waited
@@ -550,14 +659,20 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
         # The brain's own greeting only if it is already written AND made;
         # otherwise the plain one, which is ready. Never wait here: they spoke.
         if ready.done() and not ready.cancelled() and ready.exception() is None:
-            opener = ready.result() or opener
+            opener = disclosed(ready.result(), his_voice) or opener
         # The greeting plays to the end: people say "hello?" over it as they pick
         # up. After it they may talk over Asta, and it stops and listens.
         meetings._CALL["barge_in"] = False
         meetings._CALL["last_said"] = ""
-        await meetings.say_in_call(opener)
+        hello, rest = opening_lines(opener)
+        await meetings.say_in_call(hello)
+        said.append(hello)
+        # Only the greeting itself plays through a "hello?" — from here on they
+        # may talk over Asta, including over the rest of the opener.
         meetings._CALL["barge_in"] = rtc
-        said.append(opener)
+        if rest:
+            await meetings.say_in_call(rest)
+            said.append(rest)
 
         lines: list[dict] = [{"speaker": "Asta", "text": opener}] if rtc else []
         turns = 0
@@ -578,7 +693,7 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
             heard_any = True
             turns += 1
             if theirs == _UNHEARD:
-                await _say(_SAY_AGAIN, said, lines, rtc)
+                await _say(ask_again(said[-1] if said else ""), said, lines, rtc)
                 interrupted = bool(meetings._CALL.get("interrupted"))
                 continue
             mind = await _mind_if_ready(thinking_ahead)
@@ -604,6 +719,9 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
     finally:
         with contextlib.suppress(Exception):
             await meetings.leave()
+        # His voice belongs to this call only. Left set, the next call — one he
+        # never asked to be in his voice — would go out in it.
+        _voice.in_voice(_voice.VOICE_ASSISTANT)
         notes = await _notes_and_close(thinking_ahead, heard_any)
 
     if not heard_any:

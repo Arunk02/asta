@@ -321,11 +321,22 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
             with contextlib.suppress(Exception):
                 await turn
     elif kind == "colleague":
-        task = responder.respond(arg.get("source", "teams-chat"), arg.get("who", "A colleague"),
-                                 arg.get("text", ""), priority=arg.get("priority"),
-                                 context=arg.get("context", ""))
-        if task:
-            state["aliases"]["investigation"] = task["id"]
+        # Through the steward first, exactly as `chat_watch` does: it decides
+        # both whether this reaches his phone and whether anything investigates
+        # it, and a scenario that skipped it would be testing a path nobody runs.
+        from app import steward
+        who, said = arg.get("who", "A colleague"), arg.get("text", "")
+        opening = steward.consider(who, said)
+        if opening["hold"]:
+            state.setdefault("held", []).append(who)
+        else:
+            if opening["opened_with"]:
+                said = f"{opening['opened_with']}\n{said}"
+            task = responder.respond(arg.get("source", "teams-chat"), who, said,
+                                     priority=arg.get("priority"),
+                                     context=arg.get("context", ""))
+            if task:
+                state["aliases"]["investigation"] = task["id"]
     elif kind == "spawn":
         t = tasks.spawn(arg.get("title", "work"), arg.get("prompt", "do it"),
                         arg.get("kind", "code"), arg.get("workspace"),
@@ -656,6 +667,8 @@ def _check_kv(arg, world, state):
     got = store.kv_get(arg["key"])
     if "equals" in arg and got != str(arg["equals"]):
         return f"kv {arg['key']}={got!r}, expected {arg['equals']!r}"
+    if arg.get("contains") and arg["contains"].lower() not in (got or "").lower():
+        return f"kv {arg['key']}={got!r}, expected it to contain {arg['contains']!r}"
     if arg.get("set") and not got:
         return f"kv {arg['key']} is empty"
     if arg.get("empty") and got:

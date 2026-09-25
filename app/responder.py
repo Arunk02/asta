@@ -612,7 +612,15 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     """
     import time
 
-    from . import tasks
+    from . import steward, tasks
+    # The same door `chat_watch` uses for the push decision. Two opinions about
+    # whether "Hi" is a message is how one half of Asta holds a conversation
+    # while the other half investigates it.
+    opening = steward.consider(who, text)
+    if opening["hold"]:
+        return None
+    if opening["opened_with"]:
+        context = f"{opening['opened_with']}\n{context}".strip()
     kind = what_it_asks(text)
     key = key or attention.key_for(text)
     why_not = should_respond(kind, priority, key, now=time.time(),

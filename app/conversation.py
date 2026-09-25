@@ -546,6 +546,10 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
       so out loud and offer to come back, because the alternative is a colleague
       talking to nothing for forty seconds.
     """
+    # Reset the moment they pick up. Ringing is not conversation: on 25 Sep a
+    # 2.5-minute call rang for 103 seconds, so by the time Harika said hello the
+    # brain believed its budget was nearly spent — it said "Great", then "that's
+    # all I needed, thanks for this", and hung up after one exchange.
     started = asyncio.get_event_loop().time()
     # Why he rang. Stashed rather than threaded through, because the thing that
     # needs it — the voice note left when nobody picks up — is decided several
@@ -610,6 +614,7 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
         state = await meetings.wait_for_answer(page, seconds=40)
         if state in ("no answer", "ended"):
             return f"Called {rang} — no answer. I said nothing and hung up."
+        started = asyncio.get_event_loop().time()       # the call starts HERE
 
         rtc = bool(meetings._CALL.get("rtc"))
         if not rtc:

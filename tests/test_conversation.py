@@ -240,3 +240,56 @@ def test_a_call_in_his_own_voice_opens_the_way_he_would(fake, monkeypatch):
     m = fake(heard=["sure, go ahead"])
     asyncio.run(conversation.converse("Vinish", "a quick voice test"))
     assert "Asta, Arun's assistant" in m.said[0]
+
+
+def test_the_clock_starts_when_they_answer_not_when_it_starts_dialling(fake, monkeypatch):
+    """Live, 25 Sep 14:59: placed with a 2.5-minute budget, it rang for 103
+    seconds. She said "Yeah, hi Arun", Asta said "Great", then "that's all I
+    needed, thanks for this" and hung up — because by its own reckoning the call
+    was nearly over before she had said a word. Ringing is not conversation."""
+    told: list[float] = []
+
+    class _Mind:
+        async def sentences(self, theirs, elapsed=0, limit=0):
+            from app import call_mind
+            told.append(elapsed)
+            yield "Right." + call_mind.END
+
+        async def opener(self):
+            return "Hi, quick one."
+
+        async def notes(self, *a, **k):
+            return ""
+
+        async def close(self):
+            return None
+
+    m = fake(heard=["yes go ahead"])
+    slow = {"rang": False}
+    real_answer = m.wait_for_answer
+
+    async def ringing(page, seconds=0):
+        slow["rang"] = True
+        return await real_answer(page, seconds)
+
+    m.wait_for_answer = ringing
+    # A hundred seconds pass while it rings — the clock the brain is told about
+    # must not have been running for any of them.
+    monkeypatch.setattr(conversation, "RING_SECONDS_FOR_TEST", 103.0, raising=False)
+    from app import call_mind
+    monkeypatch.setattr(call_mind, "start", lambda *a, **k: _done(_Mind()))
+    monkeypatch.setattr(conversation, "_mind_if_ready", lambda *a, **k: _done(_Mind()))
+    asyncio.run(conversation.converse("Vinish", "a quick check", seconds=150))
+    assert slow["rang"] and told, "the brain was never asked for a reply"
+    assert told[0] < 5, f"the brain was told {told[0]:.0f}s of a 150s call had gone"
+
+
+def test_the_clock_reset_is_where_the_answer_is(monkeypatch):
+    """Structural, because the timing one cannot see a clock it does not drive:
+    the reset must sit after wait_for_answer and before anything is said."""
+    import inspect
+    src = inspect.getsource(conversation.converse)
+    answered = src.index("state = await meetings.wait_for_answer")
+    reset = src.index("started = asyncio.get_event_loop().time()", answered)
+    spoke = src.index("await meetings.say_in_call(hello)")
+    assert answered < reset < spoke

@@ -251,7 +251,45 @@ class Mind:
                 self.proc.kill()
 
 
-async def start(who: str, topic: str, agenda: str = "", minutes: float = 0) -> Mind:
+#: Added when the call is spoken in HIS cloned voice. His voice reading
+#: assistant-register English is the uncanny part — the voice is his and the
+#: words are nobody's. The idiom below is taken from the same Teams history
+#: that `voice.CLONE_SCRIPTS` was built from, which is why the clone's rhythm
+#: fits it. What is NOT in it is any particular address term: "bro" is what he
+#: calls Vinish, and it went out to Harika on 25 Sep because it was written in
+#: here as though it were how he talks to everyone. It is how he talks to SOME
+#: people, and the brain has no way to know which — so it waits to be shown.
+_AS_HIM = (
+    "\nYou are speaking in Arun's own voice on this call, as him. Talk the way "
+    "HE talks, not the way an assistant writes:\n"
+    "- Short sentences. Often three or four words. \"On it.\" \"Let me check "
+    "and come back.\" \"Then fine.\" Say the thing, then stop — he does not pad.\n"
+    "- His turns of phrase: \"na\" as a tag question (\"that is fine na?\"), "
+    "\"once\" (\"tell me once you are free\"), \"post that\" for afterwards.\n"
+    "- NO term of address unless they use one with you first. Do not call anyone "
+    "\"bro\", \"mate\", \"buddy\" or anything else. He uses \"bro\" with some "
+    "colleagues and never with others, and you cannot tell which from here — "
+    "guessing wrong is worse than using their name or nothing at all.\n"
+    "- No assistant register at all. Never \"How may I help you\", \"I'd be happy "
+    "to\", \"Certainly\". Do not introduce yourself as an assistant.\n"
+    "- If they ask outright whether this is Arun himself, or who is speaking, do "
+    "not deny it — tell them shortly and move on. Never state that you are Arun.\n")
+
+
+def persona(who: str, topic: str, agenda: str = "", minutes: float = 0,
+            as_him: bool = False) -> str:
+    """The whole brief the call's brain is started with."""
+    return _PERSONA.format(
+        who=who or "a colleague", topic=topic or "a quick word",
+        reactions=" / ".join(f'"{r}"' for r in REACTIONS),
+        agenda=f"\nWhat to cover: {agenda}" if agenda else "",
+        length=(f"\nThe call should last about {minutes:g} minutes: keep it going "
+                f"naturally until then, and close when told time is nearly up."
+                if minutes else "")) + (_AS_HIM if as_him else "")
+
+
+async def start(who: str, topic: str, agenda: str = "", minutes: float = 0,
+                as_him: bool = False) -> Mind:
     """Spawn the call's brain and prime it while the phone rings."""
     # The same environment every CLI brain gets: his refused API key stripped
     # (left in, the CLI tries it instead of his subscription and stalls), and
@@ -266,13 +304,7 @@ async def start(who: str, topic: str, agenda: str = "", minutes: float = 0) -> M
         CLAUDE, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
         "--verbose", "--include-partial-messages", "--model", MODEL, "--tools", "",
         "--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-        "--system-prompt", _PERSONA.format(
-            who=who or "a colleague", topic=topic or "a quick word",
-            reactions=" / ".join(f'"{r}"' for r in REACTIONS),
-            agenda=f"\nWhat to cover: {agenda}" if agenda else "",
-            length=(f"\nThe call should last about {minutes:g} minutes: keep it going "
-                    f"naturally until then, and close when told time is nearly up."
-                    if minutes else "")),
+        "--system-prompt", persona(who, topic, agenda, minutes, as_him),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, cwd=tempfile.gettempdir(), env=env)
     mind = Mind(proc)

@@ -508,25 +508,15 @@ def test_the_http_door_can_place_a_call_in_his_voice(monkeypatch):
     assert "voice_name=" in src
 
 
-def test_the_disclosure_survives_a_greeting_the_brain_wrote():
-    """Live, 25 Sep: the call went out in his cloned voice and opened "Hi Harika,
-    this is Asta, Arun's assistant, is now a good time?" — no mention of whose
-    voice she was hearing. The disclosure had been put on the FALLBACK greeting
-    only, and the call brain's own greeting replaced it. Whatever opener wins,
-    the disclosure goes with it."""
-    written = "Hi Harika, this is Asta, Arun's assistant — is now a good time?"
-    said = conversation.disclosed(written, his_voice=True)
-    assert "Arun's own voice" in said and "good time" in said
-    assert conversation.disclosed(written, his_voice=False) == written
+def test_a_call_in_his_voice_opens_as_him():
+    """It used to bolt "it's his assistant, on his voice" onto the greeting. He
+    asked for it twice: in his voice, talk like him. The brain writes the
+    opener and nothing is appended to it."""
+    import inspect
+    src = inspect.getsource(conversation.converse)
+    assert "disclosed" not in src
+    assert 'f"Hi, is now a good time for {topic}?" if his_voice' in src
 
-
-def test_the_disclosure_is_not_repeated_if_it_is_already_there():
-    already = ("Hi Harika, it's Asta — I'm speaking with Arun's own voice today "
-               "so he can hear how it sounds. Is now a good time?")
-    assert conversation.disclosed(already, his_voice=True) == already
-
-
-# --- the greeting has to be the FIRST thing, not the first thing READY -----------------
 
 def test_the_greeting_is_a_short_line_of_its_own():
     """Live, 25 Sep 11:07: she picked up and heard NOTHING for two minutes ten
@@ -687,3 +677,37 @@ def test_audio_that_is_not_a_wav_is_handed_back_untouched():
 def test_every_take_is_cleaned_on_its_way_into_a_clone():
     import inspect
     assert "without_rumble" in inspect.getsource(voice.clone_from_sample)
+
+
+# --- in his voice, talk the way he talks -----------------------------------------------
+
+def test_the_brain_is_told_to_talk_like_him_when_it_is_his_voice():
+    """His clone reading assistant-register English is the uncanny bit: the
+    voice is his and the words are nobody's. His actual idiom is on record in
+    voice.CLONE_SCRIPTS — short sentences, "bro", "na" as a tag question."""
+    from app import call_mind
+    his = call_mind.persona("Harika", "a quick word", as_him=True)
+    assert "arun's own voice" in his.lower()
+    assert '"na" as a tag question' in his and "does not pad" in his
+    plain = call_mind.persona("Harika", "a quick word")
+    assert "talk the way" not in plain, "the assistant voice still talks as Asta"
+
+
+def test_it_does_not_answer_to_being_him():
+    """Speaking in his voice is his call and he made it. Saying "yes, this is
+    Arun" to someone who asks outright is a different person's decision about
+    what they are told, and she is not in the room to make it."""
+    from app import call_mind
+    his = call_mind.persona("Harika", "a quick word", as_him=True)
+    assert "do not deny it" in his and "Never state that you are Arun" in his
+
+
+def test_he_is_never_made_to_call_a_colleague_bro_by_default():
+    """Live, 25 Sep: the brief told it to say "bro", so it opened a call to
+    Harika with "quick one bro". That is what he calls Vinish. The brain cannot
+    tell which colleagues those are, so it uses no term of address at all until
+    they use one first."""
+    from app import call_mind
+    his = call_mind.persona("Harika", "a quick word", as_him=True)
+    assert "NO term of address unless they use one with you first" in his
+    assert "guessing wrong is worse" in his

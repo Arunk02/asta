@@ -340,11 +340,20 @@ _BRIEFS = {
 
 
 def brief_for(kind: str, who: str, text: str) -> str:
-    """The self-contained prompt for one investigation."""
+    """The self-contained prompt for one investigation.
+
+    The kind says what the job IS; the role says who does it. The kind is passed
+    through rather than letting the role module re-read the message, because a
+    second classifier reaching a different answer about the same sentence is how
+    two halves of Asta come to disagree.
+    """
+    from . import roles
     body = _BRIEFS.get(kind, _BRIEFS["debug"])
     pr = pr_number(text)
-    return (body + _CLOSING).format(who=who or "A colleague", text=message_of(text),
-                                    pr=f"#{pr}" if pr else "(number not stated)")
+    hat = roles.brief(roles.role_for(text, kind=kind))
+    out = (body + _CLOSING).format(who=who or "A colleague", text=message_of(text),
+                                   pr=f"#{pr}" if pr else "(number not stated)")
+    return f"{hat}\n\n{out}" if hat else out
 
 
 def _gist(text: str, limit: int = 52) -> str:

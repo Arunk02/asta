@@ -1,0 +1,58 @@
+# Which expert answers — his ask of 25 Sep.
+#
+# "when it comes to coding he should be great expert coding developer senior
+# expert, when it comes to debug he should be great expert debugging engineer …
+# basically asta should act and change it and sustain to depend on the
+# situation."
+#
+# The unit tests hold the classifier. These hold the thing that actually
+# matters: that the expert reaches the BRAIN, through the real prompt path, for
+# each kind of work — and that it is the same answer whichever brain took it.
+
+scenarios:
+  - id: a-bug-report-briefs-a-debugging-engineer
+    title: "\"figure out why the consumer is throwing a null pointer\" arrives as a debugging job"
+    why: >
+      A coding brief on a bug sends it editing the first suspicious line it
+      finds. The debugger's first move is to reproduce, and that instruction
+      has to be in the prompt, not in a memory note nobody reads.
+    twin: false
+    steps:
+      - say: "figure out why the booking consumer is throwing a null pointer"
+    checks:
+      - brain_prompt_contains: "debugging engineer"
+      - brain_prompt_contains: "Reproduce it first"
+
+  - id: a-production-question-briefs-a-site-engineer
+    title: "\"preprod is returning 502s since the deploy\" gets the person who asks what changed"
+    why: >
+      Reading code first on a production incident is how an hour goes by before
+      anyone checks whether a rollback fixes it.
+    twin: false
+    steps:
+      - say: "preprod is returning 502s since the deploy this afternoon"
+    checks:
+      - brain_prompt_contains: "site reliability engineer"
+      - brain_prompt_contains: "what changed"
+
+  - id: planning-gets-an-architect-who-actually-recommends
+    title: "\"how should we structure this\" gets a recommendation, not a menu of options"
+    why: His standing complaint about analysis — options listed, no answer given.
+    twin: false
+    steps:
+      - say: "how should we structure the new pricing service, queue or direct calls?"
+    checks:
+      - brain_prompt_contains: "solution architect"
+      - brain_prompt_contains: "recommendation, not a menu"
+
+  - id: a-plain-message-gets-no-expert-at-all
+    title: "\"any updates for me?\" is briefed as nobody in particular"
+    why: >
+      A wrong expert is worse than none: an SRE brief on a status question
+      sends it to the dashboards. Unreadable means unread, not guessed.
+    twin: false
+    steps:
+      - say: "any updates for me?"
+    checks:
+      - brain_prompt_lacks: "site reliability engineer"
+      - brain_prompt_lacks: "debugging engineer"

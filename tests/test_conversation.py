@@ -225,10 +225,9 @@ def test_the_sandbox_names_the_hardware_calls_too():
     assert "voice.play_to_device" in covered
 
 
-def test_a_call_in_his_own_voice_says_so_in_its_first_sentence(fake, monkeypatch):
-    """His cloned voice saying "it's Asta, Arun's assistant" leaves the colleague
-    thinking Arun himself rang. Whoever picks up is told what they are hearing
-    before anything else is discussed — and an ordinary call says no such thing."""
+def test_a_call_in_his_own_voice_opens_the_way_he_would(fake, monkeypatch):
+    """No "it's Asta, Arun's assistant" in front of his own voice — he asked for
+    that twice. The voice is still set for the call and given back after it."""
     from app import voice as voice_mod
     set_to: list[str] = []
     real = voice_mod.in_voice
@@ -236,13 +235,8 @@ def test_a_call_in_his_own_voice_says_so_in_its_first_sentence(fake, monkeypatch
                         lambda name="": (set_to.append(name) if name else None) or real(name))
     m = fake(heard=["sure, go ahead"])
     asyncio.run(conversation.converse("Vinish", "a quick voice test", voice_name="mine"))
-    # Greeting first, on its own line, and the disclosure right behind it: the
-    # greeting is what must not wait on a long line being synthesised.
-    assert m.said[0].startswith("Hi") and len(m.said[0]) < 60
-    assert "Arun's own voice" in m.said[1]
-    # Set for this call, and given back afterwards — the next call is never his
-    # voice by inheritance.
+    assert "assistant" not in m.said[0]
     assert set_to == ["mine", "assistant"]
     m = fake(heard=["sure, go ahead"])
     asyncio.run(conversation.converse("Vinish", "a quick voice test"))
-    assert not any("Arun's own voice" in line for line in m.said[:2])
+    assert "Asta, Arun's assistant" in m.said[0]

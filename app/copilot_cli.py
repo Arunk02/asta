@@ -199,11 +199,19 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     runs once per CLI session (the CLI remembers the rest), so the index tail is
     what keeps a later message in the same session reachable.
     """
+    # Which expert is answering. One shared function, so the chat brain, the task
+    # pipeline and the responder's investigations all reach the same answer about
+    # the same sentence — see app/roles.py for why that is not a nicety.
+    from . import roles
+    hat = roles.brief(roles.role_for(user_text))
+
     from . import capabilities, consent, guardrails, skills, tool_index
     name = os.environ.get("ASSISTANT_NAME", "Asta")
     parts = [
         f"You are acting as {name}, Arun's assistant, via {via}. Be concise and direct.",
     ]
+    if hat:
+        parts.append(hat)
     # His standing instructions — the same block the in-process brain gets from
     # agent.build_instructions, so a rule holds whichever brain took the turn.
     rules = guardrails.block("chat")

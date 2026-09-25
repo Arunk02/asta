@@ -28,7 +28,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import (agents, claude_cli, clip, copilot_cli, guardrails, repo_ops, store,
+from . import (agents, claude_cli, clip, copilot_cli, guardrails, repo_ops, roles, store,
                wa_format, workspace_tools)
 
 
@@ -1191,9 +1191,17 @@ def _pipeline_name(kind: str, pipeline: str = "full") -> str:
     return ANALYSIS_PIPELINE
 
 
-def _with_pipeline(pipeline: str, prompt: str) -> str:
-    """Prepend a pipeline body to a prompt, for executors without a file flag."""
+def _with_pipeline(pipeline: str, prompt: str, task_id: str = "") -> str:
+    """Prepend a pipeline body to a prompt, for executors without a file flag.
+
+    The pipeline says how the work is STAGED; the role says who is doing it.
+    They are orthogonal — a micro task can be a debugging job or a coding one —
+    so the role rides alongside rather than forking the pipeline files.
+    """
     body = agents.load(pipeline) if pipeline else ""
+    hat = roles.brief(roles.sustained(task_id, prompt) if task_id
+                      else roles.role_for(prompt))
+    body = f"{body}\n\n{hat}" if (body and hat) else (body or hat)
     return f"{body}\n\n---\n\n{prompt}" if body else prompt
 
 

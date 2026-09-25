@@ -432,39 +432,6 @@ async def _they_started(ctx) -> bool:
     return False
 
 
-#: Said in the first sentence of a call held in HIS voice. Arun's own voice
-#: saying "it's Asta, Arun's assistant" leaves the person thinking Arun rang
-#: them — so whoever picks up is told what they are hearing before anything
-#: else is discussed, whichever greeting ends up being used.
-_DISCLOSURE = "I'm speaking with Arun's own voice today so he can hear how it sounds."
-
-
-def disclosed(opener: str, his_voice: bool) -> str:
-    """`opener` with the voice disclosure in it, when the call is in his voice.
-
-    Applied to whatever greeting actually gets said, not only to the fallback:
-    on 25 Sep the call brain wrote its own greeting, that greeting won, and the
-    disclosure went out of the call with the one it had been attached to.
-    """
-    line = (opener or "").strip()
-    if not his_voice or "arun's own voice" in line.lower():
-        return line
-    # Goes in FRONT of the question they are meant to answer — "is now a good
-    # time?" is the last thing said, so nothing is asked before they have been
-    # told what they are listening to.
-    for dash in ("—", "–", " - "):
-        head, sep, tail = line.partition(dash)
-        if sep and tail.strip():
-            tail = tail.strip()
-            return f"{head.rstrip(' ,')}. {_DISCLOSURE} {tail[0].upper()}{tail[1:]}"
-    if line.endswith("?") and ". " in line:
-        head, _, tail = line.rpartition(". ")
-        return f"{head}. {_DISCLOSURE} {tail}"
-    if line.endswith("?"):
-        return f"{_DISCLOSURE} {line}"
-    return f"{line} {_DISCLOSURE}"
-
-
 def opening_lines(opener: str) -> tuple[str, str]:
     """The greeting, and everything after it.
 
@@ -604,7 +571,9 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
     # The call's own brain starts now, so it is warm by the time they answer.
     from . import call_mind, voice
     thinking_ahead = asyncio.get_event_loop().create_task(
-        call_mind.start(who, topic, agenda=agenda, minutes=round(limit / 60, 1) if seconds else 0))
+        call_mind.start(who, topic, agenda=agenda,
+                        minutes=round(limit / 60, 1) if seconds else 0,
+                        as_him=his_voice))
     asyncio.get_event_loop().create_task(voice.warm_the_ears())
     asyncio.get_event_loop().create_task(
         voice.warm_the_voice(languages, _voice.in_voice()))
@@ -630,8 +599,8 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
     page = (meetings._CALL or {}).get("page")
     said: list[str] = []
     heard_any = False
-    opener = disclosed(
-        f"Hi, it's Asta, Arun's assistant — is now a good time for {topic}?", his_voice)
+    opener = (f"Hi, is now a good time for {topic}?" if his_voice else
+              f"Hi, it's Asta, Arun's assistant — is now a good time for {topic}?")
     # Made while it rings, so the greeting plays the moment they say hello —
     # people speak the instant they pick up. The plain greeting is made FIRST,
     # before anything else is queued on the voice server: on 22 Sep it waited
@@ -659,7 +628,7 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
         # The brain's own greeting only if it is already written AND made;
         # otherwise the plain one, which is ready. Never wait here: they spoke.
         if ready.done() and not ready.cancelled() and ready.exception() is None:
-            opener = disclosed(ready.result(), his_voice) or opener
+            opener = ready.result() or opener
         # The greeting plays to the end: people say "hello?" over it as they pick
         # up. After it they may talk over Asta, and it stops and listens.
         meetings._CALL["barge_in"] = False

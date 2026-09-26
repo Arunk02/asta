@@ -22,6 +22,8 @@ side never grows a branch per operation.
 
 from __future__ import annotations
 
+import contextlib
+
 from . import jira, meetings, review
 
 #: op name -> (callable, human description). The description is what he sees in
@@ -222,9 +224,14 @@ async def run(op_spec: dict) -> str:
     if act:
         # He approved this exact act, as written. Ten of the same and Asta may
         # ask for a standing permission — never sooner, never for a new person.
-        from . import authority
+        from . import authority, ledger
         target = str(args.get(act[1], ""))
         authority.note_approved(act[0], target)
+        # And the same fact in a shape something can learn from: the counter
+        # above only ever counts up, so it cannot answer "how often was he
+        # happy with it" — which is the question every learner asks. See P12.
+        with contextlib.suppress(Exception):
+            ledger.record(act[0], target, "as_is")
         if authority.earned(act[0], target):
             out += "\n\n" + authority.propose(act[0], target)
     return out

@@ -222,6 +222,18 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
         os.environ["ASTA_KNOWLEDGE_DIR"] = str(root)
         from app import knowledge as _k
         _k.reindex()
+    # Judgements he already made, so a learner has something to read. Written
+    # through `ledger.record` rather than into the table, so a scenario cannot
+    # set up a row the real code could never produce.
+    for row in s.get("experience", []) or []:
+        from app import ledger
+        row = dict(row)
+        times = int(row.pop("times", 1))
+        for _ in range(times):
+            ledger.record(row.get("kind", "send"), row.get("target", ""),
+                          row.get("verdict", "as_is"),
+                          confidence=row.get("confidence"),
+                          before=row.get("before", ""), after=row.get("after", ""))
     for key, value in (s.get("kv") or {}).items():
         store.kv_set(key, _clock(value))
     for key, value in (s.get("env") or {}).items():
@@ -676,6 +688,34 @@ def _check_outcome(arg, world, state):
     return ""
 
 
+def _check_learners(arg, world, state):
+    """What the learners would propose from the ledger as it now stands."""
+    from app import learners
+    got = learners.propose()
+    if arg.get("none"):
+        return f"proposed {[c.knob for c in got]}, expected nothing" if got else ""
+    knob = arg.get("knob")
+    found = [c for c in got if c.knob == knob]
+    if arg.get("absent"):
+        return f"proposed {knob} ({found[0].after})" if found else ""
+    if not found:
+        return f"nothing proposed for {knob} (got {[c.knob for c in got]})"
+    c = found[0]
+    if arg.get("direction") == "down" and not c.after < c.before():
+        return f"{knob} went {c.before()} -> {c.after}, expected down"
+    if arg.get("direction") == "up" and not c.after > c.before():
+        return f"{knob} went {c.before()} -> {c.after}, expected up"
+    return ""
+
+
+def _check_drafting_rule(arg, world, state):
+    from app import learners
+    rules = learners.drafting_rules()
+    if not any(re.search(arg, r, re.I) for r in rules):
+        return f"no drafting rule matching {arg!r} (got {rules})"
+    return ""
+
+
 def _check_kv(arg, world, state):
     from app import store
     got = store.kv_get(arg["key"])
@@ -848,6 +888,8 @@ CHECKS = {
     "observed": _check_observed,
     "outcome": _check_outcome,
     "kv": _check_kv,
+    "learners": _check_learners,
+    "drafting_rule": _check_drafting_rule,
     "brain_calls": _check_brain_calls,
     "tool_result_contains": _check_tool_result,
     "brain_flags": _check_brain_flags,

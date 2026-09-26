@@ -139,6 +139,24 @@ async def _open_ctx(pw, channel: str, headless: bool):
     return ctx
 
 
+def _no_http2() -> bool:
+    """Whether to fall back to HTTP/1.1 for every site this browser drives.
+
+    Solar's API calls die with net::ERR_HTTP2_PROTOCOL_ERROR here — the booking
+    list showed "Error in fetching bookings" with no HTTP status behind it,
+    because the requests never got a response. One browser is shared, so this is
+    a browser-wide setting; a site asks for it by setting "http1" in
+    data/sites.json, and the environment variable still forces it.
+    """
+    if os.environ.get("ASTA_BROWSER_NO_HTTP2", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    try:
+        from . import sites
+        return any(s.get("http1") for s in sites.all_sites().values())
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
 async def _open_ctx_bare(pw, channel: str, headless: bool):
     return await pw.chromium.launch_persistent_context(
         str(PROFILE_DIR),
@@ -170,9 +188,7 @@ async def _open_ctx_bare(pw, channel: str, headless: bool):
             # with no HTTP status behind it, because the request never got a
             # response. Off by default: HTTP/1.1 is slower, and this only helps
             # if the fault is the HTTP/2 negotiation rather than the service.
-            *(["--disable-http2"]
-              if os.environ.get("ASTA_BROWSER_NO_HTTP2", "").strip().lower()
-              in ("1", "true", "yes") else []),
+            *(["--disable-http2"] if _no_http2() else []),
         ],
     )
 

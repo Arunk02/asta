@@ -1238,17 +1238,49 @@ async def api_propose_review(request: Request):
         b.get("repo", "")))
 
 
-@app.post("/api/solar/look", dependencies=[Depends(require_auth)])
-async def api_solar_look(request: Request):
-    """Read a Solar page. Clicks nothing, so it is safe on any environment.
+@app.get("/api/sites", dependencies=[Depends(require_auth)])
+async def api_sites(site: str = ""):
+    """Which systems Asta can reach, what it may change, and where it is signed
+    in. Environment NAMES only — the URLs stay in data/sites.json."""
+    from app import sites
+    return {"ok": True, **sites.health(site)}
+
+
+@app.post("/api/sites/look", dependencies=[Depends(require_auth)])
+async def api_sites_look(request: Request):
+    """Read a page of any configured system. Clicks nothing, so it is safe on
+    every environment including production.
 
     Inside the server process on purpose: a Chromium profile is single-writer,
     and a second process opening it closed the page mid-read.
     """
-    from app import solar
+    from app import sites
     b = await request.json()
-    return {"ok": True, **await solar.look(b.get("env", "sit"), b.get("path", ""),
-                                           int(b.get("settle_ms", 12000) or 12000))}
+    return {"ok": True, **await sites.look(
+        b.get("site", ""), b.get("env", ""), b.get("path", ""),
+        int(b.get("settle_ms", 12000) or 12000))}
+
+
+@app.post("/api/sites/filter", dependencies=[Depends(require_auth)])
+async def api_sites_filter(request: Request):
+    """Narrow a list by one of its own filters and report what it then shows."""
+    from app import sites
+    b = await request.json()
+    if not (b.get("field") or "").strip():
+        raise HTTPException(400, "field is required")
+    return {"ok": True, **await sites.choose(
+        b.get("site", ""), b.get("env", ""), b["field"], b.get("value", ""),
+        b.get("path", ""), int(b.get("settle_ms", 12000) or 12000))}
+
+
+@app.post("/api/sites/plan", dependencies=[Depends(require_auth)])
+async def api_sites_plan(request: Request):
+    """What filling a form WOULD do, each value checked against his documents.
+    Types nothing and submits nothing."""
+    from app import sites
+    b = await request.json()
+    return {"ok": True, **await sites.plan_fill(
+        b.get("site", ""), b.get("env", ""), b.get("values") or {}, b.get("path", ""))}
 
 
 @app.post("/api/knowledge/search", dependencies=[Depends(require_auth)])

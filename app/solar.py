@@ -155,6 +155,54 @@ async def login(env: str = "") -> str:
         await pw.stop()
 
 
+#: What a page is asked about itself. Read-only by construction: it returns text
+#: and structure and clicks nothing, so it can be pointed at production.
+_LOOK = """() => {
+  const t = (s, n) => Array.from(document.querySelectorAll(s))
+      .map(e => (e.innerText || e.getAttribute('aria-label') || e.title || '').trim())
+      .filter(x => x && x.length < 80).slice(0, n);
+  const table = document.querySelector('table');
+  return {
+    title: document.title,
+    heading: t('h1,h2', 4),
+    buttons: t('button,[role=button],a[class*=btn]', 30),
+    fields: Array.from(document.querySelectorAll('input,select,textarea'))
+        .map(e => e.name || e.id || e.getAttribute('aria-label') || e.placeholder || e.type)
+        .filter(Boolean).slice(0, 40),
+    columns: table ? Array.from(table.querySelectorAll('thead th,thead td'))
+        .map(e => e.innerText.trim()).filter(Boolean) : [],
+    rows: table ? table.querySelectorAll('tbody tr').length : 0,
+    text: (document.body.innerText || '').slice(0, 2000)
+  };
+}"""
+
+
+async def look(env: str = "sit", path: str = "", settle_ms: int = 12000) -> dict:
+    """What is on a Solar page right now. Reads; clicks nothing.
+
+    Safe on any environment he named, production included, because it cannot
+    change anything: no click, no submit, no navigation beyond the URL given.
+    """
+    missing = configured()
+    if missing:
+        return {"error": missing}
+    base = base_for(env)
+    if not base:
+        return {"error": f"'{env}' is not configured — allowed: {', '.join(envs()) or '(none)'}"}
+    url = base + (path if path.startswith("/") else f"/{path}" if path else "")
+    if not allowed(url):
+        return {"error": "that URL is outside the environments he allowed"}
+    from . import teams_bridge
+    async with teams_bridge.site_page(url) as page:
+        await page.wait_for_timeout(max(0, int(settle_ms)))
+        out = await page.evaluate(_LOOK)
+        out["signed_in"] = "microsoftonline" not in page.url and "/login" not in page.url.lower()
+        out["env"] = env
+        # The path only — his hostnames stay out of anything that gets logged.
+        out["path"] = page.url[len(base):] if page.url.startswith(base) else "(elsewhere)"
+    return out
+
+
 def health() -> dict:
     """What Solar can and cannot do right now."""
     from . import store

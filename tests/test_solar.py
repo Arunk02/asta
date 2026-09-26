@@ -95,3 +95,37 @@ def test_health_names_environments_and_never_their_urls(monkeypatch):
     out = solar.health()
     assert out["writable"] == ["sit"] and "prod" in out["read_only"]
     assert "example.com" not in repr(out), "a URL leaked into the health report"
+
+
+# --- looking is not touching -------------------------------------------------------------
+
+def test_looking_at_a_page_clicks_nothing():
+    """`look` is safe on production because it CANNOT change anything: it reads
+    text and structure and nothing else. Structural, because the guarantee is
+    the absence of something."""
+    import inspect
+    src = inspect.getsource(solar.look) + solar._LOOK
+    for forbidden in (".click(", ".fill(", ".press(", ".type(", ".select_option(",
+                      ".check(", ".submit(", ".set_input_files("):
+        assert forbidden not in src, f"look() can {forbidden}"
+
+
+def test_a_look_outside_the_allowed_environments_is_refused(monkeypatch):
+    import asyncio
+    monkeypatch.setenv("ASTA_SOLAR_ENVS", "sit=https://solar-sit.example.com")
+    out = asyncio.run(solar.look("prod"))
+    assert "not configured" in out["error"]
+
+
+def test_a_look_reports_the_path_and_never_the_host(monkeypatch):
+    """His hostnames stay out of anything that could be logged or notified."""
+    import inspect
+    assert "page.url[len(base):]" in inspect.getsource(solar.look)
+
+
+def test_the_browser_is_shared_rather_than_opened_again():
+    """A Chromium profile is single-writer. A second process opening it gave
+    "Target page, context or browser has been closed" in the middle of a read,
+    which is why Solar goes through the same pool and the same lock as Teams."""
+    import inspect
+    assert "teams_bridge.site_page" in inspect.getsource(solar.look)

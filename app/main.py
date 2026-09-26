@@ -1238,6 +1238,19 @@ async def api_propose_review(request: Request):
         b.get("repo", "")))
 
 
+@app.post("/api/solar/look", dependencies=[Depends(require_auth)])
+async def api_solar_look(request: Request):
+    """Read a Solar page. Clicks nothing, so it is safe on any environment.
+
+    Inside the server process on purpose: a Chromium profile is single-writer,
+    and a second process opening it closed the page mid-read.
+    """
+    from app import solar
+    b = await request.json()
+    return {"ok": True, **await solar.look(b.get("env", "sit"), b.get("path", ""),
+                                           int(b.get("settle_ms", 12000) or 12000))}
+
+
 @app.post("/api/knowledge/search", dependencies=[Depends(require_auth)])
 async def api_knowledge_search(request: Request):
     """His own documents, searched with citations — over HTTP like everything

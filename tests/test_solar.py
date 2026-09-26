@@ -104,7 +104,7 @@ def test_looking_at_a_page_clicks_nothing():
     text and structure and nothing else. Structural, because the guarantee is
     the absence of something."""
     import inspect
-    src = inspect.getsource(solar.look) + solar._LOOK
+    src = inspect.getsource(solar.look) + inspect.getsource(solar._look_once) + solar._LOOK
     for forbidden in (".click(", ".fill(", ".press(", ".type(", ".select_option(",
                       ".check(", ".submit(", ".set_input_files("):
         assert forbidden not in src, f"look() can {forbidden}"
@@ -120,7 +120,7 @@ def test_a_look_outside_the_allowed_environments_is_refused(monkeypatch):
 def test_a_look_reports_the_path_and_never_the_host(monkeypatch):
     """His hostnames stay out of anything that could be logged or notified."""
     import inspect
-    assert "page.url[len(base):]" in inspect.getsource(solar.look)
+    assert "page.url[len(base):]" in inspect.getsource(solar._look_once)
 
 
 def test_the_browser_is_shared_rather_than_opened_again():
@@ -128,4 +128,27 @@ def test_the_browser_is_shared_rather_than_opened_again():
     "Target page, context or browser has been closed" in the middle of a read,
     which is why Solar goes through the same pool and the same lock as Teams."""
     import inspect
-    assert "teams_bridge.site_page" in inspect.getsource(solar.look)
+    assert "teams_bridge.site_page" in inspect.getsource(solar._look_once)
+
+
+def test_a_read_reports_the_calls_that_never_answered(monkeypatch):
+    """Live, 26 Sep: Solar's booking list showed "Error in fetching bookings"
+    with no failed HTTP response behind it, because the calls never got a
+    response at all — net::ERR_HTTP2_PROTOCOL_ERROR. A watcher on responses
+    alone reported nothing, and a symptom with no cause is where an hour goes."""
+    import inspect
+    src = inspect.getsource(solar._look_once)
+    assert "requestfailed" in inspect.getsource(
+        __import__("app.teams_bridge", fromlist=["x"]).site_page)
+    assert "failed_watch=_died" in src, "only HTTP failures are watched"
+
+
+def test_the_watcher_goes_on_before_the_page_is_navigated():
+    """Attached after `goto`, it misses exactly the calls worth watching — which
+    is how the first read came back with an empty list of failures."""
+    import inspect
+
+    from app import teams_bridge
+    src = inspect.getsource(teams_bridge.site_page)
+    assert src.index("requestfailed") < src.index("tab.goto")
+    assert src.index('tab.on("response"') < src.index("tab.goto")

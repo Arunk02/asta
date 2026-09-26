@@ -172,7 +172,17 @@ _LOOK = """() => {
     columns: table ? Array.from(table.querySelectorAll('thead th,thead td'))
         .map(e => e.innerText.trim()).filter(Boolean) : [],
     rows: table ? table.querySelectorAll('tbody tr').length : 0,
-    text: (document.body.innerText || '').slice(0, 2000)
+    first_rows: table ? Array.from(table.querySelectorAll('tbody tr')).slice(0, 3)
+        .map(tr => Array.from(tr.querySelectorAll('td')).slice(0, 8)
+            .map(td => td.innerText.trim().slice(0, 30))) : [],
+    row_actions: table ? Array.from(table.querySelectorAll(
+        'tbody tr:first-child button, tbody tr:first-child a, tbody tr:first-child [role=button]'))
+        .map(e => (e.innerText || e.getAttribute('aria-label') || e.title || '').trim())
+        .filter(Boolean).slice(0, 12) : [],
+    text: (document.body.innerText || '').slice(0, 6000),
+    links: Array.from(document.querySelectorAll('a[href]'))
+        .map(a => a.getAttribute('href')).filter(h => h && !h.startsWith('#'))
+        .filter((h, i, all) => all.indexOf(h) === i).slice(0, 40)
   };
 }"""
 
@@ -192,10 +202,62 @@ async def look(env: str = "sit", path: str = "", settle_ms: int = 12000) -> dict
     url = base + (path if path.startswith("/") else f"/{path}" if path else "")
     if not allowed(url):
         return {"error": "that URL is outside the environments he allowed"}
+    # Twice, because the shared browser can be taken away mid-read. Teams'
+    # own recovery closes the pool when it thinks the session is wedged, and it
+    # does not know a Solar tab is open in it — the first read after a server
+    # restart died that way with "Target page, context or browser has been
+    # closed". A second attempt gets a freshly built context.
+    last = ""
+    for attempt in (1, 2):
+        try:
+            return await _look_once(env, base, url, settle_ms)
+        except Exception as exc:                                # noqa: BLE001
+            last = f"{type(exc).__name__}: {exc}"[:200]
+            if attempt == 1:
+                from . import teams_bridge
+                await teams_bridge.close_pool()
+    return {"error": f"could not read the page — {last}", "env": env}
+
+
+async def _look_once(env: str, base: str, url: str, settle_ms: int) -> dict:
     from . import teams_bridge
-    async with teams_bridge.site_page(url) as page:
-        await page.wait_for_timeout(max(0, int(settle_ms)))
+    # What the page ASKED FOR and did not get. "Error in fetching bookings" on
+    # the screen is a sentence; the status behind it is the thing worth telling
+    # him, and it is the difference between Asta reporting a symptom and Asta
+    # reporting a cause. Reading responses changes nothing.
+    failed: list[dict] = []
+
+    def _note(response) -> None:
+        with contextlib.suppress(Exception):
+            if response.status >= 400:
+                path = response.url.split("?", 1)[0]
+                failed.append({"status": response.status,
+                               # The path, never the host: see the module docstring.
+                               "call": path[path.find("/", 9):][:140] if "//" in path else path[:140]})
+
+    def _died(request) -> None:
+        with contextlib.suppress(Exception):
+            path = request.url.split("?", 1)[0]
+            failed.append({"status": (request.failure or "failed")[:60],
+                           "call": path[path.find("/", 9):][:140] if "//" in path else path[:140]})
+
+    async with teams_bridge.site_page(url, watch=_note, failed_watch=_died) as page:
+        # A React app renders after its data arrives, so settling on the network
+        # beats a fixed sleep — and the fixed wait that remains is short, because
+        # it is held inside the browser lock that every Teams read also needs.
+        with contextlib.suppress(Exception):
+            await page.wait_for_load_state("networkidle", timeout=max(4000, int(settle_ms)))
+        await page.wait_for_timeout(2500)
         out = await page.evaluate(_LOOK)
+        if failed:
+            # Deduplicated: one broken call retried nine times is one fault.
+            seen, unique = set(), []
+            for f in failed:
+                mark = (f["status"], f["call"])
+                if mark not in seen:
+                    seen.add(mark)
+                    unique.append(f)
+            out["failed_calls"] = unique[:10]
         out["signed_in"] = "microsoftonline" not in page.url and "/login" not in page.url.lower()
         out["env"] = env
         # The path only — his hostnames stay out of anything that gets logged.

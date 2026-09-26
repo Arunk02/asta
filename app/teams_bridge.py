@@ -139,6 +139,24 @@ async def _open_ctx(pw, channel: str, headless: bool):
     return ctx
 
 
+def _no_http2() -> bool:
+    """Whether to fall back to HTTP/1.1 for every site this browser drives.
+
+    Solar's API calls die with net::ERR_HTTP2_PROTOCOL_ERROR here — the booking
+    list showed "Error in fetching bookings" with no HTTP status behind it,
+    because the requests never got a response. One browser is shared, so this is
+    a browser-wide setting; a site asks for it by setting "http1" in
+    data/sites.json, and the environment variable still forces it.
+    """
+    if os.environ.get("ASTA_BROWSER_NO_HTTP2", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    try:
+        from . import sites
+        return any(s.get("http1") for s in sites.all_sites().values())
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
 async def _open_ctx_bare(pw, channel: str, headless: bool):
     return await pw.chromium.launch_persistent_context(
         str(PROFILE_DIR),
@@ -165,6 +183,12 @@ async def _open_ctx_bare(pw, channel: str, headless: bool):
             # Asta's microphone is an AudioContext, and Chrome starts one
             # suspended until a person clicks something. Nobody clicks here.
             "--autoplay-policy=no-user-gesture-required",
+            # Solar's own API calls die with net::ERR_HTTP2_PROTOCOL_ERROR in
+            # this browser — the booking list shows "Error in fetching bookings"
+            # with no HTTP status behind it, because the request never got a
+            # response. Off by default: HTTP/1.1 is slower, and this only helps
+            # if the fault is the HTTP/2 negotiation rather than the service.
+            *(["--disable-http2"] if _no_http2() else []),
         ],
     )
 
@@ -274,7 +298,7 @@ async def teams_page():
 
 
 @contextlib.asynccontextmanager
-async def site_page(url: str, timeout: int = 60000):
+async def site_page(url: str, timeout: int = 60000, watch=None, failed_watch=None):
     """A page on ANOTHER corporate site, in the same profile and under the same lock.
 
     Solar sits behind the same SSO as Teams, so it needs the same cookies — and
@@ -289,6 +313,18 @@ async def site_page(url: str, timeout: int = 60000):
             raise RuntimeError("no browser context")
         tab = await ctx.new_page()
         try:
+            if failed_watch is not None:
+                # A request that never got a response at all — DNS, TLS, CORS,
+                # an abort. There is no `response` event for those, which is why
+                # a screen saying "error in fetching" can come with an empty list
+                # of failed responses.
+                tab.on("requestfailed", failed_watch)
+            if watch is not None:
+                # Attached BEFORE the navigation, or it misses the very calls
+                # worth watching: the first read of Solar's booking list showed
+                # "Error in fetching bookings" on screen and no failed request,
+                # because the listener went on after `goto` had finished.
+                tab.on("response", watch)
             await tab.goto(url, wait_until="domcontentloaded", timeout=timeout)
             yield tab
         finally:

@@ -1,0 +1,71 @@
+# Learning from what HE decided — Round 3, P12.
+#
+# "Approvals, edits, rejections and corrections are logged but never learned
+# from, and confidence is never calibrated."
+#
+# The bench says whether Asta works. The ledger says whether he agreed with it,
+# and those are different questions — P6's loop could only ever hear the first.
+# These hold the second one going through the same fence: a bounded candidate,
+# proved against the version running now, never promoted by the learner itself.
+
+scenarios:
+  - id: a-claim-that-overstates-itself-is-corrected
+    title: Claimed 0.9, taken as written half the time — the claim is what gets pulled down
+    why: >
+      Every gate that decides whether to ask him reads that number. A confidence
+      that means nothing makes all of them meaningless at once.
+    twin: false
+    setup:
+      experience:
+        - {kind: send, target: "Alex Kumar", verdict: as_is, confidence: 0.9, times: 10}
+        - {kind: send, target: "Alex Kumar", verdict: rejected, confidence: 0.9, times: 10}
+    checks:
+      - learners: {knob: ASTA_CONFIDENCE_SHIFT, direction: down}
+
+  - id: a-claim-that-means-what-it-says-is-left-alone
+    title: Claimed 0.9, taken as written nine times in ten — nothing changes
+    why: The commonest outcome of a learner must be no change at all.
+    twin: false
+    setup:
+      experience:
+        - {kind: send, target: "Alex Kumar", verdict: as_is, confidence: 0.9, times: 18}
+        - {kind: send, target: "Alex Kumar", verdict: rejected, confidence: 0.9, times: 2}
+    checks:
+      - learners: {knob: ASTA_CONFIDENCE_SHIFT, absent: true}
+
+  - id: thin-evidence-teaches-nothing
+    title: Five judgements propose nothing at all
+    why: >
+      A learner acting on five judgements is a random number generator with a
+      changelog.
+    twin: false
+    setup:
+      experience:
+        - {kind: send, target: "Alex Kumar", verdict: rejected, confidence: 0.9, times: 5}
+    checks:
+      - learners: {none: true}
+
+  - id: silence-is-not-a-verdict-on-the-words
+    title: Pushes he never opened do not raise the bar for sending
+    why: >
+      "Ignored" says he was busy. Reading it as "the draft was wrong" would stop
+      Asta sending the things he would have approved.
+    twin: false
+    setup:
+      experience:
+        - {kind: send, target: "Alex Kumar", verdict: ignored, confidence: 0.9, times: 30}
+    checks:
+      - learners: {knob: ASTA_SEND_MIN_CONFIDENCE, absent: true}
+
+  - id: a-habit-becomes-a-rule-before-he-has-to-repeat-it
+    title: The greeting he has cut nine times becomes a drafting rule
+    why: >
+      A correction he makes by hand every day is a rule Asta could have followed
+      the first time.
+    twin: false
+    setup:
+      experience:
+        - {kind: send, target: "Alex Kumar", verdict: amended, times: 9,
+           before: "Hi Alex, the build passed.", after: "The build passed."}
+    checks:
+      - drafting_rule: "greeting"

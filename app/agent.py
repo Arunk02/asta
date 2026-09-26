@@ -1869,6 +1869,26 @@ def _terms(terms) -> list[str]:
     return [str(t).strip() for t in (terms or []) if str(t).strip()]
 
 
+async def search_knowledge(question: str, limit: int = 3) -> str:
+    """Search Arun's own documents and answer WITH CITATIONS.
+
+    His knowledge folder holds the documents that are not in any repo and not on
+    Confluence in a readable form — the NAM inland booking flow, the Telikos
+    end-to-end flow. Ask this BEFORE guessing at how one of those flows works: a
+    guess about the booking flow reads exactly like knowledge, and he cannot
+    tell the difference from the answer.
+
+    Every passage comes back with the document and the page or heading it sits
+    on, so he can check it. Nothing is summarised here — a summary would put a
+    model between him and his own document, and every invented word would arrive
+    wearing a citation.
+    """
+    from . import knowledge
+    with contextlib.suppress(Exception):
+        knowledge.reindex()          # only re-reads what changed on disk
+    return knowledge.answer(question, limit=max(1, min(int(limit or 3), 8)))
+
+
 async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
                        namespace: str = "", errors_only: bool = True) -> str:
     """Search production logs (Loki) and get back what is WRONG, not a log dump.

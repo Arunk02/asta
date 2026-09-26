@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import json
 import os
+import pathlib
 import re
 import time
 import traceback
@@ -208,6 +209,31 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
         world.log_lines.append(dict(line))
     for flow in s.get("workflows", []) or []:
         world.workflows.append(dict(flow))
+    # Documents in his knowledge folder, written into a sandbox for this run —
+    # the real folder is his and a scenario must never read or touch it.
+    docs = s.get("knowledge") or {}
+    if docs:
+        import tempfile
+        root = pathlib.Path(tempfile.mkdtemp(prefix="asta-knowledge-"))
+        for name, body in docs.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(body)
+        state["env_undo"].append(("ASTA_KNOWLEDGE_DIR", os.environ.get("ASTA_KNOWLEDGE_DIR")))
+        os.environ["ASTA_KNOWLEDGE_DIR"] = str(root)
+        from app import knowledge as _k
+        _k.reindex()
+    # Judgements he already made, so a learner has something to read. Written
+    # through `ledger.record` rather than into the table, so a scenario cannot
+    # set up a row the real code could never produce.
+    for row in s.get("experience", []) or []:
+        from app import ledger
+        row = dict(row)
+        times = int(row.pop("times", 1))
+        for _ in range(times):
+            ledger.record(row.get("kind", "send"), row.get("target", ""),
+                          row.get("verdict", "as_is"),
+                          confidence=row.get("confidence"),
+                          before=row.get("before", ""), after=row.get("after", ""))
     for key, value in (s.get("kv") or {}).items():
         store.kv_set(key, _clock(value))
     for key, value in (s.get("env") or {}).items():
@@ -321,11 +347,22 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
             with contextlib.suppress(Exception):
                 await turn
     elif kind == "colleague":
-        task = responder.respond(arg.get("source", "teams-chat"), arg.get("who", "A colleague"),
-                                 arg.get("text", ""), priority=arg.get("priority"),
-                                 context=arg.get("context", ""))
-        if task:
-            state["aliases"]["investigation"] = task["id"]
+        # Through the steward first, exactly as `chat_watch` does: it decides
+        # both whether this reaches his phone and whether anything investigates
+        # it, and a scenario that skipped it would be testing a path nobody runs.
+        from app import steward
+        who, said = arg.get("who", "A colleague"), arg.get("text", "")
+        opening = steward.consider(who, said)
+        if opening["hold"]:
+            state.setdefault("held", []).append(who)
+        else:
+            if opening["opened_with"]:
+                said = f"{opening['opened_with']}\n{said}"
+            task = responder.respond(arg.get("source", "teams-chat"), who, said,
+                                     priority=arg.get("priority"),
+                                     context=arg.get("context", ""))
+            if task:
+                state["aliases"]["investigation"] = task["id"]
     elif kind == "spawn":
         t = tasks.spawn(arg.get("title", "work"), arg.get("prompt", "do it"),
                         arg.get("kind", "code"), arg.get("workspace"),
@@ -651,11 +688,41 @@ def _check_outcome(arg, world, state):
     return ""
 
 
+def _check_learners(arg, world, state):
+    """What the learners would propose from the ledger as it now stands."""
+    from app import learners
+    got = learners.propose()
+    if arg.get("none"):
+        return f"proposed {[c.knob for c in got]}, expected nothing" if got else ""
+    knob = arg.get("knob")
+    found = [c for c in got if c.knob == knob]
+    if arg.get("absent"):
+        return f"proposed {knob} ({found[0].after})" if found else ""
+    if not found:
+        return f"nothing proposed for {knob} (got {[c.knob for c in got]})"
+    c = found[0]
+    if arg.get("direction") == "down" and not c.after < c.before():
+        return f"{knob} went {c.before()} -> {c.after}, expected down"
+    if arg.get("direction") == "up" and not c.after > c.before():
+        return f"{knob} went {c.before()} -> {c.after}, expected up"
+    return ""
+
+
+def _check_drafting_rule(arg, world, state):
+    from app import learners
+    rules = learners.drafting_rules()
+    if not any(re.search(arg, r, re.I) for r in rules):
+        return f"no drafting rule matching {arg!r} (got {rules})"
+    return ""
+
+
 def _check_kv(arg, world, state):
     from app import store
     got = store.kv_get(arg["key"])
     if "equals" in arg and got != str(arg["equals"]):
         return f"kv {arg['key']}={got!r}, expected {arg['equals']!r}"
+    if arg.get("contains") and arg["contains"].lower() not in (got or "").lower():
+        return f"kv {arg['key']}={got!r}, expected it to contain {arg['contains']!r}"
     if arg.get("set") and not got:
         return f"kv {arg['key']} is empty"
     if arg.get("empty") and got:
@@ -821,6 +888,8 @@ CHECKS = {
     "observed": _check_observed,
     "outcome": _check_outcome,
     "kv": _check_kv,
+    "learners": _check_learners,
+    "drafting_rule": _check_drafting_rule,
     "brain_calls": _check_brain_calls,
     "tool_result_contains": _check_tool_result,
     "brain_flags": _check_brain_flags,

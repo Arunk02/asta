@@ -1,0 +1,55 @@
+# His own documents, answered with citations — Round 3, P13.
+#
+# The two that prompted it are a Word file describing the NAM inland booking
+# flow and a PDF of the Telikos end-to-end flow. Neither is in a repo and
+# neither is on Confluence in a form a brain can read, so Asta guessed — and a
+# guess about a booking flow reads exactly like knowledge, which is the worst
+# of the three options.
+
+scenarios:
+  - id: a-flow-question-is-answered-from-his-own-documents
+    title: '"what happens when a booking is cancelled" is answered from the document, with the page'
+    why: >
+      The answer has to be checkable. A knowledge base nobody can check is a
+      more confident way to be wrong.
+    twin: false
+    setup:
+      knowledge:
+        "inland-booking.md": |
+          # NAM inland booking
+
+          ## Cancellation
+          When a booking is cancelled the transport order must be released
+          before the STF is raised. Releasing it afterwards leaves an orphaned
+          transport order that the nightly job cannot reconcile.
+    brains:
+      chat:
+        - calls: [{tool: search_knowledge,
+                   args: {question: "what happens to the transport order when a booking is cancelled"}}]
+          text: "Here is what the document says."
+    steps:
+      - say: "what happens to the transport order when a booking is cancelled?"
+    checks:
+      - tool_result_contains: {tool: search_knowledge, text: "released"}
+      - tool_result_contains: {tool: search_knowledge, text: "inland-booking.md"}
+      - tool_result_contains: {tool: search_knowledge, text: "Cancellation"}
+
+  - id: what-it-does-not-know-it-says
+    title: A question his documents do not cover is answered with "nothing covers that"
+    why: >
+      The failure being closed is a confident answer with no source. Saying
+      nothing is known sends him to look; inventing an answer does not.
+    twin: false
+    setup:
+      knowledge:
+        "inland-booking.md": |
+          # NAM inland booking
+          Only about inland bookings and transport orders.
+    brains:
+      chat:
+        - calls: [{tool: search_knowledge, args: {question: "kubernetes ingress config"}}]
+          text: "Nothing in your documents covers that."
+    steps:
+      - say: "what does our kubernetes ingress config look like?"
+    checks:
+      - tool_result_contains: {tool: search_knowledge, text: "Nothing in his knowledge folder"}

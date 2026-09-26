@@ -651,6 +651,17 @@ async def sweep(notify=None) -> list[dict]:
                 attention.mark_acted(key, why="he replied")
                 attention.settle_with(who)
                 continue
+            # A greeting with nothing in it is the START of a conversation, not
+            # news. Held here rather than pushed, and the message that explains
+            # it — arriving seconds later — is what reaches him, once, with the
+            # greeting behind it. See app/steward.py.
+            from . import steward
+            opening = steward.consider(who, text)
+            if opening["hold"]:
+                attention.mark_dropped(key)
+                continue
+            if opening["opened_with"]:
+                text = f"{opening['opened_with']}\n{text}"
             handled.append({"chat": chat, "who": who, "text": text, "priority": pri, "key": key})
             lines.append(render(chat, who, text, pri, known=known))
             # The few lines BEFORE this one, from the same person. People paste

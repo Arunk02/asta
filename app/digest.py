@@ -16,6 +16,8 @@ dropped: the UI bell and the ledger already have every item.
 
 from __future__ import annotations
 
+import contextlib
+
 import json
 import time
 
@@ -86,6 +88,14 @@ def render(rows: list[dict], reason: str = "") -> str:
 async def flush(reason: str = "") -> dict:
     """Send the digest now, or report that there was nothing to send."""
     rows = take()
+    # People who said hello and never said why. A hold is not a drop — he still
+    # gets to know somebody tried to reach him — but it belongs in the quiet
+    # channel, not as a push an hour after the fact. See app/steward.py.
+    from . import steward
+    with contextlib.suppress(Exception):
+        line = steward.line_for(steward.expired())
+        if line:
+            rows = rows + [{"text": line, "source": "steward", "why": "said hello only"}]
     if not rows:
         return {"sent": False, "items": 0}
     from . import notify

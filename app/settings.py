@@ -25,6 +25,13 @@ KNOBS: dict[str, tuple[float, float, float, str]] = {
     "ASTA_ATTENTION_MIN_SEEN": (10, 5, 50, "items from a source before its record counts"),
     "ASTA_ATTENTION_IGNORE_SHARE": (0.8, 0.6, 0.95, "ignored share that moves a feed to the digest"),
     "ASTA_RESPOND_MAX_PER_HOUR": (4, 1, 12, "investigations an hour"),
+    # P12. What Asta claims about itself, corrected by what he actually did:
+    # added to every stated confidence before any gate reads it. Starts at 0 —
+    # an uncalibrated claim is used exactly as made.
+    "ASTA_CONFIDENCE_SHIFT": (0.0, -0.3, 0.1, "correction added to a stated confidence"),
+    # The bar a draft must clear to go without asking. The floor is 0.9 and not
+    # lower: below that, "it usually works" is not a reason to send in his name.
+    "ASTA_SEND_MIN_CONFIDENCE": (0.95, 0.9, 1.0, "confidence needed to send unasked"),
 }
 
 

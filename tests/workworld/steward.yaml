@@ -1,0 +1,89 @@
+# The conversation steward — Round 3, P9.
+#
+# "A greeting has nothing to check, so it is forwarded as news. Nothing keeps
+# the conversation open or waits for the real ask."
+#
+# On Teams people type "Hi", let it send, and type the real question ten seconds
+# later. Asta treated the "Hi" as a thing needing attention and the question as
+# a second thing: two interruptions for one conversation, and the first of them
+# carried no information at all, because the message it was about had not been
+# written yet.
+
+scenarios:
+  - id: a-bare-hello-starts-nothing
+    title: '"Hi" from a colleague investigates nothing and is held open instead'
+    why: >
+      There is nothing in it to check and nothing in it to answer. Spending an
+      investigation — or an interruption — on it is spending them on a message
+      that has not been written yet.
+    twin: false
+    setup:
+      # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
+      env: {ASTA_RESPOND: "1"}
+    steps:
+      - colleague: {who: "Alex Kumar", text: "Hi"}
+    checks:
+      - outcome: {kind: "steward", outcome: "held"}
+      - kv: {key: "steward:Alex Kumar", contains: "waiting"}
+
+  - id: the-ask-that-follows-is-the-one-that-counts
+    title: The question typed ten seconds later is investigated, carrying the greeting
+    why: The greeting and the ask are one conversation, and he should see it as one.
+    twin: false
+    setup:
+      # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
+      env: {ASTA_RESPOND: "1"}
+    steps:
+      - colleague: {who: "Alex Kumar", text: "Hi"}
+      - colleague: {who: "Alex Kumar", text: "can you check why STF is not done for booking 88271?"}
+    checks:
+      - outcome: {kind: "steward", outcome: "released"}
+      - kv: {key: "steward:Alex Kumar", empty: true}
+
+  - id: a-greeting-with-the-ask-in-it-is-not-held
+    title: '"Hi, can you check 88271?" is a question, not a greeting'
+    why: >
+      Holding a message that already contains the ask would delay the very thing
+      the steward exists to get to him sooner.
+    twin: false
+    setup:
+      # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
+      env: {ASTA_RESPOND: "1"}
+    steps:
+      - colleague: {who: "Alex Kumar", text: "Hi, can you check why STF is not done for booking 88271?"}
+    checks:
+      - outcome: {kind: "steward", outcome: "straight"}
+      - kv: {key: "steward:Alex Kumar", empty: true}
+
+  - id: urgency-is-never-held
+    title: '"Hi, prod is down" goes straight through'
+    why: >
+      It opens with a greeting and is not one. The steward must never be the
+      reason an outage waited for a second message.
+    twin: false
+    setup:
+      # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
+      env: {ASTA_RESPOND: "1"}
+    steps:
+      - colleague: {who: "Alex Kumar", text: "Hi, prod is down and bookings are failing"}
+    checks:
+      - outcome: {kind: "steward", outcome: "straight"}
+      - kv: {key: "steward:Alex Kumar", empty: true}
+
+  - id: two-people-waiting-are-two-conversations
+    title: One colleague's question does not release another colleague's hold
+    why: >
+      The hold is per person. Releasing them together would forward a greeting
+      nobody has explained yet.
+    twin: false
+    setup:
+      # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
+      env: {ASTA_RESPOND: "1"}
+    steps:
+      - colleague: {who: "Alex Kumar", text: "Hi"}
+      - colleague: {who: "Nakka Harika", text: "good morning"}
+      - colleague: {who: "Alex Kumar", text: "the booking consumer is throwing a null pointer"}
+    checks:
+      - outcome: {kind: "steward", outcome: "straight"}
+      - kv: {key: "steward:Alex Kumar", empty: true}
+      - kv: {key: "steward:Nakka Harika", contains: "waiting"}

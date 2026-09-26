@@ -952,6 +952,18 @@ def kv_set(key: str, value: str) -> None:
         )
 
 
+def kv_like(pattern: str) -> dict[str, str]:
+    """Every kv row whose key matches a SQL LIKE pattern, e.g. "steward:%".
+
+    For the handful of places that keep a row PER SOMETHING — one per colleague,
+    one per thread — and need to sweep them. A table scan over a few dozen rows,
+    which is what this table is.
+    """
+    with _connect() as conn:
+        rows = conn.execute("SELECT key, value FROM kv WHERE key LIKE ?", (pattern,)).fetchall()
+    return {r["key"]: r["value"] for r in rows}
+
+
 def kv_del(key: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM kv WHERE key=?", (key,))

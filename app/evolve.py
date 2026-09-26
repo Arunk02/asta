@@ -32,6 +32,7 @@ brain budget as the live bench.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -324,9 +325,21 @@ async def nightly(k: int = 1) -> dict:
     seen = {**observe(), "day": (baseline.get("day") or {}),
             "pass_rate": baseline.get("pass_rate")}
     clusters = diagnose(seen)
+    from . import learners
+    from_him = []
+    with contextlib.suppress(Exception):
+        from_him = [c.cluster for c in learners.propose()]
+    clusters = list(dict.fromkeys([*clusters, *from_him]))
     if not clusters:
         return {"ran": True, "clusters": [], "promoted": None, "why": "nothing to fix"}
     candidates = propose(clusters)
+    # What HE decided, not what the bench scored. The bench says whether Asta
+    # works; the ledger says whether he agreed with it, and those are different
+    # questions — P6 could only ever hear the first one. Same fence either way:
+    # every candidate below is proved against the version running now.
+    from . import learners
+    with contextlib.suppress(Exception):
+        candidates = candidates + learners.propose()
     if not candidates:
         return {"ran": True, "clusters": clusters, "promoted": None,
                 "why": "no bounded change worth trying"}

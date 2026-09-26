@@ -273,6 +273,29 @@ async def teams_page():
             raise
 
 
+@contextlib.asynccontextmanager
+async def site_page(url: str, timeout: int = 60000):
+    """A page on ANOTHER corporate site, in the same profile and under the same lock.
+
+    Solar sits behind the same SSO as Teams, so it needs the same cookies — and
+    a Chromium profile is single-writer, which is why a second process opening
+    it got "Target page, context or browser has been closed" mid-read. One
+    browser, one lock, a throwaway tab per operation.
+    """
+    async with _lock:
+        await _pooled_page()                      # makes sure a context exists
+        ctx = _POOL.get("ctx")
+        if ctx is None:
+            raise RuntimeError("no browser context")
+        tab = await ctx.new_page()
+        try:
+            await tab.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            yield tab
+        finally:
+            with contextlib.suppress(Exception):
+                await tab.close()
+
+
 async def close_pool() -> None:
     """Drop the pooled browser — on shutdown, or when the session is re-logged."""
     async with _lock:

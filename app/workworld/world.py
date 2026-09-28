@@ -40,6 +40,41 @@ class SandboxBreach(RuntimeError):
     """Something reached for the real world. Always a scenario failure."""
 
 
+#: The worlds whose doubles are in place RIGHT NOW, oldest first.
+#:
+#: `evolve.measure` runs the bench inside the live server, patching the same
+#: module objects the daemons are using. A world that never comes back out is
+#: therefore not a test failure — it is a silent outage: the chat loop keeps
+#: reading Teams, keeps ranking it, marks every item "notified", and each push
+#: vanishes into a recorder nobody will read. It cost twenty-two hours once.
+#:
+#: A list, not a flag, so nested installs unwind in the right order and so
+#: `restore_all` can say what it had to clean up.
+_INSTALLED: list["World"] = []
+
+
+def installed() -> bool:
+    """Is a bench world holding Asta's own doors? Live loops stand down while it is."""
+    return bool(_INSTALLED)
+
+
+def restore_all() -> list[str]:
+    """Take every installed world's doubles back out; return what was left behind.
+
+    The net under the callers' own `finally`. The live entry point runs this
+    whatever happened, because "the scenario runner has a finally" is exactly the
+    guarantee that was true right up until it wasn't.
+    """
+    left: list[str] = []
+    while _INSTALLED:
+        world = _INSTALLED[-1]
+        left.append(str(world.db_path or "a world with no database"))
+        world.uninstall()                   # removes itself from _INSTALLED
+        if _INSTALLED and _INSTALLED[-1] is world:
+            _INSTALLED.pop()                # never loop on an uninstall that didn't
+    return left
+
+
 @dataclass
 class BrainReply:
     """One scripted answer from a brain.
@@ -284,6 +319,10 @@ class World:
                          repo_ops, store, tasks, teams_bridge, telegram, verify, wa_bridge)
         from app import apps, screen, voice
         p = self._patch
+        # Registered BEFORE the first door is swapped, so a world that dies
+        # halfway through installing is still one `restore_all` can undo.
+        if not any(w is self for w in _INSTALLED):
+            _INSTALLED.append(self)
 
         # 1. The database: a fresh file per scenario. Checked again by
         #    assert_sandboxed, because everything else rests on it.
@@ -318,8 +357,14 @@ class World:
             self.pushes.append({"text": text, "level": "whatsapp", "urgency": "direct"})
             return True
 
+        # Every parameter the real door takes, whether the bench reads it or not.
+        # This signature IS the contract: `chat_watch.sweep` passes `keys=` and the
+        # double did not take it, so a bench run left behind in the live process
+        # turned every Teams push into a swallowed TypeError. Kept honest by
+        # tests/test_bench_doubles.py, which compares the two signatures.
         async def notify_fn(text, level="info", urgency="direct", priority=None, *,
-                            source="", key="", considered=False):
+                            source="", key="", considered=False, asked=False,
+                            keys=()):
             self.pushes.append({"text": text, "level": level, "urgency": urgency})
             store.add_notification(text, level)
             return {"whatsapp": True}
@@ -343,7 +388,8 @@ class World:
             self.documents.append({"path": str(path), "caption": f"voice {seconds}s"})
             return True
 
-        async def spoken(text: str, **kw) -> bytes:
+        async def spoken(text: str, profile: str = "", engine: str = "",
+                         voice: str = "", **kw) -> bytes:
             self.spoke.append(text)
             return b"RIFF" + b"\0" * 64          # enough to be a file, not audio
 
@@ -518,18 +564,18 @@ class World:
         #    branches, fetches and checks out — so the whole of git is confined
         #    to a scratch directory here, and anything outside it is a breach,
         #    not a surprise on his working tree.
-        async def git(repo, *args, timeout=120, stdin=""):
+        async def git(cwd, *args, timeout=120, stdin=""):
             cmd = " ".join(str(a) for a in args)
             # `gh` talking to GitHub touches no working tree, and a PR read from a
             # link is answered from anywhere — so it is judged as the outward act
             # it is (recorded, never performed) rather than as an escape from the
             # sandbox. Everything else must stay inside the scratch directory.
             reaches_github = args and str(args[0]) == "gh"
-            if not reaches_github and str(Path(repo).resolve()) != str(self.scratch.resolve()) \
-                    and self.scratch.resolve() not in Path(repo).resolve().parents:
-                self.breaches.append(f"git outside the sandbox: {repo} — {cmd[:60]}")
+            if not reaches_github and str(Path(cwd).resolve()) != str(self.scratch.resolve()) \
+                    and self.scratch.resolve() not in Path(cwd).resolve().parents:
+                self.breaches.append(f"git outside the sandbox: {cwd} — {cmd[:60]}")
                 return 1, "blocked by the sandbox"
-            self.sent.append({"door": "git", "cmd": cmd, "repo": str(repo),
+            self.sent.append({"door": "git", "cmd": cmd, "repo": str(cwd),
                               "body": stdin[:2000]})
             if "gh pr create" in cmd:
                 url = f"https://github.com/x/y/pull/{900 + len(self.sent)}"
@@ -542,15 +588,15 @@ class World:
 
         # Everything a code task does to a working tree, pointed at the scratch
         # directory. The task engine itself is real; only the trees are not his.
-        p.set(tasks, "_cwd", lambda ws: str(self.scratch))
-        p.set(tasks, "task_cwd", lambda tid, ws: str(self.scratch))
-        p.set(tasks, "code_cwd", lambda ws: str(self.scratch))
+        p.set(tasks, "_cwd", lambda workspace: str(self.scratch))
+        p.set(tasks, "task_cwd", lambda task_id, workspace: str(self.scratch))
+        p.set(tasks, "code_cwd", lambda workspace: str(self.scratch))
         p.set(tasks, "_prepare_branches", _async_value_fn(lambda *a, **k: []))
         p.set(tasks, "mark_rollback_point", _async_value_fn(lambda *a, **k: {}))
         p.set(tasks, "committed_so_far", lambda *a, **k: [])
         p.set(tasks, "_repos_still_needed", lambda *a, **k: [])
         p.set(tasks, "_self_review", _async_value(""))
-        p.set(tasks, "_audit_note", lambda tid: "")
+        p.set(tasks, "_audit_note", lambda task_id: "")
         p.set(tasks, "task_tools", lambda *a, **k: "")
 
         async def pr_state(url):
@@ -563,11 +609,11 @@ class World:
         p.set(verify, "enabled", lambda: bool(self.verify))
         p.set(verify, "resolve_command", lambda cwd, workspace=None: "pytest -q" if self.verify else "")
 
-        async def verify_run(cwd, cmd, _retried=False):
+        async def verify_run(cwd, command, _retried=False):
             step = self.verify.pop(0) if self.verify else {"ok": True}
             ok = bool(step.get("ok", True))
             return verify.VerifyResult(ran=bool(step.get("ran", True)), ok=ok,
-                                       command=cmd, code=0 if ok else 1,
+                                       command=command, code=0 if ok else 1,
                                        tail=step.get("tail", ""))
         p.set(verify, "run", verify_run)
 
@@ -600,7 +646,8 @@ class World:
             chat = chat_brain or ScriptedBrain([], self, "chat")
             task = task_brain or ScriptedBrain([], self, "task")
 
-            async def run_turn(conv, user_text, on_delta=None, on_tool=None, on_usage=None):
+            async def run_turn(conv, user_text, on_delta=None, on_tool=None,
+                               on_usage=None, _retried=False):
                 # What the brain is TOLD, not only what it is asked. The real chat
                 # path builds this orientation every turn and the sandbox replaced
                 # the whole call, so no scenario could assert on it — which is how
@@ -672,6 +719,13 @@ class World:
                 os.environ[key] = old
         self._env_undo = []
         self._patch.undo()
+        # By identity: World is a dataclass, so `==` compares its recorders and
+        # two untouched worlds are equal. Removing "an equal one" would leave the
+        # real leak in the registry and drop an innocent bystander instead.
+        for i, w in enumerate(_INSTALLED):
+            if w is self:
+                _INSTALLED.pop(i)
+                break
 
 
 def _async_value(value):

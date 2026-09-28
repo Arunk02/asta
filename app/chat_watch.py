@@ -701,6 +701,22 @@ def in_a_call() -> bool:
     return teams_bridge.in_a_call()
 
 
+def stand_down() -> bool:
+    """Should this poll be skipped? Both reasons are "somebody else owns it".
+
+    A call owns the browser (see watch_loop). The BENCH owns something worse: it
+    runs inside this process and replaces `notify`, `store.DB_PATH` and the chat
+    rail itself with recorders, so a sweep that lands mid-run reads a temporary
+    database and posts his real Teams messages into a scenario's list. That is
+    how a twenty-two-hour silence started — and it looked exactly like a quiet
+    morning from the outside.
+    """
+    if in_a_call():
+        return True
+    from .workworld import world as bench_world
+    return bench_world.installed()
+
+
 async def watch_loop() -> None:
     """Poll the rail forever. Quiet when nothing moved."""
     from . import notify, teams_bridge, wake
@@ -715,7 +731,7 @@ async def watch_loop() -> None:
         # later "TargetClosedError: Keyboard.press" while still searching for the
         # person's name. `incoming.watch_loop` already stands down for exactly
         # this reason; this loop never learned to.
-        if in_a_call():
+        if stand_down():
             continue
         if not (enabled() and teams_bridge.enabled() and teams_bridge.logged_in_once()
                 and store.kv_get("teams_session_ok") != "0"):

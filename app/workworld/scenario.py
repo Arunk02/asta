@@ -116,19 +116,24 @@ async def run(sc: Scenario, seed: int = 0, live: bool = False) -> list[str]:
 
     world = W.World()
     brains = _brains(sc, world)
-    world.install(chat_brain=brains[0], task_brain=brains[1], live_brains=live,
-                  real_notify=sc.real_notify)
-    if sc.real_notify:
-        # A scenario that exercises Asta's deciding layer has to say which
-        # settings it decides with — on a machine with no .env they are all off,
-        # and the scenario would quietly test nothing. `setup.env` still wins.
-        world.use_env({"ASTA_ATTENTION": "1", "ASTA_DELIVERY": "1",
-                       "ASTA_ATTENTION_LEARN": "1", "ASTA_PUSH_BUDGET": "20"})
-    world.assert_sandboxed()
     failures: list[str] = []
     state: dict = {"aliases": {}, "setup_ids": set(), "env_undo": [],
                    "conv": None, "sink": W.Sink(world)}
+    # `install` and `assert_sandboxed` are INSIDE the try. They used to sit above
+    # it, so a breach — or any other raise before the first step — left the
+    # bench's doubles wired into whatever process was running: in the suite, a
+    # confusing cascade; in the live server, Asta reading Teams for a day and
+    # posting every push into a temporary recorder instead of to his phone.
     try:
+        world.install(chat_brain=brains[0], task_brain=brains[1], live_brains=live,
+                      real_notify=sc.real_notify)
+        if sc.real_notify:
+            # A scenario that exercises Asta's deciding layer has to say which
+            # settings it decides with — on a machine with no .env they are all
+            # off, and the scenario would quietly test nothing. `setup.env` wins.
+            world.use_env({"ASTA_ATTENTION": "1", "ASTA_DELIVERY": "1",
+                           "ASTA_ATTENTION_LEARN": "1", "ASTA_PUSH_BUDGET": "20"})
+        world.assert_sandboxed()
         _apply_setup(sc, world, state)
         # A real brain leg takes a minute or more; a scripted one takes nothing.
         # The window is the same thing either way: "let what this step started finish".

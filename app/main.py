@@ -88,6 +88,9 @@ async def _no_stale_ui(request: Request, call_next):
 @app.on_event("startup")
 async def startup() -> None:
     global MCP_TOOLSETS, MCP_STATUS
+    # This is the process that serves, so it is the one allowed to notice that
+    # launchd is supervising a DIFFERENT one — see health.unsupervised.
+    health.mark_serving()
     store.init()
     memory.ensure_dirs()
     memory.reindex()

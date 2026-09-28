@@ -171,8 +171,13 @@ async def measure(k: int = 1) -> dict:
     database of its own, so a promoted change was invisible to every later
     measurement: tomorrow's baseline measured an Asta nobody was running, and
     the same change could be proposed and "proved" all over again.
+
+    This is the ONE place the bench runs inside the live server, so it is the
+    place that has to guarantee the doors come back. A scenario that dies in a
+    way its own `finally` never sees leaves a recorder where Asta's notify was,
+    and the process keeps running for days — reading everything, saying nothing.
     """
-    from .workworld import day as day_mod, runner
+    from .workworld import day as day_mod, runner, world as bench_world
     was = {name: os.environ.get(name) for name in settings.overrides()}
     for name, value in settings.overrides().items():
         os.environ[name] = str(value)
@@ -185,6 +190,11 @@ async def measure(k: int = 1) -> dict:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = old
+        leaked = bench_world.restore_all()
+        if leaked:
+            store.record_outcome("bench", "leaked", subject="doubles",
+                                 detail=f"{len(leaked)} world(s) left Asta's doors "
+                                        f"replaced; taken back out")
     return runner.summarise(results, k=k, live=False, day_summary=day_mod.summary(seen))
 
 

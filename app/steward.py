@@ -57,12 +57,35 @@ _GREETING = re.compile(
     r"(?:\s+(?:there|arun|bro|buddy|mate|sir|team|all))?"
     r"[\s\W]*$", re.I)
 
-#: A greeting followed by nothing but a check that he is present. Still a
-#: greeting: "are you there?" is not an ask, it is waiting for one.
+#: A greeting followed by nothing but a check that he is present, or by a
+#: request for help that does not say what for. Still a greeting: "are you
+#: there?" is not an ask, and neither is "need ur help" — both are waiting for
+#: one.
+#:
+#: The help half was missing, and it cost the module its whole point. Navya's
+#: "Hi Arunkumar, need ur help" matched neither pattern, so it was pushed to his
+#: phone in red, carrying no information, and he had to drive the rest by hand.
+#: A vocabulary that knows "quick question" but not "need your help" is the same
+#: failure as a review that greps for `"type": "enum"`.
+#:
+#: Anchored at both ends, like _GREETING. "need ur help with booking 88271" HAS
+#: the ask in it and must never be held — the trailing `[\s\W]*$` is what keeps
+#: that true, so any new phrase added here inherits the guarantee.
 _STILL_OPENING = re.compile(
-    r"^\W*(?:hi|hey|hello|yo|hai)?[\s,]*"
+    r"^\W*(?:hi+|hey+|hello+|yo|hai)?[\s,]*"
+    # How they addressed him — "Hi Arunkumar, …". A name and a comma, nothing
+    # more: without this the real message that started all of it, "Hi Arunkumar,
+    # need ur help", failed on the name alone.
+    r"(?:[\w.'-]{2,20}\s*,\s*)?"
     r"(?:are\s+you\s+(?:there|around|free|available)|you\s+(?:there|around|free)|"
-    r"r\s+u\s+there|available\?|free\?|ping|need\s+(?:a\s+)?minute|quick\s+question)"
+    r"r\s+u\s+there|available\?|free\?|ping|need\s+(?:a\s+)?(?:minute|min|sec|second)|"
+    r"quick\s+question|quick\s+one|"
+    # "somebody wants something" with the something left out
+    r"(?:i\s+)?need\s+(?:a\s+little|a\s+bit\s+of|ur|your|some|an?)?\s*"
+    r"(?:help|favou?r|assistance)|"
+    r"(?:can|could|cud)\s+(?:you|u)\s+(?:pls\s+|please\s+)?help(?:\s+me)?|"
+    r"(?:got|have)\s+(?:a|1)\s+(?:minute|min|sec|second)|"
+    r"small\s+help|need\s+help)"
     r"[\s\W]*$", re.I)
 
 #: Words that mean this cannot wait for a second message, whatever it opens with.
@@ -77,6 +100,75 @@ def is_greeting(text: str) -> bool:
     if not said or _URGENT.search(said):
         return False
     return bool(_GREETING.match(said) or _STILL_OPENING.match(said))
+
+
+#: The one outward act in Asta that does not wait for his yes.
+#:
+#: His decision, 28 Sep: *"once u recieved send short message get wht they want,
+#: once you got u have to analyse and come back with the actual result and ask
+#: me check once approve will send, so only final result approval should come to
+#: user"*. So the clarifying question goes on its own, and the ANSWER — the part
+#: that commits him to something — is staged for approval exactly as before.
+#:
+#: The justification is narrow and does not generalise: a question promises
+#: nothing, states nothing on his behalf, and cannot be acted on by the person
+#: receiving it. `responder`'s "auto-analyse, never auto-reply" still holds for
+#: every other message; this is one sentence, to someone who has already started
+#: talking to him, asking them to finish.
+#:
+#: Off unless switched on, like everything else that acts outward.
+def ask_back_enabled() -> bool:
+    return os.environ.get("ASTA_ASK_BACK", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+#: Deliberately a question and nothing else. No "sure", no "I'll look at it" —
+#: a commitment he never approved is exactly the thing this is not allowed to be.
+#:
+#: And courteous, because it goes out in HIS name to a colleague who has just
+#: asked him for something. His rule: *"always use bit polite tone, not rude"* —
+#: short is the house style, but short must not arrive as curt. "What do you
+#: need?" is the shortest correct sentence here and reads like a ticket form.
+#: "Sure, happy to help" would be warmer and is not available: it promises, in
+#: his name, that he will help — and he has not seen the message yet. Courtesy
+#: has to come from HOW it asks, not from agreeing to something on his behalf.
+ASK_BACK = os.environ.get(
+    "ASTA_ASK_BACK_LINE", "Could you tell me a bit more about what you need help with?")
+
+
+def _asked_key(who: str) -> str:
+    return f"steward:asked:{(who or '').strip()}"
+
+
+def ask_back_line(who: str, text: str) -> str:
+    """The question to send this person, or '' to send nothing.
+
+    '' whenever anything at all is uncertain: the flag is off, the message
+    already carries the ask, it is urgent, or this person has already been asked
+    and has not come back yet. A second "what do you need?" is not attentiveness.
+    """
+    from . import store
+    if not (enabled() and ask_back_enabled()):
+        return ""
+    if not is_greeting(text):
+        return ""                       # they already said what they want
+    if (store.kv_get(_asked_key(who)) or "").strip():
+        return ""                       # asked once; the ball is theirs
+    return ASK_BACK
+
+
+def note_asked_back(who: str) -> None:
+    """Remember that this person has been asked, and record it.
+
+    Recorded because this is the only send that nobody approved — an unapproved
+    outward act that is also invisible is not something he could ever audit.
+    """
+    import contextlib
+
+    from . import store
+    store.kv_set(_asked_key(who), f"{time.time():.0f}")
+    with contextlib.suppress(Exception):
+        store.record_outcome("steward", "asked back", subject=(who or "")[:80],
+                             detail=ASK_BACK)
 
 
 def _key(who: str) -> str:

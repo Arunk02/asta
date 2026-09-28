@@ -136,35 +136,45 @@ async def run(seed: int = 20260911, count: int = 150, batch: int = 6) -> DayResu
     from app import chat_watch, main, notify, outlook
     t0 = time.monotonic()
     world = W.World()
-    # The REAL notify: the day is the one measure of how often he is interrupted,
-    # so the layer that decides whether and when to push has to run.
-    world.install(chat_brain=W.ScriptedBrain(
-        [W.BrainReply(text="Nothing outstanding on your side.")] * 60, world, "chat"),
-        task_brain=W.ScriptedBrain([W.BrainReply(text="PLAN READY")] * 40, world, "task"),
-        real_notify=True)
-    world.assert_sandboxed()
-    res = DayResult(events=generate(seed, count))
-    # Nine hours, as nine hours: every window Asta has (batching, quiet hours,
-    # the digest slots, the day's budget) reads the clock.
-    clock = world.use_clock(res.events[0].at if res.events else time.time())
-    # HIS configuration, stated rather than inherited: the day is a measure of
-    # what his Asta does, and on a machine with no .env (CI) the ledger and the
-    # batching are off — which quietly made the day a different day, 21 pushes
-    # instead of 14, with no test able to say why.
-    world.use_env({"ASTA_ATTENTION": "1", "ASTA_DELIVERY": "1", "ASTA_PUSH_BUDGET": "20",
-                   "ASTA_ATTENTION_LEARN": "1", "ASTA_COALESCE_SECONDS": "120"},
-                  keep_existing=True)
-    seed_history(clock.now)
-    conv = W.new_conversation(workspace="booking")
-    sink = W.Sink(world)
     patch = W.Patcher()
     pending: dict[str, list[dict]] = {}
     mail: list[dict] = []
-
-    patch.set(chat_watch, "candidates", _async(lambda: list(pending)))
-    patch.set(chat_watch, "new_in", _async(lambda chat, advance=True: pending.pop(chat, [])))
-    patch.set(chat_watch, "answered_by_him", lambda chat, m: False)
-    patch.set(chat_watch, "_people_he_talks_to", lambda: list(PEOPLE))
+    # Setting up is as dangerous as running. Everything from here to the end of
+    # this block replaces doors in whatever process the day runs in — and the day
+    # runs inside the LIVE server every time `evolve.measure` calls it. A raise
+    # in the middle used to leave those doors replaced for the life of the
+    # process, which is not an error anybody sees: Asta keeps reading Teams and
+    # posts every push into this world's list instead of to his phone.
+    try:
+        # The REAL notify: the day is the one measure of how often he is
+        # interrupted, so the layer that decides whether and when to push has to run.
+        world.install(chat_brain=W.ScriptedBrain(
+            [W.BrainReply(text="Nothing outstanding on your side.")] * 60, world, "chat"),
+            task_brain=W.ScriptedBrain([W.BrainReply(text="PLAN READY")] * 40, world, "task"),
+            real_notify=True)
+        world.assert_sandboxed()
+        res = DayResult(events=generate(seed, count))
+        # Nine hours, as nine hours: every window Asta has (batching, quiet hours,
+        # the digest slots, the day's budget) reads the clock.
+        clock = world.use_clock(res.events[0].at if res.events else time.time())
+        # HIS configuration, stated rather than inherited: the day is a measure of
+        # what his Asta does, and on a machine with no .env (CI) the ledger and the
+        # batching are off — which quietly made the day a different day, 21 pushes
+        # instead of 14, with no test able to say why.
+        world.use_env({"ASTA_ATTENTION": "1", "ASTA_DELIVERY": "1", "ASTA_PUSH_BUDGET": "20",
+                       "ASTA_ATTENTION_LEARN": "1", "ASTA_COALESCE_SECONDS": "120"},
+                      keep_existing=True)
+        seed_history(clock.now)
+        conv = W.new_conversation(workspace="booking")
+        sink = W.Sink(world)
+        patch.set(chat_watch, "candidates", _async(lambda: list(pending)))
+        patch.set(chat_watch, "new_in", _async(lambda chat, advance=True: pending.pop(chat, [])))
+        patch.set(chat_watch, "answered_by_him", lambda chat, m: False)
+        patch.set(chat_watch, "_people_he_talks_to", lambda: list(PEOPLE))
+    except BaseException:
+        patch.undo()
+        world.uninstall()
+        raise
 
     async def flush() -> None:
         from app import delivery, digest

@@ -14,7 +14,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import re
 import shutil
+import subprocess
+import sys
 import time
 
 from . import (quiet, attention, copilot_cli, daemon, diagnostics, guardrails, memory,
@@ -22,6 +26,57 @@ from . import (quiet, attention, copilot_cli, daemon, diagnostics, guardrails, m
 
 CHECK_SECONDS = 6 * 3600
 MIN_FREE_GB = 5
+
+#: The LaunchAgent that is meant to own the server. See `unsupervised`.
+SERVER_JOB = "com.asta.server"
+
+#: True only in the process that is actually serving requests, set once by the
+#: startup hook. Everything else — the suite, a CLI, a one-off script — has a PID
+#: of its own and is not a second Asta.
+_SERVING = False
+
+
+def mark_serving() -> None:
+    """Called once, by the server's startup hook, in the process that serves."""
+    global _SERVING
+    _SERVING = True
+
+
+def supervising_pid() -> int:
+    """The PID launchd believes is Asta's server; 0 when it is managing none."""
+    if sys.platform != "darwin":
+        return 0
+    try:
+        out = subprocess.run(["launchctl", "list", SERVER_JOB],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+    if out.returncode != 0:
+        return 0
+    found = re.search(r'"PID"\s*=\s*(\d+)', out.stdout or "")
+    return int(found.group(1)) if found else 0
+
+
+def unsupervised() -> str:
+    """'' unless the process answering is not the one launchd supervises.
+
+    Two servers, one port: whichever binds first wins, and the other is restarted
+    by launchd forever. Nothing about that is visible — the UI answers, Teams is
+    read, the log says only "address already in use" — and `launchctl kickstart`
+    then restarts the process that has never served a request. It ran that way for
+    two days, which also meant nothing held in memory here could be cleared by
+    restarting the service.
+    """
+    if not _SERVING:
+        return ""
+    theirs, mine = supervising_pid(), os.getpid()
+    if not theirs or theirs == mine:
+        return ""
+    return (f"TWO servers: the one answering you is pid {mine}, but launchd supervises "
+            f"pid {theirs}, which keeps failing to bind port 8321 and restarting. "
+            f"Restarting the service restarts the wrong one, and nothing held in "
+            f"memory here can be cleared that way. Fix: kill {mine}, then "
+            f"launchctl kickstart -k gui/$(id -u)/{SERVER_JOB}")
 
 
 #: Days of neglect before stale context is worth naming in a health check. Below
@@ -254,6 +309,11 @@ async def checks() -> dict[str, str]:
     for bad in quiet.loud():
         problems[f"repeated:{bad['where']}"] = (
             f"failed {bad['count']}x and was ignored each time — {bad['error'][:70]}")
+    # Named first among the operational ones on purpose: while it is true, every
+    # other line here may be about a process he cannot restart.
+    two = await asyncio.to_thread(unsupervised)
+    if two:
+        problems["two-servers"] = two
     # The last call rehearsal (nightly, app/call_rehearsal.py): a call path that
     # fails there will fail on a colleague next — say so before anyone is rung.
     from . import call_rehearsal

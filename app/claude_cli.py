@@ -88,6 +88,10 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     """
     if not available():
         raise RuntimeError("claude CLI is not installed")
+    # Same stamp the chat turn gets, from the same function — see
+    # copilot_cli.now_line for the Monday this is here to stop repeating.
+    from . import copilot_cli
+    prompt = f"{copilot_cli.now_line()}\n{prompt}"
     cmd = ["claude", "-p", prompt,
            # Parity with the copilot path's --allow-all-tools: the pipeline
            # must run builds/tests unattended. Workspace repos only.
@@ -239,8 +243,7 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     # on his sentence; the wrapper is provenance, not the subject.
     from . import resume as resume_mod
     ranking_text = resume_mod.ranking_text(user_text)
-    now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M %a")
-    umsg = f"[now: {now}]\n{user_text}"
+    umsg = f"{copilot_cli.now_line()}\n{user_text}"
     if prefetched:
         # Live Teams/Outlook context, exactly as Copilot gets it. Same assistant,
         # same rules — a brain that answers "any messages for me?" from a real

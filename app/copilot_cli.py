@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -176,6 +177,36 @@ def _switch_recap(conv: dict, via: str) -> str:
            else "you're continuing it after a model switch")
     return (f"Conversation so far ({why} — pick up where it left off, don't restart):\n"
             + "\n".join(lines))
+
+
+def now_line(now: float | None = None) -> str:
+    """What every brain is told about when it is. One definition, four callers.
+
+    28 Sep: *"some of the tasks are not doing thinking it is sunday"* — on a
+    Monday. Nothing was broken; a brain was asked to infer policy it had no way
+    to evaluate. `guardrails.block()` hands every brain his standing rule frozen
+    as prose — "Quiet on Saturdays and Sundays — one summary Monday 09:00" — and
+    `one_shot`, the entry point for every background call (tasks, the responder,
+    digests, triage, plans, reviews), said nothing at all about the date. So the
+    brain guessed the weekend and politely held back.
+
+    Two things, therefore, and the second matters more than the first: the local
+    day, and whether the quiet rule is in force RIGHT NOW. A condition a brain
+    has to work out from a sentence is a condition it will get wrong; this
+    answers it. Shared by claude_cli too — a rule that holds on one CLI and not
+    the other is two assistants.
+    """
+    import datetime as _dt
+    from . import policy
+    at = _dt.datetime.fromtimestamp(time.time() if now is None else now)
+    line = at.strftime("%Y-%m-%d %H:%M %a")
+    with contextlib.suppress(Exception):
+        if policy.rules("quiet"):
+            holding = policy.quiet_holding(at.timestamp())
+            line += (f" · his quiet rule IS in force now ({holding.render()}) — "
+                     "hold anything that is not urgent" if holding else
+                     " · his quiet-hours rules are NOT in force right now, so work normally")
+    return f"[now: {line}]"
 
 
 def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "") -> str:
@@ -383,9 +414,7 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     ranking_text = resume_mod.ranking_text(user_text)
     # Every turn carries the current local time — long-lived sessions otherwise
     # drift days behind, which breaks "remind me at 3pm" style requests.
-    import datetime as _dt
-    now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M %a")
-    user_text = f"[now: {now}]\n{user_text}"
+    user_text = f"{now_line()}\n{user_text}"
     if extra_context:
         user_text = f"{extra_context}\n\n{user_text}"
     prompt = user_text
@@ -650,6 +679,9 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     """
     if not available():
         raise RuntimeError("Copilot CLI is not installed/authenticated")
+    # A background brain is the one nobody is watching, and it was the only one
+    # not told the date. See now_line.
+    prompt = f"{now_line()}\n{prompt}"
     cmd = ["copilot"]
     if session_id:
         cmd += ["--resume" if resume else "--session-id", session_id]

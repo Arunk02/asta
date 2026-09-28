@@ -3122,11 +3122,15 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None
-    pending = asking.pending_for_reply()
+    # …but only when the message is an ANSWER. "send this feedback to swamy",
+    # said while "reply 1, 2, or both" was open, was filed as the answer: nothing
+    # was sent, and he was told his own question back. An instruction swallowed
+    # here is not done and not visibly not-done. The offers branch above already
+    # reads "he moved on"; this one does now too.
+    pending = asking.pending_for_reply(user_text)
     if pending and (user_text or "").strip():
         asking.answer(pending["id"], user_text.strip())
-        await sink.send({"type": "note", "text":
-                         f"✅ Passed that back to whatever asked: “{pending['text'][:80]}”"})
+        await sink.send({"type": "note", "text": asking.delivered_line(pending)})
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None

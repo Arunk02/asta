@@ -17,6 +17,7 @@ answered, and a stale question would otherwise swallow his next message.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from . import store
@@ -131,13 +132,58 @@ def answer(qid: int, text: str) -> bool:
     return True
 
 
-def pending_for_reply() -> dict | None:
+#: An imperative that names something for Asta to DO, at the very start of the
+#: message. Anchored on purpose: "the second one, but check with Vinish first"
+#: is an answer that happens to contain a verb, and diverting it would strand
+#: the caller waiting on the answer.
+_AN_INSTRUCTION = re.compile(
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|pls\s+|plz\s+)?"
+    r"(?:send|share|forward|message|msg|ping|tell|reply|respond|post|comment|"
+    r"email|mail|call|dial|ring|draft|write|raise|open|create|schedule|book|"
+    r"remind|delegate|assign|escalate|chase|follow\s*up)\b",
+    re.I)
+
+
+def reads_as_an_instruction(text: str) -> bool:
+    """Is this something to DO, rather than an answer to what was asked?
+
+    28 Sep: a question was open ("reply 1, 2, or both") when he said "send this
+    feedback to swamy". It was filed as the answer, nothing was sent, and he was
+    told "Passed that back to whatever asked". An instruction swallowed by a
+    multiple-choice question is not done and not visibly not-done — he finds out
+    from the person who never heard from him.
+
+    One-directional, like `work_intent`: divert only when the message is plainly
+    an instruction. A wrongly-diverted answer leaves a question he can still
+    answer; a wrongly-swallowed instruction just never happens.
+    """
+    return bool(_AN_INSTRUCTION.match(text or ""))
+
+
+def pending_for_reply(text: str | None = None) -> dict | None:
     """The one open question a bare message should be read as answering.
 
     Only when exactly one is open and it is recent — with two open, guessing
     would put the answer on the wrong question, and on a phone channel that is
     invisible until it has already gone wrong.
+
+    `text` is what he actually said. An open question used to own the next
+    message unconditionally; it owns it now only when the message is not itself
+    an instruction. Optional so callers with nothing to offer behave as before.
     """
+    if text is not None and (not text.strip() or reads_as_an_instruction(text)):
+        return None
     rows = [q for q in store.open_questions()
             if time.time() - q["created_at"] <= AUTO_ANSWER_WINDOW]
     return rows[0] if len(rows) == 1 else None
+
+
+def delivered_line(q: dict) -> str:
+    """What he is told after his reply is handed back to whoever was waiting.
+
+    It used to read "Passed that back to whatever asked: …" — a machine that has
+    lost track of its own errand, quoting his question back at him instead of
+    naming who is now unblocked. The source is a column on the row.
+    """
+    who = (q.get("source") or "").strip() or "the task that asked"
+    return f"✅ Answered #{q['id']} — passed back to {who}."

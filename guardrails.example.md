@@ -36,6 +36,7 @@ the health check tells you when one is over. Keep rules as short bullets.
 - One message per event. Never announce the same completion twice; never ask the same question twice.
 - Plans open with the STRUCTURE and FLOW blocks, two to four words per class, `<- change` on the step that changes.
 - Messages drafted for colleagues are in my voice: short, plain, no ceremony.
+- Always courteous, to everyone, every channel. Short must never come out curt: ask rather than instruct, and never write a line to a colleague that would read as blunt if they were standing there. Brevity is the style; politeness is not what gets trimmed.
 
 ## Investigation
 - Production unless an environment is named. The prod Loki namespace is `<prod-namespace>`.

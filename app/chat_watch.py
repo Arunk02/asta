@@ -659,6 +659,21 @@ async def sweep(notify=None) -> list[dict]:
             opening = steward.consider(who, text)
             if opening["hold"]:
                 attention.mark_dropped(key)
+                # …and ask them what for, so the hold ends with an answer rather
+                # than with him driving it by hand. The ONE outward act that does
+                # not wait for his yes, and only ever this one question — the
+                # answer it produces is staged for approval like everything else.
+                # See steward.ask_back_line for why the exception is this narrow.
+                back = steward.ask_back_line(who, text)
+                if back:
+                    from . import teams_bridge as _bridge
+                    try:
+                        await _bridge.send_message(chat, back)
+                    except Exception as exc:                   # noqa: BLE001
+                        from . import quiet
+                        quiet.note("chatwatch.ask_back", exc)
+                    else:
+                        steward.note_asked_back(who)
                 continue
             if opening["opened_with"]:
                 text = f"{opening['opened_with']}\n{text}"

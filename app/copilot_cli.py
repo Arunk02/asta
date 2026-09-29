@@ -209,6 +209,51 @@ def now_line(now: float | None = None) -> str:
     return f"[now: {line}]"
 
 
+#: He is asking to be TOLD something, rather than asking Asta to DO something.
+#: Only these turns get passages put in front of the brain: injecting documents
+#: into "set a reminder" or "thanks" would spend tokens on nothing.
+_SEEKING = re.compile(
+    r"^\s*(?:what|whats|what's|how|why|when|where|which|who|explain|describe|"
+    r"define|summari[sz]e|overview|walk\s+me\s+through|"
+    r"tell\s+(?:me\s+)?(?:abt|about|more))\b|\?\s*$", re.I)
+
+
+def turn_context(user_text: str) -> str:
+    """What a chat turn should know before it starts, besides the date.
+
+    Two things, both learned on 29 Sep, and both built so they can only ever add:
+
+      * WHO HE MEANS. Asta pushed "Navya R: need ur help" and a minute later
+        asked who "her" was, because pushes never reach the thread the brain
+        reads. `referents` carries the last few people across.
+      * WHAT HIS DOCUMENTS SAY. "tell abt telikos inland journey" got "no
+        grounded info here" while his own index answered it outright. A tool the
+        brain may decide not to call is not grounding, so when he is asking to
+        be told something and the passages are actually about it, they arrive
+        first, each with the document it came from.
+
+    Never raises. A broken index or an empty register leaves the turn exactly as
+    it was without them.
+    """
+    parts: list[str] = []
+    with contextlib.suppress(Exception):
+        from . import referents
+        people = referents.block()
+        if people:
+            parts.append(people)
+    if _SEEKING.search(user_text or ""):
+        with contextlib.suppress(Exception):
+            from . import knowledge
+            hits = knowledge.relevant(user_text, limit=3, at_least=0.6)
+            if hits:
+                lines = [f"[{h['document']} — {h['where']}]\n{h['text'][:600]}" for h in hits]
+                parts.append(
+                    "From his indexed documents. Answer from these and name the "
+                    "document when you do; if they do not cover the question, say "
+                    "so rather than guess:\n\n" + "\n\n".join(lines))
+    return "\n\n".join(parts)
+
+
 def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "") -> str:
     """Orientation block for a fresh CLI session (it has no Asta memory).
 
@@ -415,6 +460,11 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     # Every turn carries the current local time — long-lived sessions otherwise
     # drift days behind, which breaks "remind me at 3pm" style requests.
     user_text = f"{now_line()}\n{user_text}"
+    # Who he means and what his documents say — judged on HIS sentence, never on
+    # a handoff's wrapper (see resume.ranking_text).
+    ctx = turn_context(ranking_text)
+    if ctx:
+        user_text = f"{ctx}\n\n{user_text}"
     if extra_context:
         user_text = f"{extra_context}\n\n{user_text}"
     prompt = user_text

@@ -265,9 +265,47 @@ happen need want know""".split())
 
 def _query(text: str) -> str:
     """An FTS query from the sentence he typed."""
-    words = [w for w in re.findall(r"[A-Za-z0-9_]+", (text or "").lower())
-             if len(w) > 1 and w not in _NOISE]
-    return " OR ".join(f'"{w}"' for w in words[:24])
+    return " OR ".join(f'"{w}"' for w in terms(text)[:24])
+
+
+def terms(text: str) -> list[str]:
+    """The words of a sentence worth matching on — exactly the set `_query` uses."""
+    return [w for w in re.findall(r"[A-Za-z0-9_]+", (text or "").lower())
+            if len(w) > 1 and w not in _NOISE]
+
+
+#: Words he types that are not in `_NOISE` but say nothing about a subject.
+#: Counted as subject matter, "abt" and "thanks" made small talk look relevant.
+_CHATTER = frozenset("""abt thanks thank thx ok okay pls plz hi hello hey bro ask her
+him set check any whats all fine sure done got""".split())
+
+
+def coverage(question: str, hit: dict) -> float:
+    """How much of what he asked about this passage actually mentions, 0.0-1.0.
+
+    BM25 alone cannot decide relevance on a corpus this small: "whats the status
+    of the release" scored 3.88 against his index and "tell abt telikos inland
+    journey" — a question the documents answer outright — scored 3.50. Common
+    words like "status" and "booking" are everywhere in two documents about
+    bookings. Coverage asks the question that matters instead: of the words that
+    say what he means, how many are in this passage?
+
+    The document's name and heading count, because that is often where the
+    subject is named: the inland journey passage is headed "New Booking Journey
+    Overview" in a file called NAM_Inland_Booking.
+    """
+    want = {w for w in terms(question) if w not in _CHATTER}
+    if not want:
+        return 0.0
+    body = " ".join(str(hit.get(k) or "") for k in ("document", "where", "text")).lower()
+    # A five-letter prefix tolerates the plurals and stems the index already folds.
+    return sum(1 for w in want if w[:5] in body) / len(want)
+
+
+def relevant(question: str, limit: int = 3, at_least: float = 0.5) -> list[dict]:
+    """Passages that are about what he asked, not merely scored against it."""
+    hits = search(question, limit=max(limit * 2, 6))
+    return [h for h in hits if coverage(question, h) >= at_least][:limit]
 
 
 def search(question: str, limit: int = 5, workspace: str = "") -> list[dict]:

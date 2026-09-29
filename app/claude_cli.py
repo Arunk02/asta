@@ -244,6 +244,11 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     from . import resume as resume_mod
     ranking_text = resume_mod.ranking_text(user_text)
     umsg = f"{copilot_cli.now_line()}\n{user_text}"
+    # Same block the Copilot path adds, from the same function: who he means, and
+    # what his documents say about what he asked.
+    ctx = copilot_cli.turn_context(ranking_text)
+    if ctx:
+        umsg = f"{ctx}\n\n{umsg}"
     if prefetched:
         # Live Teams/Outlook context, exactly as Copilot gets it. Same assistant,
         # same rules — a brain that answers "any messages for me?" from a real

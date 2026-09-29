@@ -636,8 +636,24 @@ def _checkin_enabled() -> bool:
     return os.environ.get("ASTA_THREAD_CHECKIN", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-async def _say(chat: str, line: str) -> bool:
-    """One of the two unapproved lines Asta may send: the ask-back and the check-in."""
+def group_silent() -> bool:
+    """ASTA_GROUP_SILENT — Asta says nothing in a group chat, not even a question.
+
+    His rule, 29 Sep, "just for now until we make sure one to one chat is
+    working fine": in a group, people put what they need up front, so Asta
+    analyses it and brings him the result; only his yes posts anything there."""
+    return os.environ.get("ASTA_GROUP_SILENT", "1").strip().lower() not in ("0", "false", "no")
+
+
+async def _say(chat: str, line: str, *, group: bool = False) -> bool:
+    """One of the two unapproved lines Asta may send: the ask-back and the check-in.
+
+    Never in a group while ASTA_GROUP_SILENT is on — False, and the caller
+    carries on as if the line could not be sent."""
+    if group and group_silent():
+        store.record_outcome("thread", "held back", subject=chat[:80],
+                             detail=f"group — not said: {line}"[:200])
+        return False
     from . import teams_bridge as _bridge
     try:
         await _bridge.send_message(chat, line)
@@ -819,6 +835,12 @@ async def _sweep_threads(notify=None) -> list[dict]:
         who = c["who"]
         where = "Teams 1:1" if c["one_to_one"] else f"Teams · {c['chat']}"
         name = who if c["one_to_one"] else f"{who} in {c['chat']}"
+        # In the model's own words when it gave them: "Yogesh wants a quick call
+        # about the event-history defect — want me to set it up?" reads like a
+        # colleague; "🔴 Yogesh Kumar Ravichandran: Discuss and understand the
+        # fix" reads like a log line. The template is the floor, not the format.
+        tell = (d.get("tell") or "") if d.get("source") == "model" else ""
+
 
         if c["handled_by_him"]:
             for k in c["keys"]:
@@ -831,7 +853,8 @@ async def _sweep_threads(notify=None) -> list[dict]:
             for k in c["keys"]:
                 attention.mark_dropped(k)
             if conf < CLOSE_SURE and c["asta_spoke"] and not c["checked_in"] \
-                    and _checkin_enabled() and await _say(c["chat"], checkin_line()):
+                    and _checkin_enabled() \
+                    and await _say(c["chat"], checkin_line(), group=not c["one_to_one"]):
                 threads.update(tid, checked_in=1, status="checked_in", asta_spoke=1)
                 continue
             threads.close(tid, why=f"closing ({d.get('source')}, {conf:.2f})", now=now)
@@ -840,11 +863,19 @@ async def _sweep_threads(notify=None) -> list[dict]:
         if state == "opener":
             for k in c["keys"]:
                 attention.mark_dropped(k)
+            # The model's question, which uses what it knows ("is this about
+            # the event-history defect?"), before the fixed line that knows
+            # nothing. Yogesh, 29 Sep: "Call ?" after a defect discussion got
+            # "Could you tell me a bit more about what you need help with?"
+            ask = understand.safe_question(d.get("question") or "") or steward.ASK_BACK
             if not c["asked_back"] and steward.ask_back_enabled() \
-                    and await _say(c["chat"], steward.ASK_BACK):
+                    and await _say(c["chat"], ask, group=not c["one_to_one"]):
                 steward.note_asked_back(who)
                 threads.update(tid, asked_back=c["asked_back"] + 1, status="clarifying",
                                asta_spoke=1)
+            elif not c["one_to_one"] and tell \
+                    and _worth_telling(tid, tell, fyi=True, group=True, now=now):
+                quiet_lines.append(tell)      # a group Asta may not speak in
             continue
 
         # A status line is the model's reading of the conversation — or, when the
@@ -862,7 +893,7 @@ async def _sweep_threads(notify=None) -> list[dict]:
             for k in c["keys"]:
                 attention.mark_dropped(k)
             if _worth_telling(tid, said, fyi=True, group=not c["one_to_one"], now=now):
-                quiet_lines.append(f"· {name}: {said}")
+                quiet_lines.append(tell or f"· {name}: {said}")
             continue
 
         # From here Asta works the ask the way he would, and he hears once, at
@@ -879,11 +910,22 @@ async def _sweep_threads(notify=None) -> list[dict]:
         from . import understand
         q = understand.safe_question(d.get("question") or "")
         if state == "ask" and q and c["asked_back"] < MAX_QUESTIONS \
-                and steward.ask_back_enabled() and await _say(c["chat"], q):
+                and steward.ask_back_enabled() \
+                and await _say(c["chat"], q, group=not c["one_to_one"]):
             # Too vague to act on: ask them, the way he would, before spending a
             # turn on a guess. Never more than MAX_QUESTIONS in one conversation.
             threads.update(tid, asked_back=c["asked_back"] + 1, status="clarifying",
                            asta_spoke=1)
+            continue
+
+        if d.get("work") == "talk" and state == "ask":
+            # They want HIM — a call, a discussion. Nothing to investigate; what
+            # he needs is who, about what, and the choice of how to answer.
+            if _worth_telling(tid, said, fyi=False, group=not c["one_to_one"], now=now):
+                (red if c["wanted"] or c["one_to_one"] else quiet_lines).append(
+                    tell or f"{name} wants to talk to you: {said}. "
+                            "Shall I tell them when you're free, or will you reply?")
+                threads.update(tid, status="awaiting_arun")
             continue
 
         context = "\n".join(x for x in [
@@ -907,7 +949,7 @@ async def _sweep_threads(notify=None) -> list[dict]:
             threads.update(tid, status="working")
             if state == "urgent" and _worth_telling(tid, said, fyi=False,
                                                     group=not c["one_to_one"], now=now):
-                red.append(f"🚨 {name}: {said}")
+                red.append(f"🚨 {tell}" if tell else f"🚨 {name}: {said}")
                 started.append(responder.line_for(task, who, responder.what_it_asks(c["last"])))
             # Otherwise silent until the answer is ready for his "send".
             continue
@@ -920,14 +962,22 @@ async def _sweep_threads(notify=None) -> list[dict]:
         # ignoring stays quiet. Whether the colleague is helped never was.
         if offered or _worth_telling(tid, said, fyi=False,
                                      group=not c["one_to_one"], now=now):
-            (red if loud else quiet_lines).append(f"{'🔴' if loud else '·'} {line}")
+            if tell:
+                line = tell + (" Reply *yes* and I'll look into it." if offered else "")
+                (red if loud else quiet_lines).append(line)
+            else:
+                (red if loud else quiet_lines).append(f"{'🔴' if loud else '·'} {line}")
         if task:
             started.append(responder.line_for(task, who, responder.what_it_asks(c["last"])))
 
     if notify and (red or quiet_lines or started):
-        body = "\n".join(red + quiet_lines + ([""] if (red or quiet_lines) and started else [])
-                         + started)
-        await notify("💬 Teams\n" + body, "teams",
+        lines = red + quiet_lines
+        # Sentences get room; a list of one-liners stays a list under its label.
+        spoken = any(not x.startswith(("·", "🔴", "🚨")) for x in lines)
+        body = ("\n\n" if spoken else "\n").join(lines)
+        if started:
+            body += ("\n\n" if body else "") + "\n".join(started)
+        await notify(body if spoken else "💬 Teams\n" + body, "teams",
                      urgency="direct" if red or started else "ambient",
                      considered=True, keys=tuple(h["key"] for h in handled))
     return handled

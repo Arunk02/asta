@@ -22,16 +22,41 @@ read his next "yes" — so an answer that finishes while he is deciding on
 something else waits in a queue, and so does a "want me to plan this code
 change?". Two open questions sharing one word is how the wrong thing goes out.
 The queue is drained after each sweep and after each send.
+
+BUT A QUESTION HE DOES NOT ANSWER MUST NOT STOP THE LINE. 29 Sep: a draft for
+Harika was shown at 17:40 and never answered, and behind it Vinish's booking
+check (done 19:07) and Harika's own follow-up sat unseen all evening while the
+colleagues waited. A decision left unanswered for PARK_SECONDS is parked — it
+goes to the back of the queue and the next one is shown; one that is still
+unanswered after being shown MAX_SHOWINGS times, or that is older than
+STALE_SECONDS, is retired and he is told, in one line, what was dropped.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 
 from . import store
 
 _QUEUE = "answers_queue"
+
+
+def _minutes(raw: str | None, default: float) -> float:
+    try:
+        return float(raw or default) * 60
+    except ValueError:
+        return default * 60
+
+
+#: Unanswered this long, a decision steps aside for the next one.
+PARK_SECONDS = _minutes(os.environ.get("ASTA_DECISION_PARK_MINUTES"), 15)
+#: A reply to a colleague older than this is no longer worth sending.
+STALE_SECONDS = _minutes(os.environ.get("ASTA_DECISION_STALE_MINUTES"), 180)
+#: Shown this many times without an answer, it is retired.
+MAX_SHOWINGS = 2
 
 #: Appended to an investigation's brief when a colleague is waiting for the answer.
 REPLY_FORMAT = """
@@ -75,15 +100,22 @@ def phone_conversation() -> str:
 
 
 def render(who: str, need: str, analysis: str, reply: str, note: str = "") -> str:
-    """Exactly what he needs to decide, and nothing else."""
-    head = f"🧑‍💻 *{who}* asked: {need}" if need else f"🧑‍💻 *{who}* asked something"
-    parts = [head]
-    if note:
-        parts.append(note)
+    """Exactly what he needs to decide, said the way a colleague would say it.
+
+    Was a form — "🧑‍💻 X asked: … 🔎 … ✉️ Reply to X: ——— … ——— Send it?" — the
+    same five boxes for every ask. His words, 29 Sep: talk to me, don't make
+    the format constant. So: what they wanted, what was found, the reply as a
+    quote, one question."""
+    first = (who or "Someone").split()[0]
+    need = (need or "").strip().rstrip(".")
+    head = (f"*{who}* asked about {need[0].lower() + need[1:]}." if need
+            else f"*{who}* asked me something.")
+    parts = [head + (f" {note}" if note else "")]
     if analysis:
-        parts.append(f"🔎 {analysis}")
-    parts.append(f"✉️ Reply to {who}:\n———\n{reply}\n———")
-    parts.append("Send it? Reply *send*, or tell me what to change.")
+        parts.append(analysis)
+    quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in reply.splitlines())
+    parts.append(f"Here's what I'd send {first}:\n{quoted}")
+    parts.append("Shall I send it? Or tell me what to change.")
     return "\n\n".join(parts)
 
 
@@ -97,7 +129,8 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
         return False
     intent = {"kind": "send", "what": reply.strip(), "to": chat, "channel": "teams",
               "to_group": bool(group), "task_id": task_id, "thread": thread,
-              "who": who, "need": need, "analysis": analysis, "note": note}
+              "who": who, "need": need, "analysis": analysis, "note": note,
+              "_at": time.time()}
     if thread:
         threads.update(thread, status="awaiting_arun")
     if _blocked(cid):
@@ -107,13 +140,35 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
     return True
 
 
-def _blocked(cid: str) -> bool:
-    """Is he already being asked something his next "yes" would answer?"""
+def _blocked(cid: str, now: float | None = None) -> bool:
+    """Is he already being asked something his next "yes" would answer?
+
+    Something he has left unanswered for PARK_SECONDS no longer counts: a draft
+    of ours is parked at the back of the queue, and an old offer simply stops
+    holding the line (it stays open — a staged draft is read before an offer, so
+    his next "yes" still goes to what he was shown last)."""
     from . import loop, offers
-    return bool(loop.awaiting(cid)) or offers.pending() is not None
+    now = time.time() if now is None else now
+    staged = loop.awaiting(cid)
+    if staged:
+        if staged.get("type") != "answer" or now - float(staged.get("_shown") or 0) < PARK_SECONDS:
+            return True
+        loop.clear_awaiting(cid)
+        _park(staged, now)
+    o = offers.pending()
+    return o is not None and now - float(o.created or 0) < PARK_SECONDS
+
+
+def _park(item: dict, now: float) -> None:
+    q = _load_queue()
+    q.append(item)
+    store.kv_set(_QUEUE, json.dumps(q))
+    store.record_outcome("answer", "parked", subject=str(item.get("task_id") or ""),
+                         detail=f"{item.get('who')}: {item.get('need', '')}"[:200])
 
 
 def _enqueue(item: dict) -> None:
+    item.setdefault("_at", time.time())
     q = _load_queue()
     q.append(item)
     store.kv_set(_QUEUE, json.dumps(q))
@@ -157,9 +212,17 @@ async def _show_plan(item: dict) -> None:
 
 async def _show(cid: str, intent: dict) -> None:
     from . import loop, notify
+    intent = {**intent, "type": "answer", "_shown": time.time(),
+              "_showings": int(intent.get("_showings") or 0) + 1}
     loop.stage(cid, intent)
+    waiting = len(_load_queue())
+    note = intent.get("note", "")
+    if intent["_showings"] > 1:
+        note = (note + "\n" if note else "") + "(Asking again — this one is still unanswered.)"
     text = render(intent["who"], intent.get("need", ""), intent.get("analysis", ""),
-                  intent["what"], intent.get("note", ""))
+                  intent["what"], note)
+    if waiting:
+        text += f"\n\n({waiting} more waiting after this one.)"
     # In the conversation too, so "change the second line" has something to refer to.
     store.add_ui_message(cid, "assistant", text, {"via": "answer", "channel": "whatsapp"})
     store.record_outcome("answer", "presented", subject=str(intent.get("task_id") or ""),
@@ -191,11 +254,40 @@ async def announce_offer() -> bool:
     return True
 
 
+def _retire(now: float) -> list[dict]:
+    """Take out what is too old to send, or has been ignored enough times."""
+    keep, gone = [], []
+    for it in _load_queue():
+        old = now - float(it.get("_at") or 0) > STALE_SECONDS
+        ignored = int(it.get("_showings") or 0) >= MAX_SHOWINGS
+        (gone if old or ignored else keep).append(it)
+    if gone:
+        store.kv_set(_QUEUE, json.dumps(keep))
+        for it in gone:
+            store.record_outcome("answer", "retired", subject=str(it.get("task_id") or ""),
+                                 detail=f"{it.get('who')}: {it.get('need', '')}"[:200])
+    return gone
+
+
 async def next_after(cid: str = "") -> bool:
     """Nothing is in front of him: show the next waiting decision, if any."""
+    from . import notify
     cid = cid or phone_conversation()
     if not cid or _blocked(cid):
         return False
+    gone = _retire(time.time())
+    if gone:
+        names = "; ".join(f"{g.get('who')} ({(g.get('need') or '')[:50]})" for g in gone)
+        # The drafts themselves go into his conversation, so "send Vinish's one"
+        # has something to find — the note would be an empty promise otherwise.
+        drafts = "\n\n".join(f"Draft for {g.get('who')} ({g.get('to')}): {g.get('what')}"
+                              for g in gone if g.get("what"))
+        if drafts:
+            store.add_ui_message(cid, "assistant", "Unsent drafts, retired:\n\n" + drafts,
+                                 {"via": "answer", "channel": "whatsapp"})
+        await notify.notify(f"🗂 Didn't send these — too old now, or left unanswered: {names}. "
+                            "Tell me if you still want one to go out.",
+                            "answer", urgency="ambient", considered=True)
     q = _load_queue()
     if not q:
         return False

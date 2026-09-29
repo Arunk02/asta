@@ -754,6 +754,9 @@ def open_ask(text: str) -> tuple[str, str, str] | None:
     t = " ".join((text or "").split())
     if not t:
         return None
+    playing = play_ask(t)
+    if playing:
+        return ("play", playing[0], playing[1])
     found = search_url(t)
     if found:
         return ("url", found[0], found[1])
@@ -775,8 +778,68 @@ def open_ask(text: str) -> tuple[str, str, str] | None:
     return ("app", what, browser)
 
 
+#: "open youtube and play some tamil songs", "play arijit songs on youtube".
+#: Opening YouTube was all that happened on 29 Sep — "it is just opening app not
+#: doing anything, it has to do the task". Play means a video is playing.
+_PLAY_ASK = re.compile(
+    r"^\W*(?:(?:can you|could you|please|pls|can)\s+)?(?:try\s+)?(?:again\s+)?"
+    r"(?:(?:open|go to)\s+youtube\s+(?:and\s+)?)?play\s+(?P<q>.{1,80}?)"
+    r"(?:\s+(?:on|in)\s+youtube)?(?:\s+(?:in|on|with)\s+(?P<browser>chrome|safari|firefox|edge|brave|arc))?"
+    r"\W*$", re.I)
+_MUSICAL = re.compile(r"\b(song|songs|music|video|videos|playlist|youtube|track|album)\b", re.I)
+_VAGUE = re.compile(r"^(?:some(?:thing)?|any|a few|few)\s*", re.I)
+
+
+def play_ask(text: str) -> tuple[str, str] | None:
+    """(what to search for, browser) when he asks for something to be PLAYED."""
+    t = " ".join((text or "").split())
+    m = _PLAY_ASK.match(t)
+    if not m or not (_MUSICAL.search(t)):
+        return None
+    q = _VAGUE.sub("", m.group("q").strip(" .!,")).strip()
+    if re.match(r"^(?:the|this|that|it)\b", q, re.I):
+        return None                      # "play the video" is about what is on screen
+    if q.lower() in ("", "songs", "song", "music", "popular", "something popular"):
+        q = "popular songs"
+    return q, (m.group("browser") or "chrome")
+
+
+async def first_video(query: str) -> str:
+    """The top YouTube result for a search, as a watch URL — '' if none found."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/126 Safari/537.36",
+                "Accept-Language": "en-US"}) as client:
+            r = await client.get("https://www.youtube.com/results",
+                                 params={"search_query": query})
+    except Exception:                                          # noqa: BLE001
+        return ""
+    m = re.search(r'"videoId":"([\w-]{11})"', r.text or "")
+    return f"https://www.youtube.com/watch?v={m.group(1)}&autoplay=1" if m else ""
+
+
+async def play(query: str, browser: str = "chrome") -> str:
+    """Put a video on for him. One line: what is playing, or what happened."""
+    from urllib.parse import quote_plus
+    url = await first_video(query)
+    try:
+        out = await open_url(url or SEARCHES["youtube"].format(q=quote_plus(query)), browser)
+    except AppError as exc:
+        return f"⚠️ {exc}"
+    if out["verified"] is False:
+        return "⚠️ " + out["said"]
+    if not url:
+        return (f"🎵 Couldn't pick a video for “{query}”, so I opened the YouTube "
+                f"results in {out['app'] or 'your browser'} — tap one to play.")
+    return f"🎵 Playing “{query}” on YouTube in {out['app'] or 'your browser'}."
+
+
 async def open_it(kind: str, what: str, browser: str = "") -> str:
     """One line for him: what was opened, or what happened instead."""
+    if kind == "play":
+        return await play(what, browser or "chrome")
     try:
         out = await (open_url(what, browser) if kind == "url" else open_app(what))
     except AppError as exc:

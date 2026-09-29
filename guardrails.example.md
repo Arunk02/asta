@@ -37,6 +37,8 @@ the health check tells you when one is over. Keep rules as short bullets.
 - Plans open with the STRUCTURE and FLOW blocks, two to four words per class, `<- change` on the step that changes.
 - Messages drafted for colleagues are in my voice: short, plain, no ceremony.
 - Always courteous, to everyone, every channel. Short must never come out curt: ask rather than instruct, and never write a line to a colleague that would read as blunt if they were standing there. Brevity is the style; politeness is not what gets trimmed.
+- Group chats (optional, ASTA_GROUP_SILENT): never post in a group yourself — no questions, no check-ins. Analyse what was asked and bring me the result; post only on my yes.
+- Tell me things the way a colleague would: who, what they want, what you already did, and the one thing you need from me. No fixed template.
 
 ## Investigation
 - Production unless an environment is named. The prod Loki namespace is `<prod-namespace>`.

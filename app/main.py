@@ -1230,6 +1230,14 @@ async def api_voice_note(request: Request):
     return {"ok": True, "detail": await agent_mod.leave_voice_note(b.get("text", ""))}
 
 
+@app.post("/api/app-task", dependencies=[Depends(require_auth)])
+async def api_app_task(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.do_in_app(
+        b.get("app", ""), b.get("goal", ""), b.get("context", ""),
+        bool(b.get("confirmed")))}
+
+
 @app.post("/api/screen", dependencies=[Depends(require_auth)])
 async def api_use_screen(request: Request):
     b = await request.json()
@@ -3261,6 +3269,17 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # waits on a chat turn has already failed at the thing he asked for.
     from . import apps
     if frontdesk.enabled() and apps.enabled():
+        # "open excel and add a column Status" — a task inside an app, said as
+        # one instruction. Done, checked, and reported; not a window left open.
+        from . import app_tasks
+        inside = app_tasks.direct_ask(user_text)
+        if inside:
+            frontdesk.record("app_task", inside[0])
+            await sink.send({"type": "delta" if channel == "web" else "note",
+                             "text": await app_tasks.do(*inside)})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
         wants_open = apps.open_ask(user_text)
         if wants_open:
             frontdesk.record("open", wants_open[0])

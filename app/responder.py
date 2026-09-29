@@ -698,6 +698,47 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     return t
 
 
+#: Identifiers worth tracing: booking refs (H65ZMWX52B2, MH65W8JZNVNT), CBK/job
+#: numbers, long numeric ids.
+_AN_ID = re.compile(r"\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{9,14}\b|\bCBK\d{5,}\b|\b\d{8,10}\b")
+_RUN_URL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/actions/runs/\d+")
+_PR_URL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+_HOW_WHY = re.compile(r"\b(why|how does|how do|how is|where is|which service|flow)\b", re.I)
+
+
+def playbook(text: str) -> str:
+    """How a good engineer would check THIS kind of ask — steps, not a hint.
+
+    29 Sep: "check booking H65ZMWX52B2" was searched in two namespaces, one of
+    which does not exist, and answered "no trace — is the ref right?". The
+    booking was in preprod with a billing error on it. The steps below make
+    "which environment?" the first question an investigation answers."""
+    steps: list[str] = []
+    ids = sorted(set(_AN_ID.findall(text or "")))
+    if ids:
+        steps.append(
+            f"Identifiers {', '.join(ids[:4])}: FIRST find which environment they live in — "
+            "grafana_logs(terms=[id], namespace=\"all\", errors_only=false, minutes=4320) "
+            "searches every environment at once. Never conclude an id does not exist from "
+            "one environment. Then temporal_workflows in that environment for its workflow, "
+            "and the error signatures around it.")
+    if _RUN_URL.search(text or ""):
+        steps.append("A GitHub Actions run: `gh run view <id> --repo <owner/repo> --log-failed`; "
+                     "name the failing job and step, quote the error line, and check whether a "
+                     "re-run attempt passed before calling it a code problem.")
+    if _PR_URL.search(text or ""):
+        steps.append("A pull request: read the diff and CI state with gh; check it against the "
+                     "repo's conventions in its .asta-context notes; list concrete findings.")
+    if _HOW_WHY.search(text or ""):
+        steps.append("A how/why question about the product: start from the workspace's "
+                     ".asta-context index (the repo's _index.json, then its notes) to find the "
+                     "service and code path, then confirm in the code; cite file:line.")
+    if not steps:
+        return ""
+    return ("\n\nHow to check this (do these, in order, before concluding):\n"
+            + "\n".join(f"- {x}" for x in steps))
+
+
 def _waiting_brief(who: str, text: str, context: str) -> str:
     """What an investigation needs when a colleague is waiting on the answer.
 
@@ -721,6 +762,7 @@ def _waiting_brief(who: str, text: str, context: str) -> str:
         parts.append("\n\nFrom Arun's indexed project documents — use them and name the "
                      "document when you do:\n" + "\n\n".join(
                          f"[{h['document']} — {h['where']}]\n{h['text'][:700]}" for h in hits))
+    parts.append(playbook(text))
     parts.append(answers.brief_rider(who))
     return "".join(parts)
 

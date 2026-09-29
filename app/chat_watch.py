@@ -920,7 +920,16 @@ async def _sweep_threads(notify=None) -> list[dict]:
 
         if d.get("work") == "talk" and state == "ask":
             # They want HIM — a call, a discussion. Nothing to investigate; what
-            # he needs is who, about what, and the choice of how to answer.
+            # he needs is who, about what, and the choice of how to answer. With
+            # a reply drafted in his voice, that choice is one word: "yes" sends
+            # it, "tell him after lunch" rewrites it, "no" drops it.
+            from . import answers
+            if tell and (d.get("reply") or "").strip() \
+                    and _worth_telling(tid, said, fyi=False, group=not c["one_to_one"], now=now) \
+                    and await answers.present(who=who, need=said, chat=c["chat"],
+                                              group=not c["one_to_one"], analysis="",
+                                              reply=d["reply"], thread=tid, lead=tell):
+                continue
             if _worth_telling(tid, said, fyi=False, group=not c["one_to_one"], now=now):
                 (red if c["wanted"] or c["one_to_one"] else quiet_lines).append(
                     tell or f"{name} wants to talk to you: {said}. "

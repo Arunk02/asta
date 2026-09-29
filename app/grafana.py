@@ -56,6 +56,65 @@ def namespace() -> str:
     return (os.environ.get("ASTA_GRAFANA_NAMESPACE") or "").strip()
 
 
+#: What people call environments, and what they mean.
+_ENV_ALIASES = {"pp": "preprod", "pre-prod": "preprod", "pre prod": "preprod",
+                "production": "prod", "cdt": "sit", "test": "qa"}
+
+
+def envs() -> list[str]:
+    """The environments an "everywhere" search covers, most important first."""
+    raw = os.environ.get("ASTA_GRAFANA_ENVS") or "prod,preprod,uat,sit,qa,dev"
+    return [e.strip() for e in raw.split(",") if e.strip()]
+
+
+def resolve_namespace(given: str) -> str:
+    """The real namespace for what a brain or a person said.
+
+    29 Sep: an investigation of booking H65ZMWX52B2 searched `telikosprod` and
+    reported "no trace in prod". That namespace does not exist (Loki has
+    telikos-prod), so the search could never find anything, and the answer was
+    wrong with total confidence. Environment names ("uat", "pp") and near-miss
+    spellings ("telikosprod", "telikos_uat") are mapped here, in code.
+    """
+    g = " ".join((given or "").lower().split())
+    if not g:
+        return namespace()
+    default = namespace()
+    base = default.rsplit("-", 1)[0] if "-" in default else (default or "telikos")
+    env = _ENV_ALIASES.get(g, g)
+    if env in envs() or env in ("spt", "perf", "devops"):
+        return f"{base}-{env}"
+    m = re.fullmatch(rf"{re.escape(base)}[-_ ]?([a-z-]+)", g)
+    if m:
+        env = _ENV_ALIASES.get(m.group(1), m.group(1))
+        return f"{base}-{env}"
+    return given.strip()
+
+
+async def logs_everywhere(service: str = "", terms: list[str] | None = None,
+                          minutes: int = 0, errors_only: bool = False) -> list[dict]:
+    """The same search in every environment — for an identifier whose
+    environment nobody said. One result per env; a failed env says why."""
+    import asyncio
+    base = resolve_namespace("prod").rsplit("-", 1)[0]
+
+    async def one(env: str) -> dict:
+        span = minutes or window_minutes()
+        while True:
+            try:
+                got = await logs(service=service, terms=terms, minutes=span,
+                                 ns=f"{base}-{env}", errors_only=errors_only)
+            except GrafanaError as exc:
+                # Prod over three days is ~300 GiB against a 200 GiB cap: read a
+                # shorter window rather than report the environment unreadable.
+                if "too many bytes" in str(exc) and span > 60:
+                    span //= 4
+                    continue
+                return {"env": env, "namespace": f"{base}-{env}", "error": str(exc)[:160]}
+            return {"env": env, **got}
+    return list(await asyncio.gather(*(one(e) for e in envs())))
+
+
 def clusters() -> list[str]:
     named = os.environ.get("ASTA_GRAFANA_CLUSTERS") or ""
     return [c.strip() for c in named.split(",") if c.strip()]
@@ -388,7 +447,7 @@ async def logs(service: str = "", terms: list[str] | None = None, minutes: int =
                ns: str = "", errors_only: bool = True, limit: int = 0,
                end: datetime | None = None) -> dict:
     """Targeted Loki search, summarised. Raises GrafanaError with a usable reason."""
-    ns = ns or namespace()
+    ns = resolve_namespace(ns)
     if not ns:
         raise GrafanaError("no namespace to search — ASTA_GRAFANA_NAMESPACE, or say which")
     minutes = minutes or window_minutes()

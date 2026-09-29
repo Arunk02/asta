@@ -124,6 +124,10 @@ _TABLE: tuple[Capability, ...] = (
                http='POST /api/open {"what":"intellij"} or {"what":"youtube","browser":"chrome"}',
                note="Put an app or a site in front of him — \"open intellij\", "
                     "\"open youtube\". Only opens; to write INTO an app use use_app."),
+    Capability("do_in_app", "hands", write=True,
+               http='POST /api/app-task {"app":"numbers","goal":"add a column Status"}',
+               note="Do a task INSIDE any scriptable app — add a column, a slide, a "
+                    "paragraph, a draft — and check it worked. Not just opening it."),
     Capability("app_recipes", "hands", http="GET /api/apps",
                note="The app recipes and what each one takes. Read before use_app."),
     Capability("leave_voice_note", "hands", write=True,

@@ -230,6 +230,11 @@ def required_for(query: str) -> list[str]:
            for m in _JIRA_KEY.finditer(query or "")):
         from . import capabilities
         out += [n for n, c in capabilities.registry().items() if c.group == "jira"]
+    # "open excel add a column": an app named and something to do in it. The
+    # ranker hears "open" and offers open_app, which can only open.
+    from . import app_tasks
+    if app_tasks.asks_inside_an_app(query or ""):
+        out.append("do_in_app")
     if _ABOUT_PRODUCTION.search(query or ""):
         out.append("grafana_logs")
     if _ABOUT_WORKFLOWS.search(query or ""):

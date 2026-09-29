@@ -290,6 +290,11 @@ async def _pooled_page():
     return page
 
 
+class NotFound(RuntimeError):
+    """The chat could not be found or opened — a clean refusal, taken before
+    anything was typed. The browser is fine; only the page needs to go home."""
+
+
 @contextlib.asynccontextmanager
 async def teams_page():
     """The one way a headless operation gets at Teams.
@@ -301,6 +306,15 @@ async def teams_page():
         page = await _pooled_page()
         try:
             yield page
+        except NotFound:
+            # Nothing was typed and the browser is healthy — a search result
+            # that did not match. Relaunching Chrome for it (29 Sep: twelve
+            # relaunches in ten minutes, each "no person match for 'Followed
+            # threads'") costs seconds and the whole pooled session; going back
+            # to the chat list costs one navigation.
+            with contextlib.suppress(Exception):
+                await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
+            raise
         except Exception:
             # The operation failed with the page in an unknown state: half-typed
             # into a composer, a dialog open, a navigation in flight. Reusing that
@@ -844,7 +858,7 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
             "Arun's rule is 1:1 unless he names the group explicitly")
     else:
         found = ", ".join(f"{_kind(o)}:{o['text'][:30]}" for o in options[:6]) or "nothing"
-        raise RuntimeError(f"no person match for '{chat}' in Teams search (saw: {found})")
+        raise NotFound(f"no person match for '{chat}' in Teams search (saw: {found})")
 
     # Mark and click, rather than index into a fresh query_selector_all(). The
     # options were read by an earlier evaluate(), and Teams streams its results
@@ -888,7 +902,7 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
     # Last line of defence: if the open conversation is not the one asked for,
     # fail loudly rather than let the caller type into the wrong thread.
     if title and not _title_matches(title, wanted):
-        raise RuntimeError(f"opened '{title}' instead of '{chat}' — aborted without typing")
+        raise NotFound(f"opened '{title}' instead of '{chat}' — aborted without typing")
     return title or chat
 
 
@@ -1457,12 +1471,28 @@ def duplicates_chat_watch(item: str) -> bool:
     stay with the feed, which is the only thing that can see them.
     """
     from . import chat_watch
+    t = (item or "").lower()
+    if "invited you" in t and _outlook_reading():
+        # A meeting invite is also an email, and the mail reader already tells
+        # him about it — with the title in full. Both at once was the same
+        # BRAD2026 session arriving twice in one batch, once per surface.
+        return True
     if not chat_watch.enabled():
         return False                      # the feed is the only reader; keep it all
-    t = (item or "").lower()
     if any(k in t for k in _FEED_ONLY):
         return False
     return any(k in t for k in _A_MESSAGE)
+
+
+def _outlook_reading(within: float = 3600.0) -> bool:
+    """Has the mail reader read the inbox recently? Only then may it be relied on
+    to carry what both surfaces show."""
+    import time
+    from . import attention
+    try:
+        return time.time() - attention.last_scrape("outlook") < within
+    except Exception:                                          # noqa: BLE001
+        return False
 
 
 def _activity_wanted(item: str) -> bool:

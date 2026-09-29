@@ -196,29 +196,41 @@ async def read(items: list[dict]) -> dict[str, dict]:
     if not items or not model():
         return out
     chunks = [items[i:i + CHUNK] for i in range(0, len(items), CHUNK)]
-    results = await asyncio.gather(*(_read_chunk(c) for c in chunks))
+    why: list[str] = []
+    results = await asyncio.gather(*(_read_chunk(c, why) for c in chunks))
     for got in results:
         for tid, d in got.items():
             if tid in out:
                 out[tid] = _clean(d, out[tid])
     fell_back = sum(1 for d in out.values() if d.get("source") != "model")
     if fell_back:
-        # Never silent: a sweep read by rules instead of the model is recorded,
-        # and a pattern of it shows up in health as a repeated failure.
+        # Never silent, and never without the reason. 29 Sep: 36 of 36 live
+        # sweeps fell back while the same call worked from a shell, and the
+        # record said only "1/1 by rules" — nothing to debug from.
+        if not why:
+            why.append("ids not in reply: " + ", ".join(
+                t for t, d in out.items() if d.get("source") != "model")[:120])
         from . import store
         with contextlib.suppress(Exception):
-            store.record_outcome("understand", "rules", detail=f"{fell_back}/{len(out)} by rules")
+            store.record_outcome("understand", "rules",
+                                 detail=f"{fell_back}/{len(out)} by rules — {'; '.join(why)[:400]}")
     return out
 
 
-async def _read_chunk(chunk: list[dict]) -> dict[str, dict]:
+async def _read_chunk(chunk: list[dict], why: list[str] | None = None) -> dict[str, dict]:
     try:
-        return _parse(await _call(prompt(chunk)))
+        raw = await _call(prompt(chunk))
     except Exception as exc:                                   # noqa: BLE001
         with contextlib.suppress(Exception):
             from . import quiet
             quiet.note("understand.read", exc)
+        if why is not None:
+            why.append(f"{type(exc).__name__}: {exc}"[:200])
         return {}
+    got = _parse(raw)
+    if not got and why is not None:
+        why.append("unreadable reply: " + " ".join((raw or "<empty>").split())[:160])
+    return got
 
 
 # --- the floor: rules, for when there is no model -----------------------------------------
@@ -245,7 +257,12 @@ def rules(item: dict) -> dict:
     bodies = [re.sub(r"\n\s*\d+\s+[^\n]{1,40}?\breactions?\.?\s*$", "",
                      re.sub(r"^[^:\n]{1,60}:\s", "", x), flags=re.I).strip() for x in new]
     last = bodies[-1] if bodies else ""
-    summary = (item.get("so_far") or "") + (" " if item.get("so_far") else "") + last[:160]
+    # The summary the conversation already has, untouched. It used to be that
+    # summary with the raw latest message glued on and cut at 400 characters —
+    # so every fallback sweep grew it into "summary. Hi Vinish/ Arunkumar,
+    # Please check…", and once it hit the cap every sweep produced the SAME
+    # line, which went to his phone eight times in ninety minutes (29 Sep).
+    summary = item.get("so_far") or last[:160]
     base = {"need": "", "summary": summary.strip()[:400], "entities": [],
             "continues": None, "source": "rules", "work": "check", "question": ""}
     if item.get("handled_by_him"):

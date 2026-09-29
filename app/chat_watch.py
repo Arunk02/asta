@@ -96,7 +96,27 @@ ENGAGED_HOURS = float(os.environ.get("ASTA_GROUP_FOLLOW_HOURS", "2"))
 #: conversation was really newest behind it. Found live: the first sweep against
 #: his real rail reported "nothing new" and was right for the wrong reason.
 _SELF_MARK = "(you)"
-_RAIL_FURNITURE = ("telikos - all teams",)
+_RAIL_FURNITURE = ("telikos - all teams", "followed threads")
+
+#: Rail names that search could not open — channels and communities sit on the
+#: same rail as chats and are not reachable as one. Skipped for a day rather
+#: than tried (and failed) on every sweep.
+_UNOPENABLE_KEY = "chatwatch_unopenable:"
+UNOPENABLE_SECONDS = 24 * 3600
+
+
+def unopenable(name: str) -> bool:
+    import time as _time
+    try:
+        at = float(store.kv_get(_UNOPENABLE_KEY + name.strip().lower()[:80]) or 0)
+    except ValueError:
+        at = 0.0
+    return _time.time() - at < UNOPENABLE_SECONDS
+
+
+def note_unopenable(name: str) -> None:
+    import time as _time
+    store.kv_set(_UNOPENABLE_KEY + name.strip().lower()[:80], str(_time.time()))
 
 
 def is_furniture(name: str) -> bool:
@@ -553,7 +573,7 @@ async def candidates() -> list[str]:
         cursor = int(store.kv_get(_CURSOR_KEY) or "0")
     except ValueError:
         cursor = 0
-    chosen, cursor = pick(current, cursor, previous)
+    chosen, cursor = pick([r for r in current if not unopenable(r)], cursor, previous)
     store.kv_set(_CURSOR_KEY, str(cursor))
     return chosen
 
@@ -643,6 +663,36 @@ def _transcript(chat: str, now: float, hours: float = 6, at_most: int = 14) -> l
     return out
 
 
+#: What each conversation last told him, so it never tells him the same thing twice.
+_TOLD_KEY = "thread_told:"
+#: A line identical to the last one is not news for this long.
+SAME_LINE_SECONDS = 6 * 3600
+#: A busy group's "nothing needed from you" line, at most this often. On 29 Sep
+#: the SCP deployment group produced one per sweep — eight in ninety minutes.
+GROUP_FYI_SECONDS = 30 * 60
+
+
+def _worth_telling(tid: str, line: str, *, fyi: bool, group: bool, now: float) -> bool:
+    """Has this conversation got something to tell him that it has not already?
+
+    Records the line when the answer is yes. Any line is held back if it is word
+    for word what was told last; a status line ("nothing needed from you") in a
+    group also waits out GROUP_FYI_SECONDS after the previous status line. An ask
+    is never held back by an FYI, and an FYI never by an ask."""
+    try:
+        last = json.loads(store.kv_get(_TOLD_KEY + tid) or "{}")
+    except (ValueError, TypeError):
+        last = {}
+    said = " ".join((line or "").lower().split())
+    since = now - float(last.get("at") or 0)
+    if said and last.get("line") == said and since < SAME_LINE_SECONDS:
+        return False
+    if fyi and group and last.get("fyi") and since < GROUP_FYI_SECONDS:
+        return False
+    store.kv_set(_TOLD_KEY + tid, json.dumps({"line": said, "at": now, "fyi": fyi}))
+    return True
+
+
 async def _sweep_threads(notify=None) -> list[dict]:
     """One pass, by CONVERSATION: read, group, understand once, act per thread.
 
@@ -679,7 +729,10 @@ async def _sweep_threads(notify=None) -> list[dict]:
             known = set()
         try:
             fresh = await new_in(chat)
-        except Exception:                                      # noqa: BLE001
+        except Exception as exc:                               # noqa: BLE001
+            from . import teams_bridge
+            if isinstance(exc, teams_bridge.NotFound):
+                note_unopenable(chat)
             failed += 1
             continue                # one unreadable thread must not end the sweep
         for m in fresh:
@@ -794,7 +847,11 @@ async def _sweep_threads(notify=None) -> list[dict]:
                                asta_spoke=1)
             continue
 
-        said = fields["summary"] if state == "status" else (fields["need"] or "")
+        # A status line is the model's reading of the conversation — or, when the
+        # rules read it, simply the newest message: the rules cannot summarise,
+        # and the summary they carry forward is the OLD one, not the news.
+        said = (fields["summary"] if d.get("source") == "model" else "") \
+            if state == "status" else (fields["need"] or "")
         said = said or summarise(c["last"], known=c["known"])
         referents.note(who, said, source=where)
         handled.append({"chat": c["chat"], "who": who, "text": "\n".join(c["new"]),
@@ -804,7 +861,8 @@ async def _sweep_threads(notify=None) -> list[dict]:
             # Nothing is needed from him: a line to read later, never a buzz.
             for k in c["keys"]:
                 attention.mark_dropped(k)
-            quiet_lines.append(f"· {name}: {said}")
+            if _worth_telling(tid, said, fyi=True, group=not c["one_to_one"], now=now):
+                quiet_lines.append(f"· {name}: {said}")
             continue
 
         # From here Asta works the ask the way he would, and he hears once, at
@@ -847,7 +905,8 @@ async def _sweep_threads(notify=None) -> list[dict]:
                 continue
         if task and not task.get("joined") and not task.get("reused"):
             threads.update(tid, status="working")
-            if state == "urgent":
+            if state == "urgent" and _worth_telling(tid, said, fyi=False,
+                                                    group=not c["one_to_one"], now=now):
                 red.append(f"🚨 {name}: {said}")
                 started.append(responder.line_for(task, who, responder.what_it_asks(c["last"])))
             # Otherwise silent until the answer is ready for his "send".
@@ -856,12 +915,12 @@ async def _sweep_threads(notify=None) -> list[dict]:
         after = offers.pending()
         offered = after is not None and (before is None or after.id != before.id)
         line = f"{name}: {said}" + (" — reply *yes* and I'll look into it." if offered else "")
+        loud = c["wanted"] or state == "urgent"
         # Whether HE is interrupted is the ledger's call — a source he keeps
         # ignoring stays quiet. Whether the colleague is helped never was.
-        if c["wanted"] or state == "urgent":
-            red.append(f"🔴 {line}")
-        else:
-            quiet_lines.append(f"· {line}")
+        if offered or _worth_telling(tid, said, fyi=False,
+                                     group=not c["one_to_one"], now=now):
+            (red if loud else quiet_lines).append(f"{'🔴' if loud else '·'} {line}")
         if task:
             started.append(responder.line_for(task, who, responder.what_it_asks(c["last"])))
 
@@ -902,7 +961,10 @@ async def sweep(notify=None) -> list[dict]:
             known = set()
         try:
             fresh = await new_in(chat)
-        except Exception:                                      # noqa: BLE001
+        except Exception as exc:                               # noqa: BLE001
+            from . import teams_bridge
+            if isinstance(exc, teams_bridge.NotFound):
+                note_unopenable(chat)
             failed += 1
             continue                # one unreadable thread must not end the sweep
         for i, m in enumerate(fresh):

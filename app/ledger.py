@@ -106,6 +106,64 @@ def record(kind: str, target: str, verdict: str, *, confidence: float | None = N
         return int(cur.lastrowid or 0)
 
 
+def set_edit(row_id: int, before: str, after: str) -> None:
+    """Complete an "amended" row once the revised draft exists.
+
+    He says "make it shorter" before the shorter version is written, so the row
+    is recorded at his answer and its edit shape filled in when the revision is
+    staged — one judgement, one row.
+    """
+    from . import store
+    shape = _shape_of_edit(before, after)
+    if not row_id or not shape:
+        return
+    with store._connect() as conn:
+        conn.execute("UPDATE experience SET edit=? WHERE id=?", (shape, int(row_id)))
+
+
+def push_verdict(outcome: str) -> str:
+    """What his reaction to a push says about the decision to push it."""
+    o = (outcome or "").strip().lower()
+    if o == "ignored":
+        return "ignored"
+    if o == "muted":
+        return "rejected"
+    return "as_is"
+
+
+_BACKFILLED = "ledger_backfilled_pushes"
+
+
+def backfill_pushes() -> int:
+    """Seed the ledger, once, from reactions already recorded as outcomes.
+
+    The attention ledger has been labelling his reactions since August; the
+    learners only ever read this table, which stayed empty. Returns rows added;
+    0 on every run after the first.
+    """
+    import re as _re
+
+    from . import store
+    if store.kv_get(_BACKFILLED):
+        return 0
+    with store._connect() as conn:
+        conn.executescript(_SCHEMA)
+        rows = conn.execute(
+            "SELECT outcome, detail, created_at FROM outcomes WHERE kind='attention' "
+            "AND outcome IN ('he replied','acted','read_elsewhere','ignored','muted') "
+            "ORDER BY created_at").fetchall()
+        for r in rows:
+            m = _re.search(r"source=(\S+)", r["detail"] or "")
+            conn.execute(
+                "INSERT INTO experience (at, kind, target, verdict, confidence, edit, features) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (float(r["created_at"]), "push", (m.group(1) if m else "")[:120],
+                 push_verdict(r["outcome"]), None, "",
+                 json.dumps({"backfilled": True, "outcome": r["outcome"]})))
+    store.kv_set(_BACKFILLED, "1")
+    return len(rows)
+
+
 def recent(limit: int = 100, kind: str = "") -> list[dict]:
     from . import store
     with store._connect() as conn:

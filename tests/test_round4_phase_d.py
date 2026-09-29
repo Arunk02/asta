@@ -357,3 +357,15 @@ def test_a_code_ask_is_offered_as_a_plan_not_investigated(rail):
     rail.sweep()
     assert not rail.asked
     assert rail.pushed and "plan" in rail.pushed[0]["text"].lower()
+
+
+def test_an_offer_that_moves_up_the_queue_is_actually_asked(phone):
+    """Queued offers promise "I'll ask when that one is answered"; on 29 Sep a
+    promoted offer was never asked, and a colleague's answer waited behind it."""
+    from app import answers, offers
+    offers.propose("first", "ctx", "go?", "do first")
+    offers.propose("🔴 CI failure: repo", "ctx", "Want me to analyse the failure?", "analyse")
+    offers.decline()                                     # the first is answered
+    assert asyncio.run(answers.announce_offer())
+    assert "CI failure" in phone["pushed"][-1]["text"] and "yes" in phone["pushed"][-1]["text"]
+    assert not asyncio.run(answers.announce_offer()), "asked once, not every sweep"

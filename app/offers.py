@@ -223,6 +223,9 @@ def _promote() -> Offer | None:
         if o is not None and not o.expired():
             store.kv_set(KEY, json.dumps(asdict(o)))
             store.kv_set(QUEUE_KEY, json.dumps(queued))
+            # Queued offers told him "I'll ask when that one is answered" — and
+            # promotion never asked. Marked here; answers.announce_offer asks.
+            store.kv_set(f"offer_unasked:{o.id}", "1")
             return o
     store.kv_set(QUEUE_KEY, json.dumps([]))
     return None

@@ -76,7 +76,7 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent_file: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
                    on_progress=None, mcp_config: str = "", plan_only: bool = False,
-                   model: str = "") -> str:
+                   model: str = "", tools_off: bool = False) -> str:
     """Headless claude run with the same contract as copilot_cli.one_shot.
 
     agent_file — a .github/agents/*.agent.md whose CONTENT becomes the appended
@@ -85,6 +85,10 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     mcp_config — inline mcpServers JSON to attach for this run (e.g. the dev MCP
                  servers for a code task). Empty leaves the command untouched, so
                  the default path is byte-for-byte what it was.
+    tools_off  — a model that can only read and answer: the tool set is emptied
+                 and permissions are the CLI's own defaults. For classifying
+                 untrusted text, where the worst a hostile message may do is be
+                 misread. Measured at ~7s against ~14s with tools loaded.
     """
     if not available():
         raise RuntimeError("claude CLI is not installed")
@@ -95,7 +99,9 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     cmd = ["claude", "-p", prompt,
            # Parity with the copilot path's --allow-all-tools: the pipeline
            # must run builds/tests unattended. Workspace repos only.
-           "--permission-mode", "bypassPermissions"]
+           "--permission-mode", "default" if tools_off else "bypassPermissions"]
+    if tools_off:
+        cmd += ["--tools", ""]
     if mcp_config:
         # No --strict-mcp-config: these servers ADD to whatever the workspace
         # already configures, they don't replace it. `claude --mcp-config` takes

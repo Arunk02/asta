@@ -626,6 +626,11 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     why_not = should_respond(kind, priority, key, now=time.time(),
                              broadcast=is_broadcast(who, text), sent_at=sent_at)
     if why_not:
+        # Written down, not dropped. should_respond returns a REASON so that "why
+        # didn't you check that one?" has an answer — and on 29 Sep, a day with no
+        # investigation at all, there was nowhere to read one.
+        store.record_outcome("responder", "skipped", subject=(who or "")[:80],
+                             detail=f"{why_not} — {(text or '')[:100]}")
         return None
     # The ASK is judged on the message itself — context must not be able to
     # invent a question nobody asked. Everything else reads the surrounding
@@ -662,12 +667,27 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
             kind="investigate",
             payload={"who": who, "source": source, "responder_kind": kind})
         return None
+    # The same question, already answered or already being answered, is not
+    # investigated again: "u shouldnt do the same operation multiple times". Keyed
+    # on what it is ABOUT, so two people asking about one booking in different
+    # words share one investigation. See app/results_cache.py.
+    from . import results_cache
+    ck = results_cache.key_for(kind or "ask", grounds)
+    hit = results_cache.lookup(ck)
+    if hit:
+        done = hit["state"] == "done"
+        store.record_outcome("responder", "reused" if done else "joined",
+                             subject=str(hit["task_id"]), detail=f"{who}: {text[:120]}")
+        return {"id": hit["task_id"], "title": title_for(kind, who, text),
+                "reused": done, "joined": not done, "result": hit.get("result", ""),
+                "at": hit.get("at")}
     t = tasks.spawn(title_for(kind, who, text),
                     brief_for(kind, who, grounds),
                     "analysis",                     # read-only. never code.
                     workspace or None)
     store.kv_set(f"responder_task:{t['id']}",
                  f"{source}|{who}|{kind}|{why}")
+    results_cache.start(ck, kind or "ask", t["id"])
     return t
 
 
@@ -682,4 +702,13 @@ def line_for(task: dict, who: str, kind: str) -> str:
             "pr_review": "whether that review is right",
             "review_request": "their PR now — you'll get the review to approve",
             "debug": "it"}.get(kind, "it")
+    if task.get("reused"):
+        import time as _t
+        at = _t.strftime("%H:%M", _t.localtime(float(task.get("at") or _t.time())))
+        found = " ".join((task.get("result") or "").split())[:240]
+        return (f"🔁 {who or 'Someone'} asked something already checked at {at} "
+                f"(task #{task['id']}) — not run again. {found}").rstrip()
+    if task.get("joined"):
+        return (f"🔎 {who or 'Someone'} asked the same thing that is already being "
+                f"checked (task #{task['id']}) — joined it, not started again.")
     return f"🔎 {who or 'Someone'} asked — I'm checking {what} now (task #{task['id']})."

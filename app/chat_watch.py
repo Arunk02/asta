@@ -593,12 +593,227 @@ async def pending() -> list[dict]:
     return out
 
 
+#: At or above this, a closing conversation is simply closed. Below it — probably
+#: done, not certainly — and only if Asta itself has been helping, it asks once.
+CLOSE_SURE = 0.85
+
+
+def checkin_line() -> str:
+    """The one casual question before a conversation Asta was helping with closes.
+
+    A question, and nothing in it promises anything: the same fence as the
+    ask-back in `steward`, for the same reason — it goes out in his name.
+    """
+    return os.environ.get("ASTA_THREAD_CHECKIN_LINE",
+                          "Is there anything else you need from my side?")
+
+
+def _checkin_enabled() -> bool:
+    return os.environ.get("ASTA_THREAD_CHECKIN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def _say(chat: str, line: str) -> bool:
+    """One of the two unapproved lines Asta may send: the ask-back and the check-in."""
+    from . import teams_bridge as _bridge
+    try:
+        await _bridge.send_message(chat, line)
+    except Exception as exc:                                   # noqa: BLE001
+        from . import quiet
+        quiet.note("chatwatch.say", exc)
+        return False
+    store.record_outcome("thread", "said", subject=chat[:80], detail=line[:200])
+    return True
+
+
+async def _sweep_threads(notify=None) -> list[dict]:
+    """One pass, by CONVERSATION: read, group, understand once, act per thread.
+
+    The design of 29 Sep. The old sweep judged every message on its own, which is
+    how a thank-you after his own reaction, three status lines about one defect,
+    and "please ping when free" were all red pushes on the same morning. Here the
+    new messages are grouped into their conversation, the conversation is read
+    as a whole by `understand` — in one model call for the whole sweep — and one
+    decision is taken per conversation:
+
+      * he already replied or reacted  → closed, silently, whatever the words
+      * closing, and sure              → closed, silently
+      * closing, unsure, Asta helped   → one casual check-in, then it closes
+      * an opener                      → asked, politely, what it is about; once
+      * a status update                → one quiet line, never red
+      * an ask                         → one line naming what they need, and an
+                                         investigation — or the one already done
+      * urgent                         → the same, red, now
+
+    Nothing reaches his phone for the first three, and the last two carry the
+    conversation, not the message. The attention ledger still records every
+    message, and a source he keeps ignoring still cannot turn red.
+    """
+    import time as _time
+    from . import attention, referents, responder, steward, threads, triage, understand
+    now = _time.time()
+    opened = failed = 0
+    convs: dict[str, dict] = {}
+    for chat in await candidates():
+        opened += 1
+        try:
+            known = {(r.get("text") or "") for r in store.teams_messages(chat=chat, limit=300)}
+        except Exception:                                      # noqa: BLE001
+            known = set()
+        try:
+            fresh = await new_in(chat)
+        except Exception:                                      # noqa: BLE001
+            failed += 1
+            continue                # one unreadable thread must not end the sweep
+        for m in fresh:
+            who = (m.get("sender") or chat).strip()
+            text = (m.get("text") or "").strip()
+            if not text:
+                continue
+            direct = addressed_to_him(chat, who, text)
+            key = attention.key_for(f"{chat}:{text}")
+            v = triage.classify(who, text, addressed=direct)
+            pri, why, due = attention.rank(v.action, text, addressed=direct, key=key, who=who)
+            wanted = attention.consider("teams-chat", key, who=who, what=v.one_line,
+                                        why=why, priority=pri, due_at=due)
+            if not direct:
+                attention.mark_dropped(key)     # read, recorded, not his to answer
+                continue
+            one_to_one = who.lower() == chat.lower()
+            counterpart = who if one_to_one else chat
+            tid = threads.tid("teams", counterpart)
+            c = convs.setdefault(tid, {
+                "id": tid, "who": who, "chat": chat, "counterpart": counterpart,
+                "one_to_one": one_to_one, "new": [], "keys": [], "known": known,
+                "handled_by_him": False, "wanted": False, "pri": pri,
+                "last": "", "sent_at": None})
+            c["new"].append(text if one_to_one else f"{who}: {text}")
+            c["keys"].append(key)
+            c["wanted"] = c["wanted"] or bool(wanted)
+            if pri is not None and (c["pri"] is None or pri < c["pri"]):
+                c["pri"] = pri
+            c["who"], c["last"], c["sent_at"] = who, text, m.get("sent_at")
+            # Whether he has dealt with the LATEST message — not any of them. On
+            # 29 Sep Navya's "Thank you" carried his salute and was followed by
+            # "can you please merge this": his reaction answered the thanks, not
+            # the merge. Latest wins, so a follow-up is never swallowed.
+            c["handled_by_him"] = answered_by_him(chat, m)
+    if opened and failed >= opened:
+        attention.note_scrape_error(
+            "teams-chat", RuntimeError(f"all {opened} chat(s) failed to open"))
+    elif opened:
+        attention.note_scrape("teams-chat")
+    if not convs:
+        return []
+
+    # What each conversation already knows, and — for one just opened — the
+    # earlier conversations with this person that it may be picking back up.
+    for c in convs.values():
+        t = threads.open("teams", c["counterpart"], chat=c["chat"], now=now)
+        c["status"] = t.get("status", "open")
+        c["so_far"] = t.get("summary", "")
+        c["asta_spoke"] = bool(t.get("asta_spoke"))
+        c["asked_back"] = bool(t.get("asked_back"))
+        c["checked_in"] = bool(t.get("checked_in"))
+        c["entities"] = sorted(set(t.get("entities") or [])
+                               | set(threads.entities_in(" ".join(c["new"]))))
+        c["past"] = []
+        if threads.is_new(t, now):
+            for r in threads.past(c["counterpart"], " ".join(c["new"]), c["entities"], now=now):
+                day = _time.strftime("%d %b", _time.localtime(float(r["closed_at"])))
+                c["past"].append(f"#{r['id']} ({day}): {r['need']} — {r['summary']}".strip())
+
+    decisions = await understand.read(list(convs.values()))
+
+    handled: list[dict] = []
+    red: list[str] = []
+    quiet_lines: list[str] = []
+    started: list[str] = []
+    for tid, c in convs.items():
+        d = decisions.get(tid) or understand.rules(c)
+        state, conf = d["state"], float(d.get("closing_confidence") or 0.0)
+        fields = {"need": d.get("need") or "", "summary": d.get("summary") or c["so_far"],
+                  "entities": sorted(set(c["entities"]) | set(d.get("entities") or [])),
+                  "last_activity": now}
+        if d.get("continues"):
+            fields["continues"] = d["continues"]
+        threads.update(tid, **fields)
+        threads._record(tid, f"understood:{state}",
+                        f"{d.get('source')} conf={conf:.2f} need={fields['need'][:80]}")
+        who = c["who"]
+        where = "Teams 1:1" if c["one_to_one"] else f"Teams · {c['chat']}"
+        name = who if c["one_to_one"] else f"{who} in {c['chat']}"
+
+        if c["handled_by_him"]:
+            for k in c["keys"]:
+                attention.mark_acted(k, why="he replied or reacted")
+            attention.settle_with(who)
+            threads.close(tid, why="he replied or reacted", now=now)
+            continue
+
+        if state == "closing":
+            for k in c["keys"]:
+                attention.mark_dropped(k)
+            if conf < CLOSE_SURE and c["asta_spoke"] and not c["checked_in"] \
+                    and _checkin_enabled() and await _say(c["chat"], checkin_line()):
+                threads.update(tid, checked_in=1, status="checked_in", asta_spoke=1)
+                continue
+            threads.close(tid, why=f"closing ({d.get('source')}, {conf:.2f})", now=now)
+            continue
+
+        if state == "opener":
+            for k in c["keys"]:
+                attention.mark_dropped(k)
+            if not c["asked_back"] and steward.ask_back_enabled() \
+                    and await _say(c["chat"], steward.ASK_BACK):
+                steward.note_asked_back(who)
+                threads.update(tid, asked_back=1, status="clarifying", asta_spoke=1)
+            continue
+
+        said = fields["summary"] if state == "status" else (fields["need"] or "")
+        said = said or summarise(c["last"], known=c["known"])
+        referents.note(who, said, source=where)
+        handled.append({"chat": c["chat"], "who": who, "text": "\n".join(c["new"]),
+                        "priority": c["pri"], "key": c["keys"][-1], "state": state})
+
+        if state == "status" or (state == "ask" and not c["wanted"]):
+            # Nothing is needed — or it is from a source he has taught Asta he
+            # ignores. Either way it is a line to read later, never a buzz.
+            for k in c["keys"]:
+                attention.mark_dropped(k)
+            quiet_lines.append(f"· {name}: {said}")
+            continue
+
+        red.append(f"🔴 {name}: {said}")
+        context = "\n".join(x for x in [
+            f"So far in this conversation: {c['so_far']}" if c["so_far"] else "",
+            *[f"Earlier with {who}: {p}" for p in c["past"]]] if x)
+        task = responder.respond("teams-chat", who, "\n".join(c["new"]), priority=c["pri"],
+                                 key=c["keys"][-1], sent_at=c["sent_at"], context=context)
+        if task:
+            started.append(responder.line_for(task, who, responder.what_it_asks(c["last"])))
+            threads.update(tid, status="working")
+
+    if notify and (red or quiet_lines or started):
+        body = "\n".join(red + quiet_lines + ([""] if (red or quiet_lines) and started else [])
+                         + started)
+        await notify("💬 Teams\n" + body, "teams",
+                     urgency="direct" if red or started else "ambient",
+                     considered=True, keys=tuple(h["key"] for h in handled))
+    return handled
+
+
 async def sweep(notify=None) -> list[dict]:
     """One pass: what moved, what is new in it, judged and acted on.
 
     Returns the messages it handled, so a test can assert on the decision rather
     than on a notification having been sent.
+
+    With ASTA_THREADS on, the pass is by conversation — see `_sweep_threads`. The
+    per-message path below is kept whole, as the rollback.
     """
+    from . import threads
+    if threads.enabled():
+        return await _sweep_threads(notify)
     from . import attention, responder, triage
     handled: list[dict] = []
     lines: list[str] = []
@@ -774,4 +989,13 @@ async def watch_loop() -> None:
         except Exception as exc:                               # noqa: BLE001
             from . import quiet
             quiet.note("chatwatch.sweep", exc)
+        # Conversations that are over give their context back — "once the convo
+        # resolved automatically dissolve the thread context and make it free".
+        from . import threads
+        if threads.enabled():
+            try:
+                threads.dissolve_due()
+            except Exception as exc:                           # noqa: BLE001
+                from . import quiet
+                quiet.note("chatwatch.dissolve", exc)
         await asyncio.sleep(0)

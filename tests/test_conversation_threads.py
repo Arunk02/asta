@@ -479,3 +479,47 @@ def test_a_pasted_log_cannot_become_the_whole_prompt():
     huge = "ERROR at line 1\n" * 5000
     p = understand.prompt([_item(new=[huge] * 40)])
     assert len(p) < 20000, "bounded no matter what they paste"
+
+
+# --- both sides of the conversation ---------------------------------------------------------
+
+def test_the_model_reads_both_sides_so_it_sees_he_already_took_it_over(rail):
+    """The first live conversation, 29 Sep 14:38. Ayyappa explained a Telemetry
+    topic; Arun replied "u create group with karthik" / "let me talk with him if
+    he asks anything"; Ayyappa said "Ok Arun". Asta, shown only Ayyappa's side,
+    read it as a code change and asked Arun to plan it. His own messages are
+    the most important half: they say who is handling it."""
+    from app import understand
+    now = time.time()
+    for who, text, dt in [
+        ("Yelugubanti Ayyappa Swamy", "Karthik says we need a serviceplan topic for Telemetry", 60),
+        ("Arunkumar K", "u create group with karthik", 40),
+        ("Arunkumar K", "let me talk with him if he asks anything", 30),
+    ]:
+        store.save_teams_messages([{"key": f"k{dt}", "chat": "Yelugubanti Ayyappa Swamy",
+                                    "sender": who, "text": text, "sent_at": now - dt,
+                                    "stamp": ""}])
+    seen = []
+    real = understand.prompt
+
+    def spy(items):
+        seen.extend(items)
+        return real(items)
+    import app.understand as u
+    u.prompt = spy
+    rail.rows["Yelugubanti Ayyappa Swamy"] = [_msg("Yelugubanti Ayyappa Swamy", "Ok Arun", at=now)]
+    rail.script["teams:Yelugubanti Ayyappa Swamy"] = {
+        "state": "closing", "closing_confidence": 0.9, "need": "", "entities": [],
+        "summary": "Arun asked Ayyappa to set up a group with Karthik; Ayyappa agreed."}
+    try:
+        rail.sweep()
+    finally:
+        u.prompt = real
+    transcript = "\n".join(seen[0]["conversation"])
+    assert "Arun: u create group with karthik" in transcript
+    assert not rail.pushes, "he had already taken it over"
+
+
+def test_ok_arun_is_a_goodbye_to_the_rules_too():
+    from app import understand
+    assert understand.rules(_item(new=["Ok Arun"]))["state"] == "closing"

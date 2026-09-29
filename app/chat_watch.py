@@ -629,6 +629,20 @@ async def _say(chat: str, line: str) -> bool:
     return True
 
 
+def _transcript(chat: str, now: float, hours: float = 6, at_most: int = 14) -> list[str]:
+    """The last few messages of this chat, both sides, oldest first, labelled."""
+    try:
+        rows = store.teams_messages(chat=chat, since=now - hours * 3600, limit=400)
+    except Exception:                                          # noqa: BLE001
+        return []
+    out = []
+    for r in rows[-at_most:]:
+        text = " ".join((r.get("text") or "").split())[:400]
+        if text:
+            out.append(f"{'Arun' if is_from_him(r.get('sender', '')) else r.get('sender', '?')}: {text}")
+    return out
+
+
 async def _sweep_threads(notify=None) -> list[dict]:
     """One pass, by CONVERSATION: read, group, understand once, act per thread.
 
@@ -712,6 +726,12 @@ async def _sweep_threads(notify=None) -> list[dict]:
     # What each conversation already knows, and — for one just opened — the
     # earlier conversations with this person that it may be picking back up.
     for c in convs.values():
+        # BOTH sides, in order. `new_in` leaves his own messages out, rightly —
+        # they are not things to act on — but they are the half that says who is
+        # handling it. The first live conversation, 29 Sep, was read as "a code
+        # change, plan it?" because the model never saw his "u create group with
+        # karthik" before "Ok Arun".
+        c["conversation"] = _transcript(c["chat"], now)
         t = threads.open("teams", c["counterpart"], chat=c["chat"], now=now)
         c["status"] = t.get("status", "open")
         c["so_far"] = t.get("summary", "")

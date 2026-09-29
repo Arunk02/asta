@@ -81,10 +81,17 @@ summary — one or two sentences on the WHOLE conversation so far, including wha
           was resolved. Written for Arun, plainly.
 entities — PR links, Jira keys, incident numbers, booking or defect ids mentioned.
 continues — the id of a past conversation this picks back up, or null.
+work — for an ask or urgent: "code" if they want code written or changed,
+       otherwise "check" (look into, answer, review, explain, decide).
+question — for an ask that is too vague to act on (no id, no link, no clear
+       subject, and the summary and past do not supply it): ONE short, polite
+       question to ask them, in Arun's voice, that would let someone act. It
+       must be a question, promise nothing, and not ask for anything already
+       given. Empty when the ask is clear enough to start on.
 
 Reply with ONLY this JSON, one entry per conversation, ids exactly as given:
 {"threads":[{"id":"...","state":"...","closing_confidence":0.0,"need":"",
-"summary":"","entities":[],"continues":null}]}"""
+"summary":"","entities":[],"continues":null,"work":"check","question":""}]}"""
 
 
 #: Per conversation: the newest messages only, each cut short. A pasted log is
@@ -113,7 +120,7 @@ async def _call(text: str) -> str:
     """The model, with no tools. Its own seam so tests never start a CLI."""
     from . import claude_cli
     return await claude_cli.one_shot(text, model=model() or "haiku", tools_off=True,
-                                     timeout=90)
+                                     timeout=150)
 
 
 def _parse(raw: str) -> dict[str, dict]:
@@ -142,7 +149,9 @@ def _clean(d: dict, fallback: dict) -> dict:
         conf = fallback["closing_confidence"]
     ents = d.get("entities") if isinstance(d.get("entities"), list) else []
     cont = d.get("continues")
-    return {"state": state, "closing_confidence": conf,
+    work = d.get("work") if d.get("work") in ("code", "check") else fallback.get("work", "check")
+    return {"state": state, "closing_confidence": conf, "work": work,
+            "question": str(d.get("question") or "").strip()[:240],
             "need": str(d.get("need") or "")[:200],
             "summary": str(d.get("summary") or fallback["summary"])[:400],
             "entities": [str(e)[:120] for e in ents][:20],
@@ -151,23 +160,59 @@ def _clean(d: dict, fallback: dict) -> dict:
             "source": "model"}
 
 
+#: Words that turn a question into a commitment made in his name.
+_PROMISE = re.compile(r"\b(?:i'?ll|i\s+will|will\s+do|on\s+it|happy\s+to|sure[,!]|"
+                      r"we'?ll|arun\s+will|done\b)", re.I)
+
+
+def safe_question(q: str) -> str:
+    """The model's clarifying question, if it is fit to send in his name, else ''.
+
+    It goes out without his approval, so it has to be exactly what the exception
+    allows: a short question that promises nothing.
+    """
+    q = " ".join((q or "").split())
+    if not (8 <= len(q) <= 220) or not q.endswith("?") or _PROMISE.search(q):
+        return ""
+    return q
+
+
+#: Conversations per model call. Measured: 4 took ~30 s, 28 took ~60 s — so a
+#: busy morning is split into chunks that run side by side instead of one call
+#: that outlives its timeout and silently becomes rules.
+CHUNK = 8
+
+
 async def read(items: list[dict]) -> dict[str, dict]:
     """{thread id: decision} for every conversation given. Never raises."""
+    import asyncio
     out = {it["id"]: rules(it) for it in items}
     if not items or not model():
         return out
+    chunks = [items[i:i + CHUNK] for i in range(0, len(items), CHUNK)]
+    results = await asyncio.gather(*(_read_chunk(c) for c in chunks))
+    for got in results:
+        for tid, d in got.items():
+            if tid in out:
+                out[tid] = _clean(d, out[tid])
+    fell_back = sum(1 for d in out.values() if d.get("source") != "model")
+    if fell_back:
+        # Never silent: a sweep read by rules instead of the model is recorded,
+        # and a pattern of it shows up in health as a repeated failure.
+        from . import store
+        with contextlib.suppress(Exception):
+            store.record_outcome("understand", "rules", detail=f"{fell_back}/{len(out)} by rules")
+    return out
+
+
+async def _read_chunk(chunk: list[dict]) -> dict[str, dict]:
     try:
-        got = _parse(await _call(prompt(items)))
+        return _parse(await _call(prompt(chunk)))
     except Exception as exc:                                   # noqa: BLE001
         with contextlib.suppress(Exception):
             from . import quiet
             quiet.note("understand.read", exc)
-        return out
-    for it in items:
-        d = got.get(it["id"])
-        if d:
-            out[it["id"]] = _clean(d, out[it["id"]])
-    return out
+        return {}
 
 
 # --- the floor: rules, for when there is no model -----------------------------------------
@@ -196,7 +241,7 @@ def rules(item: dict) -> dict:
     last = bodies[-1] if bodies else ""
     summary = (item.get("so_far") or "") + (" " if item.get("so_far") else "") + last[:160]
     base = {"need": "", "summary": summary.strip()[:400], "entities": [],
-            "continues": None, "source": "rules"}
+            "continues": None, "source": "rules", "work": "check", "question": ""}
     if item.get("handled_by_him"):
         return {**base, "state": "closing", "closing_confidence": 0.95}
     if any(steward._URGENT.search(b) for b in bodies):

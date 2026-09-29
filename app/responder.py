@@ -604,7 +604,8 @@ def familiar(text: str) -> tuple[bool, str]:
 
 def respond(source: str, who: str, text: str, priority: int | None = None,
             key: str = "", workspace: str = "", sent_at: float | None = None,
-            context: str = "") -> dict | None:
+            context: str = "", reply_to: str = "", group: bool = False,
+            need: str = "", thread: str = "") -> dict | None:
     """Start the investigation this message deserves. The spawned task, or None.
 
     Deliberately synchronous and tiny: it decides and delegates. Everything slow
@@ -681,14 +682,47 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         return {"id": hit["task_id"], "title": title_for(kind, who, text),
                 "reused": done, "joined": not done, "result": hit.get("result", ""),
                 "at": hit.get("at")}
-    t = tasks.spawn(title_for(kind, who, text),
-                    brief_for(kind, who, grounds),
+    brief = brief_for(kind, who, grounds)
+    if reply_to:
+        brief += _waiting_brief(who, text, context)
+    t = tasks.spawn(title_for(kind, who, text), brief,
                     "analysis",                     # read-only. never code.
-                    workspace or None)
+                    workspace or None, teams_chat=reply_to)
     store.kv_set(f"responder_task:{t['id']}",
                  f"{source}|{who}|{kind}|{why}")
+    if reply_to:
+        from . import answers
+        answers.remember_meta(t["id"], who=who, need=need or message_of(text)[:160],
+                              chat=reply_to, group=group, thread=thread)
     results_cache.start(ck, kind or "ask", t["id"])
     return t
+
+
+def _waiting_brief(who: str, text: str, context: str) -> str:
+    """What an investigation needs when a colleague is waiting on the answer.
+
+    The conversation so far and their earlier conversations, so it continues
+    rather than restarts; his indexed documents when they are about the ask, so
+    an answer about the product comes from the product's own documentation; and
+    the two-section ending that lets the finished answer reach him as one
+    "send?" — see app/answers.py.
+    """
+    from . import answers
+    parts = []
+    if context.strip():
+        parts.append("\n\nWhat has already been said with them (continue from it, do not "
+                     "ask again for anything already given):\n" + context.strip())
+    try:
+        from . import knowledge
+        hits = knowledge.relevant(text, limit=3, at_least=0.5)
+    except Exception:                                          # noqa: BLE001
+        hits = []
+    if hits:
+        parts.append("\n\nFrom Arun's indexed project documents — use them and name the "
+                     "document when you do:\n" + "\n\n".join(
+                         f"[{h['document']} — {h['where']}]\n{h['text'][:700]}" for h in hits))
+    parts.append(answers.brief_rider(who))
+    return "".join(parts)
 
 
 def line_for(task: dict, who: str, kind: str) -> str:

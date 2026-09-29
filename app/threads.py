@@ -229,6 +229,77 @@ def past(counterpart: str, text: str, entities: list | None = None,
     return [r for _, r in scored[:limit]]
 
 
+def context_for(person: str, now: float | None = None, channel: str = "teams") -> str:
+    """What Asta knows about its conversations with this person, in a few lines.
+
+    One function, every place a person comes up — his chat when he says "her",
+    a call to them, a meeting with them, an investigation for them — so each one
+    continues the conversation instead of starting it again:
+
+        "should know their previous context and remember and continues talk
+         until it resolve, keep in context, no context rot"
+
+    Bounded on purpose: the live conversation's summary plus the two most recent
+    earlier ones. The rest stays searchable, not carried.
+    """
+    import time as _t
+    now = _t.time() if now is None else now
+    person = (person or "").strip()
+    if not person:
+        return ""
+    lines = []
+    live = get(tid(channel, person))
+    if live and (live.get("summary") or live.get("need")):
+        state = {"awaiting_arun": "answer waiting for Arun's approval",
+                 "clarifying": "asked them to clarify", "working": "being looked into",
+                 "checked_in": "asked if anything else is needed"}.get(live["status"], live["status"])
+        lines.append(f"Now ({state}): {live.get('need') or ''} — {live.get('summary') or ''}".strip(" —"))
+    with store._connect() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT need, summary, closed_at FROM conv_episodes WHERE counterpart=? "
+            "AND closed_at>=? ORDER BY closed_at DESC LIMIT 2",
+            (person, now - PAST_DAYS * 86400)).fetchall()]
+    for r in rows:
+        day = _t.strftime("%d %b", _t.localtime(float(r["closed_at"])))
+        lines.append(f"Earlier ({day}): {r['need']} — {r['summary']}".strip(" —"))
+    if not lines:
+        return ""
+    return f"With {person}:\n" + "\n".join(f"- {x}" for x in lines)
+
+
+def status_report(person: str, now: float | None = None) -> str:
+    """The conversation with this person, told plainly: now, how it got here, before."""
+    import time as _t
+    now = _t.time() if now is None else now
+    name = (person or "").strip()
+    if not name:
+        return "Name the person."
+    with store._connect() as conn:
+        live = [_row(r) for r in conn.execute(
+            "SELECT * FROM conv_threads WHERE lower(counterpart) LIKE ? "
+            "ORDER BY last_activity DESC LIMIT 1", (f"%{name.lower()}%",)).fetchall()]
+        who = live[0]["counterpart"] if live else name
+        steps = [dict(r) for r in conn.execute(
+            "SELECT created_at, outcome, detail FROM outcomes WHERE kind='thread' "
+            "AND subject LIKE ? ORDER BY id DESC LIMIT 8", (f"%{who}%",)).fetchall()][::-1]
+    out = []
+    if live:
+        t = live[0]
+        out.append(f"{who} — {t['status']}. Needs: {t['need'] or 'nothing stated'}.")
+        if t.get("summary"):
+            out.append(t["summary"])
+    else:
+        out.append(f"No open conversation with {who}.")
+    if steps:
+        out.append("What happened:")
+        out += [f"- {_t.strftime('%H:%M', _t.localtime(float(r['created_at'])))} "
+                f"{r['outcome']}: {r['detail'][:120]}" for r in steps]
+    earlier = context_for(who, now=now)
+    if earlier:
+        out.append(earlier)
+    return "\n".join(out)
+
+
 def _record(thread_id: str, event: str, detail: str) -> None:
     """The conversation's timeline — "why did you push Navya's thanks?" is
     answered from here, not reconstructed from memory."""

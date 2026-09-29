@@ -445,6 +445,7 @@ async def login(name: str, env: str = "") -> str:
         return f"'{env}' is not configured for {name} — allowed: {', '.join(known) or '(none)'}"
     from . import store, teams_bridge
     print(f"Opening {name} {env} — complete any sign-in in the window.")
+    await teams_bridge.close_pool()      # this window owns the profile; don't collide
     pw, ctx = await teams_bridge._launch(headless=False)
     try:
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()

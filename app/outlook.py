@@ -80,6 +80,11 @@ def _clean_cells(text: str) -> list[str]:
 
 async def _open(page, url: str, ready: str, timeout: int = 70) -> None:
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    await _ready(page, ready, timeout)
+
+
+async def _ready(page, ready: str, timeout: int = 70) -> None:
+    """Wait for Outlook to render — or say plainly that the session has gone."""
     for _ in range(timeout // 2):
         if "login" in page.url or "microsoftonline" in page.url:
             raise RuntimeError("SESSION_EXPIRED")
@@ -92,24 +97,21 @@ async def _open(page, url: str, ready: str, timeout: int = 70) -> None:
 
 async def read_mail(limit: int = 15) -> list[dict]:
     """Recent inbox rows as {unread, sender, subject, when, important}."""
-    async with teams_bridge._lock:
-        pw, ctx = await teams_bridge._launch()
-        try:
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            await _open(page, MAIL_URL, MAIL_LIST)
-            rows = await page.evaluate(
-                """(sel) => {
-                    const list = document.querySelector(sel);
-                    if (!list) return [];
-                    return Array.from(list.querySelectorAll('[role="option"]')).map(r => ({
-                        aria: r.getAttribute('aria-label') || '',
-                        text: r.innerText.replace(/\\n/g, ' | '),
-                    }));
-                }""", MAIL_LIST)
-            store.kv_set("teams_session_ok", "1")  # shared session proved alive
-        finally:
-            await ctx.close()
-            await pw.stop()
+    # A tab in the POOLED browser — never a second Chrome on the profile. This
+    # launched its own every five minutes, and the launch reaped the live Teams
+    # browser as an "orphan": 1,045 kills in a week. See tests/test_one_browser.py.
+    async with teams_bridge.site_page(MAIL_URL) as page:
+        await _ready(page, MAIL_LIST)
+        rows = await page.evaluate(
+            """(sel) => {
+                const list = document.querySelector(sel);
+                if (!list) return [];
+                return Array.from(list.querySelectorAll('[role="option"]')).map(r => ({
+                    aria: r.getAttribute('aria-label') || '',
+                    text: r.innerText.replace(/\\n/g, ' | '),
+                }));
+            }""", MAIL_LIST)
+        store.kv_set("teams_session_ok", "1")  # shared session proved alive
 
     out: list[dict] = []
     for row in rows[:limit]:
@@ -583,19 +585,14 @@ def fmt_mail(m: dict, context: bool = False) -> str:
 
 async def _todays_events() -> list[dict]:
     """Raw calendar rows scraped from Outlook, parsed into dicts."""
-    async with teams_bridge._lock:
-        pw, ctx = await teams_bridge._launch()
-        try:
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            await _open(page, CALENDAR_URL, '[role="main"], [aria-label*="calendar view"]')
-            await asyncio.sleep(3)
-            labels = await page.evaluate(
-                """() => Array.from(document.querySelectorAll('[aria-label]'))
-                        .map(e => e.getAttribute('aria-label') || '')""")
-            store.kv_set("teams_session_ok", "1")
-        finally:
-            await ctx.close()
-            await pw.stop()
+    # The pooled browser, in a tab — see read_mail.
+    async with teams_bridge.site_page(CALENDAR_URL) as page:
+        await _ready(page, '[role="main"], [aria-label*="calendar view"]')
+        await asyncio.sleep(3)
+        labels = await page.evaluate(
+            """() => Array.from(document.querySelectorAll('[aria-label]'))
+                    .map(e => e.getAttribute('aria-label') || '')""")
+        store.kv_set("teams_session_ok", "1")
 
     return _events_from(labels)
 

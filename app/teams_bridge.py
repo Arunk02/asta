@@ -230,7 +230,15 @@ async def _pool_alive() -> bool:
         return False
 
 
-async def _discard_pool() -> None:
+#: Why the pooled browser was last thrown away — read when the next one launches,
+#: so every relaunch is recorded with its cause. The Outlook collision that
+#: killed the Teams browser every five minutes was found from timestamps alone.
+_WHY: dict[str, str] = {"discard": ""}
+
+
+async def _discard_pool(why: str = "") -> None:
+    if why:
+        _WHY["discard"] = why
     ctx, pw = _POOL.get("ctx"), _POOL.get("pw")
     _POOL.clear()
     for closer in (ctx, pw):
@@ -264,8 +272,12 @@ async def _pooled_page():
     # background readers and the next one added would not know to ask.
     if in_a_call():
         raise RuntimeError("a call is in progress — the Teams browser is busy")
+    had = bool(_POOL)
     await _discard_pool()
     pw, ctx = await _launch(headless=True)
+    store.record_outcome("browser", "launched", subject="teams",
+                         detail=(_WHY["discard"] or ("pool went stale" if had else "cold start"))[:200])
+    _WHY["discard"] = ""
     try:
         page = await _open_teams(ctx)
     except Exception:
@@ -293,7 +305,9 @@ async def teams_page():
             # The operation failed with the page in an unknown state: half-typed
             # into a composer, a dialog open, a navigation in flight. Reusing that
             # is how one failure becomes several, so it is thrown away.
-            await _discard_pool()
+            import sys as _sys
+            exc = _sys.exc_info()[1]
+            await _discard_pool(f"operation failed: {type(exc).__name__}: {str(exc)[:120]}")
             raise
 
 

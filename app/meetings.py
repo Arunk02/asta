@@ -116,26 +116,22 @@ async def open_and_send(url: str, send: bool = False) -> str:
     there afterwards, this reports NOT sent rather than assuming the click landed.
     """
     from . import outlook, teams_bridge
-    async with teams_bridge._lock:
-        pw, ctx = await teams_bridge._launch()
-        try:
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            await outlook._open(page, url, '[role="main"], [aria-label*="Send" i]')
-            await asyncio.sleep(3)
-            if not send:
-                return "opened (not sent)"
-            for sel in _SEND_BUTTONS:
-                try:
-                    await (await page.wait_for_selector(sel, timeout=5000)).click()
-                    await asyncio.sleep(3)
-                    store.kv_set("teams_session_ok", "1")
-                    return "sent"
-                except Exception:
-                    continue
-            raise RuntimeError("couldn't find the Send button — treat as NOT sent")
-        finally:
-            await ctx.close()
-            await pw.stop()
+    # A tab in the pooled browser, never a second Chrome on the profile — see
+    # tests/test_one_browser.py for what launching one used to cost.
+    async with teams_bridge.site_page(url) as page:
+        await outlook._ready(page, '[role="main"], [aria-label*="Send" i]')
+        await asyncio.sleep(3)
+        if not send:
+            return "opened (not sent)"
+        for sel in _SEND_BUTTONS:
+            try:
+                await (await page.wait_for_selector(sel, timeout=5000)).click()
+                await asyncio.sleep(3)
+                store.kv_set("teams_session_ok", "1")
+                return "sent"
+            except Exception:
+                continue
+        raise RuntimeError("couldn't find the Send button — treat as NOT sent")
 
 
 # --- joining a call ----------------------------------------------------------

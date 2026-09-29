@@ -1867,6 +1867,20 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
     serves every one of them; only the module and the trace label differ.
     """
     tool_name = via if via.endswith("_cli") else f"{via}_cli"
+    # A phone chat after a long silence is a new sitting: fresh session, a short
+    # recap, and the last sitting written to memory where a later "that PR from
+    # Tuesday" can find it. Without this his WhatsApp was one thread of 490
+    # messages, re-read at 107k-300k tokens a turn. See app/episodes.py.
+    from . import episodes
+    if episodes.applies_to(channel) and episodes.gap_elapsed(conv["id"]):
+        dropped = rotate_sessions(conv["id"])
+        store.kv_set(f"session_recap:{conv['id']}", "1")
+        store.record_outcome("session", "rotated", subject=conv["id"],
+                             detail=f"new sitting after {episodes.gap_seconds() / 60:.0f} min "
+                                    f"quiet; dropped={','.join(dropped) or 'none'}")
+        daemon.once(f"digest:{conv['id']}", asyncio.to_thread(memory.write_episode, conv))
+    if episodes.applies_to(channel):
+        episodes.touch(conv["id"])
     if note:
         await out.send({"type": "note", "text": note})
     await out.send({"type": "tool", "status": "start", "name": tool_name, "args": ""})

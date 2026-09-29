@@ -452,13 +452,27 @@ def _people_he_talks_to() -> list[str]:
     return names
 
 
+#: The count Teams renders under a message that somebody reacted to — "1 Saluting
+#: face reaction.", "2 Like reactions." — at the END of the scraped text. Anchored
+#: there, so "what was the customer reaction?" is a sentence and not a reaction.
+_REACTION_TAIL = re.compile(r"\n\s*\d+\s+[^\n]{1,40}?\breactions?\.?\s*$", re.I)
+
+
 def answered_by_him(chat: str, message: dict) -> bool:
-    """Has Arun himself said something in this thread since this message?
+    """Has Arun himself dealt with this message?
 
     Read from what Asta has already stored, so it costs nothing. Anything without
     a timestamp is ignored rather than guessed at: an untimed row cannot be
     honestly claimed to come after anything.
+
+    A REACTION is an answer too, in a 1:1. Navya's "Thank you" arrived with his
+    salute already on it and was pushed to him in red, because only a text reply
+    counted. A 1:1 has two people in it, so a reaction on her message is his. In a
+    group anyone could have reacted, and it proves nothing.
     """
+    if (message.get("sender") or chat or "").strip().lower() == (chat or "").strip().lower() \
+            and _REACTION_TAIL.search(message.get("text") or ""):
+        return True
     when = message.get("sent_at")
     if not when:
         return False
@@ -679,6 +693,10 @@ async def sweep(notify=None) -> list[dict]:
                 text = f"{opening['opened_with']}\n{text}"
             handled.append({"chat": chat, "who": who, "text": text, "priority": pri, "key": key})
             lines.append(render(chat, who, text, pri, known=known))
+            # So "ask her what it is" a minute later knows who "her" is.
+            from . import referents
+            referents.note(who, text, source="Teams 1:1" if who.lower() == chat.lower()
+                           else f"Teams · {chat}")
             # The few lines BEFORE this one, from the same person. People paste
             # the link and ask about it in the next breath — Alex's booking id
             # was one message above "can you check why STF is not done?", so

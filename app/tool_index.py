@@ -222,6 +222,18 @@ def required_for(query: str) -> list[str]:
         out.append("grafana_logs")
     if _ABOUT_WORKFLOWS.search(query or ""):
         out += ["temporal_workflows", "temporal_workflow"]
+    # His documents know about it — so the brain must be able to read them. On 29
+    # Sep "tell abt telikos inland journey" was handed 31 tools, from set_reminder
+    # to answer_call, and not this one, while 31 of his 52 passages mention
+    # inland. The answer was "no grounded info here". The index is the only thing
+    # that can know what the index contains; the ranker was guessing from the
+    # tool's description.
+    try:
+        from . import knowledge
+        if knowledge.relevant(query or "", limit=1):
+            out.append("search_knowledge")
+    except Exception:                                          # noqa: BLE001
+        pass                        # a broken index must never break routing
     return out
 
 

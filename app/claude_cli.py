@@ -102,6 +102,11 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
            "--permission-mode", "default" if tools_off else "bypassPermissions"]
     if tools_off:
         cmd += ["--tools", ""]
+        if not mcp_config:
+            # No MCP servers either. The CLI otherwise starts every server in
+            # his user config (Grafana) for a call that can use none of them:
+            # +2.3s each time, measured, and one hung server stalls the reader.
+            cmd += ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
     if mcp_config:
         # No --strict-mcp-config: these servers ADD to whatever the workspace
         # already configures, they don't replace it. `claude --mcp-config` takes

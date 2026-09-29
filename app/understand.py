@@ -48,6 +48,12 @@ def model() -> str:
     return os.environ.get("ASTA_UNDERSTAND_MODEL", "").strip()
 
 
+def second_model() -> str:
+    """ASTA_UNDERSTAND_FALLBACK_MODEL — tried for what the first model could not
+    read, before the rules. '' skips it."""
+    return os.environ.get("ASTA_UNDERSTAND_FALLBACK_MODEL", "").strip()
+
+
 # --- the model ----------------------------------------------------------------------------
 
 _INSTRUCTIONS = """You read conversations colleagues are having with Arun on Teams and
@@ -72,7 +78,9 @@ state — exactly one of:
           ("hi", "need your help", "please ping when free", "you there?") AND
           nothing in the summary, the past or the conversation says what it is
           about. "Call?" right after a discussion of a defect is NOT an opener:
-          it is an ask (work "talk") about that defect.
+          it is an ask (work "talk") about that defect. A report that something
+          is broken or failed ("also this failed") is never an opener: it is an
+          ask, even if it needs a question to pin down.
   ask     they want Arun to do, check, review, answer or decide something specific
   urgent  production is broken, a release is blocked, a customer is escalating
   status  an update, FYI or a decision; nothing is needed from Arun
@@ -91,13 +99,17 @@ entities — PR links, Jira keys, incident numbers, booking or defect ids mentio
 continues — the id of a past conversation this picks back up, or null.
 work — for an ask or urgent:
        "code"  they want code written or changed (a feature, a fix, a PR)
-       "talk"  they want Arun HIMSELF: a call, a meeting, a discussion, a
-               decision only he can make
+       "talk"  they ASK for Arun himself now: a call, a meeting, a
+               discussion, a decision only he can make ("call?", "can we
+               connect?"). A plan already agreed ("we will connect post lunch",
+               "lets merge tomorrow") is status, not an ask.
        "check" anything else: look into, answer, review, explain, assess
                whether something is feasible
 question — for an opener, or an ask too vague to act on (no id, no link, no
        clear subject, and the summary, past and conversation do not supply it):
-       ONE short, polite, natural question to ask them, in Arun's voice, that
+       ONE short, polite, natural question to ask them, in Arun's voice (see
+       arun_writes_like: his own recent messages to them — match the register,
+       never the content), that
        uses what you DO know ("Sure — is this about the event-history defect?"
        beats "Could you tell me more?"). It must be a question, promise
        nothing, and not ask for anything already given. Empty when the subject
@@ -109,15 +121,28 @@ tell — what Arun's assistant would say to Arun on WhatsApp about this
        something is needed from him — the one question for him ("Want me to
        reply that you'll call in 10, or will you take it?"). No labels, no
        emoji, no markdown, no "Teams:". Empty for closing.
+reply — for an ask with work "talk" only: the short reply Arun would most likely
+       send them, in his voice (arun_writes_like), that moves it forward without
+       committing him to a time he has not given ("Sure bro, what time works for
+       you?", "yes, give me 10 mins, will call"). Empty otherwise.
 
 Reply with ONLY this JSON, one entry per conversation, ids exactly as given:
 {"threads":[{"id":"...","state":"...","closing_confidence":0.0,"need":"",
-"summary":"","entities":[],"continues":null,"work":"check","question":"","tell":""}]}"""
+"summary":"","entities":[],"continues":null,"work":"check","question":"","tell":"",
+"reply":""}]}"""
 
 
 #: Per conversation: the newest messages only, each cut short. A pasted log is
 #: still an ask about a log, and it must not become the classifier's whole prompt.
 NEW_AT_MOST, CHARS_AT_MOST = 12, 800
+
+
+def _voice(item: dict) -> list[str]:
+    try:
+        from . import style
+        return style.examples(item.get("who", ""), k=3)
+    except Exception:                                          # noqa: BLE001
+        return []
 
 
 def prompt(items: list[dict]) -> str:
@@ -133,16 +158,18 @@ def prompt(items: list[dict]) -> str:
             "new": [str(x)[:CHARS_AT_MOST] for x in it.get("new", [])][-NEW_AT_MOST:],
             "handled_by_arun": bool(it.get("handled_by_him")),
             "assistant_spoke": bool(it.get("asta_spoke")),
+            # So a question asked in his name sounds like him with this person.
+            "arun_writes_like": _voice(it) if it.get("one_to_one", True) else [],
         })
     return (_INSTRUCTIONS + "\n\nConversations:\n"
             + json.dumps(blocks, ensure_ascii=False, indent=1))
 
 
-async def _call(text: str) -> str:
+async def _call(text: str, model_name: str = "") -> str:
     """The model, with no tools. Its own seam so tests never start a CLI."""
     from . import claude_cli
-    return await claude_cli.one_shot(text, model=model() or "haiku", tools_off=True,
-                                     timeout=150)
+    return await claude_cli.one_shot(text, model=model_name or model() or "haiku",
+                                     tools_off=True, timeout=150)
 
 
 def _parse(raw: str) -> dict[str, dict]:
@@ -176,6 +203,7 @@ def _clean(d: dict, fallback: dict) -> dict:
     return {"state": state, "closing_confidence": conf, "work": work,
             "question": str(d.get("question") or "").strip()[:240],
             "tell": " ".join(str(d.get("tell") or "").split())[:500],
+            "reply": str(d.get("reply") or "").strip()[:400],
             "need": str(d.get("need") or "")[:200],
             "summary": str(d.get("summary") or fallback["summary"])[:400],
             "entities": [str(e)[:120] for e in ents][:20],
@@ -213,13 +241,11 @@ async def read(items: list[dict]) -> dict[str, dict]:
     out = {it["id"]: rules(it) for it in items}
     if not items or not model():
         return out
-    chunks = [items[i:i + CHUNK] for i in range(0, len(items), CHUNK)]
     why: list[str] = []
-    results = await asyncio.gather(*(_read_chunk(c, why) for c in chunks))
-    for got in results:
-        for tid, d in got.items():
-            if tid in out:
-                out[tid] = _clean(d, out[tid])
+    got = await _ladder(items, why)
+    for tid, d in got.items():
+        if tid in out:
+            out[tid] = _clean(d, out[tid])
     fell_back = sum(1 for d in out.values() if d.get("source") != "model")
     if fell_back:
         # Never silent, and never without the reason. 29 Sep: 36 of 36 live
@@ -235,9 +261,44 @@ async def read(items: list[dict]) -> dict[str, dict]:
     return out
 
 
-async def _read_chunk(chunk: list[dict], why: list[str] | None = None) -> dict[str, dict]:
+#: The reader's ladder. On 29 Sep the model read only 24 of 68 conversations;
+#: the rest silently became rules — the floor that produced the repeated lines.
+#: A miss is now tried again smaller, then by a second model, and only what
+#: all three could not read falls to the rules.
+RETRY_CHUNK = 2
+
+
+async def _ladder(items: list[dict], why: list[str]) -> dict[str, dict]:
+    import asyncio
+
+    def split(xs, n):
+        return [xs[i:i + n] for i in range(0, len(xs), n)]
+
+    got: dict[str, dict] = {}
+    rungs = [("first", CHUNK, None), ("retry", RETRY_CHUNK, None)]
+    if second_model() and second_model() != model():
+        rungs.append(("second model", CHUNK, second_model()))
+    for rung, size, name in rungs:
+        missing = [it for it in items if it["id"] not in got]
+        if not missing:
+            break
+        tried: list[str] = []
+        results = await asyncio.gather(*(_read_chunk(c, tried, name) for c in split(missing, size)))
+        for r in results:
+            got.update({k: v for k, v in r.items() if any(k == it["id"] for it in missing)})
+        why += [f"{rung}: {t}" for t in tried]
+        if rung != "first" and any(it["id"] in got for it in missing):
+            from . import store
+            with contextlib.suppress(Exception):
+                store.record_outcome("understand", "recovered", detail=f"{rung}: "
+                                     f"{sum(1 for it in missing if it['id'] in got)}/{len(missing)}")
+    return got
+
+
+async def _read_chunk(chunk: list[dict], why: list[str] | None = None,
+                      model_name: str | None = None) -> dict[str, dict]:
     try:
-        raw = await _call(prompt(chunk))
+        raw = await (_call(prompt(chunk), model_name) if model_name else _call(prompt(chunk)))
     except Exception as exc:                                   # noqa: BLE001
         with contextlib.suppress(Exception):
             from . import quiet
@@ -283,7 +344,7 @@ def rules(item: dict) -> dict:
     summary = item.get("so_far") or last[:160]
     base = {"need": "", "summary": summary.strip()[:400], "entities": [],
             "continues": None, "source": "rules", "work": "check", "question": "",
-            "tell": ""}
+            "tell": "", "reply": ""}
     if item.get("handled_by_him"):
         return {**base, "state": "closing", "closing_confidence": 0.95}
     if any(steward._URGENT.search(b) for b in bodies):

@@ -1907,9 +1907,11 @@ async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
 
     service: part of an app name ("billing", "booking-consumer"), or blank for the
     whole namespace. terms: identifiers to narrow by — a booking id, a trace id, an
-    exception class. minutes: how far back (default 30). namespace: another
-    environment's namespace; blank means the default one. errors_only=False when
-    you are tracing an identifier rather than hunting a failure.
+    exception class. minutes: how far back (default 30). namespace: an environment
+    ("prod", "preprod"/"pp", "uat", "sit", "qa", "dev") or "all" to search every
+    environment at once — use "all" for a booking or trace id when nobody said
+    which environment; blank means prod. errors_only=False when you are tracing
+    an identifier rather than hunting a failure.
 
     You do not write LogQL here. The query is built in code — it always carries the
     namespace and cluster labels Loki requires, and your terms become filters Loki
@@ -1918,6 +1920,12 @@ async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
     and reason from the answer; do not re-query for a detail you were already sent.
     """
     from . import grafana
+    if (namespace or "").strip().lower() in ("all", "every", "everywhere", "*"):
+        found_all = await grafana.logs_everywhere(service=service, terms=_terms(terms),
+                                                  minutes=minutes, errors_only=bool(errors_only))
+        return "\n\n".join(
+            f"[{f['env']}] could not read {f['namespace']} — {f['error']}" if f.get("error")
+            else f"[{f['env']}] " + grafana.render(f) for f in found_all)
     try:
         found = await grafana.logs(service=service, terms=_terms(terms), minutes=minutes,
                                    ns=namespace, errors_only=bool(errors_only))
@@ -1989,6 +1997,23 @@ async def open_app(what: str, browser: str = "") -> str:
         return await apps.play(playing[0], browser or playing[1])
     kind = "url" if apps.site_url(what) else "app"
     return await apps.open_it(kind, what, browser)
+
+
+async def do_in_app(app: str, goal: str, context: str = "", confirmed: bool = False) -> str:
+    """Do a task INSIDE an app — "open excel and add a column Status", "add a slide
+    titled Q3 to my deck in keynote", "make a new Word doc with these notes".
+
+    app: the app as he named it ("excel", "numbers", "word", "keynote", "outlook",
+    "chrome", "notes"). goal: what to do there, in his words, with any names or
+    values he gave. context: anything from the conversation it needs.
+    confirmed: true ONLY after he said yes to a step this tool said cannot be
+    undone.
+
+    Reads the app's own scripting dictionary, writes the script and a check,
+    runs both, and reports what the check saw. Excel is not installed: Numbers
+    stands in and says so. Prefer this over use_screen for any scriptable app."""
+    from . import app_tasks
+    return await app_tasks.do(app, goal, context=context, confirmed=bool(confirmed))
 
 
 async def use_screen(process: str, steps: list | None = None,

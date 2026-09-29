@@ -218,6 +218,26 @@ _SEEKING = re.compile(
     r"tell\s+(?:me\s+)?(?:abt|about|more))\b|\?\s*$", re.I)
 
 
+#: He is asking for something to be written to someone.
+_WRITING_TO = re.compile(r"\b(reply|respond|tell|ping|message|msg|send|write|ask|draft|inform|"
+                         r"let\s+\w+\s+know)\b", re.I)
+
+
+def _named_in(text: str) -> str:
+    """The colleague a message names, from the people he actually chats with."""
+    try:
+        from . import chat_watch, store
+        names = json.loads(store.kv_get(chat_watch._RAIL_KEY) or "[]")
+    except Exception:                                          # noqa: BLE001
+        return ""
+    low = (text or "").lower()
+    for n in names:
+        first = (n or "").split()[0].lower() if (n or "").split() else ""
+        if len(first) > 2 and re.search(rf"\b{re.escape(first)}\b", low):
+            return n
+    return ""
+
+
 def turn_context(user_text: str) -> str:
     """What a chat turn should know before it starts, besides the date.
 
@@ -247,6 +267,14 @@ def turn_context(user_text: str) -> str:
             known = threads.context_for(r["who"])
             if known:
                 parts.append(known)
+    # Writing to someone in his name: how he actually writes to them.
+    if _WRITING_TO.search(user_text or ""):
+        with contextlib.suppress(Exception):
+            from . import referents, style
+            who = _named_in(user_text) or next((r["who"] for r in referents.recent()[:1]), "")
+            voice = style.rider(who) if who else ""
+            if voice:
+                parts.append(voice)
     if _SEEKING.search(user_text or ""):
         with contextlib.suppress(Exception):
             from . import knowledge

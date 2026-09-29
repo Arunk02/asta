@@ -75,7 +75,14 @@ promise work Arun has not agreed to."""
 
 
 def brief_rider(who: str) -> str:
-    return REPLY_FORMAT.format(who=who or "the colleague")
+    """The reply section of the brief, with how he actually writes to them."""
+    from . import style
+    voice = ""
+    try:
+        voice = style.rider(who)
+    except Exception:                                          # noqa: BLE001
+        pass
+    return REPLY_FORMAT.format(who=who or "the colleague") + (f"\n\n{voice}" if voice else "")
 
 
 _SECTION = re.compile(r"^\W*(ANALYSIS|REPLY)\W*:?\W*$", re.I | re.M)
@@ -99,7 +106,8 @@ def phone_conversation() -> str:
     return (store.kv_get("wa_conversation") or store.kv_get("telegram_conversation") or "").strip()
 
 
-def render(who: str, need: str, analysis: str, reply: str, note: str = "") -> str:
+def render(who: str, need: str, analysis: str, reply: str, note: str = "",
+           lead: str = "") -> str:
     """Exactly what he needs to decide, said the way a colleague would say it.
 
     Was a form — "🧑‍💻 X asked: … 🔎 … ✉️ Reply to X: ——— … ——— Send it?" — the
@@ -110,7 +118,9 @@ def render(who: str, need: str, analysis: str, reply: str, note: str = "") -> st
     need = (need or "").strip().rstrip(".")
     head = (f"*{who}* asked about {need[0].lower() + need[1:]}." if need
             else f"*{who}* asked me something.")
-    parts = [head + (f" {note}" if note else "")]
+    # The reader's own sentence, when it wrote one ("Yogesh wants a quick call
+    # about the event-history defect…"), says it better than the template.
+    parts = [(lead or head) + (f" {note}" if note else "")]
     if analysis:
         parts.append(analysis)
     quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in reply.splitlines())
@@ -121,7 +131,7 @@ def render(who: str, need: str, analysis: str, reply: str, note: str = "") -> st
 
 async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
                   reply: str, task_id: int | None = None, thread: str = "",
-                  note: str = "") -> bool:
+                  note: str = "", lead: str = "") -> bool:
     """Stage the reply and put the decision in front of him. False if it cannot."""
     from . import loop, notify, threads
     cid = phone_conversation()
@@ -130,7 +140,7 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
     intent = {"kind": "send", "what": reply.strip(), "to": chat, "channel": "teams",
               "to_group": bool(group), "task_id": task_id, "thread": thread,
               "who": who, "need": need, "analysis": analysis, "note": note,
-              "_at": time.time()}
+              "lead": lead, "_at": time.time()}
     if thread:
         threads.update(thread, status="awaiting_arun")
     if _blocked(cid):
@@ -220,7 +230,7 @@ async def _show(cid: str, intent: dict) -> None:
     if intent["_showings"] > 1:
         note = (note + "\n" if note else "") + "(Asking again — this one is still unanswered.)"
     text = render(intent["who"], intent.get("need", ""), intent.get("analysis", ""),
-                  intent["what"], note)
+                  intent["what"], note, lead=intent.get("lead", ""))
     if waiting:
         text += f"\n\n({waiting} more waiting after this one.)"
     # In the conversation too, so "change the second line" has something to refer to.

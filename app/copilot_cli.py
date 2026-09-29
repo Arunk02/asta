@@ -237,10 +237,16 @@ def turn_context(user_text: str) -> str:
     """
     parts: list[str] = []
     with contextlib.suppress(Exception):
-        from . import referents
+        from . import referents, threads
         people = referents.block()
         if people:
             parts.append(people)
+        # …and what is going on with the first two of them, so "what did she
+        # want?" or "send her the fix" continues their conversation.
+        for r in referents.recent()[:2]:
+            known = threads.context_for(r["who"])
+            if known:
+                parts.append(known)
     if _SEEKING.search(user_text or ""):
         with contextlib.suppress(Exception):
             from . import knowledge

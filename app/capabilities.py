@@ -99,6 +99,13 @@ _TABLE: tuple[Capability, ...] = (
                     "guessing at how a flow works: a guess about the booking "
                     "flow reads exactly like knowledge. Answers carry the "
                     "document and the page or heading, so he can check them."),
+    Capability("conversation_status", "observe",
+               http='POST /api/conversations/status {"person":"Navya R"}',
+               note="Where Asta's conversation with a colleague stands: what they "
+                    "need, what Asta has done so far and why, whether an answer is "
+                    "waiting for Arun, and the earlier conversations it continues. "
+                    "Use it for 'what's happening with X', 'did you reply to X', "
+                    "'why did you push that' — never answer those from guesswork."),
     Capability("grafana_logs", "observe",
                http='POST /api/grafana/logs {"service":"billing","terms":"MH4DRHV7","minutes":60}',
                note="THE way to read production logs. Code builds the LogQL (Loki "

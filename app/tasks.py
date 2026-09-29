@@ -2118,6 +2118,12 @@ async def _worker(task_id: int) -> None:
             store.update_task(task_id, status="done", result=result,
                               finished_at=time.time())
             _learn_from(task_id, t["title"], result)
+            # A colleague is waiting on this one: it reaches him as ONE decision —
+            # who asked, what was found, the reply, send? — not as a task report
+            # he then has to turn into a message himself. See app/answers.py.
+            from . import answers
+            if t.get("teams_chat") and await answers.present_task(task_id, t, result):
+                return
             snippet = result[:400] + ("…" if len(result) > 400 else "")
             waste = _audit_note(task_id)
             await notify.notify(

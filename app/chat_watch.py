@@ -593,6 +593,10 @@ async def pending() -> list[dict]:
     return out
 
 
+#: At most this many clarifying questions in one conversation, counting the
+#: ask-back. A colleague is asked, not interrogated.
+MAX_QUESTIONS = 2
+
 #: At or above this, a closing conversation is simply closed. Below it — probably
 #: done, not certainly — and only if Asta itself has been helping, it asks once.
 CLOSE_SURE = 0.85
@@ -712,7 +716,7 @@ async def _sweep_threads(notify=None) -> list[dict]:
         c["status"] = t.get("status", "open")
         c["so_far"] = t.get("summary", "")
         c["asta_spoke"] = bool(t.get("asta_spoke"))
-        c["asked_back"] = bool(t.get("asked_back"))
+        c["asked_back"] = int(t.get("asked_back") or 0)     # questions asked so far
         c["checked_in"] = bool(t.get("checked_in"))
         c["entities"] = sorted(set(t.get("entities") or [])
                                | set(threads.entities_in(" ".join(c["new"]))))
@@ -766,7 +770,8 @@ async def _sweep_threads(notify=None) -> list[dict]:
             if not c["asked_back"] and steward.ask_back_enabled() \
                     and await _say(c["chat"], steward.ASK_BACK):
                 steward.note_asked_back(who)
-                threads.update(tid, asked_back=1, status="clarifying", asta_spoke=1)
+                threads.update(tid, asked_back=c["asked_back"] + 1, status="clarifying",
+                               asta_spoke=1)
             continue
 
         said = fields["summary"] if state == "status" else (fields["need"] or "")
@@ -775,23 +780,70 @@ async def _sweep_threads(notify=None) -> list[dict]:
         handled.append({"chat": c["chat"], "who": who, "text": "\n".join(c["new"]),
                         "priority": c["pri"], "key": c["keys"][-1], "state": state})
 
-        if state == "status" or (state == "ask" and not c["wanted"]):
-            # Nothing is needed — or it is from a source he has taught Asta he
-            # ignores. Either way it is a line to read later, never a buzz.
+        if state == "status":
+            # Nothing is needed from him: a line to read later, never a buzz.
             for k in c["keys"]:
                 attention.mark_dropped(k)
             quiet_lines.append(f"· {name}: {said}")
             continue
 
-        red.append(f"🔴 {name}: {said}")
+        # From here Asta works the ask the way he would, and he hears once, at
+        # the end: "this person asked this, this is the final analysis, can I
+        # send?" Only three things reach him before that — something urgent, a
+        # code change (which needs his yes before anyone plans it), and an ask
+        # Asta could not take on.
+        if d.get("work") == "code" and state != "urgent":
+            from . import answers
+            await answers.offer_plan(who=who, chat=c["chat"], need=said,
+                                     summary=fields["summary"], thread=tid)
+            continue
+
+        from . import understand
+        q = understand.safe_question(d.get("question") or "")
+        if state == "ask" and q and c["asked_back"] < MAX_QUESTIONS \
+                and steward.ask_back_enabled() and await _say(c["chat"], q):
+            # Too vague to act on: ask them, the way he would, before spending a
+            # turn on a guess. Never more than MAX_QUESTIONS in one conversation.
+            threads.update(tid, asked_back=c["asked_back"] + 1, status="clarifying",
+                           asta_spoke=1)
+            continue
+
         context = "\n".join(x for x in [
             f"So far in this conversation: {c['so_far']}" if c["so_far"] else "",
             *[f"Earlier with {who}: {p}" for p in c["past"]]] if x)
+        from . import offers
+        before = offers.pending()
         task = responder.respond("teams-chat", who, "\n".join(c["new"]), priority=c["pri"],
-                                 key=c["keys"][-1], sent_at=c["sent_at"], context=context)
+                                 key=c["keys"][-1], sent_at=c["sent_at"], context=context,
+                                 reply_to=c["chat"], group=not c["one_to_one"], need=said,
+                                 thread=tid)
+        if task and task.get("reused"):
+            from . import answers
+            analysis, reply = answers.split(task.get("result") or "")
+            if reply and await answers.present(
+                    who=who, need=said, chat=c["chat"], group=not c["one_to_one"],
+                    analysis=analysis, reply=reply, task_id=task["id"], thread=tid,
+                    note=f"Already looked into this recently (task #{task['id']}) — not run again."):
+                continue
+        if task and not task.get("joined") and not task.get("reused"):
+            threads.update(tid, status="working")
+            if state == "urgent":
+                red.append(f"🚨 {name}: {said}")
+                started.append(responder.line_for(task, who, responder.what_it_asks(c["last"])))
+            # Otherwise silent until the answer is ready for his "send".
+            continue
+        # Not taken on — he needs to know, and to know what would move it.
+        after = offers.pending()
+        offered = after is not None and (before is None or after.id != before.id)
+        line = f"{name}: {said}" + (" — reply *yes* and I'll look into it." if offered else "")
+        # Whether HE is interrupted is the ledger's call — a source he keeps
+        # ignoring stays quiet. Whether the colleague is helped never was.
+        if c["wanted"] or state == "urgent":
+            red.append(f"🔴 {line}")
+        else:
+            quiet_lines.append(f"· {line}")
         if task:
             started.append(responder.line_for(task, who, responder.what_it_asks(c["last"])))
-            threads.update(tid, status="working")
 
     if notify and (red or quiet_lines or started):
         body = "\n".join(red + quiet_lines + ([""] if (red or quiet_lines) and started else [])
@@ -995,6 +1047,9 @@ async def watch_loop() -> None:
         if threads.enabled():
             try:
                 threads.dissolve_due()
+                # A decision that waited behind another comes up once he is free.
+                from . import answers
+                await answers.next_after()
             except Exception as exc:                           # noqa: BLE001
                 from . import quiet
                 quiet.note("chatwatch.dissolve", exc)

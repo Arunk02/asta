@@ -1297,6 +1297,15 @@ async def api_knowledge_search(request: Request):
         b["question"], int(b.get("limit", 3) or 3))}
 
 
+@app.post("/api/conversations/status", dependencies=[Depends(require_auth)])
+async def api_conversation_status(request: Request):
+    """Where a conversation with a colleague stands — for the CLI brains and MCP."""
+    b = await request.json()
+    if not (b.get("person") or "").strip():
+        raise HTTPException(400, "person is required")
+    return {"ok": True, "detail": await agent_mod.conversation_status(b["person"])}
+
+
 @app.post("/api/knowledge/reindex", dependencies=[Depends(require_auth)])
 async def api_knowledge_reindex(request: Request):
     from app import knowledge
@@ -3071,6 +3080,11 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             op = _mechanical_send(staged)
             if op:
                 await _run_op(op, cid, sink, channel)
+                # A colleague's answer went out: the conversation knows Asta spoke
+                # in it, and the next finished answer, if one is waiting, comes up.
+                from . import answers
+                answers.sent(staged)
+                await answers.next_after(cid)
                 return None
             prompt = (f"Arun approved sending this. Send it now using the right tool for "
                       f"channel '{staged.get('channel', 'chat')}'"

@@ -530,6 +530,23 @@ async def _close_mind(task: "asyncio.Task") -> None:
             task.cancel()
 
 
+def with_history(who: str, agenda: str) -> str:
+    """The call's agenda, with what Asta already knows about this person.
+
+    A call used to start knowing only the topic. Someone rung about PR 1251 two
+    days after they asked about it heard it asked again. The same few lines his
+    chat and the investigations get — see threads.context_for.
+    """
+    try:
+        from . import threads
+        known = threads.context_for(who)
+    except Exception:                                          # noqa: BLE001
+        known = ""
+    if not known:
+        return agenda
+    return f"{agenda}\n\nWhat you already know — do not ask again for anything here:\n{known}".strip()
+
+
 async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0,
                    agenda: str = "", languages: str = "",
                    voice_name: str = "") -> str:
@@ -575,7 +592,7 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
     # The call's own brain starts now, so it is warm by the time they answer.
     from . import call_mind, voice
     thinking_ahead = asyncio.get_event_loop().create_task(
-        call_mind.start(who, topic, agenda=agenda,
+        call_mind.start(who, topic, agenda=with_history(who, agenda),
                         minutes=round(limit / 60, 1) if seconds else 0,
                         as_him=his_voice))
     asyncio.get_event_loop().create_task(voice.warm_the_ears())

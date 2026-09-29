@@ -1869,6 +1869,18 @@ def _terms(terms) -> list[str]:
     return [str(t).strip() for t in (terms or []) if str(t).strip()]
 
 
+async def conversation_status(person: str) -> str:
+    """Where Asta's conversation with a colleague stands, and why.
+
+    "what's happening with Navya?", "did you reply to Vinish?", "why did you push
+    that?" — answered from the conversation's own record rather than from memory:
+    its state, what they need, what Asta has done in it step by step, and the
+    earlier conversations with them that it may be continuing.
+    """
+    from . import threads
+    return threads.status_report(person)
+
+
 async def search_knowledge(question: str, limit: int = 3) -> str:
     """Search Arun's own documents and answer WITH CITATIONS.
 

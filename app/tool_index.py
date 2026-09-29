@@ -207,6 +207,14 @@ _ABOUT_WORKFLOWS = re.compile(
     r"replay|saga|orchestrat\w+)\b", re.I)
 
 
+#: Asking about a conversation Asta is having with someone.
+_ABOUT_A_CONVERSATION = re.compile(
+    r"\bwhat(?:'s|s| is)?\s+(?:happening|going on|the status)\s+with\b|"
+    r"\bdid\s+(?:you|u)\s+(?:reply|respond|answer|ask|send)\b|"
+    r"\bwhy\s+did\s+(?:you|u)\s+(?:push|send|ask|reply|close)\b|"
+    r"\bwhat\s+did\s+\w+(?:\s+\w+)?\s+(?:want|need|ask)\b", re.I)
+
+
 def required_for(query: str) -> list[str]:
     """Capabilities this message names outright, whatever the ranker thinks."""
     from . import consent
@@ -222,6 +230,10 @@ def required_for(query: str) -> list[str]:
         out.append("grafana_logs")
     if _ABOUT_WORKFLOWS.search(query or ""):
         out += ["temporal_workflows", "temporal_workflow"]
+    # "what's happening with Navya?" is answered from the conversation's record,
+    # never from the brain's guess — so the tool that reads it must be offered.
+    if _ABOUT_A_CONVERSATION.search(query or ""):
+        out.append("conversation_status")
     # His documents know about it — so the brain must be able to read them. On 29
     # Sep "tell abt telikos inland journey" was handed 31 tools, from set_reminder
     # to answer_call, and not this one, while 31 of his 52 passages mention

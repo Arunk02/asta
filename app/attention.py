@@ -625,6 +625,15 @@ def _label(row: dict, outcome: str) -> None:
     # history instead of an empty table that has to earn its evidence from zero.
     from . import contacts
     contacts.record(str(row.get("who") or ""), outcome)
+    # …and the same reaction where the self-learning loop reads. Until 29 Sep the
+    # learners read "push" rows that nothing wrote: 279 replies and 68 ignores in
+    # a week, and the experience ledger held none of them.
+    import contextlib as _cl
+    with _cl.suppress(Exception):
+        from . import ledger
+        ledger.record("push", str(row.get("sources") or row.get("source") or ""),
+                      ledger.push_verdict(outcome), who=str(row.get("who") or "")[:60],
+                      priority=row.get("priority"), outcome=outcome)
 
 
 def mark_acted(key: str, now: float | None = None, why: str = "acted") -> None:

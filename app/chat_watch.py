@@ -1069,6 +1069,7 @@ async def watch_loop() -> None:
                 threads.dissolve_due()
                 # A decision that waited behind another comes up once he is free.
                 from . import answers
+                await answers.announce_offer()
                 await answers.next_after()
             except Exception as exc:                           # noqa: BLE001
                 from . import quiet

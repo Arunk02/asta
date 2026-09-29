@@ -290,6 +290,42 @@ def self_changes(since: float, until: float) -> dict:
             "rolled_back": counts.get("rolled_back", 0), "live": len(settings.overrides())}
 
 
+def conversations(since: float, until: float) -> dict:
+    """Round 4, measured: are colleagues handled the way he asked?
+
+    Answers reaching him as one "send?", and whether he sends them as written;
+    conversations that ended without interrupting him; how often the model —
+    not the fallback rules — did the reading; and whether the self-learning loop
+    is being fed at all (it held 0 rows until 29 Sep).
+    """
+    def n(sql, *a):
+        return int(_one(sql, (since, until, *a)) or 0)
+    ev = "SELECT count(*) FROM outcomes WHERE created_at BETWEEN ? AND ? AND kind=? AND outcome=?"
+    presented = n(ev, "answer", "presented")
+    ledger_q = ("SELECT count(*) FROM experience WHERE at BETWEEN ? AND ? AND kind='send' "
+                "AND verdict=? AND json_extract(features,'$.channel')='teams'")
+    try:
+        as_is, amended, rejected = (n(ledger_q, v) for v in ("as_is", "amended", "rejected"))
+        fed = n("SELECT count(*) FROM experience WHERE at BETWEEN ? AND ? "
+                "AND coalesce(json_extract(features,'$.backfilled'),0)=0")
+    except Exception:                                          # noqa: BLE001
+        as_is = amended = rejected = fed = 0
+    opened = n(ev, "thread", "opened") + n(ev, "thread", "reopened")
+    closed = n(ev, "thread", "closed")
+    questions = n("SELECT count(*) FROM outcomes WHERE created_at BETWEEN ? AND ? "
+                  "AND kind='thread' AND outcome='said'")
+    understood = n("SELECT count(*) FROM outcomes WHERE created_at BETWEEN ? AND ? "
+                   "AND kind='thread' AND outcome LIKE 'understood:%'")
+    by_model = n("SELECT count(*) FROM outcomes WHERE created_at BETWEEN ? AND ? "
+                 "AND kind='thread' AND outcome LIKE 'understood:%' AND detail LIKE 'model%'")
+    decided = as_is + amended + rejected
+    return {"presented": presented, "as_is": as_is, "amended": amended, "rejected": rejected,
+            "as_is_share": (as_is / decided) if decided else None,
+            "opened": opened, "closed": closed, "questions": questions,
+            "model_share": (by_model / understood) if understood else None,
+            "understood": understood, "fed": fed}
+
+
 def rules_holding() -> dict:
     """His standing rules, and whether his own corrections still hold in replay."""
     from . import policy
@@ -384,6 +420,7 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
     sc = self_changes(since, until)
     it = interruptions(since, until)
     da = done_alone(since, until)
+    cv = conversations(since, until)
 
     rows = [
         Row("reply_p50", "WhatsApp reply time, typical", r["p50_s"], _fmt_s(r["p50_s"]),
@@ -421,6 +458,23 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
             "na" if it["per_day"] is None else _judge(it["per_day"], it["budget"] or 20, 45),
             f"{it['digested']} moved to the digest · {it['digests']} digests sent · "
             f"{it['waiting']} waiting"),
+        Row("answers_as_written", "Colleague answers you sent as written", cv["as_is_share"],
+            _fmt_pct(cv["as_is_share"]), "≥ 70% (the rest edited, not rejected)",
+            "na" if cv["as_is_share"] is None else
+            _judge(cv["as_is_share"], 0.7, 0.4, lower_is_better=False),
+            f"{cv['presented']} put to you · {cv['as_is']} sent · {cv['amended']} edited · "
+            f"{cv['rejected']} rejected"),
+        Row("conversations", "Colleague conversations handled", cv["opened"], str(cv["opened"]),
+            "most end without interrupting you", "na" if not cv["opened"] else "good",
+            f"{cv['closed']} closed · {cv['questions']} questions asked for you"),
+        Row("understood_by_model", "Conversations read by the model, not the fallback",
+            cv["model_share"], _fmt_pct(cv["model_share"]), "≥ 90%",
+            "na" if cv["model_share"] is None else
+            _judge(cv["model_share"], 0.9, 0.6, lower_is_better=False),
+            f"{cv['understood']} read"),
+        Row("learning_fed", "Decisions of yours the learning loop recorded", cv["fed"],
+            str(cv["fed"]), "every day > 0", "good" if cv["fed"] else "bad",
+            "pushes you answered or ignored, drafts sent, edited or rejected, offers"),
         Row("done_alone", "Acts Asta did under a standing permission", da["used"],
             str(da["used"]), "only what you granted",
             "good" if da["grants"] or not da["used"] else "bad",

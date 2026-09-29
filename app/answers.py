@@ -175,6 +175,22 @@ def _load_queue() -> list[dict]:
     return [x for x in q if isinstance(x, dict)]
 
 
+async def announce_offer() -> bool:
+    """Ask the offer that moved up the queue, once — as the queue promised.
+
+    A queued offer says "I'll ask when that one is answered". On 29 Sep an
+    offer moved up without being asked, and a finished answer for a colleague
+    waited behind a question he had never seen.
+    """
+    from . import notify, offers
+    o = offers.pending()
+    if o is None or not store.kv_get(f"offer_unasked:{o.id}"):
+        return False
+    store.kv_set(f"offer_unasked:{o.id}", "")
+    await notify.notify(o.render(), "offer", urgency="direct", considered=True)
+    return True
+
+
 async def next_after(cid: str = "") -> bool:
     """Nothing is in front of him: show the next waiting decision, if any."""
     cid = cid or phone_conversation()

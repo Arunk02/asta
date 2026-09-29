@@ -88,6 +88,11 @@ async def _no_stale_ui(request: Request, call_next):
 @app.on_event("startup")
 async def startup() -> None:
     global MCP_TOOLSETS, MCP_STATUS
+    # The learners read the experience ledger; his reactions have been recorded
+    # elsewhere since August. Seed it once so learning starts from that history.
+    with contextlib.suppress(Exception):
+        from . import ledger
+        ledger.backfill_pushes()
     # This is the process that serves, so it is the one allowed to notice that
     # launchd is supervising a DIFFERENT one — see health.unsupervised.
     health.mark_serving()
@@ -2405,6 +2410,7 @@ async def _conduct(conv0: dict, first_text: str, sink, channel: str) -> None:
         # and wait for his yes/no — nothing leaves the machine unconfirmed.
         if intent and intent["kind"] == "send":
             loop.stage(cid, intent)
+            _revision_staged(cid, intent)
             await _present_staged_send(sink, cid, intent, channel)
             return
 
@@ -2597,6 +2603,48 @@ def _slip_of(word: str, target: str) -> bool:
             a, b = diff
             return word[a] == target[b] and word[b] == target[a]
     return False
+
+
+def _judge_staged(cid: str, staged: dict, user_text: str) -> None:
+    """His answer to a draft he did NOT approve, where the learners read it.
+
+    A clear no is "rejected". Anything else is feedback — "amended" — recorded
+    now, and completed with the edit's shape when the revision is staged (see
+    `_revision_staged`). Approvals are recorded by the send itself (ops.run).
+    """
+    import json as _json
+
+    from . import ledger
+    target = (staged.get("to") or staged.get("channel") or "").strip()
+    with contextlib.suppress(Exception):
+        if _DECLINE.match((user_text or "").strip()):
+            ledger.record("send", target, "rejected", channel=staged.get("channel"))
+            return
+        row = ledger.record("send", target, "amended", channel=staged.get("channel"))
+        store.kv_set(f"amending:{cid}", _json.dumps(
+            {"id": row, "before": staged.get("what") or "", "to": target}))
+
+
+def _revision_staged(cid: str, intent: dict) -> None:
+    """The revised draft is ready: finish the "amended" row with how it changed."""
+    import json as _json
+
+    from . import ledger
+    raw = store.kv_get(f"amending:{cid}")
+    if not raw:
+        return
+    store.kv_set(f"amending:{cid}", "")
+    with contextlib.suppress(Exception):
+        pending = _json.loads(raw)
+        if (intent.get("to") or intent.get("channel") or "").strip() == pending.get("to"):
+            ledger.set_edit(int(pending["id"]), pending.get("before", ""), intent.get("what") or "")
+
+
+def _judge_offer(kind: str, accepted: bool) -> None:
+    """Which of Asta's offers he takes — "want me to plan it?", "look into it?"."""
+    from . import ledger
+    with contextlib.suppress(Exception):
+        ledger.record("offer", kind or "next", "as_is" if accepted else "rejected")
 
 
 def _affirmation(text: str) -> tuple[bool, str]:
@@ -3067,6 +3115,8 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     if staged and (user_text or "").strip():
         loop.clear_awaiting(cid)
         approved, read_as = _affirmation(user_text)
+        if not approved:
+            _judge_staged(cid, staged, user_text)
         if approved:
             if read_as:
                 await sink.send({"type": "note",
@@ -3086,6 +3136,10 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                 answers.sent(staged)
                 await answers.next_after(cid)
                 return None
+            with contextlib.suppress(Exception):
+                from . import ledger
+                ledger.record("send", (staged.get("to") or staged.get("channel") or ""),
+                              "as_is", channel=staged.get("channel"))
             prompt = (f"Arun approved sending this. Send it now using the right tool for "
                       f"channel '{staged.get('channel', 'chat')}'"
                       + (f" to {staged['to']}" if staged.get("to") else "")
@@ -3104,6 +3158,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     if open_offer and (user_text or "").strip():
         if _affirmation(user_text)[0]:
             offers.accept()
+            _judge_offer(open_offer.kind, accepted=True)
             # An outward write was staged with its exact arguments. Run THAT,
             # rather than asking a brain to perform the thing it described — the
             # words he approved are the words that go out.
@@ -3125,6 +3180,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             return _start_turn(conv, _offer_prompt(open_offer), sink, channel)
         if _DECLINE.match(user_text):
             offers.decline()
+            _judge_offer(open_offer.kind, accepted=False)
             await sink.send({"type": "note", "text": "👍 Dropped it."})
             if channel == "web":
                 await sink.send({"type": "done", "tools": []})

@@ -1980,8 +1980,13 @@ async def open_app(what: str, browser: str = "") -> str:
 
     This only brings something to the front. To put something INTO an app — a
     reminder, an event, a draft — use `use_app`, which reads the app back
-    afterwards. An app that does not actually start is reported as not started."""
+    afterwards. An app that does not actually start is reported as not started.
+    To PLAY something, pass the ask itself ("play tamil songs on youtube"): the
+    top result is found and started, not just YouTube's home page."""
     from . import apps
+    playing = apps.play_ask(what)
+    if playing:
+        return await apps.play(playing[0], browser or playing[1])
     kind = "url" if apps.site_url(what) else "app"
     return await apps.open_it(kind, what, browser)
 

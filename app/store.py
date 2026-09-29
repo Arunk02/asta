@@ -296,6 +296,48 @@ CREATE TABLE IF NOT EXISTS traces (
     error TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS conv_threads (
+    -- One LIVE conversation per person per channel (app/threads.py). Deleted when
+    -- it dissolves; what it was about survives in conv_episodes.
+    id TEXT PRIMARY KEY,                 -- "<channel>:<counterpart>"
+    channel TEXT NOT NULL,
+    counterpart TEXT NOT NULL,
+    chat TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open', -- open clarifying checked_in closed
+    need TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    entities TEXT NOT NULL DEFAULT '[]',
+    continues INTEGER,                   -- the conv_episodes row it picked back up
+    asked_back INTEGER NOT NULL DEFAULT 0,
+    checked_in INTEGER NOT NULL DEFAULT 0,
+    asta_spoke INTEGER NOT NULL DEFAULT 0,
+    opened_at REAL NOT NULL,
+    last_activity REAL NOT NULL,
+    closed_at REAL
+);
+CREATE TABLE IF NOT EXISTS conv_episodes (
+    -- A finished conversation, kept as a few lines so a return days later can
+    -- pick it back up without carrying its whole transcript.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel TEXT NOT NULL,
+    counterpart TEXT NOT NULL,
+    need TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    entities TEXT NOT NULL DEFAULT '[]',
+    outcome TEXT NOT NULL DEFAULT '',
+    opened_at REAL NOT NULL,
+    closed_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conv_episodes ON conv_episodes(counterpart, closed_at);
+CREATE TABLE IF NOT EXISTS result_cache (
+    -- What was already found out, so the same question is not investigated
+    -- twice (app/results_cache.py). The answer itself lives on the task row.
+    key TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    task_id INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
 """
 
 # Columns added after the table shipped. CREATE TABLE IF NOT EXISTS leaves an

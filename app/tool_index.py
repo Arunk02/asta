@@ -193,6 +193,10 @@ _NOT_A_KEY = frozenset(
 _REQUIRED = (
     ("asked_to_talk", ("discuss_in_call", "teams_call", "say_in_call",
                        "teams_send_message", "teams_resolve", "draft_voice")),
+    # The same test the prompt uses to tell the brain "call make_file". Without it
+    # here, "make a short deck of my open tasks" was told to use a tool it had not
+    # been given — "tasks" outranked every file word. One definition, both doors.
+    ("asked_for_a_file", ("make_file",)),
 )
 
 #: Asking what production is doing. The ranker put `task_result` and

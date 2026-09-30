@@ -172,6 +172,31 @@ async def _ask(text: str) -> str:
                                      or "sonnet", tools_off=True, timeout=240)
 
 
+def _added_lines(diff: str) -> dict[str, list[int]]:
+    """Every NEW line number the diff adds, per file — where IntelliJ should land."""
+    out: dict[str, list[int]] = {}
+    current, n = "", 0
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            current = line[6:].strip()
+            out.setdefault(current, [])
+        elif line.startswith("@@"):
+            m = re.search(r"\+(\d+)", line)
+            n = int(m.group(1)) if m else 1
+        elif current and line.startswith("+") and not line.startswith("+++"):
+            out[current].append(n)
+            n += 1
+        elif current and not line.startswith("-") and not line.startswith("\\"):
+            n += 1
+    return out
+
+
+def _snap(line: int, added: list[int]) -> int:
+    """The model's line, moved to the nearest line the change actually added.
+    Live, 30 Sep: it said qa-values.yml:86 for a change on 85."""
+    return min(added, key=lambda a: abs(a - line)) if added else line
+
+
 def _files_and_lines(diff: str) -> dict[str, int]:
     """First changed NEW line per file, from the diff itself."""
     out: dict[str, int] = {}
@@ -194,6 +219,7 @@ async def plan_steps(change: dict) -> dict:
     except ValueError:
         data = {}
     known = _files_and_lines(change["diff"])
+    added = _added_lines(change["diff"])
     steps = []
     for st in data.get("steps") or []:
         f = str(st.get("file") or "").strip().removeprefix("b/")
@@ -205,6 +231,7 @@ async def plan_steps(change: dict) -> dict:
             line = int(st.get("line") or known[f])
         except (TypeError, ValueError):
             line = known[f]
+        line = _snap(line, added.get(f) or [])
         steps.append({"file": f, "line": max(1, line), "title": str(st.get("title") or f)[:80],
                       "explain": " ".join(str(st.get("explain") or "").split())[:500]})
     if not steps:                           # the model failed: the diff's own order

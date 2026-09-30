@@ -141,3 +141,21 @@ def test_what_it_learned_is_said_not_claimed():
     assert "1 skill(s)" in line and "verify repo existence before adding to workspace" in line
     assert "1 of your decisions recorded" in line
     assert briefing.learned_line(time.time() + 60) == ""
+
+
+def test_a_step_the_app_rejects_is_retried_not_a_crash(idea, monkeypatch):
+    from app import apps, screen
+    app_tasks, plans, followed, looked = idea
+    calls = []
+
+    async def follow(process, steps, why=""):
+        calls.append(1)
+        if len(calls) == 1:
+            raise apps.AppError("System Events got an error: Can't get menu item "
+                                "\"Find in Files...\" (-1728)")
+        return {"ok": True, "process": process, "steps": [s.render() for s in steps]}
+
+    monkeypatch.setattr(screen, "follow", follow)
+    plans += [_steps("Edit > Find in Files..."), _steps("Edit > Find > Find in Files…")]
+    assert "Done" in asyncio.run(app_tasks.do("intellij", "open find in files"))
+    assert len(calls) == 2

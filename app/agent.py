@@ -1737,6 +1737,47 @@ def continue_working(next_step: str) -> str:
     return f"Continuing automatically: {next_step or 'next step'}"
 
 
+#: A message longer than this is something he would want to read first.
+SEND_WHEN_ASKED_MAX = int(os.environ.get("ASTA_SEND_WHEN_ASKED_MAX_CHARS", "600"))
+_SEND_VERB = re.compile(r"\b(?:send|share|ping|tell|ask|message|msg|forward|inform|nudge|"
+                        r"reply\s+to|let\s+\w+\s+know)\b", re.I)
+
+
+def _he_asked_to_send(to: str, cid: str) -> bool:
+    """Did HE, in his own words this turn, ask for a message to this person?"""
+    if os.environ.get("ASTA_SEND_WHEN_ASKED", "0").strip().lower() not in ("1", "true", "on", "yes"):
+        return False
+    from . import capabilities, scorecard, store
+    said = scorecard.his_words(capabilities.said_this_turn()).lower()
+    first = (to or "").split()[0].lower() if (to or "").split() else ""
+    if not said or len(first) < 3 or not _SEND_VERB.search(said):
+        return False
+    if re.search(rf"\b{re.escape(first)}\b", said):
+        return True
+    if not re.search(r"\b(?:him|her|them)\b", said):
+        return False
+    # "share this PR with him": the person he named a message or two ago.
+    try:
+        recent = [scorecard.his_words(m.get("content") or "").lower()
+                  for m in (store.list_ui_messages(cid) or []) if m.get("role") == "user"][-4:]
+    except Exception:                                          # noqa: BLE001
+        recent = []
+    return any(re.search(rf"\b{re.escape(first)}\b", r) for r in recent)
+
+
+async def _send_as_asked(cid: str, to: str, body: str) -> None:
+    """Send what he asked for, as a recorded call, and say how it ended."""
+    from . import notify, ops, store
+    try:
+        line = await ops.run({"name": "teams_send", "args": {"to": to, "text": body,
+                                                             "to_group": False}})
+    except Exception as exc:                                   # noqa: BLE001
+        line = f"⚠️ Could not send to {to} — {type(exc).__name__}: {exc}. Nothing went out."
+    quoted = "> " + body.replace("\n", "\n> ")
+    store.add_ui_message(cid, "assistant", f"{line}\n\n{quoted}", {"via": "sent-as-asked"})
+    await notify.notify(f"{line}\n\n{quoted}", "action", urgency="direct", considered=True)
+
+
 _LABEL_NOT_MESSAGE = re.compile(
     r"^(?:a\s+|the\s+)?(?:reply|message|response|draft|update|note|follow[- ]?up)\s+"
     r"(?:confirming|about|regarding|on|for|to\s+\w+\s+(?:about|confirming|regarding)|"
@@ -1786,6 +1827,25 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
             return (f"Sending to {to} now under permission {allowed.id} "
                     f"({allowed.render()}) — no approval needed. Tell Arun in one line "
                     f"what is going and to whom.")
+    # He asked for exactly this send, to exactly this person, in his own words
+    # this turn: asking IS the consent. "share this PR with him, ask him to
+    # review — I told you earlier as well" was staged back to him as "can I send
+    # this?" (30 Sep). One-to-one only; a group always waits for his yes, and so
+    # does anything long enough that he would want to read it first.
+    if channel in ("teams", "chat") and to and not to_group \
+            and _he_asked_to_send(to, cid) and len(what.strip()) <= SEND_WHEN_ASKED_MAX \
+            and not _LABEL_NOT_MESSAGE.match(what.strip()):
+        import asyncio
+        body = writing.fit_address(writing.tidy_links(what), to)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            asyncio.ensure_future(_send_as_asked(cid, to, body))
+            return (f"Sending to {to} now — he asked for this himself, so it is not staged. "
+                    f"Tell Arun in one line what is going and to whom; the send result "
+                    f"follows on its own.")
     # The message itself, not a label for it. "Reply confirming Mexico
     # single-click backend status" was staged as the draft to Sankalp (30 Sep)
     # — one "send" from going out as the message.
@@ -2407,6 +2467,26 @@ async def ship_task(task_id: int) -> str:
         return f"Ship failed: {exc}"
 
 
+async def update_task_pr(task_id: int, action: str = "describe", text: str = "") -> str:
+    """Act on the PR of one of Arun's OWN tasks. He asked, it is his PR: do it at
+    once with this tool — never stage it with prepare_to_send, and never try `gh`
+    yourself (a chat turn cannot write to GitHub; this can).
+
+    action="describe"  append `text` (exact markdown) to the PR description
+    action="comment"   post `text` as a PR comment
+    action="rerun_ci"  re-run the failed CI jobs — every failed run on the PR,
+                       the push-triggered one and the pull_request one alike
+    """
+    from . import tasks
+    try:
+        if action == "rerun_ci":
+            return await tasks.rerun_ci(task_id)
+        return await tasks.pr_note(task_id, text,
+                                   "comment" if action == "comment" else "description")
+    except (ValueError, RuntimeError) as exc:
+        return f"Not done — {exc}"
+
+
 async def reject_task(task_id: int, why: str = "") -> str:
     """Reject a task: stops a running worker (and its spend), discards a draft.
 
@@ -2734,10 +2814,16 @@ async def teams_unread(debug: bool = False) -> str:
         if "SESSION_EXPIRED" in str(exc):
             return "Teams session expired — Arun must rerun: python -m app.teams_bridge login"
         return f"Couldn't read the chats: {exc}"
-    if not items:
-        return "Nothing new in your Teams chats."
     lines = [f"• {i['chat']} — {i['who']}: {i['text'][:120]}" for i in items]
-    return f"{len(items)} message(s) you haven't dealt with:\n" + "\n".join(lines)
+    head = (f"{len(items)} message(s) you haven't dealt with:\n" + "\n".join(lines)) if items else ""
+    # The watcher reads every chat each minute, so "unprocessed" is nearly
+    # always empty — and "Nothing new" was the answer while Vinish's RCA, a PR
+    # waiting on his review and a group nobody could open were all sitting
+    # there (30 Sep). What he is asking is what is OPEN with him.
+    still = chat_watch.open_with_him()
+    if still:
+        head += ("\n\n" if head else "Nothing unread. ") + "Still open with you today:\n" + "\n".join(still)
+    return head or "Nothing new in your Teams chats, and nothing open with you."
 
 
 async def teams_resolve(chat: str, to_group: bool = False) -> str:

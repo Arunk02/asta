@@ -906,6 +906,66 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
     return title or chat
 
 
+_MARK_RAIL_ROW = """
+    (wanted) => {
+        document.querySelectorAll('[data-asta-row]').forEach(e => e.removeAttribute('data-asta-row'));
+        const rows = Array.from(document.querySelectorAll('[role="treeitem"]'))
+            .filter(n => !n.querySelector('[role="treeitem"]'))
+            .filter(n => ((n.innerText || '').split('\\n')[0].trim().toLowerCase()) === wanted);
+        if (rows.length !== 1) return rows.length;
+        rows[0].setAttribute('data-asta-row', '1');
+        return 1;
+    }
+"""
+
+
+def _is_member_list(chat: str) -> bool:
+    """"Shabda Anubhav, Vinish, +2", "Rekha and Rini" — a group chat with no name
+    of its own. Channels and communities are on the same rail and are NOT this:
+    they stay reachable only through search, which is what keeps them out."""
+    c = (chat or "").strip()
+    return bool(re.search(r",\s*\+\d+$|,\s+\S|^\S+(?:\s\S+)?\s+and\s+\S+(?:\s\S+)?$", c))
+
+
+def _rail_title_ok(title: str, chat: str) -> bool:
+    """Is the conversation that opened the rail row that was clicked?
+
+    A named chat must show its name. A members-list row ("A, B, +2") shows the
+    members in full in the header, so its first member is what is checked."""
+    title, chat = (title or "").lower(), (chat or "").lower()
+    if not title:
+        return False
+    if "," in chat:
+        first = chat.split(",")[0].split()
+        return bool(first) and first[0] in title
+    return _title_matches(title, chat)
+
+
+async def _open_from_rail(page, chat: str) -> bool:
+    """Open a chat by clicking its own row on the rail. For READING only.
+
+    True when exactly one row carries that name and the conversation that
+    opened is that one. Anything else — no row, two rows, a header that does
+    not match — is False, and the caller falls back to search."""
+    wanted = (chat or "").strip().lower()
+    if not wanted:
+        return False
+    try:
+        if await page.evaluate(_MARK_RAIL_ROW, wanted) != 1:
+            return False
+        await page.click('[data-asta-row="1"]', timeout=8000)
+        await page.wait_for_selector(
+            '[data-tid="messageBodyContent"], [data-tid="chat-pane-message"], [role="main"]',
+            timeout=15000)
+        for _ in range(_TITLE_ATTEMPTS):
+            if _rail_title_ok(await _chat_title(page), chat):
+                return True
+            await asyncio.sleep(_TITLE_POLL)
+    except Exception:                                          # noqa: BLE001
+        return False
+    return False
+
+
 #: Pull every message out of the open thread WITH the time Teams attached to it.
 #:
 #: The old version of this read `innerText` and nothing else, which is why a
@@ -1135,8 +1195,16 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
     browser at all.
     """
     async with teams_page() as page:
-        await _find_chat(page, chat, allow_group=True)  # reading a group is harmless
-        title = await _chat_title(page) or chat
+        # The rail row itself, when the chat is on it. A group chat nobody named
+        # is listed by its members — "Shabda Anubhav, Vinish, +2" — and search
+        # has no such result, so it was marked unopenable for a day and a whole
+        # group where he is one of four went unread (30 Sep: "create a new
+        # topic" — read by nobody). Reading needs no search: click the row.
+        if _is_member_list(chat) and await _open_from_rail(page, chat):
+            title = chat
+        else:
+            await _find_chat(page, chat, allow_group=True)  # reading a group is harmless
+            title = await _chat_title(page) or chat
 
         raw = await page.evaluate(_MESSAGE_JS, 0)
         # Only a time-windowed question justifies scrolling. "The last 15

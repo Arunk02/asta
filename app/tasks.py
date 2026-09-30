@@ -2968,13 +2968,150 @@ async def _pr_state(url: str) -> dict:
         return {}
 
 
+def _latest_checks(pr: dict) -> list[dict]:
+    """Every check on the PR's head commit, as GitHub lists them.
+
+    NOT collapsed by name. #1252 had two "cicd / Build" checks on one commit —
+    one from the push trigger, one from the pull_request trigger. They are
+    different runs and both count: the pull_request one passed, the push one
+    had really failed, and "CI is green now, the fail you see is stale" was
+    wrong (30 Sep). A re-run replaces its own run in this list; nothing else does."""
+    return list(pr.get("statusCheckRollup") or [])
+
+
+_RUN_ID = re.compile(r"/actions/runs/(\d+)")
+_FAILED_TEST = re.compile(
+    r"\[ERROR\]\s+(?:Tests run:.*?(?:Failures|Errors): [1-9].*?(?:in|-)\s+(\S+)|"
+    r"(\w+(?:Test|IT|Tests)\w*[.:#]\w+)\S*\s+(?:--|:)\s*(.{0,120}))")
+
+
+def _failed_runs(pr: dict) -> list[str]:
+    ids: list[str] = []
+    for c in _latest_checks(pr):
+        if (c.get("conclusion") or c.get("state") or "").upper() in (
+                "FAILURE", "TIMED_OUT", "ERROR"):
+            m = _RUN_ID.search(c.get("detailsUrl") or c.get("targetUrl") or "")
+            if m and m.group(1) not in ids:
+                ids.append(m.group(1))
+    return ids
+
+
+def _repo_of(url: str) -> str:
+    m = re.search(r"github\.com/([^/]+/[^/]+)/pull/\d+", url or "")
+    return m.group(1) if m else ""
+
+
+async def _why_red(pr: dict, url: str) -> str:
+    """What actually failed, read from the failed run's own log — so "CI red"
+    arrives as "this test, this assertion", not as a link to go and open."""
+    repo = _repo_of(url)
+    found: list[str] = []
+    for run in _failed_runs(pr)[:2]:
+        rc, out = await repo_ops.git(ROOT, "gh", "run", "view", run, "--repo", repo,
+                                     "--log-failed", timeout=120)
+        if rc != 0:
+            continue
+        for line in out.splitlines():
+            m = _FAILED_TEST.search(line)
+            if not m:
+                continue
+            what = (m.group(1) or f"{m.group(2)} — {(m.group(3) or '').strip()}").strip(" —")
+            if what and what not in found:
+                found.append(what[:200])
+            if len(found) >= 4:
+                break
+    return ("\nFailed: " + "; ".join(found)) if found else ""
+
+
+def _auto_rerun() -> bool:
+    return os.environ.get("ASTA_CI_AUTO_RERUN", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+async def rerun_ci(task_id: int) -> str:
+    """Re-run the failed jobs on a task's PR. His "rerun it", done rather than
+    described."""
+    t = store.get_task(task_id)
+    if not t:
+        raise ValueError(f"no task #{task_id}")
+    links = _pr_links(t)
+    if not links:
+        raise ValueError(f"task #{task_id} has no PR yet")
+    done: list[str] = []
+    for url in links:
+        pr = await _pr_state(url)
+        for run in _failed_runs(pr):
+            rc, out = await repo_ops.git(ROOT, "gh", "run", "rerun", run, "--failed",
+                                         "--repo", _repo_of(url), timeout=120)
+            done.append(f"run {run}: " + ("re-running the failed jobs" if rc == 0
+                                          else f"could not rerun — {out.strip()[:160]}"))
+    if not done:
+        return f"Task #{task_id}: nothing failed on its latest CI runs — nothing to re-run."
+    store.update_task(task_id, pr_state="OPEN")           # so the next result is reported
+    store.add_task_event(task_id, "ci", "; ".join(done)[:200])
+    return f"🔁 #{task_id}: " + "; ".join(done) + ". I'll tell you how it ends."
+
+
+async def pr_note(task_id: int, text: str, where: str = "description") -> str:
+    """Add to his own PR: a section on its description, or a comment.
+
+    Done by Asta with the recorded words. On 30 Sep "add that in PR description"
+    was staged, confirmed twice, approved with "send" — and never landed: the
+    chat brain is sandboxed from `gh pr edit`, and nothing else could do it."""
+    t = store.get_task(task_id)
+    if not t:
+        raise ValueError(f"no task #{task_id}")
+    links = _pr_links(t)
+    if not links:
+        raise ValueError(f"task #{task_id} has no PR yet — say “raise PR” first")
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("nothing to add")
+    url = links[0]
+    if where == "comment":
+        rc, out = await repo_ops.git(ROOT, "gh", "pr", "comment", url, "--body-file", "-",
+                                     stdin=text, timeout=120)
+        if rc != 0:
+            raise RuntimeError(f"comment failed: {out.strip()[:300]}")
+        store.add_task_event(task_id, "pr", "commented: " + text[:160])
+        return f"💬 Commented on {url}"
+    rc, body = await repo_ops.git(ROOT, "gh", "pr", "view", url, "--json", "body",
+                                  "--jq", ".body", timeout=60)
+    if rc != 0:
+        raise RuntimeError(f"could not read the PR description: {body.strip()[:300]}")
+    body = body.rstrip()
+    if text in body:
+        return f"Already in the description of {url}"
+    rc, out = await repo_ops.git(ROOT, "gh", "pr", "edit", url, "--body-file", "-",
+                                 stdin=(body + "\n\n" + text).strip() + "\n", timeout=120)
+    if rc != 0:
+        raise RuntimeError(f"description update failed: {out.strip()[:300]}")
+    rc, check = await repo_ops.git(ROOT, "gh", "pr", "view", url, "--json", "body",
+                                   "--jq", ".body", timeout=60)
+    if rc == 0 and text.splitlines()[0][:60] not in check:
+        raise RuntimeError("the description did not change after the update — treat as NOT done")
+    store.add_task_event(task_id, "pr", "description: " + text[:160])
+    return f"📝 Added to the description of {url}"
+
+
+def task_for_pr(ref: str) -> int | None:
+    """The task whose PR this is — from a url, or "PR #1252 — repo-name"."""
+    m = re.search(r"/pull/(\d+)|\bPR\s*#?(\d+)", ref or "", re.I)
+    if not m:
+        return None
+    num = m.group(1) or m.group(2)
+    for t in store.list_tasks(limit=80):
+        if any(u.rstrip("/").endswith(f"/pull/{num}") for u in _pr_links(t)):
+            return t["id"]
+    return None
+
+
 def _checks_verdict(pr: dict) -> str:
     """'red' | 'green' | 'pending' from the check rollup.
 
     Anything not explicitly a failure or explicitly finished is pending — a run
     still in flight must not be reported as a pass.
     """
-    rollup = pr.get("statusCheckRollup") or []
+    rollup = _latest_checks(pr)
     if not rollup:
         return "pending"
     states = []
@@ -3041,9 +3178,21 @@ async def check_pr(task_id: int) -> str | None:
 
         if checks == "red":
             store.update_task(task_id, status="pr_ci_failed")
-            return (f"🔴 CI red on the PR for #{task_id} {title}\n{url}\n"
-                    f"Reply 'fix #{task_id}' and I'll pick the task back up with "
-                    f"everything it already knows.")
+            why = ""
+            with contextlib.suppress(Exception):
+                why = await _why_red(pr, url)
+            # The first red is re-run once, on its own: a flaky test should cost
+            # him one message, not five. A second red is his to decide.
+            if _auto_rerun() and not store.kv_get(f"task_ci_rerun:{task_id}"):
+                store.kv_set(f"task_ci_rerun:{task_id}", str(time.time()))
+                with contextlib.suppress(Exception):
+                    await rerun_ci(task_id)
+                    return (f"🔴 CI red on the PR for #{task_id} {title}\n{url}{why}\n"
+                            f"Re-running the failed jobs once — I'll tell you how it ends.")
+            return (f"🔴 CI red on the PR for #{task_id} {title}\n{url}{why}\n"
+                    f"Say *rerun ci {task_id}* to run the failed jobs again, or "
+                    f"*fix #{task_id}* and I'll pick the task back up with everything "
+                    f"it already knows.")
         if decision == "CHANGES_REQUESTED":
             store.update_task(task_id, status="pr_changes_requested")
             # Carry what they actually said. "Changes requested" on its own is
@@ -3055,6 +3204,12 @@ async def check_pr(task_id: int) -> str | None:
         if decision == "APPROVED" and checks == "green":
             store.update_task(task_id, status="shipped")
             return f"✅ Approved and green — #{task_id} {title}\n{url}\nReady to merge."
+        if checks == "green":
+            # The end of the CI run is news too — he raised the PR and then had
+            # to ask, three times, whether the pipeline had passed (30 Sep).
+            store.update_task(task_id, status="shipped")
+            return (f"✅ CI green on the PR for #{task_id} {title}\n{url}\n"
+                    f"Waiting on review.")
     return None
 
 

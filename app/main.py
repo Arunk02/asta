@@ -1433,6 +1433,24 @@ async def api_ship_task(task_id: int):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/tasks/{task_id}/pr-note", dependencies=[Depends(require_auth)])
+async def api_task_pr_note(task_id: int, request: Request):
+    b = await request.json()
+    try:
+        return {"ok": True, "detail": await tasks.pr_note(
+            task_id, b.get("text", ""), b.get("where", "description"))}
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/tasks/{task_id}/rerun-ci", dependencies=[Depends(require_auth)])
+async def api_task_rerun_ci(task_id: int):
+    try:
+        return {"ok": True, "detail": await tasks.rerun_ci(task_id)}
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/tasks/{task_id}/reject", dependencies=[Depends(require_auth)])
 async def api_reject_task(task_id: int):
     try:
@@ -2423,6 +2441,16 @@ async def _conduct(conv0: dict, first_text: str, sink, channel: str) -> None:
             loop.stage(cid, intent)
             _revision_staged(cid, intent)
             await _present_staged_send(sink, cid, intent, channel)
+            # What he typed WHILE this turn ran was typed before the draft was
+            # shown, so it is not an answer to it — and it must not vanish.
+            # "post that, send the PR to Vinish for review…" was acknowledged
+            # with "I'll answer this right after" and never answered (30 Sep).
+            queued = _followups.get(cid)
+            if queued:
+                text = queued.pop(0)
+                if not queued:
+                    _followups.pop(cid, None)
+                continue
             return
 
         pending = _addenda.pop(cid, None)
@@ -2688,6 +2716,19 @@ def _mechanical_send(staged: dict) -> dict | None:
     nothing here composes them; chat has nowhere to send to. Returning None keeps
     those on exactly the path they were already on.
     """
+    if (staged.get("channel") or "").strip().lower() == "pr":
+        # A note for one of his own PRs is a recorded call too. Handed back to
+        # a brain it was approved with "send" and never landed: the chat brain
+        # cannot run `gh pr edit` (30 Sep, PR #1252).
+        tid = tasks.task_for_pr(f"{staged.get('to') or ''} {staged.get('what') or ''}")
+        what = (staged.get("what") or "").strip()
+        if not tid or not what:
+            return None
+        # Drop the brain's own lead-in ("Add to PR #1252 description (repo):").
+        what = re.sub(r"^\s*add\s+(?:this\s+)?to\s+(?:the\s+)?pr\b[^\n]*:\s*\n+", "", what,
+                      flags=re.I).strip()
+        where = "comment" if re.search(r"\bcomment\b", staged.get("to") or "", re.I) else "description"
+        return {"name": "pr_note", "args": {"task_id": tid, "text": what, "where": where}}
     if (staged.get("channel") or "").strip().lower() != "teams":
         return None
     to, what = (staged.get("to") or "").strip(), (staged.get("what") or "").strip()
@@ -3155,8 +3196,9 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     from . import go
     if go.enabled() and not _TASK_CMD.match(user_text or ""):
         is_go, wanted_task = go.command(user_text or "")
-        if is_go:
-            note = await go.act(user_text or "", wanted_task)
+        note = await go.rerun(user_text or "")
+        if note or is_go:
+            note = note or await go.act(user_text or "", wanted_task)
             if note:
                 frontdesk.record("command", "go")
                 store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
@@ -3459,6 +3501,16 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                       else await activity.resolve_interjection(user_text, conv.get("model", "")))
             if intent == "augment":
                 target = recent[-1]
+        if target is not None and frontdesk.is_question(user_text):
+            # A question about finished work is answered, not applied to it.
+            if target == named:
+                card = frontdesk.task_card(target)
+                frontdesk.record("state", f"status #{target}")
+                await sink.send({"type": "note", "text": card})
+                if channel == "web":
+                    await sink.send({"type": "done", "tools": []})
+                return None
+            target = None
         if target is not None:
             # Drop the "#64" only when he actually wrote one, so the pipeline
             # reads a natural instruction either way.

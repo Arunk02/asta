@@ -134,12 +134,36 @@ end run
 
 
 def _menu_script(process: str, path: list[str]) -> str:
-    item, menu = path[-1], path[0]
+    """Click a menu path of ANY depth. The names travel as arguments, never
+    inside the script: JSON-quoting "Find in Files…" wrote \\u2026, which
+    AppleScript cannot parse, and a two-level template dropped the middle of
+    "Edit > Find > Find in Files…" (both found live, 30 Sep)."""
+    ref = "menu bar item (item 1 of argv) of menu bar 1"
+    for i in range(2, len(path)):
+        ref = f"menu item (item {i} of argv) of menu 1 of {ref}"
     return f'''
 on run argv
   tell application "System Events" to tell process "{process}"
     set frontmost to true
-    click menu item {json.dumps(item)} of menu 1 of menu bar item {json.dumps(menu)} of menu bar 1
+    click menu item (item {len(path)} of argv) of menu 1 of {ref}
+  end tell
+end run
+'''
+
+
+#: Keys by name → macOS key code. "key escape" used to send the WORD to
+#: `key code`, which takes only numbers.
+KEY_CODES = {"return": 36, "enter": 36, "escape": 53, "esc": 53, "tab": 48, "space": 49,
+             "delete": 51, "backspace": 51, "up": 126, "down": 125, "left": 123,
+             "right": 124, "home": 115, "end": 119, "pageup": 116, "pagedown": 121}
+
+
+def _key_script(process: str, code: int) -> str:
+    return f'''
+on run argv
+  tell application "System Events" to tell process "{process}"
+    set frontmost to true
+    key code {int(code)}
   end tell
 end run
 '''
@@ -240,11 +264,13 @@ async def follow(process: str, steps: list[Step], why: str = "") -> dict:
             path = [p.strip() for p in step.target.split(">")]
             if len(path) < 2:
                 raise ScreenError(f"a menu path needs 'Menu > Item', got {step.target!r}")
-            await apps._osascript(_menu_script(process, path), [])
+            await apps._osascript(_menu_script(process, path), path)
         elif step.do == "type" and _needs_paste(step.target):
             await apps._osascript(_paste_script(process), [step.target])
+        elif step.do == "key" and step.target.strip().lower() in KEY_CODES:
+            await apps._osascript(_key_script(process, KEY_CODES[step.target.strip().lower()]), [])
         elif step.do in ("type", "key"):
-            await apps._osascript(_type_script(process, step.do == "key"), [step.target])
+            await apps._osascript(_type_script(process, False), [step.target])
         else:
             raise ScreenError(f"step {i}: no such action {step.do!r}")
 

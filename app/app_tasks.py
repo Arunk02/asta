@@ -285,8 +285,8 @@ async def by_screen(app: str, goal: str, *, context: str = "", confirmed: bool =
     for attempt in (1, 2):
         try:
             seen = await screen.look(app)
-        except screen.ScreenError as exc:
-            return f"Not done — {exc}."
+        except (screen.ScreenError, apps.AppError) as exc:
+            return f"Not done — I couldn't read {app}'s window: {exc}."
         brief = _SCREEN_BRIEF.format(app=app, goal=goal.strip(), seen=seen[:6000],
                                      context=f"Context: {context.strip()}\n" if context.strip() else "")
         if error:

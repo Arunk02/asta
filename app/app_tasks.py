@@ -198,6 +198,8 @@ async def do(app_name: str, goal: str, *, context: str = "", confirmed: bool = F
     except AppTaskError as exc:
         return f"Not done — {exc}."
     app = path.stem
+    if app.lower().startswith("intellij"):
+        return await in_intellij(goal, context=context)
     words = dictionary(path, goal)
     if not words:
         # No scripting door (IntelliJ, VS Code, Teams, Postman…): the window's
@@ -256,10 +258,16 @@ Write the steps. Each step is one of:
   {{"do":"type","target":"text to type","expect":"..."}}
   {{"do":"key","target":"return | escape | tab","expect":"..."}}
 Targets are NAMES you can see above (or standard menu paths), never coordinates.
-"expect" says what must be true afterwards: "exists: <name>", "gone: <name>" or
-"window: <title>". The LAST step must have an expect. Prefer menus over clicks.
+"expect" says what must be true afterwards: "exists: <name>", "gone: <name>",
+"window: <title>", or "windows: <N>" — the number of open windows, for apps
+(like IntelliJ) whose dialogs and popups have no readable name: the line
+"windows: N" above says how many are open now. The LAST step must have an expect. Prefer menus over clicks.
 Menu paths must name every level ("Edit > Find > Find in Files…"), and menu
 item names are exact — many end with the single character "…", not "...".
+The menu list above shows only the first two levels: items such as "Edit > Find"
+open submenus that are not listed — name their items from what you know of the
+app. Never ask about a menu path: try it. A wrong path fails safely (nothing is
+clicked) and you get another look.
 Never type passwords or secrets. If the ask would delete, discard, reset or quit
 anything, set "destructive" true. If something essential is missing, leave
 "steps" empty and ask ONE short question.
@@ -321,6 +329,69 @@ async def by_screen(app: str, goal: str, *, context: str = "", confirmed: bool =
         return (f"{note}Done in {app} on screen: {(plan.get('changes') or goal).rstrip('.')}. "
                 f"Each step checked: {' → '.join(out['steps'])[:300]}")
     return "Not done."
+
+
+#: IntelliJ exposes no windows to macOS accessibility (measured 30 Sep: its
+#: menus read, "windows: 0"), so clicking in it can never be CHECKED. Its own
+#: launcher is the door for navigation; code work is a code task.
+_IDEA_CODE_WORK = re.compile(r"\b(refactor|rename|extract|fix|implement|change|edit|add|remove|"
+                             r"run\s+(?:the\s+)?tests?|build|commit|push|format|optimi[sz]e)\b", re.I)
+_IDEA_FILE = re.compile(r"([\w./-]+\.(?:java|kt|kts|xml|ya?ml|properties|gradle|md|json|sql|avsc))"
+                        r"(?:[:#]\s*(?:line\s*)?(\d+)|\s+(?:at\s+)?line\s+(\d+))?", re.I)
+_IDEA_REPO = re.compile(r"\b(?:project|repo)\s+([\w.-]+)", re.I)
+
+
+async def in_intellij(goal: str, *, context: str = "") -> str:
+    """IntelliJ by its own launcher: a project, a file at a line. Code work is
+    offered as a code task, where it is planned, approved and checked."""
+    import asyncio
+    from . import review, walkthrough, workspace_tools
+    idea = walkthrough.IDEA
+    if _IDEA_CODE_WORK.search(goal) and not _IDEA_FILE.search(goal):
+        return ("That's code work — I do it as a code task (plan first, your yes, then the "
+                "change and a PR), not by clicking inside IntelliJ. Say “do it as a code "
+                f"task: {goal}” and I'll plan it.")
+    roots = [Path(str(v)) for v in workspace_tools.WORKSPACES.values()]
+    repo_root: Path | None = None
+    m = _IDEA_REPO.search(goal)
+    for ws in roots:
+        hit = review.resolve_repo(ws, m.group(1)) if m else ""
+        if hit:
+            repo_root = ws / hit
+            break
+    f = _IDEA_FILE.search(goal)
+    target: Path | None = None
+    line = 0
+    if f:
+        name = f.group(1)
+        line = int(f.group(2) or f.group(3) or 0)
+        search = [repo_root] if repo_root else [d for ws in roots for d in ws.iterdir()
+                                                 if (d / ".git").is_dir()]
+        for base in search:
+            found = [p for p in base.rglob(Path(name).name)
+                     if "/build/" not in str(p) and "/target/" not in str(p)
+                     and str(p).endswith(name)]
+            if found:
+                target, repo_root = found[0], base
+                break
+        if target is None:
+            return f"Not done — I couldn't find {name} in your workspaces."
+    if not repo_root:
+        return ("Which project or file? e.g. “open BookingController.java line 88 in intellij” "
+                "or “open project telikos-booking-service in intellij”.")
+    args = [idea, str(repo_root)] + (["--line", str(line)] if line else []) + \
+        ([str(target)] if target else [])
+    proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.DEVNULL,
+                                                stdout=asyncio.subprocess.DEVNULL,
+                                                stderr=asyncio.subprocess.DEVNULL)
+    try:
+        await asyncio.wait_for(proc.wait(), 20)
+    except asyncio.TimeoutError:
+        pass
+    _record("IntelliJ IDEA", goal, {"changes": "opened", "script": " ".join(args)}, "done", "")
+    what = f"{target.relative_to(repo_root)}" + (f":{line}" if line else "") if target \
+        else repo_root.name
+    return f"🧠 Opened {what} in IntelliJ."
 
 
 def _record(app: str, goal: str, plan: dict, outcome: str, detail: str) -> None:

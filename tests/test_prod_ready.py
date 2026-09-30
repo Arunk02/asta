@@ -76,7 +76,7 @@ def idea(monkeypatch):
     monkeypatch.setattr(screen, "look", look)
     monkeypatch.setattr(screen, "follow", follow)
     monkeypatch.setattr(apps, "open_app", open_app)
-    monkeypatch.setattr(app_tasks, "resolve", lambda n: (Path("/Applications/IntelliJ IDEA.app"), ""))
+    monkeypatch.setattr(app_tasks, "resolve", lambda n: (Path("/Applications/Postman.app"), ""))
     monkeypatch.setattr(app_tasks, "dictionary", lambda path, goal="": "")
     return app_tasks, plans, followed, looked
 
@@ -89,9 +89,9 @@ def _steps(*targets, destructive=False):
 def test_an_app_with_no_dictionary_is_driven_by_its_named_controls(idea):
     app_tasks, plans, followed, looked = idea
     plans.append(_steps("Edit > Find > Find in Files…"))
-    out = asyncio.run(app_tasks.do("intellij", "open the find in files dialog"))
-    assert "Done in IntelliJ IDEA on screen" in out and "Each step checked" in out
-    assert looked == ["IntelliJ IDEA"] and followed[0][0] == "IntelliJ IDEA"
+    out = asyncio.run(app_tasks.do("postman", "open the find in files dialog"))
+    assert "Done in Postman on screen" in out and "Each step checked" in out
+    assert looked == ["Postman"] and followed[0][0] == "Postman"
 
 
 def test_a_failed_step_gets_one_fresh_look_then_stops(idea):
@@ -99,7 +99,7 @@ def test_a_failed_step_gets_one_fresh_look_then_stops(idea):
     plans += [{"steps": [{"do": "click", "target": 'button "Nope"', "expect": "gone: x"}],
                "changes": "", "destructive": False},
               _steps("Edit > Find > Find in Files…")]
-    assert "Done" in asyncio.run(app_tasks.do("intellij", "open find in files"))
+    assert "Done" in asyncio.run(app_tasks.do("postman", "open find in files"))
     assert len(looked) == 2, "looked again before the retry"
 
 
@@ -107,7 +107,7 @@ def test_something_destructive_on_screen_waits_for_his_yes(idea):
     app_tasks, plans, followed, looked = idea
     plans.append({"steps": [{"do": "menu", "target": "Git > Rollback…", "expect": "window: Rollback"}],
                   "changes": "rolls back local changes", "destructive": False})
-    out = asyncio.run(app_tasks.do("intellij", "discard my local changes"))
+    out = asyncio.run(app_tasks.do("postman", "discard my local changes"))
     assert "Say yes" in out and followed == []
 
 
@@ -157,7 +157,7 @@ def test_a_step_the_app_rejects_is_retried_not_a_crash(idea, monkeypatch):
 
     monkeypatch.setattr(screen, "follow", follow)
     plans += [_steps("Edit > Find in Files..."), _steps("Edit > Find > Find in Files…")]
-    assert "Done" in asyncio.run(app_tasks.do("intellij", "open find in files"))
+    assert "Done" in asyncio.run(app_tasks.do("postman", "open find in files"))
     assert len(calls) == 2
 
 
@@ -191,3 +191,84 @@ def test_named_keys_are_key_codes_not_typed_words(monkeypatch):
     menu, key = ran[0], ran[1]
     assert menu[1] == ["Edit", "Find", "Find in Files…"]
     assert "key code 53" in key[0]
+
+
+def test_a_big_ide_is_read_the_fast_way_and_a_slow_app_is_remembered(monkeypatch):
+    from app import apps, screen
+    monkeypatch.setenv("ASTA_SCREEN", "1")
+    scripts = []
+
+    async def osa(script, args):
+        scripts.append(script)
+        if "entire contents" in script:
+            raise apps.AppError("the app did not answer within 25s")
+        return "menu: Edit\n  Edit > Find\n"
+
+    monkeypatch.setattr(apps, "_osascript", osa)
+    assert "Edit > Find" in asyncio.run(screen.look("IntelliJ IDEA"))
+    assert "entire contents" not in scripts[0], "an IDE is never walked element by element"
+    scripts.clear()
+    asyncio.run(screen.look("Postman"))
+    assert "entire contents" in scripts[0] and "every menu item" in scripts[1]
+    scripts.clear()
+    asyncio.run(screen.look("Postman"))
+    assert len(scripts) == 1 and "every menu item" in scripts[0], "remembered as big"
+
+
+@pytest.mark.parametrize("expect,seen,ok", [
+    ("windows: 2", "windows: 2\nmenu: Edit\n", True),
+    ("windows: 2", "windows: 1\nelement: 2 problems\n", False),
+    ("window: Find in Files", "windows: 2\nwindow: Find in Files\n", True),
+    ("gone: Find in Files", "windows: 1\n", True),
+])
+def test_a_window_count_is_a_check_that_works_on_java_apps(expect, seen, ok):
+    from app import screen
+    assert screen._met(expect, seen) is ok
+
+
+@pytest.fixture
+def ide(tmp_path, monkeypatch):
+    from app import app_tasks, walkthrough, workspace_tools
+    root = tmp_path / "booking-workspace"
+    src = root / "telikos-booking-service" / "src" / "main" / "java" / "x"
+    src.mkdir(parents=True)
+    (root / "telikos-booking-service" / ".git").mkdir()
+    (src / "BookingController.java").write_text("class BookingController {}")
+    monkeypatch.setattr(workspace_tools, "WORKSPACES", {"booking": root})
+    monkeypatch.setenv("ASTA_APPS", "1")
+    ran = []
+
+    async def spawn(*args, **kw):
+        ran.append(list(args))
+
+        class P:
+            async def wait(self):
+                return 0
+        return P()
+
+    monkeypatch.setattr(app_tasks.asyncio if hasattr(app_tasks, "asyncio") else __import__("asyncio"),
+                        "create_subprocess_exec", spawn)
+    monkeypatch.setattr(app_tasks, "resolve", lambda n: (Path("/Applications/IntelliJ IDEA.app"), ""))
+    return root, ran
+
+
+def test_intellij_opens_a_file_at_a_line_through_its_launcher(ide):
+    from app import app_tasks, walkthrough
+    root, ran = ide
+    out = asyncio.run(app_tasks.do("intellij", "open BookingController.java line 88"))
+    assert "Opened" in out and "BookingController.java:88" in out
+    assert ran[0][0] == walkthrough.IDEA and "--line" in ran[0] and "88" in ran[0]
+
+
+def test_intellij_opens_a_project_by_its_repo_name(ide):
+    from app import app_tasks
+    root, ran = ide
+    out = asyncio.run(app_tasks.do("intellij", "open project booking-service"))
+    assert "Opened telikos-booking-service" in out
+
+
+def test_code_work_in_intellij_becomes_a_code_task_not_clicks(ide):
+    from app import app_tasks
+    root, ran = ide
+    out = asyncio.run(app_tasks.do("intellij", "refactor the priority service"))
+    assert "code task" in out and ran == []

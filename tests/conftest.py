@@ -131,6 +131,10 @@ def _no_machine_side_effects(monkeypatch):
     # A red CI is re-run once on its own in production; the older lifecycle
     # tests are about what he is told when it is NOT, and no test may reach gh.
     monkeypatch.setenv("ASTA_CI_AUTO_RERUN", "0")
+    # The staging tests below this line predate "a send he asked for is his
+    # yes"; they are about the draft path, which is still what happens for
+    # anything he did not ask for. tests/test_say_it_once.py turns it on.
+    monkeypatch.setenv("ASTA_SEND_WHEN_ASKED", "0")
     # Telegram is the same door on another channel. It is dead in tests only by
     # accident today (the chat id lives in the isolated database), and a test
     # that stores one would push to his phone for real.

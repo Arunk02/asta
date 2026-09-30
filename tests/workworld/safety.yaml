@@ -59,13 +59,15 @@ scenarios:
     title: A declined draft never goes
     brains:
       chat:
-        - when: "tell (alex|rahul)"
+        - when: "draft .*rahul"
           text: "Drafted it — shall I send?"
           calls:
             - tool: prepare_to_send
               args: {what: "the topics are created in uat", to: "Rahul Verma", channel: teams}
     steps:
-      - say: "tell rahul the uat topics are created"
+      # He asked for a DRAFT, not a send — so it is staged, and his no ends it.
+      # ("tell rahul …" is a send he asked for; see a-send-he-asked-for-is-his-yes.)
+      - say: "draft a note to rahul that the uat topics are created"
       - say: "no dont send"
     checks:
       - no_send: true

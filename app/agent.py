@@ -1745,7 +1745,7 @@ _SEND_VERB = re.compile(r"\b(?:send|share|ping|tell|ask|message|msg|forward|info
 
 def _he_asked_to_send(to: str, cid: str) -> bool:
     """Did HE, in his own words this turn, ask for a message to this person?"""
-    if os.environ.get("ASTA_SEND_WHEN_ASKED", "0").strip().lower() not in ("1", "true", "on", "yes"):
+    if os.environ.get("ASTA_SEND_WHEN_ASKED", "1").strip().lower() in ("0", "false", "off", "no"):
         return False
     from . import capabilities, scorecard, store
     said = scorecard.his_words(capabilities.said_this_turn()).lower()

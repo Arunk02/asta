@@ -236,7 +236,13 @@ CODE_OVERRIDES = """
 - Branch: Asta has already put every repo on the task's feature branch, cut
   fresh from develop. Do NOT create another branch, do not switch branches, and
   do not rebase onto anything. If `git status` shows an unexpected branch, stop
-  and say so rather than fixing it yourself."""
+  and say so rather than fixing it yourself.
+  EXCEPTION — an EXISTING branch or PR. When he says the work belongs on a
+  branch or pull request that already exists ("pick that PR", "fix it on the
+  existing branch", "update the same PR"), that is an instruction, not a
+  question to bring back to him: find it yourself (`gh pr list --search`,
+  `git branch -r`), `git fetch`, and `git switch` THIS worktree to that branch.
+  Commit there, never on a new branch, and name the branch in your summary."""
 # How Arun expects the code to READ — the quality bar he reviews every diff
 # against — used to be a block here. It is now the `## Coding` section of his
 # guardrails.md, so he edits it himself, and every fresh code leg receives it
@@ -858,7 +864,9 @@ def _branch_note(task_id: int, t: dict) -> str:
             f"are on. Do NOT create a branch, do NOT switch branch, and never say "
             f"you are blocked for want of one — you have it. Every repo listed above "
             f"is yours to change in THIS run; a change spanning two of them is one "
-            f"task, not two.")
+            f"task, not two. The one exception: if he asked for the work on a branch "
+            f"or PR that ALREADY exists, find it and `git switch` this worktree to "
+            f"it yourself — do not ask him whether to.")
 
 
 def task_cwd(task_id: int, workspace: str | None) -> str:
@@ -1884,6 +1892,55 @@ async def rollback(task_id: int) -> str:
 
 # --- reading its own work before handing it over ------------------------------
 
+async def _task_base(repo: Path, t: dict, task_id: int = 0) -> str:
+    """The commit just before THIS task's first commit in this repo — "" if it
+    made none.
+
+    Read from git by time, not from a recorded branch point: #185 was told to
+    work on an existing PR branch, and its review then diffed three repos
+    against where the SHARED checkout had stood — 126 files of other people's
+    work — and reported a "cross-repo contradiction" in a five-line wording
+    fix (30 Sep)."""
+    since = int(float(t.get("created_at") or 0)) - 1 if t.get("created_at") else 0
+    if not since:
+        # No task row to date it by (a caller holding only the workspace): the
+        # recorded branch point, as before.
+        mark = rollback_point(task_id).get(repo.name) if task_id else None
+        return mark["sha"] if mark else "HEAD~1"
+    rc, out = await repo_ops.git(repo, "git", "log", f"--since=@{since}", "--format=%H", "HEAD")
+    shas = out.split() if rc == 0 else []
+    if not shas:
+        return ""
+    rc, parent = await repo_ops.git(repo, "git", "rev-parse", "--verify", f"{shas[-1]}~1")
+    # A repository's very first commit has no parent: diff against the empty tree.
+    return parent.strip() if rc == 0 and parent.strip() else _EMPTY_TREE
+
+
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+async def _already_pushed(task_id: int, t: dict) -> list[str]:
+    """PR urls for work that is ALREADY on origin — the branch has an upstream
+    with nothing ahead of it and an open PR. "" list when any of it is local."""
+    try:
+        root = Path(task_cwd(task_id, t.get("workspace")))
+    except RuntimeError:
+        return []
+    urls: list[str] = []
+    for repo in _repos_under(root):
+        if not await _task_base(repo, t):
+            continue
+        rc, ahead = await repo_ops.git(repo, "git", "rev-list", "--count", "@{u}..HEAD")
+        if rc != 0 or ahead.strip() != "0":
+            return []
+        rc, url = await repo_ops.git(repo, "gh", "pr", "view", "--json", "url", "--jq", ".url",
+                                     timeout=60)
+        if rc != 0 or not url.strip().startswith("http"):
+            return []
+        urls.append(f"{repo.name}: {url.strip()}")
+    return urls
+
+
 async def _self_review(task_id: int, t: dict, result: str) -> str:
     """Read the diff this task just produced, the way it reads anyone else's PR.
 
@@ -1908,8 +1965,9 @@ async def _self_review(task_id: int, t: dict, result: str) -> str:
         return ""
     diffs = []
     for repo in _repos_under(root):
-        mark = rollback_point(task_id).get(repo.name)
-        base = mark["sha"] if mark else "HEAD~1"
+        base = await _task_base(repo, t, task_id)
+        if not base:
+            continue                # this task committed nothing in this repo
         rc, out = await repo_ops.git(repo, "git", "diff", "--stat", base, "HEAD")
         if rc == 0 and out.strip():
             rc2, full = await repo_ops.git(repo, "git", "diff", base, "HEAD")
@@ -2151,6 +2209,16 @@ async def complete(task_id: int, t: dict, result: str) -> None:
         store.kv_set(f"task_landed:{task_id}", _json.dumps(landed))
         expected = (store.kv_get(f"task_branch:{task_id}") or "").strip()
         strayed = [d for d in landed if expected and d["branch"] != expected]
+        # A branch that already existed on origin is one he sent the task to
+        # ("fix it on the existing PR branch") — adopted, not warned about.
+        for d in list(strayed):
+            with contextlib.suppress(Exception):
+                repo = Path(task_cwd(task_id, t["workspace"])) / d["repo"]
+                rc, _ = await repo_ops.git(repo, "git", "rev-parse", "--verify",
+                                           f"origin/{d['branch']}")
+                if rc == 0:
+                    strayed.remove(d)
+                    store.kv_set(f"task_branch:{task_id}", d["branch"])
         if strayed:
             result += ("\n\n⚠️ Committed on a branch Asta did not prepare: "
                        + ", ".join(f"{d['repo']} → {d['branch']}" for d in strayed)
@@ -2159,6 +2227,19 @@ async def complete(task_id: int, t: dict, result: str) -> None:
     _learn_from(task_id, t["title"], result)
     waste = _audit_note(task_id)
     own = await _self_review(task_id, t, result)
+    pushed = []
+    with contextlib.suppress(Exception):
+        pushed = await _already_pushed(task_id, t)
+    if pushed:
+        # It is on origin and its PR exists: say that, not "nothing pushed — say
+        # raise PR" underneath a report that opens "Pushed." (#185, 30 Sep).
+        store.update_task(task_id, status="shipped", pr_urls="\n".join(pushed),
+                          pr_state="OPEN", pr_checked_at=0.0)
+        await notify.notify(
+            f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}{own}\n\n"
+            f"Already pushed — the PR is updated:\n" + "\n".join("• " + u for u in pushed)
+            + f"\nI'm watching its CI and will tell you how it ends.{waste}", "task")
+        return
     from . import go
     if go.enabled() and go.ships(task_id):
         # He already said "…and raise the PR". Asking "say ship" now would be

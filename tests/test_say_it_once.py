@@ -881,3 +881,56 @@ def test_a_pr_marked_red_with_green_checks_is_reported_as_recovered(monkeypatch)
     assert line and "CI green" in line
     assert store.get_task(tid)["status"] == "shipped"
     assert asyncio.run(tasks.check_pr(tid)) is None
+
+
+# --- task #185: an existing PR branch, and an honest DONE -------------------------
+
+def test_a_task_is_told_it_may_switch_to_an_existing_branch_without_asking():
+    assert "EXISTING branch or PR" in tasks.CODE_OVERRIDES
+    assert "not a" in tasks.CODE_OVERRIDES and "question to bring back to him" in tasks.CODE_OVERRIDES
+    from pathlib import Path
+    for f in ("agents/solo.md", "agents/micro.md"):
+        assert "EXISTING branch or PR" in Path(f).read_text()
+
+
+def test_the_self_review_reads_only_what_this_task_committed(monkeypatch, tmp_path):
+    """#185's five-line fix was reviewed as 126 files across three repos."""
+    asked: list[tuple] = []
+
+    async def git(cwd, *args, **k):
+        asked.append(args)
+        if args[:2] == ("git", "log"):
+            return (0, "bbb\naaa\n") if cwd.name == "svc" else (0, "")
+        if args[:2] == ("git", "rev-parse"):
+            return 0, "parent000\n"
+        return 0, ""
+
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    t = {"created_at": 1790000000.0}
+    assert asyncio.run(tasks._task_base(tmp_path / "svc", t)) == "parent000"
+    assert asyncio.run(tasks._task_base(tmp_path / "other", t)) == "", "untouched repo: nothing to review"
+    log = next(a for a in asked if a[:2] == ("git", "log"))
+    assert "--since=@1789999999" in log
+    assert ("git", "rev-parse", "--verify", "aaa~1") in asked, "the parent of its FIRST commit"
+
+
+def test_work_already_on_origin_is_not_reported_as_local_only(monkeypatch, quiet, tmp_path):
+    async def nothing(*a, **k):
+        return ""
+
+    async def pushed(tid, t):
+        return ["telikos-booking-service: https://github.com/acme/svc/pull/1429"]
+
+    monkeypatch.setattr(tasks, "_self_review", nothing)
+    monkeypatch.setattr(tasks, "_already_pushed", pushed)
+    t = store.create_task("Fix RFP validation messages", "code", "p", None)
+    asyncio.run(tasks.complete(t["id"], t, "Pushed. Commit b57e396 on feature/rfp-mandatory-field-validation."))
+    assert "Already pushed — the PR is updated" in quiet[-1] and "pull/1429" in quiet[-1]
+    assert "nothing pushed" not in quiet[-1]
+    assert store.get_task(t["id"])["status"] == "shipped", "and its CI is watched from here"
+
+
+def test_waiting_on_a_task_is_not_a_step_to_run():
+    assert main._WAITS_ON_A_TASK.search("Check task #185 status again; when it finishes, present the diff")
+    assert main._WAITS_ON_A_TASK.search("Wait for task #185's own completion notification")
+    assert not main._WAITS_ON_A_TASK.search("add the null check and run the mapper tests")

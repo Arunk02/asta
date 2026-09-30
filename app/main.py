@@ -2303,6 +2303,12 @@ def _workspace_repos(workspace: str) -> tuple[str, ...]:
         return ()
 
 
+#: A "next step" that is only waiting on a background task.
+_WAITS_ON_A_TASK = re.compile(
+    r"\b(?:wait(?:ing)?\s+(?:for|on)|check(?:ing)?\s+(?:on\s+)?(?:the\s+)?(?:status\s+of\s+)?|"
+    r"poll(?:ing)?|monitor(?:ing)?|re-?check)\s*(?:the\s+)?task\s*#?\d+", re.I)
+
+
 def _start_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task:
     frontdesk.record("brain", channel)
     job = asyncio.create_task(_conducted_turn(conv, user_text, sink, channel))
@@ -2469,6 +2475,12 @@ async def _conduct(conv0: dict, first_text: str, sink, channel: str) -> None:
 
         # Arun left nothing to do — so if the model said it wasn't finished, run its
         # next step itself rather than stopping and waiting for a message.
+        if intent and intent["kind"] == "continue" and _WAITS_ON_A_TASK.search(
+                intent.get("next_step") or ""):
+            # Waiting is not a step. "Check task #185 status again…" ran three
+            # turns of "still running" onto his phone (30 Sep); the task tells
+            # him itself when it reaches a gate or finishes.
+            intent = None
         if intent and intent["kind"] == "continue":
             if loop.budget_left(cid):
                 loop.bump_steps(cid)

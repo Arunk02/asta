@@ -775,7 +775,9 @@ def test_a_question_about_finished_work_does_not_reopen_it(monkeypatch):
 def test_an_unnamed_group_chat_is_opened_by_its_own_rail_row():
     from app import teams_bridge as tb
     assert tb._is_member_list("Shabda Anubhav, Vinish, +2")
-    assert tb._is_member_list("Rekha and Rini")
+    assert not tb._is_member_list("Rekha and Rini"), "search first; the row only if search fails"
+    assert tb._maybe_member_list("Rekha and Rini")
+    assert not tb._is_member_list("Team Booking and Execution")
     assert not tb._is_member_list("General")
     assert not tb._is_member_list("Backend Community of Practice")
     assert tb._rail_title_ok("Shabda Anubhav Dev, Vinish Kumar, Yogesh Kumar Ravichandran",
@@ -934,3 +936,116 @@ def test_waiting_on_a_task_is_not_a_step_to_run():
     assert main._WAITS_ON_A_TASK.search("Check task #185 status again; when it finishes, present the diff")
     assert main._WAITS_ON_A_TASK.search("Wait for task #185's own completion notification")
     assert not main._WAITS_ON_A_TASK.search("add the null check and run the mapper tests")
+
+
+# --- reading Teams: every change, once -------------------------------------------
+
+def _rail(*rows):
+    return [{"name": n, "text": f"{n}\n{t}\n9:48 PM"} for n, t in rows]
+
+
+def test_a_burst_reads_every_changed_chat_one_to_one_first():
+    """A 1:1 arrives, then five group messages push it to sixth on the rail. It
+    never "rose", missed the cap and waited for the rotation."""
+    from app import chat_watch
+    names = ["G1", "G2", "G3", "G4", "G5", "Vinish Kumar", "Quiet Group"]
+    store.save_teams_messages([{"chat": "Vinish Kumar", "sender": "Vinish Kumar", "text": "hi",
+                                "sent_at": time.time() - 3600, "key": "k0", "stamp": ""}])
+    chat_watch.changed_first(_rail(*[(n, "old") for n in names]), names)      # first look
+    after = _rail(("G1", "new 1"), ("G2", "new 2"), ("G3", "Arunkumar can you check"),
+                  ("G4", "new 4"), ("G5", "new 5"), ("Vinish Kumar", "Bro"), ("Quiet Group", "old"))
+    first = chat_watch.changed_first(after, names)
+    assert "Quiet Group" not in first, "nothing changed there"
+    assert set(first) == {"G1", "G2", "G3", "G4", "G5", "Vinish Kumar"}
+    assert first[0] == "Vinish Kumar", "the 1:1 first, though it sits sixth on the rail"
+    assert first.index("G3") < first.index("G1"), "a group that names him before one that does not"
+
+
+def test_his_own_reply_and_the_clock_are_not_news():
+    from app import chat_watch
+    names = ["Sankalp Grover", "Team X"]
+    chat_watch.changed_first(_rail(("Sankalp Grover", "okay sure"), ("Team X", "deploy done")), names)
+    later = [{"name": "Sankalp Grover", "text": "Sankalp Grover\nYou: done, thanks\n9:50 PM"},
+             {"name": "Team X", "text": "Team X\ndeploy done\nYesterday"}]
+    assert chat_watch.changed_first(later, names) == [], \
+        "his own reply means he dealt with it; 9:48 PM → Yesterday is the clock"
+
+
+def test_what_does_not_fit_this_sweep_is_owed_to_the_next():
+    from app import chat_watch
+    store.kv_set(chat_watch._OWED_KEY, json.dumps(["Vinish Kumar"]))
+    store.kv_set(chat_watch._PREVIEWS_KEY, json.dumps({"Vinish Kumar": "Bro"}))
+    first = chat_watch.changed_first(_rail(("Vinish Kumar", "Bro")), ["Vinish Kumar"])
+    assert first == ["Vinish Kumar"], "carried over even though nothing changed since"
+
+
+def test_a_lost_mark_does_not_replay_the_thread():
+    """Team Booking's old messages came back every few minutes all evening."""
+    from app import chat_watch
+    now = time.time()
+    rows = [{"key": "a1", "sent_at": now - 7200, "text": "Hi Everyone"},
+            {"key": "a2", "sent_at": now - 7100, "text": "Can we connect please\n\n1 Like reaction."}]
+    chat_watch.remember("Team Booking and Execution", rows)
+    rekeyed = [{"key": "b1", "sent_at": now - 7200, "text": "Hi Everyone"},
+               {"key": "b2", "sent_at": now - 7100, "text": "Can we connect please\n\n2 Like reactions."}]
+    assert chat_watch.unseen("Team Booking and Execution", rekeyed) == []
+    newer = rekeyed + [{"key": "b3", "sent_at": now - 60, "text": "any update?"}]
+    assert [r["key"] for r in chat_watch.unseen("Team Booking and Execution", newer)] == ["b3"]
+
+
+def test_the_same_message_with_new_reactions_is_the_same_message():
+    from app import chat_watch
+    a = {"sender": "Vinish Kumar", "sent_at": 1790770000.0, "text": "Can we connect please"}
+    b = {"sender": "Vinish Kumar", "sent_at": 1790770010.0,
+         "text": "Can we connect please\n\n1 Laugh reaction."}
+    assert chat_watch._identity(a) == chat_watch._identity(b)
+    c = {"sender": "Vinish Kumar", "sent_at": 1790773600.0, "text": "Can we connect please"}
+    assert chat_watch._identity(a) != chat_watch._identity(c), "said again an hour later is new"
+
+
+def test_the_same_answer_is_not_put_to_him_twice_in_a_day(monkeypatch):
+    shown: list[str] = []
+
+    async def notify(msg, kind="", **k):
+        shown.append(msg)
+
+    from app import notify as notify_mod
+    monkeypatch.setattr(notify_mod, "notify", notify)
+    store.kv_set("wa_conversation", _conv()["id"])
+    kw = dict(who="Vinish Kumar", need="wants to connect", chat="Vinish Kumar", group=False,
+              analysis="", reply="Sure bro, what time works for you?")
+    assert asyncio.run(answers.present(**kw)) is True
+    from app import loop
+    loop.clear_awaiting(answers.phone_conversation())
+    assert asyncio.run(answers.present(**kw)) is False
+    assert len(shown) == 1
+
+
+# --- calls: the moment Teams shows the toast ---------------------------------------
+
+def test_a_ring_seen_by_the_page_is_offered_once_whichever_watcher_sees_it(monkeypatch):
+    from app import incoming
+    told: list[str] = []
+
+    async def notify(msg, kind="", **k):
+        told.append(kind)
+
+    from app import notify as notify_mod
+    monkeypatch.setattr(notify_mod, "notify", notify)
+    monkeypatch.setenv("ASTA_INCOMING", "1")
+    monkeypatch.setenv("ASTA_RING_PUSH", "1")
+    monkeypatch.setattr(incoming, "meetings_busy", lambda: False)
+    incoming.clear()
+    toast = "Vinish Kumar is calling you\nAccept\nDecline"
+    assert asyncio.run(incoming.on_ring_text(toast)) is True
+    assert asyncio.run(incoming.on_ring_text(toast)) is False, "the same ring, not asked twice"
+    assert asyncio.run(incoming.offer({"who": "Vinish Kumar", "group": False})) is False, \
+        "and the eight-second poll does not ask again either"
+    assert told == ["calls"]
+
+
+def test_a_page_with_no_call_in_it_says_nothing(monkeypatch):
+    from app import incoming
+    monkeypatch.setenv("ASTA_INCOMING", "1")
+    assert asyncio.run(incoming.on_ring_text("Chat\nVinish Kumar\nBro")) is False
+    assert "calling you" in incoming.RING_WATCH_JS and "astaRing" in incoming.RING_WATCH_JS

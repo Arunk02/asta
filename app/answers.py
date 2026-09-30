@@ -170,6 +170,11 @@ def _blocked(cid: str, now: float | None = None) -> bool:
     if staged:
         if staged.get("type") != "answer" or now - float(staged.get("_shown") or 0) < PARK_SECONDS:
             return True
+        if not _load_queue():
+            # Nothing else is waiting: parking would only re-show the SAME
+            # question 15 minutes later ("Asking again…", 30 Sep) — a nag, not
+            # a way through. It stays where he left it.
+            return True
         loop.clear_awaiting(cid)
         _park(staged, now)
     o = offers.pending()

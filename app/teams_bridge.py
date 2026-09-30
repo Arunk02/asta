@@ -952,7 +952,21 @@ _MESSAGE_JS = """
       if (quotes.length) { quotes.forEach(q => q.remove()); src = clone; }
     } catch (e) { src = body; }
     const text = (src.innerText || '').trim();
-    if (!text) continue;
+    // Screenshots and pasted images: tagged so the reader can photograph each
+    // one (element screenshot — no auth token needed). Emoji, avatars and tiny
+    // icons are not images anyone sent.
+    const images = [];
+    try {
+      for (const im of Array.from(body.querySelectorAll('img'))) {
+        const w = im.naturalWidth || im.width || 0, h = im.naturalHeight || im.height || 0;
+        const hint = ((im.className || '') + ' ' + (im.alt || '') + ' ' + (im.getAttribute('itemtype') || ''));
+        if (w < 48 || h < 48 || /emoji|avatar|profile|reaction/i.test(hint)) continue;
+        const id = 'ai' + Math.random().toString(36).slice(2, 10);
+        im.setAttribute('data-asta-img', id);
+        images.push(id);
+      }
+    } catch (e) {}
+    if (!text && !images.length) continue;
 
     let iso = '', stamp = '';
     const t = item.querySelector('time[datetime], [data-tid="message-timestamp"]');
@@ -988,6 +1002,7 @@ _MESSAGE_JS = """
       text: text,
       iso: iso,
       stamp: stamp,
+      images: images,
     });
   }
   return limit > 0 ? out.slice(-limit) : out;
@@ -1033,12 +1048,45 @@ def _to_epoch(iso: str) -> float | None:
         return None
 
 
+MEDIA = Path(__file__).resolve().parent.parent / "data" / "media"
+_IMAGE_MARK = re.compile(r"\[image: [^\]]+\]")
+
+
+async def _photograph_images(page, chat: str, raw: list[dict]) -> None:
+    """Save each image a message carries, and mark the message with its path.
+
+    A screenshot of a stack trace IS the message, and until 30 Sep Teams
+    dropped it: an image-only message had no text, so it was skipped. The key is
+    fixed BEFORE the marker is added, so a message is the same message either way.
+    """
+    import hashlib
+    for m in raw:
+        ids = m.get("images") or []
+        m["_key"] = _msg_key(chat, m)
+        if not ids:
+            continue
+        marks = []
+        for i, img_id in enumerate(ids):
+            name = hashlib.sha1(f"{chat}|{m.get('iso')}|{m.get('sender')}|{i}".encode()).hexdigest()[:16]
+            path = MEDIA / f"teams-{name}.png"
+            if not path.exists():
+                try:
+                    MEDIA.mkdir(parents=True, exist_ok=True)
+                    await page.locator(f'[data-asta-img="{img_id}"]').first.screenshot(
+                        path=str(path), timeout=5000)
+                except Exception:                              # noqa: BLE001
+                    continue
+            marks.append(f"[image: {path}]")
+        if marks:
+            m["text"] = ((m.get("text") or "") + "\n" + " ".join(marks)).strip()
+
+
 def _capture(chat: str, raw: list[dict]) -> list[dict]:
     """Turn scraped rows into storable ones and persist them."""
     rows = []
     for m in raw:
         rows.append({
-            "key": _msg_key(chat, m),
+            "key": m.get("_key") or _msg_key(chat, m),
             "chat": chat,
             "sender": m.get("sender", ""),
             "text": m.get("text", ""),
@@ -1112,6 +1160,7 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
                 break
             raw = grown
 
+        await _photograph_images(page, title, raw)
         store.kv_set("teams_session_ok", "1")
 
     rows = _capture(title, raw)

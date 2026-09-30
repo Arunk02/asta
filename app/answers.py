@@ -64,12 +64,15 @@ REPLY_FORMAT = """
 When you are done, end with exactly these two sections and nothing after them:
 
 ANALYSIS:
-For Arun, at most five short lines: what {who} asked, what you found, and the
-evidence (file:line, the log line, the PR state, the document and heading).
+For Arun, at most five short lines: each of {who}'s questions answered directly
+(yes/no/what, then the evidence: file:line, the log line, the workflow, the PR
+state, the document and heading). At most one "Also noticed:" line, only if it
+bears on their question.
 
 REPLY:
 The message to send to {who}, in Arun's voice: short, plain and polite, no
-greeting ceremony, no sign-off. Give them the answer. If you could not find it,
+greeting ceremony, no sign-off. Answer what they asked, in the order they asked
+it; nothing they did not ask about. If you could not find it,
 say briefly what you checked and ask them for the one thing you need. Never
 promise work Arun has not agreed to.
 

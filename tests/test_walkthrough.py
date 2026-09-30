@@ -68,6 +68,13 @@ def session(monkeypatch, tmp_path):
         refined.append((task_id, feedback))
         return f"Task #{task_id}: continuing the open PR with your feedback."
 
+    spoken = []
+
+    async def say_aloud(text):
+        spoken.append(text)
+
+    monkeypatch.setattr(walkthrough, "say_aloud", say_aloud)
+    monkeypatch.delenv("ASTA_WALKTHROUGH_VOICE", raising=False)
     monkeypatch.setattr(walkthrough, "open_in_idea", idea)
     monkeypatch.setattr(walkthrough, "_ask", ask)
     monkeypatch.setattr(tasks, "refine", refine)
@@ -76,6 +83,7 @@ def session(monkeypatch, tmp_path):
         pass
     s = S()
     s.tid, s.opened, s.asked, s.refined, s.cid = tid, opened, asked, refined, "conv-1"
+    s.spoken = spoken
     s.say = lambda text: asyncio.run(walkthrough.handle(s.cid, text))
     s.start = lambda: asyncio.run(walkthrough.start(s.cid, f"task {tid}"))
     return s
@@ -179,3 +187,54 @@ def test_intellij_lands_on_the_line_the_change_added():
     added = walkthrough._added_lines(diff)
     assert added == {"helm/qa-values.yml": [85]}
     assert walkthrough._snap(86, added["helm/qa-values.yml"]) == 85
+
+
+
+@pytest.mark.parametrize("text,voice", [
+    ("walk me through task 126 and speak", True), ("explain the changes of task 126 aloud", True),
+    ("walk me through task 126", False)])
+def test_asking_for_voice(text, voice, monkeypatch):
+    from app import walkthrough
+    monkeypatch.delenv("ASTA_WALKTHROUGH_VOICE", raising=False)
+    assert walkthrough.wants_voice(text) is voice
+
+
+def test_a_spoken_walkthrough_says_each_step_and_answer(session):
+    from app import walkthrough
+
+    async def run():
+        out = await walkthrough.start(session.cid, f"task {session.tid}", voice=True)
+        await asyncio.sleep(0)
+        nxt = await walkthrough.handle(session.cid, "next")
+        await asyncio.sleep(0)
+        ans = await walkthrough.handle(session.cid, "why is the id optional here?")
+        await asyncio.sleep(0)
+        return out, nxt, ans
+
+    out, nxt, ans = asyncio.run(run())
+    assert "Speaking each step" in out
+    assert "Step 1. New endpoint" in session.spoken[0] and "POST hits the controller" in session.spoken[0]
+    assert session.spoken[1].startswith("Step 2. Service")
+    assert "id can be absent" in session.spoken[2]
+
+
+def test_mute_and_unmute_mid_session(session):
+    from app import walkthrough
+
+    async def run():
+        await walkthrough.start(session.cid, f"task {session.tid}", voice=True)
+        await asyncio.sleep(0)
+        muted = await walkthrough.handle(session.cid, "mute")
+        await walkthrough.handle(session.cid, "next")
+        await asyncio.sleep(0)
+        on = await walkthrough.handle(session.cid, "voice on")
+        return muted, on
+
+    muted, on = asyncio.run(run())
+    assert "Voice off" in muted and "Speaking" in on
+    assert len(session.spoken) == 1, "nothing spoken while muted"
+
+
+def test_silent_by_default(session):
+    session.start()
+    assert session.spoken == []

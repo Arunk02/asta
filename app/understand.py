@@ -107,6 +107,10 @@ Readings that are easy to get wrong:
 - A message marked "(replying to an earlier message)" is only the reply; the
   quoted text was said before.
 - Messages may be in Tamil, Tanglish or mixed English; read the meaning.
+- "[image: …]" is a screenshot they sent; you cannot see it. A screenshot on its
+  own, or with "check this"/"see this", is an ask: they want it looked at (the
+  investigation will open the image). Its subject is whatever the conversation
+  is about, or "unclear".
 
 closing_confidence — 0.0 to 1.0, how sure you are the conversation is DONE and
 nothing more is expected from Arun. Use 0.9 or above only when it is clearly over.
@@ -123,6 +127,12 @@ subject — where what they want comes from:
                      "unclear" unless something ties it to that topic.
 guess — the topic the earlier conversation suggests, in 3 to 8 plain words
        ("the event-history defect closure", "PR 1251 merge"), or empty.
+questions — for an ask or urgent: the concrete questions they need answered,
+       in their terms, 1 to 3 ("Was VTS triggered for booking H65ZMWX52B2?",
+       "What response did we get back from VTS?"). Read what they are really
+       after, not every noun they mention. When they blame a failure on an
+       integration (a webhook, VTS, an external API), the real questions are
+       whether the call was made and what came back. Empty otherwise.
 need — one short line: what they want from Arun. Empty for status and closing.
        When subject is "unclear", say only what is known ("wants a call").
 summary — one or two sentences on the WHOLE conversation so far, including what
@@ -163,7 +173,7 @@ reply — for an ask with work "talk" only: the short reply Arun would most like
 Reply with ONLY this JSON, one entry per conversation, ids exactly as given:
 {"threads":[{"id":"...","state":"...","closing_confidence":0.0,"subject":"stated",
 "need":"","summary":"","entities":[],"continues":null,"work":"check","question":"",
-"tell":"","reply":"","guess":""}]}"""
+"tell":"","reply":"","guess":"","questions":[]}]}"""
 
 
 #: Per conversation: the newest messages only, each cut short. A pasted log is
@@ -278,6 +288,8 @@ def _clean(d: dict, fallback: dict) -> dict:
             "tell": " ".join(str(d.get("tell") or "").split())[:500],
             "reply": str(d.get("reply") or "").strip()[:400],
             "guess": " ".join(str(d.get("guess") or "").split())[:80],
+            "questions": [" ".join(str(q).split())[:200] for q in (d.get("questions") or [])
+                          if isinstance(q, str) and q.strip()][:4],
             "need": str(d.get("need") or "")[:200],
             "summary": str(d.get("summary") or fallback["summary"])[:400],
             "entities": [str(e)[:120] for e in ents][:20],

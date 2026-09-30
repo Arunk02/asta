@@ -61,6 +61,57 @@ _CORRECTION = re.compile(
     r"missing|wrong|null[- ]?safe|validate|handle|log|test|refactor)\b", re.I)
 
 
+_SPEAK_ASK = re.compile(r"\b(?:speak|voice|aloud|out\s+loud|verbally|say\s+it|talk\s+me)\b", re.I)
+_VOICE_ON = re.compile(r"^\W*(?:voice\s+on|speak(?:\s+it)?|unmute|talk|read\s+it\s+out)\W*$", re.I)
+_VOICE_OFF = re.compile(r"^\W*(?:voice\s+off|mute|stop\s+talking|silent|quiet|no\s+voice)\W*$", re.I)
+
+
+def wants_voice(text: str) -> bool:
+    """"walk me through task 126 and speak" — or ASTA_WALKTHROUGH_VOICE=1."""
+    return bool(_SPEAK_ASK.search(text or "")) or \
+        os.environ.get("ASTA_WALKTHROUGH_VOICE", "").strip() == "1"
+
+
+#: The one clip playing, so the next step interrupts it instead of talking over it.
+_PLAYING: dict = {}
+
+
+async def say_aloud(text: str) -> None:
+    """Speak on the Mac's speakers, in the background. His local voice first
+    (Voicebox), macOS `say` when that is down. Never blocks the chat reply.
+    Its own seam, so tests never make a sound."""
+    import asyncio
+    import tempfile
+    old = _PLAYING.pop("proc", None)
+    if old and old.returncode is None:
+        old.kill()
+    words = " ".join((text or "").split())
+    if not words:
+        return
+    argv: list[str]
+    try:
+        from . import voice
+        wav = await voice.speak(words, voice="assistant")
+        f = tempfile.NamedTemporaryFile(prefix="asta-walk-", suffix=".wav", delete=False)
+        f.write(wav)
+        f.close()
+        argv = ["afplay", f.name]
+    except Exception:                                          # noqa: BLE001
+        argv = ["say", words[:1200]]
+    try:
+        _PLAYING["proc"] = await asyncio.create_subprocess_exec(
+            *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL)
+    except Exception:                                          # noqa: BLE001
+        pass
+
+
+def _speak(s: dict, text: str) -> None:
+    if s.get("voice"):
+        import asyncio
+        asyncio.get_running_loop().create_task(say_aloud(text))
+
+
 class WalkError(RuntimeError):
     pass
 
@@ -259,8 +310,10 @@ async def open_in_idea(root: str, file: str, line: int) -> bool:
     return True
 
 
-async def _show(cid: str, s: dict) -> str:
+async def _show(cid: str, s: dict, speak_first: str = "") -> str:
     st = s["steps"][s["cursor"]]
+    _speak(s, " ".join(x for x in [speak_first, f"Step {s['cursor'] + 1}. {st['title']}.",
+                                   st["explain"]] if x))
     opened = await open_in_idea(s.get("root", ""), st["file"], st["line"])
     where = f"{Path(st['file']).name}:{st['line']}"
     head = f"*{s['cursor'] + 1}/{len(s['steps'])} · {st['title']}* — {where}"
@@ -286,7 +339,7 @@ def wants_to_start(text: str) -> str:
     return pr.group(0) if pr else ""
 
 
-async def start(cid: str, target: str) -> str:
+async def start(cid: str, target: str, voice: bool = False) -> str:
     try:
         change = await _change(target)
         planned = await plan_steps(change)
@@ -296,13 +349,17 @@ async def start(cid: str, target: str) -> str:
         return f"Can't start the walkthrough — {str(exc)[:200]}"
     s = {"target": target, "title": change["title"], "root": change["root"],
          "task_id": change["task_id"], "pr": change["pr"], "workspace": change["workspace"],
-         "steps": planned["steps"], "cursor": 0, "notes": [], "state": "walking"}
+         "steps": planned["steps"], "cursor": 0, "notes": [], "state": "walking",
+         "voice": bool(voice)}
     _save(cid, s)
     store.record_outcome("walkthrough", "started", subject=target, detail=change["title"][:160])
     intro = f"🧭 *{change['title'] or target}* — {len(s['steps'])} steps, in the order a request runs."
     if planned["overview"]:
         intro += f"\n{planned['overview']}"
-    return intro + "\n\n" + await _show(cid, s)
+    if s["voice"]:
+        intro += "\n🔊 Speaking each step — say *mute* to stop."
+    shown = await _show(cid, s, speak_first=planned["overview"])
+    return intro + "\n\n" + shown
 
 
 async def handle(cid: str, text: str) -> str | None:
@@ -313,6 +370,14 @@ async def handle(cid: str, text: str) -> str | None:
     t = (text or "").strip()
     if s.get("state") == "awaiting_apply":
         return await _decide(cid, s, t)
+    if _VOICE_ON.match(t) or _VOICE_OFF.match(t):
+        s["voice"] = bool(_VOICE_ON.match(t))
+        _save(cid, s)
+        if not s["voice"]:
+            old = _PLAYING.pop("proc", None)
+            if old and old.returncode is None:
+                old.kill()
+        return "🔊 Speaking each step." if s["voice"] else "🔇 Voice off — text only."
     if _DONE.match(t):
         return _finish(cid, s)
     if _BACK.match(t):
@@ -346,7 +411,9 @@ async def _answer(s: dict, question: str) -> str:
         f"({st['file']}:{st['line']}).\nThe change at this step:\n{hunk}\n\n"
         f"His question: {question}\n\nAnswer in at most 80 words, plainly, about this code. "
         f"If you are not sure, say what you would check.")
-    return (raw or "").strip()[:900] + "\n\n(next · back · done)"
+    answer = (raw or "").strip()[:900]
+    _speak(s, answer)
+    return answer + "\n\n(next · back · done)"
 
 
 def _hunk_for(s: dict, st: dict) -> str:

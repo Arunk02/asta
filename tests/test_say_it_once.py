@@ -114,6 +114,8 @@ def quiet(monkeypatch, tmp_path):
     ("ship it", True),
     ("ok push it now", True),
     ("approval", False),
+    ("Go ahead approve", False),
+    ("go ahead approve and raise PR", True),
 ])
 def test_every_way_he_says_go_is_a_command(said, pr):
     is_go, _n = go.command(said)
@@ -618,3 +620,26 @@ def test_a_ping_with_nothing_checkable_says_they_are_waiting_on_him(monkeypatch)
 def test_a_ping_while_his_draft_is_waiting_points_at_the_draft(monkeypatch):
     line, asked = _nudge(monkeypatch, staged=True)
     assert "waiting on your *send*" in line and asked == []
+
+
+def test_rejecting_a_task_lets_go_of_its_clean_checkout(monkeypatch, tmp_path):
+    """#179 rejected, #180 started to replace it: "could not create a worktree —
+    already checked out at …task-179"."""
+    from app import worktrees
+    removed: list[int] = []
+
+    async def cancel(tid, status="cancelled", why=""):
+        return False
+
+    async def remove(root, tid, force=False):
+        removed.append(tid)
+        return []
+
+    monkeypatch.setattr(tasks, "cancel", cancel)
+    monkeypatch.setattr(tasks, "learn_from_stop", lambda *a, **k: None)
+    monkeypatch.setattr(tasks, "code_cwd", lambda ws: str(tmp_path))
+    monkeypatch.setattr(worktrees, "exists", lambda root, tid: True)
+    monkeypatch.setattr(worktrees, "remove", remove)
+    t = store.create_task("x", "code", "p", None)
+    asyncio.run(tasks.reject(t["id"], "wrong place"))
+    assert removed == [t["id"]]

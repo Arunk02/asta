@@ -121,6 +121,8 @@ subject — where what they want comes from:
                      people often ask for a call or for help about something
                      new, so a bare "call?" or "need help" after an old topic is
                      "unclear" unless something ties it to that topic.
+guess — the topic the earlier conversation suggests, in 3 to 8 plain words
+       ("the event-history defect closure", "PR 1251 merge"), or empty.
 need — one short line: what they want from Arun. Empty for status and closing.
        When subject is "unclear", say only what is known ("wants a call").
 summary — one or two sentences on the WHOLE conversation so far, including what
@@ -135,7 +137,9 @@ work — for an ask or urgent:
                "lets merge tomorrow") is status, not an ask.
        "check" anything else: look into, answer, review, explain, assess
                whether something is feasible
-question — REQUIRED for an opener and whenever subject is "unclear"; also for
+question — REQUIRED for an opener, whenever subject is "unclear", and for ANY
+       message that names no subject itself (a bare "call?", "hi", "bro") even
+       when you think you know the topic — offer that topic as the guess; also for
        an ask too vague to act on (no id, no link, nothing to check against):
        ONE short, polite, natural question to ask them, in Arun's voice (see
        arun_writes_like: his own recent messages to them — match the register,
@@ -159,7 +163,7 @@ reply — for an ask with work "talk" only: the short reply Arun would most like
 Reply with ONLY this JSON, one entry per conversation, ids exactly as given:
 {"threads":[{"id":"...","state":"...","closing_confidence":0.0,"subject":"stated",
 "need":"","summary":"","entities":[],"continues":null,"work":"check","question":"",
-"tell":"","reply":""}]}"""
+"tell":"","reply":"","guess":""}]}"""
 
 
 #: Per conversation: the newest messages only, each cut short. A pasted log is
@@ -244,7 +248,11 @@ def settle(d: dict, item: dict) -> dict:
     if d.get("source") != "model" or not _bare(item.get("new") or []):
         return d
     if d.get("state") == "ask" and d.get("subject") != "unclear":
-        return {**d, "subject": "unclear", "settled": "bare message: subject unclear"}
+        out = {**d, "subject": "unclear", "settled": "bare message: subject unclear"}
+        if not safe_question(out.get("question") or "") and out.get("guess"):
+            guess = out["guess"].rstrip(".?! ")
+            out["question"] = f"Sure — is this about {guess[0].lower() + guess[1:]}, or something else?"
+        return out
     if d.get("state") in ("status", "closing") and not item.get("handled_by_him") \
             and not re.search(r"\b(ok|okay|thanks?|thank\s+you|done|sure)\b",
                               " ".join(item.get("new") or []), re.I):
@@ -269,6 +277,7 @@ def _clean(d: dict, fallback: dict) -> dict:
             else "stated",
             "tell": " ".join(str(d.get("tell") or "").split())[:500],
             "reply": str(d.get("reply") or "").strip()[:400],
+            "guess": " ".join(str(d.get("guess") or "").split())[:80],
             "need": str(d.get("need") or "")[:200],
             "summary": str(d.get("summary") or fallback["summary"])[:400],
             "entities": [str(e)[:120] for e in ents][:20],

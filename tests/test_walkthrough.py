@@ -1,0 +1,172 @@
+"""The interactive review session: the change in request order, in IntelliJ,
+with his questions answered and his corrections kept — then applied on his word.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+
+from app import store
+
+DIFF = """diff --git a/src/main/java/x/BookingController.java b/src/main/java/x/BookingController.java
++++ b/src/main/java/x/BookingController.java
+@@ -40,6 +42,9 @@ class BookingController
++    @PostMapping("/bookings/{id}/priority")
++    public ResponseEntity<Void> setPriority(@PathVariable String id) {
+diff --git a/src/main/java/x/PriorityService.java b/src/main/java/x/PriorityService.java
++++ b/src/main/java/x/PriorityService.java
+@@ -10,3 +10,12 @@ class PriorityService
++    public void set(String id) { repo.save(id); publisher.send(id); }
+diff --git a/src/main/java/x/PriorityRepository.java b/src/main/java/x/PriorityRepository.java
++++ b/src/main/java/x/PriorityRepository.java
+@@ -1,0 +5,4 @@
++    void save(String id);
+"""
+
+
+@pytest.fixture
+def session(monkeypatch, tmp_path):
+    from app import review, tasks, walkthrough
+    root = tmp_path / "telikos-booking-service"
+    for f in ("BookingController.java", "PriorityService.java", "PriorityRepository.java"):
+        (root / "src/main/java/x").mkdir(parents=True, exist_ok=True)
+        (root / "src/main/java/x" / f).write_text("\n".join(f"line {i}" for i in range(80)))
+    t = store.create_task("Add transport priority API", "code", "p", "booking")
+    tid = t["id"]
+    store.update_task(tid, status="merged",
+                      pr_urls="https://github.com/Maersk-Global/telikos-booking-service/pull/1432")
+
+    async def gather(pr, workspace=""):
+        return {"diff": DIFF, "title": "Add transport priority API",
+                "target": "Maersk-Global/telikos-booking-service"}
+
+    monkeypatch.setattr(review, "gather", gather)
+    monkeypatch.setattr(walkthrough, "_workspace_roots", lambda ws: [tmp_path])
+    opened, asked, refined = [], [], []
+
+    async def idea(root, file, line):
+        opened.append((file, line))
+        return True
+
+    async def ask(text):
+        asked.append(text)
+        if "Reply with ONLY this JSON" in text:
+            return json.dumps({"overview": "POST hits the controller, the service saves and publishes.",
+                               "steps": [
+                                   {"file": "src/main/java/x/BookingController.java", "line": 42,
+                                    "title": "New endpoint", "explain": "Adds POST priority."},
+                                   {"file": "src/main/java/x/PriorityService.java", "line": 10,
+                                    "title": "Service", "explain": "Saves then publishes."},
+                                   {"file": "src/main/java/x/PriorityRepository.java", "line": 5,
+                                    "title": "Repository", "explain": "New save method."}]})
+        return "Because the id can be absent when the booking is new."
+
+    async def refine(task_id, feedback):
+        refined.append((task_id, feedback))
+        return f"Task #{task_id}: continuing the open PR with your feedback."
+
+    monkeypatch.setattr(walkthrough, "open_in_idea", idea)
+    monkeypatch.setattr(walkthrough, "_ask", ask)
+    monkeypatch.setattr(tasks, "refine", refine)
+
+    class S:
+        pass
+    s = S()
+    s.tid, s.opened, s.asked, s.refined, s.cid = tid, opened, asked, refined, "conv-1"
+    s.say = lambda text: asyncio.run(walkthrough.handle(s.cid, text))
+    s.start = lambda: asyncio.run(walkthrough.start(s.cid, f"task {tid}"))
+    return s
+
+
+@pytest.mark.parametrize("text,target", [
+    ("walk me through task 126", "task 126"),
+    ("open intellij and explain the code changes of task #126 one by one", "task 126"),
+    ("review session for https://github.com/Maersk-Global/telikos-booking-service/pull/1432",
+     "https://github.com/Maersk-Global/telikos-booking-service/pull/1432"),
+    ("what changed in task 126", ""), ("walk the dog", ""),
+])
+def test_what_starts_a_walkthrough(text, target):
+    from app import walkthrough
+    assert walkthrough.wants_to_start(text) == target
+
+
+def test_it_starts_at_the_entry_point_and_opens_intellij_there(session):
+    out = session.start()
+    assert "3 steps" in out and "1/3 · New endpoint" in out and "BookingController.java:42" in out
+    assert session.opened == [("src/main/java/x/BookingController.java", 42)]
+
+
+def test_next_back_and_again_move_intellij_with_it(session):
+    session.start()
+    assert "2/3 · Service" in session.say("next")
+    assert "1/3" in session.say("back")
+    assert "1/3" in session.say("again")
+    assert session.opened[-1] == ("src/main/java/x/BookingController.java", 42)
+
+
+def test_a_question_is_answered_about_this_step(session):
+    session.start()
+    out = session.say("why is the id optional here?")
+    assert "id can be absent" in out
+    assert "BookingController.java:42" in session.asked[-1], "asked about THIS step's code"
+
+
+def test_a_correction_is_noted_not_acted_on(session):
+    session.start()
+    session.say("next")
+    out = session.say("this should publish only after the save commits")
+    assert "Noted for step 2" in out and not session.refined
+    from app import walkthrough
+    assert walkthrough.get(session.cid)["notes"][0]["file"].endswith("PriorityService.java")
+
+
+def test_done_lists_the_notes_and_apply_continues_the_same_task(session):
+    session.start()
+    session.say("rename setPriority to updatePriority")
+    out = session.say("done")
+    assert "1 note(s)" in out and "updatePriority" in out and "apply" in out.lower()
+    applied = session.say("apply")
+    assert "continuing" in applied
+    tid, spec = session.refined[0]
+    assert tid == session.tid and "BookingController.java:42" in spec and "updatePriority" in spec
+    from app import walkthrough
+    assert walkthrough.get(session.cid) is None
+
+
+def test_notes_kept_for_later_can_be_applied_later(session):
+    from app import walkthrough
+    session.start()
+    session.say("add a null check on id")
+    session.say("done")
+    assert "Kept" in session.say("later")
+    assert walkthrough.notes_for(session.tid)
+    out = asyncio.run(walkthrough.apply_later("conv-2", f"apply review notes for task {session.tid}"))
+    assert "continuing" in out and session.refined
+
+
+def test_the_end_of_the_steps_is_the_end_of_the_session(session):
+    session.start()
+    session.say("next")
+    session.say("next")
+    assert "no changes noted" in session.say("next")
+
+
+def test_an_analysis_task_has_nothing_to_walk(session):
+    from app import walkthrough
+    t = store.create_task("look into x", "analysis", "p", "booking")
+    out = asyncio.run(walkthrough.start("c", f"task {t['id']}"))
+    assert "made no code change" in out
+
+
+def test_when_the_model_fails_the_diff_order_is_still_walked(session, monkeypatch):
+    from app import walkthrough
+
+    async def broken(text):
+        return "sorry"
+
+    monkeypatch.setattr(walkthrough, "_ask", broken)
+    out = session.start()
+    assert "3 steps" in out

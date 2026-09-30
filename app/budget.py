@@ -54,7 +54,10 @@ PEOPLE = ("teams", "teams-chat", "outlook", "call")
 #: What he is owed the moment it happens: his own tasks (plan, done, blocked),
 #: what Asta did on his word, CI on his own PRs, a colleague's answer waiting
 #: for his "send", and a question Asta needs answered to go on.
-OWED = ("task", "action", "ci", "answer", "offer", "reply", "files")
+OWED = ("task", "action", "ci", "answer", "offer", "reply", "files",
+        # A call ringing now: forty-five seconds to decide, and it is someone
+        # trying to reach him. The digest would deliver it hours after it stopped.
+        "calls")
 
 
 def allows(priority: int | None, urgency: str = "direct", now: float | None = None,

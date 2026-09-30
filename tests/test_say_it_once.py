@@ -653,7 +653,7 @@ def test_his_own_work_is_never_held_back_by_the_daily_budget(monkeypatch):
     from app import attention, budget
     monkeypatch.setenv("ASTA_PUSH_BUDGET", "20")
     monkeypatch.setattr(budget, "spent", lambda now=None: 23)
-    for level in ("task", "action", "ci", "answer"):
+    for level in ("task", "action", "ci", "answer", "calls"):
         assert budget.allows(attention.P_TODAY, "direct", level=level), level
     assert not budget.allows(attention.P_FYI, "ambient", level="jira")
 

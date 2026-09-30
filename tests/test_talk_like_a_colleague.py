@@ -199,3 +199,14 @@ def test_no_video_found_says_so_and_opens_the_results(monkeypatch):
     monkeypatch.setattr(apps, "open_url", open_url)
     line = asyncio.run(apps.play("tamil songs"))
     assert "results?search_query=tamil+songs" in opened[0] and "tap one" in line
+
+
+def test_a_lone_unanswered_draft_is_not_asked_again(phone, monkeypatch):
+    """Parking lets OTHER decisions through; with none waiting it only nagged."""
+    from app import answers, loop
+    asyncio.run(answers.present(who="Vinish Kumar", need="booking", chat="Vinish Kumar",
+                                group=False, analysis="", reply="first", task_id=1))
+    later = time.time() + answers.PARK_SECONDS + 1
+    monkeypatch.setattr(answers.time, "time", lambda: later)
+    assert not asyncio.run(answers.next_after(phone["cid"]))
+    assert len(phone["pushed"]) == 1 and loop.awaiting(phone["cid"])["what"] == "first"

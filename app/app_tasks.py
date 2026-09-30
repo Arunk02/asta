@@ -258,6 +258,8 @@ Write the steps. Each step is one of:
 Targets are NAMES you can see above (or standard menu paths), never coordinates.
 "expect" says what must be true afterwards: "exists: <name>", "gone: <name>" or
 "window: <title>". The LAST step must have an expect. Prefer menus over clicks.
+Menu paths must name every level ("Edit > Find > Find in Files…"), and menu
+item names are exact — many end with the single character "…", not "...".
 Never type passwords or secrets. If the ask would delete, discard, reset or quit
 anything, set "destructive" true. If something essential is missing, leave
 "steps" empty and ask ONE short question.
@@ -306,7 +308,10 @@ async def by_screen(app: str, goal: str, *, context: str = "", confirmed: bool =
                  for s in raw]
         try:
             out = await screen.follow(app, steps, why=goal)
-        except (screen.ScreenError, TypeError) as exc:
+        except (screen.ScreenError, apps.AppError, TypeError) as exc:
+            # AppError too: a menu that is not where the model thought arrives
+            # from the AppleScript runner, not as a ScreenError (30 Sep, live:
+            # "Edit > Find in Files..." lives at "Edit > Find > Find in Files…").
             error = str(exc)
             if attempt == 2:
                 _record(app, goal, {**plan, "script": json.dumps(raw)}, "failed", error)

@@ -170,3 +170,12 @@ def test_when_the_model_fails_the_diff_order_is_still_walked(session, monkeypatc
     monkeypatch.setattr(walkthrough, "_ask", broken)
     out = session.start()
     assert "3 steps" in out
+
+
+def test_intellij_lands_on_the_line_the_change_added():
+    from app import walkthrough
+    diff = ("+++ b/helm/qa-values.yml\n@@ -84,3 +84,3 @@\n   KEY: a\n-  TMS_TOPIC: v10\n"
+            "+  TMS_TOPIC: v11\n   SECURITY_PROTOCOL: x\n")
+    added = walkthrough._added_lines(diff)
+    assert added == {"helm/qa-values.yml": [85]}
+    assert walkthrough._snap(86, added["helm/qa-values.yml"]) == 85

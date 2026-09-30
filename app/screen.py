@@ -82,7 +82,13 @@ on run argv
       set out to ""
       repeat with w in windows
         set out to out & "window: " & (name of w as text) & linefeed
-        set els to (get entire contents of w)
+        -- A big Swing/Electron window (IntelliJ) fails `entire contents` with
+        -- -10000; its top level is still worth reading.
+        try
+          set els to (get entire contents of w)
+        on error
+          set els to (get UI elements of w)
+        end try
         repeat with i from 1 to (count of els)
           set e to item i of els
           try
@@ -104,6 +110,23 @@ on run argv
           end try
         end repeat
       end repeat
+      -- The menus, two levels: for an IDE they are the dependable way in.
+      try
+        repeat with m in (menu bar items of menu bar 1)
+          set mn to (name of m) as text
+          if mn is not "Apple" then
+            set out to out & "menu: " & mn & linefeed
+            try
+              repeat with mi in (menu items of menu 1 of m)
+                set itn to (name of mi) as text
+                if itn is not "missing value" and itn is not "" then
+                  set out to out & "  " & mn & " > " & itn & linefeed
+                end if
+              end repeat
+            end try
+          end if
+        end repeat
+      end try
       return out
     end tell
   end tell

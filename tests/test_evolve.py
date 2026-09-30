@@ -24,11 +24,11 @@ def test_only_the_listed_knobs_can_move_and_only_inside_their_bounds():
 
 
 def test_his_own_setting_beats_the_default_and_an_override_beats_both(monkeypatch):
-    assert settings.value("ASTA_RESPOND_MAX_PER_HOUR") == 4
-    monkeypatch.setenv("ASTA_RESPOND_MAX_PER_HOUR", "6")
-    assert settings.value("ASTA_RESPOND_MAX_PER_HOUR") == 6
-    settings.set_override("ASTA_RESPOND_MAX_PER_HOUR", 2)
-    assert settings.value("ASTA_RESPOND_MAX_PER_HOUR") == 2
+    assert settings.value("ASTA_MAX_PARALLEL_INVESTIGATIONS") == 3
+    monkeypatch.setenv("ASTA_MAX_PARALLEL_INVESTIGATIONS", "5")
+    assert settings.value("ASTA_MAX_PARALLEL_INVESTIGATIONS") == 5
+    settings.set_override("ASTA_MAX_PARALLEL_INVESTIGATIONS", 2)
+    assert settings.value("ASTA_MAX_PARALLEL_INVESTIGATIONS") == 2
 
 
 def test_a_tuned_knob_actually_reaches_the_code_that_reads_it():

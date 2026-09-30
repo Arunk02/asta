@@ -176,6 +176,9 @@ async def startup() -> None:
         daemon.start("premeeting", briefing.premeeting_loop)
     daemon.start("reminders", reminders.loop)
     daemon.start("briefing", briefing.scheduler_loop)
+    # Every brain's budget, measured every 5 minutes; one warning at 80%.
+    from . import brains
+    daemon.start("brains", brains.loop)
     daemon.start("health", health.loop)
     daemon.start("ci_watch", ci_watch.loop)
     daemon.start("resume_paused", tasks.resume_paused_loop)
@@ -2743,6 +2746,11 @@ _MODEL_CMD_LOOSE = re.compile(
     r"^\s*(?:use|switch|swap|change|set)\s+"
     r"(?:the|my)?\s*(?:llm|ai|chat)?\s*(?:model|brain)\s*(?:to|=)?\s+"
     r"([\w.\- ]{2,40})\s*[.!]*\s*$", re.I)
+#: "brain status", "quota", "how much claude is left" — every brain, exactly.
+_BRAIN_STATUS = re.compile(
+    r"^\s*(?:brains?\s+status|model\s+status|quota|usage|limits?|token\s+(?:status|usage|left)|"
+    r"how\s+much\s+(?:claude|copilot|quota|token\w*)\s*(?:is\s+)?(?:left|remaining|used)?)"
+    r"\s*\??\s*[.!]*\s*$", re.I)
 _MODEL_ASK = re.compile(r"^\s*(which model|what model|models|list models|brains?)\s*\??\s*$", re.I)
 
 # "ignore claude-key", "stop telling me about context_booking" — the other half of
@@ -3021,6 +3029,13 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # the yes/no routing below and leave any open question standing: picking a
     # different brain, or checking what he owes an answer to, is not an answer to
     # the question and must not be mistaken for changing the subject.
+    if _BRAIN_STATUS.match(user_text or ""):
+        from . import brains
+        frontdesk.record("state", "brain status")
+        await sink.send({"type": "note", "text": await asyncio.to_thread(brains.brain_status)})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
     if _MODEL_ASK.match(user_text or ""):
         await sink.send({"type": "note", "text": _model_listing(conv.get("model", ""))})
         if channel == "web":
@@ -3056,6 +3071,12 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     if switch:
         before = conv.get("model", "")
         await sink.send({"type": "note", "text": _switch_model(conv, switch)})
+        # "use copilot" means the WORK too, not only this chat: new tasks go
+        # there, and anything paused on a limit carries on there now (30 Sep).
+        moved_to = {"copilot": "copilot", "claude_cli": "claude"}.get(conv.get("model", ""))
+        if moved_to and conv.get("model") != before:
+            with contextlib.suppress(Exception):
+                await sink.send({"type": "note", "text": await tasks.use_brain(moved_to)})
         # He switched because something ran dry — which is the whole reason he
         # asked for this. Carrying on is what he meant; making him then type
         # "resume" would be theatre.
@@ -3108,23 +3129,24 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # yes/send/no while a colleague's draft is waiting still goes to the draft.
     from . import walkthrough
     wt_target = walkthrough.wants_to_start(user_text)
-    if wt_target or walkthrough.get(cid) or walkthrough._APPLY_LATER.search(user_text or ""):
-        waiting = loop.awaiting(cid)
-        for_the_draft = waiting and (_affirmation(user_text)[0] or _DECLINE.match(user_text or ""))
-        if not for_the_draft:
-            if wt_target:
-                await sink.send({"type": "note", "text": "🧭 Reading the change…"})
-                reply = await walkthrough.start(cid, wt_target,
-                                                voice=walkthrough.wants_voice(user_text))
-            else:
-                reply = (await walkthrough.apply_later(cid, user_text)
-                         or await walkthrough.handle(cid, user_text))
-            if reply:
-                frontdesk.record("walkthrough", (user_text or "")[:60])
-                await sink.send({"type": "delta" if channel == "web" else "note", "text": reply})
-                if channel == "web":
-                    await sink.send({"type": "done", "tools": []})
-                return None
+    # A colleague's draft is waiting: it gets everything except the session's
+    # own words. His "provide date as well…" (30 Sep) was feedback on the Vinish
+    # draft and went to an open walkthrough as a question about a helm file.
+    if walkthrough.takes(cid, user_text or "", draft_waiting=bool(loop.awaiting(cid)),
+                         affirms=bool(_affirmation(user_text)[0] or _DECLINE.match(user_text or ""))):
+        if wt_target:
+            await sink.send({"type": "note", "text": "🧭 Reading the change…"})
+            reply = await walkthrough.start(cid, wt_target,
+                                            voice=walkthrough.wants_voice(user_text))
+        else:
+            reply = (await walkthrough.apply_later(cid, user_text)
+                     or await walkthrough.handle(cid, user_text))
+        if reply:
+            frontdesk.record("walkthrough", (user_text or "")[:60])
+            await sink.send({"type": "delta" if channel == "web" else "note", "text": reply})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
 
     # A drafted outward send is waiting on "can I send this?" — his next message is
     # the answer. A bare yes sends it (via the model's real send tool, so the send

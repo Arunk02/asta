@@ -24,7 +24,7 @@ KNOBS: dict[str, tuple[float, float, float, str]] = {
     "ASTA_COALESCE_SECONDS": (120, 30, 600, "how long one buzz waits to carry more"),
     "ASTA_ATTENTION_MIN_SEEN": (10, 5, 50, "items from a source before its record counts"),
     "ASTA_ATTENTION_IGNORE_SHARE": (0.8, 0.6, 0.95, "ignored share that moves a feed to the digest"),
-    "ASTA_RESPOND_MAX_PER_HOUR": (4, 1, 12, "investigations an hour"),
+    "ASTA_MAX_PARALLEL_INVESTIGATIONS": (3, 1, 6, "investigations running at once"),
     # P12. What Asta claims about itself, corrected by what he actually did:
     # added to every stated confidence before any gate reads it. Starts at 0 —
     # an uncalibrated claim is used exactly as made.

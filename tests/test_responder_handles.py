@@ -63,7 +63,7 @@ def spawned(monkeypatch):
     # The real spawn's whole signature: a double narrower than the door it
     # replaces is how a live caller dies on a keyword (see test_bench_doubles).
     def fake_spawn(title, brief, kind="analysis", workspace=None, teams_chat="",
-                   executor="", context_from=None, pipeline=""):
+                   executor="", context_from=None, pipeline="", priority=2):
         seen.update(title=title, brief=brief, kind=kind)
         return {"id": 999}
     from app import tasks

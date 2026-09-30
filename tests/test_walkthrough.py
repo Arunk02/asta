@@ -238,3 +238,40 @@ def test_mute_and_unmute_mid_session(session):
 def test_silent_by_default(session):
     session.start()
     assert session.spoken == []
+
+
+# --- 30 Sep: his feedback on a colleague's draft went to an open walkthrough -------------
+
+def test_feedback_on_a_waiting_draft_is_never_taken_by_a_walkthrough(session):
+    from app import walkthrough
+    session.start()
+    feedback = ("provide date as well kind of complete track when it received from booking "
+                "and what billing consumed")
+    assert not walkthrough.takes(session.cid, feedback, draft_waiting=True)
+    assert walkthrough.takes(session.cid, feedback, draft_waiting=False), \
+        "with no draft waiting it is a question for the session"
+
+
+def test_a_yes_goes_to_the_draft_the_session_keeps_its_own_words(session):
+    from app import walkthrough
+    session.start()
+    assert not walkthrough.takes(session.cid, "yes", draft_waiting=True, affirms=True)
+    assert walkthrough.takes(session.cid, "next", draft_waiting=True)
+    assert walkthrough.takes(session.cid, "done", draft_waiting=True)
+
+
+def test_nothing_is_taken_without_a_session():
+    from app import walkthrough
+    assert not walkthrough.takes("no-session", "next", draft_waiting=False)
+    assert walkthrough.takes("no-session", "walk me through task 126", draft_waiting=True)
+
+
+def test_an_idle_walkthrough_closes_itself(session, monkeypatch):
+    import time as _t
+    from app import walkthrough
+    session.start()
+    assert walkthrough.get(session.cid)
+    later = _t.time() + walkthrough.IDLE_SECONDS + 5
+    monkeypatch.setattr(_t, "time", lambda: later)
+    assert walkthrough.get(session.cid) is None
+    assert not walkthrough.takes(session.cid, "why is this here?", draft_waiting=False)

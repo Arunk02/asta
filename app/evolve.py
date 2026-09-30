@@ -141,9 +141,11 @@ def propose(clusters: list[str]) -> list[Candidate]:
                                  max(5, settings.value("ASTA_ATTENTION_MIN_SEEN") - 2),
                                  cluster, "judge a noisy source on a shorter record"))
         elif cluster == "checks fail more often than they pass":
-            out.append(Candidate("L1", "ASTA_RESPOND_MAX_PER_HOUR",
-                                 max(1, settings.value("ASTA_RESPOND_MAX_PER_HOUR") - 1),
-                                 cluster, "spend fewer investigations while they are unreliable"))
+            # Fewer at once, never fewer in total: an ask is not dropped because
+            # checks have been unreliable lately.
+            out.append(Candidate("L1", "ASTA_MAX_PARALLEL_INVESTIGATIONS",
+                                 max(1, settings.value("ASTA_MAX_PARALLEL_INVESTIGATIONS") - 1),
+                                 cluster, "run fewer investigations at once while they are unreliable"))
     seen: set[str] = set()
     kept = []
     for c in out:

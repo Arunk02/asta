@@ -173,14 +173,14 @@ def test_the_brief_is_self_contained(spawned, known_ground):
     assert "Alex" in prompt
 
 
-def test_ten_people_pinging_is_not_ten_investigations(spawned, known_ground, monkeypatch):
-    """His burst scenario, and the reason a rate limit is not optional: each of
-    these is a full agentic turn against production systems."""
-    monkeypatch.setattr(responder, "MAX_PER_HOUR", 3)
+def test_ten_people_pinging_are_ten_investigations(spawned, known_ground):
+    """His rule, 30 Sep: five people pinging about different issues are five
+    investigations — not two now and the rest hours later. How many run at once
+    is the queue's job (tasks.investigation_slot); none is dropped here."""
     for i in range(10):
         responder.respond("teams", f"Person{i}", f"{TEMPORAL} number {i}",
                           priority=attention.P_TODAY)
-    assert len(spawned) == 3
+    assert len(spawned) == 10
 
 
 def test_the_same_ask_is_investigated_once(spawned, known_ground):

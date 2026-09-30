@@ -196,6 +196,9 @@ def note_limit(output: str, now: float | None = None) -> float | None:
     if until <= now:
         return None
     with contextlib.suppress(Exception):
+        from . import brains
+        brains.record_hit(now, until)          # what the window held is the ceiling
+    with contextlib.suppress(Exception):
         store.kv_set(_LIMIT_KEY, str(until))
         store.record_outcome("claude", "limited", detail=f"until {time.strftime('%H:%M', time.localtime(until))}: {(output or '')[-160:]}")
     return until

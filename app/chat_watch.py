@@ -727,6 +727,48 @@ def _transcript(chat: str, now: float, hours: float = 6, at_most: int = 14) -> l
     return out
 
 
+def _concrete(text: str) -> bool:
+    """Is there something in it a worker can go and check?"""
+    from . import responder, understand
+    if understand._HAS_A_HANDLE.search(text or ""):
+        return True
+    return responder.what_it_asks(text or "") in ("incident", "debug", "pr_review", "review_request")
+
+
+async def _nudged(tid: str, c: dict, who: str, now: float) -> str:
+    """They pinged again while something of theirs is open. The line for him."""
+    from . import answers, loop, responder, threads
+    need = c["open_need"]
+    first = (who or "They").split()[0]
+    cid = answers.phone_conversation()
+    staged = loop.awaiting(cid) if cid else None
+    waiting_draft = (staged and staged.get("thread") == tid) or any(
+        q.get("thread") == tid for q in answers._load_queue())
+    if waiting_draft:
+        line = f"🔴 {first} pinged again — the reply for them is waiting on your *send*."
+    else:
+        task = responder.respond(
+            "teams-chat", who, need + "\n" + "\n".join(c.get("conversation", [])[-8:]),
+            priority=1, key=c["keys"][-1], sent_at=c["sent_at"],
+            context=f"So far in this conversation: {c['so_far']}" if c["so_far"] else "",
+            reply_to=c["chat"], group=False, need=need, thread=tid, questions=[need])
+        if task and task.get("reused"):
+            analysis, reply = answers.split(task.get("result") or "")
+            if reply and await answers.present(
+                    who=who, need=need, chat=c["chat"], group=False, analysis=analysis,
+                    reply=reply, task_id=task["id"], thread=tid,
+                    note=f"{first} pinged again. Already looked into this (task #{task['id']})."):
+                return ""
+        if task:
+            threads.update(tid, status="working")
+            line = (f"🔴 {first} pinged again — still waiting on: {need}. "
+                    f"I'm checking it now (task #{task['id']}); the answer comes to you.")
+        else:
+            threads.update(tid, status="awaiting_arun")
+            line = f"🔴 {first} pinged again — still waiting on you for: {need}."
+    return line if _worth_telling(tid, line, fyi=False, group=False, now=now) else ""
+
+
 #: What each conversation last told him, so it never tells him the same thing twice.
 _TOLD_KEY = "thread_told:"
 #: A line identical to the last one is not news for this long.
@@ -854,6 +896,9 @@ async def _sweep_threads(notify=None) -> list[dict]:
         t = threads.open("teams", c["counterpart"], chat=c["chat"], now=now)
         c["status"] = t.get("status", "open")
         c["so_far"] = t.get("summary", "")
+        # What they were already waiting on BEFORE this sweep — read from the
+        # thread, not from the reader, which fills a need in from old chat.
+        c["open_need"] = (t.get("need") or "").strip()
         c["asta_spoke"] = bool(t.get("asta_spoke"))
         c["asked_back"] = int(t.get("asked_back") or 0)     # questions asked so far
         c["checked_in"] = bool(t.get("checked_in"))
@@ -879,6 +924,10 @@ async def _sweep_threads(notify=None) -> list[dict]:
                   "last_activity": now}
         if d.get("continues"):
             fields["continues"] = d["continues"]
+        ping = understand.is_ping(c["new"])
+        if ping:
+            # A ping changes nothing about what the conversation is about.
+            fields["need"] = c.get("open_need", "")
         threads.update(tid, **fields)
         threads._record(tid, f"understood:{state}",
                         f"{d.get('source')} conf={conf:.2f} need={fields['need'][:80]}")
@@ -917,7 +966,20 @@ async def _sweep_threads(notify=None) -> list[dict]:
             # the event-history defect?"), before the fixed line that knows
             # nothing. Yogesh, 29 Sep: "Call ?" after a defect discussion got
             # "Could you tell me a bit more about what you need help with?"
-            ask = understand.safe_question(d.get("question") or "") or steward.ASK_BACK
+            if ping and c["one_to_one"] and c.get("open_need") \
+                    and c["status"] in ("clarifying", "working", "awaiting_arun"):
+                # Not an opening: they are WAITING. Asking "is this about …?"
+                # again is the blind reply he called out (Vinish, 30 Sep: an
+                # hour after his finding, "Bro" got a second question). Work
+                # what is open, and he hears that they are waiting — once.
+                line = await _nudged(tid, c, who, now)
+                if line:
+                    red.append(line)
+                continue
+            if ping:
+                ask = steward.ping_back(c["chat"])
+            else:
+                ask = understand.safe_question(d.get("question") or "", who) or steward.ASK_BACK
             if not c["asked_back"] and steward.ask_back_enabled() \
                     and await _say(c["chat"], ask, group=not c["one_to_one"]):
                 steward.note_asked_back(who)
@@ -961,7 +1023,12 @@ async def _sweep_threads(notify=None) -> list[dict]:
         # the ask is too vague to act on, ask before planning or investigating
         # anything. His rule, 29 Sep: talk to them directly, get what they want;
         # only the final analysis comes to him.
-        q = understand.safe_question(d.get("question") or "")
+        q = understand.safe_question(d.get("question") or "", who)
+        if q and d.get("subject") != "unclear" and _concrete("\n".join(c["new"])):
+            # They named the thing — a booking, a container, a PR, an error.
+            # That is checked, not asked about: Vinish's container finding
+            # (30 Sep) got a question back where it should have got the logs.
+            q = ""
         if not q and d.get("subject") == "unclear" and state == "ask":
             q = steward.ASK_BACK
         if state == "ask" and q and c["asked_back"] < MAX_QUESTIONS \
@@ -972,7 +1039,12 @@ async def _sweep_threads(notify=None) -> list[dict]:
             continue
 
         # 2. A code change needs his yes before anyone plans it.
-        if d.get("work") == "code" and state != "urgent":
+        # …and a PR to REVIEW is not a code change to plan. Komal's "please
+        # review …/pull/1459" reached him as "asks for a code change — reply yes
+        # and I'll plan it" (30 Sep). It is read, and the review comes to him.
+        review = responder.what_it_asks(f"{fields['need']}\n" + "\n".join(c["new"])) \
+            in ("review_request", "pr_review")
+        if d.get("work") == "code" and state != "urgent" and not review:
             from . import answers
             await answers.offer_plan(who=who, chat=c["chat"], need=said,
                                      summary=fields["summary"], thread=tid)
@@ -986,7 +1058,12 @@ async def _sweep_threads(notify=None) -> list[dict]:
             *[f"Earlier with {who}: {p}" for p in c["past"]]] if x)
         from . import offers
         before = offers.pending()
-        task = responder.respond("teams-chat", who, "\n".join(c["new"]), priority=c["pri"],
+        ask_text = "\n".join(c["new"])
+        if review and not responder.what_it_asks(ask_text):
+            # The message that reached him was only the mention ("Arunkumar,
+            # Vinish"); the PR itself is a few lines up in the same chat.
+            ask_text = f"{said}\n" + "\n".join(c.get("conversation", [])[-6:])
+        task = responder.respond("teams-chat", who, ask_text, priority=c["pri"],
                                  key=c["keys"][-1], sent_at=c["sent_at"], context=context,
                                  reply_to=c["chat"], group=not c["one_to_one"], need=said,
                                  thread=tid, questions=d.get("questions") or [])

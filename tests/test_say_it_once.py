@@ -114,6 +114,8 @@ def quiet(monkeypatch, tmp_path):
     ("ship it", True),
     ("ok push it now", True),
     ("approval", False),
+    ("Go ahead approve", False),
+    ("go ahead approve and raise PR", True),
 ])
 def test_every_way_he_says_go_is_a_command(said, pr):
     is_go, _n = go.command(said)
@@ -530,3 +532,114 @@ def test_the_warning_reads_as_a_sentence(monkeypatch, tmp_path):
     assert len(said) == 1, "once per window"
     assert "which resets 3:40pm" in said[0]
     assert "so it stays on Claude." in said[0] and "— or Copilot" not in said[0]
+
+
+# --- a ping is not a question about the old conversation ------------------------
+
+def test_bro_is_an_opener_with_no_guess_about_the_old_conversation():
+    """Vinish, 30 Sep 16:00: "Bro" got "Sure — is this about equipment container
+    MNBU0654520 dual-state discrepancy, or something else?" His words: "don't
+    respond blindly — if he said bro, you are answering the old conversation."""
+    d = understand.settle(
+        {"source": "model", "state": "ask", "subject": "continuing",
+         "need": "wants Arun to confirm logs match his finding",
+         "guess": "equipment container MNBU0654520 dual-state discrepancy",
+         "question": "", "reply": "On it"},
+        {"new": ["Bro"]})
+    assert d["state"] == "opener" and d["question"] == "" and d["guess"] == ""
+    assert d["reply"] == ""
+
+
+@pytest.mark.parametrize("said, ping", [
+    (["Bro"], True), (["Hi Arun"], True), (["hello"], True), (["Arun?"], True), (["??"], True),
+    (["Call ?"], False), (["free?"], False), (["Bro check H65ZMWX52B2"], False),
+    (["Bro", "can you check the PR"], False),
+])
+def test_what_a_ping_is(said, ping):
+    assert understand.is_ping(said) is ping
+
+
+def test_a_question_about_the_person_is_not_sent_to_that_person():
+    q = ("Do your logs match what Vinish found—that MNBU0654520 was in both "
+         "bookingEquipments and cancelledBookingEquipments on 5 Sep?")
+    assert understand.safe_question(q, "Vinish Kumar") == ""
+    assert understand.safe_question("Which booking is this about?", "Vinish Kumar") \
+        == "Which booking is this about?"
+
+
+def test_the_ping_answer_uses_the_term_he_uses_for_that_person(monkeypatch):
+    from app import steward, writing
+    monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: ["bro"])
+    assert steward.ping_back("Vinish Kumar") == "Yes bro, tell me"
+    monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: [])
+    assert steward.ping_back("Komal Jayswal") == "Yes, tell me"
+
+
+def test_a_named_container_or_pr_is_checked_not_asked_about():
+    from app import chat_watch
+    assert chat_watch._concrete("It appears in both fields for container MNBU0654520 on 5 Sep")
+    assert chat_watch._concrete("please review https://github.com/x/y/pull/1459")
+    assert not chat_watch._concrete("can we talk about the design?")
+
+
+def _nudge(monkeypatch, *, staged=False, task=None):
+    from app import chat_watch, loop, responder
+    asked: list[dict] = []
+
+    def respond(source, who, text, **kw):
+        asked.append({"text": text, **kw})
+        return task
+
+    monkeypatch.setattr(responder, "respond", respond)
+    cid = _conv()["id"]
+    store.kv_set("wa_conversation", cid)
+    if staged:
+        loop.stage(cid, {"type": "answer", "kind": "send", "what": "x", "to": "Vinish Kumar",
+                         "channel": "teams", "thread": "teams:Vinish Kumar", "_shown": time.time()})
+    c = {"open_need": "confirm the logs match his finding for MNBU0654520", "chat": "Vinish Kumar",
+         "keys": ["k1"], "sent_at": None, "so_far": "Vinish found the container in both fields",
+         "conversation": ["Vinish Kumar: It appears in both fields", "Vinish Kumar: Bro"]}
+    line = asyncio.run(chat_watch._nudged("teams:Vinish Kumar", c, "Vinish Kumar", time.time()))
+    return line, asked
+
+
+def test_a_ping_while_they_are_waiting_is_worked_and_he_is_told_once(monkeypatch):
+    line, asked = _nudge(monkeypatch, task={"id": 41, "title": "t"})
+    assert "pinged again" in line and "MNBU0654520" in line and "task #41" in line
+    assert asked and asked[0]["text"].startswith("confirm the logs match")
+    assert asked[0]["questions"] == ["confirm the logs match his finding for MNBU0654520"]
+    again, _ = _nudge(monkeypatch, task={"id": 41, "title": "t"})
+    assert again == "", "the same line is not sent twice"
+
+
+def test_a_ping_with_nothing_checkable_says_they_are_waiting_on_him(monkeypatch):
+    line, _ = _nudge(monkeypatch, task=None)
+    assert "still waiting on you for" in line
+
+
+def test_a_ping_while_his_draft_is_waiting_points_at_the_draft(monkeypatch):
+    line, asked = _nudge(monkeypatch, staged=True)
+    assert "waiting on your *send*" in line and asked == []
+
+
+def test_rejecting_a_task_lets_go_of_its_clean_checkout(monkeypatch, tmp_path):
+    """#179 rejected, #180 started to replace it: "could not create a worktree —
+    already checked out at …task-179"."""
+    from app import worktrees
+    removed: list[int] = []
+
+    async def cancel(tid, status="cancelled", why=""):
+        return False
+
+    async def remove(root, tid, force=False):
+        removed.append(tid)
+        return []
+
+    monkeypatch.setattr(tasks, "cancel", cancel)
+    monkeypatch.setattr(tasks, "learn_from_stop", lambda *a, **k: None)
+    monkeypatch.setattr(tasks, "code_cwd", lambda ws: str(tmp_path))
+    monkeypatch.setattr(worktrees, "exists", lambda root, tid: True)
+    monkeypatch.setattr(worktrees, "remove", remove)
+    t = store.create_task("x", "code", "p", None)
+    asyncio.run(tasks.reject(t["id"], "wrong place"))
+    assert removed == [t["id"]]

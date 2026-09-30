@@ -3200,5 +3200,15 @@ async def reject(task_id: int, why: str = "") -> str:
     if not killed:
         store.update_task(task_id, status="rejected")
         learn_from_stop(task_id, t, "rejected", why)
+    # Let go of its checkout. A rejected task that kept its worktree kept its
+    # BRANCH checked out too, and the task started to replace it opened with
+    # "could not create a worktree: already checked out at …task-179" (30 Sep).
+    # Clean checkouts only — uncommitted edits are kept — and the branch stays.
+    if t.get("kind") == "code":
+        with contextlib.suppress(Exception):
+            from . import worktrees
+            ws_root = Path(code_cwd(t.get("workspace")))
+            if worktrees.exists(ws_root, task_id):
+                await worktrees.remove(ws_root, task_id)
     return (f"Task #{task_id} rejected and its worker killed."
             if killed else f"Task #{task_id} rejected (it had already finished).")

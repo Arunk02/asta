@@ -47,7 +47,7 @@ _FILL = r"(?:now\s+itself|now|fast|please|pls|asap|quickly|directly|right\s+away
 #: approve command: "push the ETA fix after CI is green" is an ordinary message.
 _COMMAND = re.compile(
     r"^\s*(?:(?:no|ok(?:ay)?|yes|pls|please|just|then|so)[\s,.:—-]+)*"
-    rf"{_PHRASE}(?:\s*(?:and|then|,|&|\+)\s*(?:then\s+)?{_PHRASE})*"
+    rf"{_PHRASE}(?:(?:\s*(?:and|then|,|&|\+)\s*(?:then\s+)?|\s+){_PHRASE})*"
     r"(?:\s+(?:for|on|of)?\s*(?:the\s+)?(?:task\s*)?#?\s*(\d{1,5}))?"
     rf"(?:\s+{_FILL})*\s*[.!]*\s*$", re.I)
 

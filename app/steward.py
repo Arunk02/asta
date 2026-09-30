@@ -135,6 +135,26 @@ ASK_BACK = os.environ.get(
     "ASTA_ASK_BACK_LINE", "Could you tell me a bit more about what you need help with?")
 
 
+#: The answer to a ping ("Bro", "Hi Arun"). It says he is there and asks nothing
+#: about a subject — a ping has none, and guessing one from the earlier chat is
+#: answering a conversation they did not start.
+PING_BACK = os.environ.get("ASTA_PING_BACK_LINE", "Yes, tell me")
+
+
+def ping_back(chat: str) -> str:
+    """The ping answer, with the term he actually uses for this person, if any."""
+    try:
+        from . import writing
+        terms = [t for t in writing.address_terms(chat) if t.lower() in ("bro", "da", "machi")]
+    except Exception:                                          # noqa: BLE001
+        terms = []
+    line = PING_BACK.strip() or "Yes, tell me"
+    if terms and "," in line:
+        head, rest = line.split(",", 1)
+        return f"{head} {terms[0]},{rest}"
+    return line
+
+
 def _asked_key(who: str) -> str:
     return f"steward:asked:{(who or '').strip()}"
 

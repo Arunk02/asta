@@ -79,7 +79,7 @@ on run argv
   tell application "System Events"
     if not (exists process "{process}") then return "NO-PROCESS"
     tell process "{process}"
-      set out to ""
+      set out to "windows: " & (count of windows) & linefeed
       repeat with w in windows
         set out to out & "window: " & (name of w as text) & linefeed
         -- A big Swing/Electron window (IntelliJ) fails `entire contents` with
@@ -134,11 +134,72 @@ end run
 '''
 
 
+def _shallow_script(process: str) -> str:
+    """Window titles, the front window's top-level controls and the whole menu
+    map — each fetched in ONE AppleEvent. Reading an IDE element by element took
+    over 25s and failed; batched, IntelliJ's 110 menu items come back in ~5s."""
+    return f'''
+on run argv
+  tell application "System Events"
+    if not (exists process "{process}") then return "NO-PROCESS"
+    tell process "{process}"
+      set out to "windows: " & (count of windows) & linefeed
+      repeat with n in (name of every window)
+        try
+          set out to out & "window: " & (n as text) & linefeed
+        end try
+      end repeat
+      try
+        repeat with n in (name of every UI element of front window)
+          try
+            set t to (n as text)
+            if t is not "missing value" and t is not "" then set out to out & "element: " & t & linefeed
+          end try
+        end repeat
+      end try
+      try
+        set mbn to name of every menu bar item of menu bar 1
+        set mis to name of every menu item of menu 1 of every menu bar item of menu bar 1
+        repeat with k from 2 to (count of mbn)
+          set mn to (item k of mbn) as text
+          set out to out & "menu: " & mn & linefeed
+          repeat with oneItem in (item k of mis)
+            set itn to ""
+            try
+              set itn to oneItem as text
+            end try
+            if itn is not "missing value" and itn is not "" then set out to out & "  " & mn & " > " & itn & linefeed
+          end repeat
+        end repeat
+      end try
+      return out
+    end tell
+  end tell
+end run
+'''
+
+
+#: Apps whose accessibility tree is too big to walk element by element.
+BIG_APPS = {"intellij idea", "intellij idea ce", "visual studio code", "code",
+            "microsoft teams", "pycharm", "webstorm"}
+_SHALLOW_KEY = "screen_shallow:"
+
+
 async def look(process: str) -> str:
     """What is on screen in that app, by name. Reads nothing else."""
     if not enabled():
         raise ScreenError("the screen fallback is off — ASTA_SCREEN=1 turns it on")
-    out = await apps._osascript(_tree_script(process), [])
+    shallow = process.lower() in BIG_APPS or bool(store.kv_get(_SHALLOW_KEY + process.lower()))
+    if not shallow:
+        try:
+            out = await apps._osascript(_tree_script(process), [])
+        except apps.AppError:
+            # Too big to walk (-10000, or no answer in time): read it the fast
+            # way, now and from now on.
+            store.kv_set(_SHALLOW_KEY + process.lower(), "1")
+            shallow = True
+    if shallow:
+        out = await apps._osascript(_shallow_script(process), [])
     if out.strip() == "NO-PROCESS":
         raise ScreenError(f"{process} is not running, so there is nothing to click")
     return out
@@ -246,6 +307,12 @@ def _met(expect: str, seen: str) -> bool:
     kind, want = kind.strip().lower(), want.strip()
     if not want:
         return False
+    if kind == "windows":
+        # How many windows are open — the check that works for apps (Java IDEs)
+        # whose popups and dialogs expose no name. Exact, not a substring.
+        import re as _re
+        got = _re.search(r"^windows:\s*(\d+)", seen or "", _re.M)
+        return bool(got) and want.isdigit() and int(got.group(1)) == int(want)
     there = want.lower() in seen.lower()
     return not there if kind == "gone" else there
 

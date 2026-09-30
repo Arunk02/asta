@@ -132,6 +132,11 @@ def replies(since: float, until: float) -> dict:
         "tokens_per_turn_avg": (sum(per_turn) / len(per_turn)) if per_turn else None,
         "context_per_call_max": max(ctx) if ctx else None,
         "context_per_call_avg": (sum(ctx) / len(ctx)) if ctx else None,
+        # Model calls inside one turn: everything read, over what one call holds.
+        # 29 Sep's "141k per turn" was ~5 calls of ~30k, not a 141k context.
+        "calls_per_turn_avg": (sum(t / c for t, c in zip(
+            [(r["input_tokens"] or 0) + (r["cached_tokens"] or 0) for r in rows if r["context_tokens"]],
+            ctx)) / len(ctx)) if ctx else None,
     }
 
 
@@ -439,8 +444,17 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
             " · ".join(f"{k} {n}" for k, n in sorted(tt["counts"].items())) or "—",
             "0 small changes at max effort", "good" if tt["max_on_small"] == 0 else "bad",
             "recorded while ASTA_ROUTING is on"),
-        Row("tokens_per_turn", "Tokens read per chat turn", r["tokens_per_turn_avg"],
-            _fmt_k(r["tokens_per_turn_avg"]), "≤ 50k", _judge(r["tokens_per_turn_avg"], 50_000, 150_000)),
+        Row("tokens_per_turn", "Tokens read per chat turn (all its calls)", r["tokens_per_turn_avg"],
+            _fmt_k(r["tokens_per_turn_avg"]), "≤ 120k", _judge(r["tokens_per_turn_avg"], 120_000, 250_000),
+            "context per call × calls per turn — see the two rows below"),
+        Row("context_avg", "Context one model call holds, on average", r["context_per_call_avg"],
+            _fmt_k(r["context_per_call_avg"]), "≤ 40k",
+            _judge(r["context_per_call_avg"], 40_000, 80_000),
+            "the fixed part is ~25k: the CLI's own prompt, its tools and the tools picked for the turn"),
+        Row("calls_per_turn", "Model calls inside one chat turn", r["calls_per_turn_avg"],
+            "—" if r["calls_per_turn_avg"] is None else f"{r['calls_per_turn_avg']:.1f}",
+            "≤ 3 (more means it is hunting for a fact)",
+            _judge(r["calls_per_turn_avg"], 3, 6)),
         Row("reply_length", "Asta's phone reply length", ln["avg_chars"],
             "—" if ln["avg_chars"] is None else f"{ln['avg_chars']:.0f} chars",
             "≤ 400 unless asked to elaborate", _judge(ln["avg_chars"], 400, 700),

@@ -389,6 +389,18 @@ def describe_link(url: str) -> str:
     return f"{label}: {'/'.join(tail)}" if tail else label
 
 
+def as_read(text: str, known: set[str] | None = None) -> str:
+    """A message as the reader should see it: what the sender typed, with a
+    quoted earlier message taken out and noted. "Arunkumar K 25/09/2026 15:50
+    Hi Sankalp could you please confirm… yes it is" is a reply ("yes it is"),
+    not the question it quotes — read whole, it looked like a new ask."""
+    raw = (text or "").strip()
+    if not _REPLY_HEADER.search(raw):
+        return raw
+    body = clean_message(raw, known)
+    return f"{body} (replying to an earlier message)" if body else raw
+
+
 def summarise(text: str, limit: int = 160, known: set[str] | None = None) -> str:
     """One readable line for a message — links named rather than pasted raw."""
     body = clean_message(text, known)
@@ -665,6 +677,17 @@ async def _say(chat: str, line: str, *, group: bool = False) -> bool:
     return True
 
 
+def _his_last_minutes(chat: str, now: float, hours: float = 6) -> int | None:
+    """Minutes since he last wrote in this chat — None if not in the window.
+    A small number means he is in the exchange right now."""
+    try:
+        rows = store.teams_messages(chat=chat, since=now - hours * 3600, limit=400)
+    except Exception:                                          # noqa: BLE001
+        return None
+    his = [float(r.get("sent_at") or 0) for r in rows if is_from_him(r.get("sender", ""))]
+    return int((now - max(his)) // 60) if his else None
+
+
 def _transcript(chat: str, now: float, hours: float = 6, at_most: int = 14) -> list[str]:
     """The last few messages of this chat, both sides, oldest first, labelled."""
     try:
@@ -672,8 +695,9 @@ def _transcript(chat: str, now: float, hours: float = 6, at_most: int = 14) -> l
     except Exception:                                          # noqa: BLE001
         return []
     out = []
+    earlier = {(r.get("text") or "") for r in rows}
     for r in rows[-at_most:]:
-        text = " ".join((r.get("text") or "").split())[:400]
+        text = " ".join(as_read(r.get("text") or "", earlier).split())[:400]
         if text:
             out.append(f"{'Arun' if is_from_him(r.get('sender', '')) else r.get('sender', '?')}: {text}")
     return out
@@ -773,7 +797,8 @@ async def _sweep_threads(notify=None) -> list[dict]:
                 "one_to_one": one_to_one, "new": [], "keys": [], "known": known,
                 "handled_by_him": False, "wanted": False, "pri": pri,
                 "last": "", "sent_at": None})
-            c["new"].append(text if one_to_one else f"{who}: {text}")
+            seen = as_read(text, known)
+            c["new"].append(seen if one_to_one else f"{who}: {seen}")
             c["keys"].append(key)
             c["wanted"] = c["wanted"] or bool(wanted)
             if pri is not None and (c["pri"] is None or pri < c["pri"]):
@@ -801,6 +826,7 @@ async def _sweep_threads(notify=None) -> list[dict]:
         # change, plan it?" because the model never saw his "u create group with
         # karthik" before "Ok Arun".
         c["conversation"] = _transcript(c["chat"], now)
+        c["arun_minutes_ago"] = _his_last_minutes(c["chat"], now)
         t = threads.open("teams", c["counterpart"], chat=c["chat"], now=now)
         c["status"] = t.get("status", "open")
         c["so_far"] = t.get("summary", "")
@@ -901,42 +927,31 @@ async def _sweep_threads(notify=None) -> list[dict]:
         # send?" Only three things reach him before that — something urgent, a
         # code change (which needs his yes before anyone plans it), and an ask
         # Asta could not take on.
+        # 1. CLARIFY, directly with them — no approval needed for a question.
+        # When the subject is unclear (earlier chat is context, not proof), or
+        # the ask is too vague to act on, ask before planning or investigating
+        # anything. His rule, 29 Sep: talk to them directly, get what they want;
+        # only the final analysis comes to him.
+        q = understand.safe_question(d.get("question") or "")
+        if not q and d.get("subject") == "unclear" and state == "ask":
+            q = steward.ASK_BACK
+        if state == "ask" and q and c["asked_back"] < MAX_QUESTIONS \
+                and steward.ask_back_enabled() \
+                and await _say(c["chat"], q, group=not c["one_to_one"]):
+            threads.update(tid, asked_back=c["asked_back"] + 1, status="clarifying",
+                           asta_spoke=1)
+            continue
+
+        # 2. A code change needs his yes before anyone plans it.
         if d.get("work") == "code" and state != "urgent":
             from . import answers
             await answers.offer_plan(who=who, chat=c["chat"], need=said,
                                      summary=fields["summary"], thread=tid)
             continue
 
-        from . import understand
-        q = understand.safe_question(d.get("question") or "")
-        if state == "ask" and q and c["asked_back"] < MAX_QUESTIONS \
-                and steward.ask_back_enabled() \
-                and await _say(c["chat"], q, group=not c["one_to_one"]):
-            # Too vague to act on: ask them, the way he would, before spending a
-            # turn on a guess. Never more than MAX_QUESTIONS in one conversation.
-            threads.update(tid, asked_back=c["asked_back"] + 1, status="clarifying",
-                           asta_spoke=1)
-            continue
-
-        if d.get("work") == "talk" and state == "ask":
-            # They want HIM — a call, a discussion. Nothing to investigate; what
-            # he needs is who, about what, and the choice of how to answer. With
-            # a reply drafted in his voice, that choice is one word: "yes" sends
-            # it, "tell him after lunch" rewrites it, "no" drops it.
-            from . import answers
-            if tell and (d.get("reply") or "").strip() \
-                    and _worth_telling(tid, said, fyi=False, group=not c["one_to_one"], now=now) \
-                    and await answers.present(who=who, need=said, chat=c["chat"],
-                                              group=not c["one_to_one"], analysis="",
-                                              reply=d["reply"], thread=tid, lead=tell):
-                continue
-            if _worth_telling(tid, said, fyi=False, group=not c["one_to_one"], now=now):
-                (red if c["wanted"] or c["one_to_one"] else quiet_lines).append(
-                    tell or f"{name} wants to talk to you: {said}. "
-                            "Shall I tell them when you're free, or will you reply?")
-                threads.update(tid, status="awaiting_arun")
-            continue
-
+        # 3. Everything else is worked — a call request too: if there is
+        # something to check (the defect, the PR), it is checked first, and the
+        # final message carries where it stands and the reply for them.
         context = "\n".join(x for x in [
             f"So far in this conversation: {c['so_far']}" if c["so_far"] else "",
             *[f"Earlier with {who}: {p}" for p in c["past"]]] if x)
@@ -962,6 +977,16 @@ async def _sweep_threads(notify=None) -> list[dict]:
                 started.append(responder.line_for(task, who, responder.what_it_asks(c["last"])))
             # Otherwise silent until the answer is ready for his "send".
             continue
+        # Nothing to check, and they want HIM: the final message now — who, what
+        # about, and the reply in his voice, so one word answers them.
+        if d.get("work") == "talk" and state == "ask" and not task:
+            from . import answers
+            if tell and (d.get("reply") or "").strip() \
+                    and _worth_telling(tid, said, fyi=False, group=not c["one_to_one"], now=now) \
+                    and await answers.present(who=who, need=said, chat=c["chat"],
+                                              group=not c["one_to_one"], analysis="",
+                                              reply=d["reply"], thread=tid, lead=tell):
+                continue
         # Not taken on — he needs to know, and to know what would move it.
         after = offers.pending()
         offered = after is not None and (before is None or after.id != before.id)

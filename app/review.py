@@ -127,11 +127,36 @@ def pr_target(pr: str) -> tuple[str, str]:
     return str(pr or "").strip().lstrip("#"), ""
 
 
+def _squash(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def resolve_repo(root: Path, repo: str) -> str:
+    """The cloned folder he means — "activityplan-worfklow-service" is
+    telikos-activityplanworkflow-service. '' when nothing is close.
+
+    29 Sep: "merge task 166's PR, activityplan-worfklow-service" was passed on
+    letter for letter, every gh call ran in a folder that does not exist
+    ("file not found"), and the brain spent twelve calls retrying spellings."""
+    if not repo:
+        return ""
+    if (root / repo / ".git").is_dir():
+        return repo
+    import difflib
+    clones = [d.name for d in root.iterdir() if (d / ".git").is_dir()] if root.is_dir() else []
+    want = _squash(repo.split("/")[-1])
+    for name in clones:
+        if _squash(name) == want or _squash(name).endswith(want):
+            return name
+    close = difflib.get_close_matches(want, {_squash(n): n for n in clones}, n=1, cutoff=0.8)
+    return {_squash(n): n for n in clones}[close[0]] if close else ""
+
+
 def _repo_dir(workspace: str, repo: str = "") -> Path:
-    root = ws_mod.provider_for(workspace).root
+    root = Path(ws_mod.provider_for(workspace).root)
     if repo:
-        return Path(root) / repo
-    return Path(root) if (Path(root) / ".git").is_dir() else Path(root)
+        return root / (resolve_repo(root, repo) or repo)
+    return root
 
 
 def _where(pr: str, workspace: str, repo: str = "") -> tuple[str, list[str], Path]:
@@ -438,8 +463,8 @@ async def merge_state(pr: str, workspace: str, repo: str = "") -> dict:
     state — "CI green, 2 approvals, no conflicts" — rather than a promise that it
     was checked. He is approving a fact, not a hope.
     """
-    cwd = _repo_dir(workspace, repo)
-    rc, out = await _gh(cwd, "gh", "pr", "view", str(pr).lstrip("#"), "--json",
+    number, where, cwd = _where(pr, workspace, repo)
+    rc, out = await _gh(cwd, "pr", "view", number, *where, "--json",
                         "number,title,state,isDraft,mergeable,mergeStateStatus,"
                         "reviewDecision,statusCheckRollup,headRefName,baseRefName")
     if rc != 0:
@@ -520,8 +545,8 @@ async def merge(pr: str, workspace: str, repo: str = "", method: str = "squash",
     blockers = merge_blockers(state)
     if blockers:
         raise RuntimeError("did NOT merge — " + "; ".join(blockers))
-    cwd = _repo_dir(workspace, repo)
-    args = ["gh", "pr", "merge", str(pr).lstrip("#"), flag]
+    number, where, cwd = _where(pr, workspace, repo)
+    args = ["pr", "merge", number, *where, flag]
     if delete_branch:
         args.append("--delete-branch")
     rc, out = await _gh(cwd, *args, timeout=180)

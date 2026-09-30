@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import json
 import os
+import time
 import shutil
 import uuid
 from pathlib import Path
@@ -92,6 +93,10 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     """
     if not available():
         raise RuntimeError("claude CLI is not installed")
+    limited = limited_until()
+    if limited:
+        raise RuntimeError("claude usage limit — not called; resets "
+                           + time.strftime("%H:%M", time.localtime(limited)))
     # Same stamp the chat turn gets, from the same function — see
     # copilot_cli.now_line for the Monday this is here to stop repeating.
     from . import copilot_cli
@@ -168,8 +173,43 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
             await proc.wait()
         raise
     if proc.returncode != 0:
+        note_limit(out)
         raise RuntimeError(f"claude exited {proc.returncode}: {out[-300:]}")
     return out.strip()
+
+
+#: When the subscription's session window says it lifts. Every call before then
+#: fails the same way, so it is not made: on 30 Sep the reader alone tried 36
+#: conversations a sweep against "You've hit your session limit · resets 3:40am".
+_LIMIT_KEY = "claude_limited_until"
+LIMIT_CAP_SECONDS = 6 * 3600
+
+
+def note_limit(output: str, now: float | None = None) -> float | None:
+    """Remember the reset time a limit message gives. None if it is not one."""
+    from . import agent as agent_mod, store
+    if not agent_mod.transient_limit(output or "") or "credit balance" in (output or "").lower():
+        return None
+    now = time.time() if now is None else now
+    until = agent_mod.limit_reset_at(output, now=now) or (now + 15 * 60)
+    until = min(until, now + LIMIT_CAP_SECONDS)
+    if until <= now:
+        return None
+    with contextlib.suppress(Exception):
+        store.kv_set(_LIMIT_KEY, str(until))
+        store.record_outcome("claude", "limited", detail=f"until {time.strftime('%H:%M', time.localtime(until))}: {(output or '')[-160:]}")
+    return until
+
+
+def limited_until(now: float | None = None) -> float:
+    """The reset time while a limit holds, else 0."""
+    from . import store
+    now = time.time() if now is None else now
+    try:
+        until = float(store.kv_get(_LIMIT_KEY) or 0)
+    except (ValueError, TypeError):
+        return 0.0
+    return until if until > now else 0.0
 
 
 # --- interactive chat turn ---------------------------------------------------

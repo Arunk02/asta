@@ -71,7 +71,11 @@ REPLY:
 The message to send to {who}, in Arun's voice: short, plain and polite, no
 greeting ceremony, no sign-off. Give them the answer. If you could not find it,
 say briefly what you checked and ask them for the one thing you need. Never
-promise work Arun has not agreed to."""
+promise work Arun has not agreed to.
+
+If what they asked for is Arun himself — a call, a discussion — the ANALYSIS
+prepares him for it (where the topic stands, what changed, what is still open)
+and the REPLY answers the request, without committing him to a time."""
 
 
 def brief_rider(who: str) -> str:

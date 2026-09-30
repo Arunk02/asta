@@ -323,16 +323,57 @@ def test_the_investigation_is_told_how_to_check():
 
 # --- P5 -------------------------------------------------------------------------------
 
-def test_someone_wanting_him_gets_a_reply_he_can_send_with_one_word(rail):
-    from app import loop
+def test_nothing_to_check_and_they_want_him_is_one_final_message(rail, monkeypatch):
+    from app import loop, responder
+    monkeypatch.setattr(responder, "respond", lambda *a, **k: None)   # nothing checkable
     tell = "Yogesh wants to call you about the defect closure. He's asking if you're ready now."
-    rail.rows["Yogesh Kumar Ravichandran"] = [_m("Yogesh Kumar Ravichandran", "Arunkumar K Call ?")]
+    # A call that names its subject. A bare "Call ?" is asked about first —
+    # see test_a_bare_call_is_never_assumed_to_be_about_the_old_topic.
+    rail.rows["Yogesh Kumar Ravichandran"] = [_m("Yogesh Kumar Ravichandran",
+                                                 "Arunkumar K Call ? for the defect closure")]
     rail.script["teams:Yogesh Kumar Ravichandran"] = {
-        **_decide("ask", "call about the defect", work="talk"), "tell": tell,
-        "reply": "Sure, give me a sec"}
+        **_decide("ask", "call about the defect", work="talk"), "subject": "stated",
+        "tell": tell, "reply": "Sure, give me a sec"}
     rail.sweep()
     text = rail.pushed[0]["text"]
     assert text.startswith(tell) and "> Sure, give me a sec" in text
     staged = loop.awaiting(store.kv_get("wa_conversation"))
     assert staged["to"] == "Yogesh Kumar Ravichandran" and staged["what"] == "Sure, give me a sec"
     assert rail.sent == [], "nothing goes to Yogesh before his yes"
+
+
+def test_an_unclear_subject_is_asked_about_first_with_the_guess(rail):
+    """Old conversation is context, not proof: people ask for a call about
+    something new. Unclear → ask them, offering the guess."""
+    rail.rows["Yogesh Kumar Ravichandran"] = [_m("Yogesh Kumar Ravichandran", "Call ?")]
+    q = "Sure bro — is this about the event-history defect, or something else?"
+    rail.script["teams:Yogesh Kumar Ravichandran"] = {
+        **_decide("ask", "wants a call", work="talk", question=q), "subject": "unclear"}
+    rail.sweep()
+    assert rail.sent == [("Yogesh Kumar Ravichandran", q)]
+    assert not rail.asked and not rail.pushed, "no investigation, nothing to him yet"
+
+
+def test_unclear_without_a_question_still_asks(rail):
+    from app import steward
+    rail.rows["Navya R"] = [_m("Navya R", "need ur help on something")]
+    rail.script["teams:Navya R"] = {**_decide("ask", "wants help"), "subject": "unclear"}
+    rail.sweep()
+    assert rail.sent == [("Navya R", steward.ASK_BACK)]
+
+
+def test_a_vague_code_ask_is_clarified_before_any_plan(rail):
+    rail.rows["Navya R"] = [_m("Navya R", "can you fix it")]
+    rail.script["teams:Navya R"] = {**_decide("ask", "fix something", work="code",
+                                              question="Sure — which service and what's failing?"),
+                                    "subject": "unclear"}
+    rail.sweep()
+    assert rail.sent and "which service" in rail.sent[0][1]
+    assert not rail.pushed, "no 'plan it?' before we know what it is"
+
+
+def test_a_clear_ask_is_never_questioned(rail):
+    rail.rows["Navya R"] = [_m("Navya R", "can you please merge PR 1251?")]
+    rail.script["teams:Navya R"] = {**_decide("ask", "merge PR 1251"), "subject": "stated"}
+    rail.sweep()
+    assert rail.sent == [] and rail.asked

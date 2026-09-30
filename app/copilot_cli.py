@@ -238,6 +238,37 @@ def _named_in(text: str) -> str:
     return ""
 
 
+_TASK_REF = re.compile(r"\btask\s*#?\s*(\d{1,5})\b|(?<![\w/])#(\d{2,5})\b", re.I)
+_LINK = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/(?:pull|actions/runs)/\d+")
+_PR_NUM = re.compile(r"\bPR\s*#?(\d{2,6})\b", re.I)
+
+
+def _tasks_named(text: str) -> str:
+    """The tasks a message names, with what they found and the links in them."""
+    from . import store
+    ids = []
+    for m in _TASK_REF.finditer(text or ""):
+        n = int(m.group(1) or m.group(2))
+        if n not in ids:
+            ids.append(n)
+    lines = []
+    for n in ids[:3]:
+        t = store.get_task(n)
+        if not t:
+            continue
+        body = f"{t.get('result') or ''} {t.get('pr_urls') or ''} {t.get('prompt') or ''}"
+        links = sorted(set(_LINK.findall(body)))[:4]
+        prs = sorted(set(_PR_NUM.findall(t.get("result") or "")))[:3]
+        head = " ".join((t.get("result") or t.get("error") or "").split())[:280]
+        lines.append(f"Task #{n} ({t.get('status')}, workspace {t.get('workspace') or '-'}): "
+                     f"{t.get('title', '')}"
+                     + (f"\n  links: {', '.join(links)}" if links else "")
+                     + (f"\n  PRs mentioned: {', '.join('#' + p for p in prs)}" if prs else "")
+                     + (f"\n  it found: {head}" if head else ""))
+    return ("Tasks he refers to (from the task table — use these, do not search for them):\n"
+            + "\n".join(lines)) if lines else ""
+
+
 def turn_context(user_text: str) -> str:
     """What a chat turn should know before it starts, besides the date.
 
@@ -267,6 +298,12 @@ def turn_context(user_text: str) -> str:
             known = threads.context_for(r["who"])
             if known:
                 parts.append(known)
+    # "merge task 166's PR": what task 166 was, and every link in it. Without
+    # this, 29 Sep's turn spent twelve model calls finding PR #1251 and its repo.
+    with contextlib.suppress(Exception):
+        facts = _tasks_named(user_text)
+        if facts:
+            parts.append(facts)
     # Writing to someone in his name: how he actually writes to them.
     if _WRITING_TO.search(user_text or ""):
         with contextlib.suppress(Exception):

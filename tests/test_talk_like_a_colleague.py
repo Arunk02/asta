@@ -64,18 +64,17 @@ def test_an_opener_is_asked_about_with_what_is_already_known(rail):
                           "Sure — is this about the event-history defect?")]
 
 
-def test_a_call_about_a_known_subject_goes_to_him_as_a_choice(rail):
+def test_a_call_about_a_known_subject_is_worked_before_he_hears(rail):
+    """Agreed flow: clarify with them directly, do the needful, and only the
+    final analysis reaches him. A call about a known defect is checked first."""
     rail.rows["Yogesh Kumar Ravichandran"] = [_m("Yogesh Kumar Ravichandran",
-                                                 "Arunkumar K Call ?")]
-    tell = ("Yogesh wants a quick call about the bad-message defect on the event "
-            "history topic — Rupesh asked what fix went in. Want me to tell him you'll "
-            "call, or will you take it?")
+                                                 "Call? about the event-history defect fix")]
     rail.script["teams:Yogesh Kumar Ravichandran"] = {
-        **_decide("ask", "call about the event-history defect", work="talk"), "tell": tell}
+        **_decide("ask", "call about the event-history defect", work="talk"),
+        "subject": "stated", "tell": "Yogesh wants a call about the defect.", "reply": "Sure"}
     rail.sweep()
-    assert not rail.asked, "nothing to investigate — he wants Arun"
-    assert rail.sent == [], "and no question back: the subject is known"
-    assert rail.pushed and rail.pushed[0]["text"] == tell
+    assert rail.asked and rail.asked[0]["need"] == "call about the event-history defect"
+    assert rail.sent == [] and not rail.pushed, "he hears once, when it is ready"
 
 
 def test_the_models_words_replace_the_template(rail):

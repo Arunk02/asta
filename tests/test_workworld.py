@@ -121,11 +121,14 @@ def test_the_nightly_bench_spends_nothing_by_default(monkeypatch):
     assert "off" in nightly.why_not()
 
 
-def test_the_nightly_bench_stays_out_of_his_way(monkeypatch):
+def test_the_nightly_bench_stays_out_of_his_way(monkeypatch, tmp_path):
     import datetime as dt
     from app import store
     from app.workworld import nightly
     monkeypatch.setenv("ASTA_BENCH_NIGHTLY", "1")
+    # Not the live budget file: after the real bench has run tonight it says
+    # "already ran today", and this test failed every morning.
+    monkeypatch.setattr(nightly, "BUDGET_FILE", tmp_path / "budget.json")
     # A brain must be up for the "was he working?" question to be reached at
     # all — on CI no CLI is installed, so say one is.
     from app import agent

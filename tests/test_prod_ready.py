@@ -159,3 +159,35 @@ def test_a_step_the_app_rejects_is_retried_not_a_crash(idea, monkeypatch):
     plans += [_steps("Edit > Find in Files..."), _steps("Edit > Find > Find in Files…")]
     assert "Done" in asyncio.run(app_tasks.do("intellij", "open find in files"))
     assert len(calls) == 2
+
+
+def test_a_menu_of_any_depth_is_clicked_with_its_names_as_arguments():
+    from app import screen
+    script = screen._menu_script("IntelliJ IDEA", ["Edit", "Find", "Find in Files…"])
+    assert "click menu item (item 3 of argv) of menu 1 of menu item (item 2 of argv) of menu 1 " \
+           "of menu bar item (item 1 of argv) of menu bar 1" in script
+    assert "…" not in script and "\\u2026" not in script, "names travel as arguments"
+
+
+def test_named_keys_are_key_codes_not_typed_words(monkeypatch):
+    from app import apps, screen
+    monkeypatch.setenv("ASTA_SCREEN", "1")
+    ran = []
+
+    async def osa(script, args):
+        ran.append((script, args))
+        return "window \"Find in Files\"" if "entire contents" in script or "UI elements" in script else ""
+
+    async def look(process):
+        return ""
+
+    monkeypatch.setattr(apps, "_osascript", osa)
+    monkeypatch.setattr(screen, "look", look)
+    monkeypatch.setattr(screen, "_met", lambda expect, seen: True)
+    monkeypatch.setattr(apps, "RECIPES", {})
+    asyncio.run(screen.follow("IntelliJ IDEA", [
+        screen.Step("menu", "Edit > Find > Find in Files…", "window: Find in Files"),
+        screen.Step("key", "escape", "gone: Find in Files")]))
+    menu, key = ran[0], ran[1]
+    assert menu[1] == ["Edit", "Find", "Find in Files…"]
+    assert "key code 53" in key[0]

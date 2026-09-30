@@ -245,6 +245,28 @@ def answer_from_state(text: str) -> str:
     return ""
 
 
+_ASKS = re.compile(
+    r"^\s*(?:is|are|was|did|does|do|has|have|can|could|will|what|how|when|where|why|which|who|"
+    r"any\s+update|status|done)\b", re.I)
+_CHANGES = re.compile(
+    r"\b(?:add|also|change|fix|remove|rename|replace|use|make|update|revert|move|handle|cover|"
+    r"instead|don'?t|do\s+not|should\s+(?:be|not|also)|must|need(?:s)?\s+to)\b", re.I)
+
+
+def is_question(text: str) -> bool:
+    """Is he ASKING about the work, rather than changing it?
+
+    "task 180 done ? how long it will take ?" was taken as feedback on #180 and
+    reopened its session (30 Sep). A question is answered; only an instruction
+    continues the work."""
+    t = (text or "").strip()
+    t = re.sub(r"^(?:task\s*)?#?\d{1,5}\b[\s:,-]*", "", t, flags=re.I)
+    if not t:
+        return False
+    asks = "?" in t or bool(_ASKS.match(t))
+    return asks and not _CHANGES.search(t)
+
+
 # --- binding a message to a job ----------------------------------------------------------
 
 def interjection(text: str, named: bool) -> str:

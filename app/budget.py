@@ -51,6 +51,11 @@ def left(now: float | None = None) -> int:
 #: group where he was tagged — so it is somebody waiting on his answer.
 PEOPLE = ("teams", "teams-chat", "outlook", "call")
 
+#: What he is owed the moment it happens: his own tasks (plan, done, blocked),
+#: what Asta did on his word, CI on his own PRs, a colleague's answer waiting
+#: for his "send", and a question Asta needs answered to go on.
+OWED = ("task", "action", "ci", "answer", "offer", "reply", "files")
+
 
 def allows(priority: int | None, urgency: str = "direct", now: float | None = None,
            level: str = "") -> bool:
@@ -75,6 +80,13 @@ def allows(priority: int | None, urgency: str = "direct", now: float | None = No
     # Only when he is OWED something. A colleague's FYI ("I merged the doc
     # update", ranked P_FYI) still waits for the digest — that is what the
     # budget is for.
+    # The result of work HE asked for, and anything waiting on his answer, is
+    # never budgeted either. 30 Sep: the day's twenty were spent by mid-
+    # afternoon (six of them one repeating warning), and after that the plan
+    # for #180, its "✅ DONE", its PR and "🔴 CI red on the PR" all went to the
+    # next digest. His words: "until I come and ask, no update."
+    if level in OWED:
+        return True
     if urgency == "direct" and level in PEOPLE and (
             priority is None or int(priority) <= attention.P_TODAY):
         return True

@@ -77,7 +77,12 @@ class DayResult:
 
 def generate(seed: int = 20260911, count: int = 150) -> list[Event]:
     rng = random.Random(seed)
-    day0 = time.time() - 9 * 3600
+    # A fixed working day, 08:30–17:30 local — not "the nine hours before now".
+    # Anchored to the wall clock, the same day ran 11:30–20:30 when the suite was
+    # run in the evening, crossed the evening digest, and failed for a reason
+    # that had nothing to do with the code under test (30 Sep, 20:27).
+    lt = time.localtime()
+    day0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 8, 30, 0, 0, 0, -1))
     out: list[Event] = []
     for i in range(count):
         at = day0 + i * (9 * 3600 / count)

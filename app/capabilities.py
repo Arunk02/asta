@@ -417,6 +417,13 @@ _TABLE: tuple[Capability, ...] = (
                note="Pushes the branch and opens the PR. The pipeline NEVER does this "
                     "itself — only when Arun has seen the diff and said ship. The task "
                     "stays OPEN afterwards, tracked until the PR merges or closes."),
+    Capability("update_task_pr", "ops",
+               http='POST /api/tasks/{id}/pr-note {"text":"…","where":"description|comment"} '
+                    '· POST /api/tasks/{id}/rerun-ci',
+               write=True,
+               note="His OWN task's PR: append to its description, comment on it, or "
+                    "re-run its failed CI jobs. He asked, it is his PR: do it, do not "
+                    "stage it. A chat turn cannot run gh — this is how the PR changes."),
     Capability("refine_task", "tasks", http='POST /api/tasks/{id}/refine {"text":"…"}',
                write=True,
                note="THE tool for any comment on work a task already delivered — a "

@@ -49,8 +49,10 @@ def test_past_the_budget_it_goes_to_the_digest(monkeypatch):
 
     monkeypatch.setattr(notify, "wa_send", wa)
     monkeypatch.setattr(notify.telegram, "send", tg)
-    asyncio.run(notify.notify("first thing", "task", priority=attention.P_TODAY))
-    asyncio.run(notify.notify("second thing", "task", priority=attention.P_TODAY))
+    # Asta's own announcements are what the budget is for. His OWN work — a
+    # task's plan, its DONE, CI on his PR — is never budgeted (30 Sep).
+    asyncio.run(notify.notify("first thing", "jira", priority=attention.P_TODAY))
+    asyncio.run(notify.notify("second thing", "jira", priority=attention.P_TODAY))
     assert sent == ["first thing"]
     assert [r["text"] for r in digest.pending()] == ["second thing"]
     # This test used to make its point with a Teams message he was OWED an answer

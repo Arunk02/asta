@@ -643,3 +643,230 @@ def test_rejecting_a_task_lets_go_of_its_clean_checkout(monkeypatch, tmp_path):
     t = store.create_task("x", "code", "p", None)
     asyncio.run(tasks.reject(t["id"], "wrong place"))
     assert removed == [t["id"]]
+
+
+# --- after the PR is raised: he is told, and Asta can act on it --------------------
+
+def test_his_own_work_is_never_held_back_by_the_daily_budget(monkeypatch):
+    """The day's twenty pushes were spent; the plan, DONE, the PR and "CI red"
+    for #180 all went to the digest. "Until I come and ask, no update."""
+    from app import attention, budget
+    monkeypatch.setenv("ASTA_PUSH_BUDGET", "20")
+    monkeypatch.setattr(budget, "spent", lambda now=None: 23)
+    for level in ("task", "action", "ci", "answer"):
+        assert budget.allows(attention.P_TODAY, "direct", level=level), level
+    assert not budget.allows(attention.P_FYI, "ambient", level="jira")
+
+
+def test_a_push_build_and_a_pull_request_build_both_count():
+    """Two "cicd / Build" checks on one commit — the push trigger's failed, the
+    pull_request trigger's passed. "CI is green now, the fail is stale" was wrong."""
+    pr = {"statusCheckRollup": [
+        {"workflowName": "cicd", "name": "Build", "conclusion": "FAILURE", "startedAt": "1",
+         "detailsUrl": "https://github.com/acme/svc/actions/runs/36709097728/job/1"},
+        {"workflowName": "cicd", "name": "Build", "conclusion": "SUCCESS", "startedAt": "2",
+         "detailsUrl": "https://github.com/acme/svc/actions/runs/36709111717/job/2"}]}
+    assert tasks._checks_verdict(pr) == "red"
+    assert tasks._failed_runs(pr) == ["36709097728"]
+
+
+def _shipped(monkeypatch, rollup, log=""):
+    t = store.create_task("Add derived ATA/ATD", "code", "p", None)
+    store.update_task(t["id"], status="shipped", pr_state="OPEN",
+                      pr_urls="svc: https://github.com/acme/svc/pull/1252")
+    ran: list[tuple] = []
+
+    async def state(url):
+        return {"state": "OPEN", "statusCheckRollup": rollup, "reviewDecision": ""}
+
+    async def git(cwd, *args, **k):
+        ran.append((args, k.get("stdin", "")))
+        if args[:3] == ("gh", "run", "view"):
+            return 0, log
+        if args[:3] == ("gh", "pr", "view"):
+            edits = [a[1] for a in ran if a[0][:3] == ("gh", "pr", "edit")]
+            return 0, edits[-1] if edits else "Existing description\n"
+        return 0, ""
+
+    monkeypatch.setattr(tasks, "_pr_state", state)
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    return t["id"], ran
+
+
+def test_ci_red_names_the_failing_test_and_offers_the_rerun(monkeypatch):
+    rollup = [{"workflowName": "cicd", "name": "Build", "conclusion": "FAILURE",
+               "startedAt": "1", "detailsUrl": "https://github.com/acme/svc/actions/runs/777/job/1"}]
+    log = ("build\tRun tests\t[ERROR] ReadyForPlanningActivityImplTest."
+           "readyForPlanning_BookingRfpFailedStatus_ClosesActivityAsFailed:212 -- expected: <A> but was: <B>\n")
+    monkeypatch.setenv("ASTA_CI_AUTO_RERUN", "1")
+    tid, ran = _shipped(monkeypatch, rollup, log)
+    line = asyncio.run(tasks.check_pr(tid))
+    assert "CI red" in line and "ReadyForPlanningActivityImplTest" in line
+    assert "Re-running the failed jobs once" in line, "the first red is re-run on its own"
+    assert any(a[0][:4] == ("gh", "run", "rerun", "777") for a in ran)
+    store.update_task(tid, pr_state="OPEN")
+    again = asyncio.run(tasks.check_pr(tid))
+    assert f"rerun ci {tid}" in again and f"fix #{tid}" in again, "a second red is his call"
+    assert sum(1 for a in ran if a[0][:3] == ("gh", "run", "rerun")) == 1
+
+
+def test_ci_turning_green_is_news_too(monkeypatch):
+    rollup = [{"workflowName": "cicd", "name": "Build", "conclusion": "SUCCESS", "startedAt": "1"}]
+    tid, _ = _shipped(monkeypatch, rollup)
+    line = asyncio.run(tasks.check_pr(tid))
+    assert "CI green" in line and "Waiting on review" in line
+    assert asyncio.run(tasks.check_pr(tid)) is None, "said once"
+
+
+def test_rerun_it_reruns_the_failed_jobs_without_a_brain(monkeypatch):
+    rollup = [{"workflowName": "cicd", "name": "Build", "conclusion": "FAILURE",
+               "startedAt": "1", "detailsUrl": "https://github.com/acme/svc/actions/runs/777/job/1"}]
+    tid, ran = _shipped(monkeypatch, rollup)
+    store.update_task(tid, status="pr_ci_failed")
+    monkeypatch.setattr(main, "_start_turn", _no_brain)
+    sink = _Sink()
+    assert asyncio.run(main._dispatch(_conv(), "rerun it", sink, "whatsapp")) is None
+    assert any(a[0][:4] == ("gh", "run", "rerun", "777") and "--failed" in a[0] for a in ran)
+    assert "re-running the failed jobs" in str(sink.sent)
+
+
+def test_a_note_is_added_to_his_pr_description_and_checked(monkeypatch):
+    tid, ran = _shipped(monkeypatch, [])
+    out = asyncio.run(tasks.pr_note(tid, "Known follow-up: ATD is not in the whitelist yet."))
+    assert out.startswith("📝 Added to the description")
+    edit = next(a for a in ran if a[0][:3] == ("gh", "pr", "edit"))
+    assert edit[1].startswith("Existing description") and "Known follow-up: ATD" in edit[1]
+
+
+def test_an_approved_pr_draft_is_a_recorded_call_not_a_prompt(monkeypatch):
+    """"send" on the staged PR note went back to a brain that cannot run gh."""
+    tid, _ = _shipped(monkeypatch, [])
+    op = main._mechanical_send({
+        "channel": "pr", "to": "PR #1252 — svc",
+        "what": "Add to PR #1252 description (svc):\n\n**Known follow-up:** ATD is not whitelisted."})
+    assert op == {"name": "pr_note", "args": {"task_id": tid, "where": "description",
+                                              "text": "**Known follow-up:** ATD is not whitelisted."}}
+
+
+def test_a_question_about_finished_work_does_not_reopen_it(monkeypatch):
+    """"task 180 done ? how long it will take ?" was applied to #180 as feedback."""
+    from app import frontdesk
+    assert frontdesk.is_question("task 180 done ? how long it will take ?")
+    assert frontdesk.is_question("is it pushed")
+    assert not frontdesk.is_question("180 also cover the amend path")
+    assert not frontdesk.is_question("can you also add a null check?")
+
+    async def refine(tid, text):
+        raise AssertionError("a question reopened the task")
+
+    monkeypatch.setattr(tasks, "refine", refine)
+    monkeypatch.setattr(main, "_start_turn", _no_brain)
+    conv = _conv()
+    t = store.create_task("Add derived ATA/ATD", "code", "p", None)
+    store.update_task(t["id"], status="done", result="Implemented")
+    tasks.link_task(conv["id"], t["id"])
+    sink = _Sink()
+    asyncio.run(main._dispatch(conv, f"task {t['id']} done ? how long it will take ?", sink, "whatsapp"))
+    assert f"#{t['id']}" in str(sink.sent) and "done" in str(sink.sent)
+
+
+# --- Teams: what could not be read, and what is open -------------------------------
+
+def test_an_unnamed_group_chat_is_opened_by_its_own_rail_row():
+    from app import teams_bridge as tb
+    assert tb._is_member_list("Shabda Anubhav, Vinish, +2")
+    assert tb._is_member_list("Rekha and Rini")
+    assert not tb._is_member_list("General")
+    assert not tb._is_member_list("Backend Community of Practice")
+    assert tb._rail_title_ok("Shabda Anubhav Dev, Vinish Kumar, Yogesh Kumar Ravichandran",
+                             "Shabda Anubhav, Vinish, +2")
+    assert not tb._rail_title_ok("Daily deployment slot", "Shabda Anubhav, Vinish, +2")
+
+
+def test_any_message_for_me_lists_what_is_open_and_what_could_not_be_read():
+    from app import chat_watch, threads
+    t = threads.open("teams", "Fake Internal Team", chat="Fake Internal Team")
+    threads.update(t["id"], status="awaiting_arun", need="Review PR #1459",
+                   last_activity=time.time())
+    store.kv_set("chatwatch_rail", json.dumps(["Shabda Anubhav, Vinish, +2", "Vinish Kumar"]))
+    chat_watch.note_unopenable("Shabda Anubhav, Vinish, +2")
+    lines = chat_watch.open_with_him()
+    assert any("Fake Internal Team" in ln and "waiting on you: Review PR #1459" in ln for ln in lines)
+    assert any("could not open" in ln and "Shabda Anubhav, Vinish, +2" in ln for ln in lines)
+
+
+# --- a send he asked for is sent ---------------------------------------------------
+
+def _asked(monkeypatch, said, earlier=()):
+    from app import agent, capabilities
+    cid = _conv()["id"]
+    for e in earlier:
+        store.add_ui_message(cid, "user", e, {})
+    monkeypatch.setenv("ASTA_SEND_WHEN_ASKED", "1")
+    monkeypatch.setattr(capabilities, "said_this_turn", lambda: said)
+    return agent, cid
+
+
+def test_a_message_he_asked_for_by_name_is_not_staged_back_to_him(monkeypatch):
+    agent, cid = _asked(monkeypatch, "share this PR with vinish and ask him to review")
+    assert agent._he_asked_to_send("Vinish Kumar", cid)
+    assert not agent._he_asked_to_send("Komal Jayswal", cid), "someone he did not name"
+
+
+def test_him_means_the_person_he_named_a_moment_ago(monkeypatch):
+    agent, cid = _asked(monkeypatch, "share this PR with him ask him to review",
+                        earlier=["what abt the vinish msg to vinish did you send or not ?"])
+    assert agent._he_asked_to_send("Vinish Kumar", cid)
+
+
+def test_a_turn_that_never_asked_for_a_send_still_stages(monkeypatch):
+    agent, cid = _asked(monkeypatch, "what did vinish say about the RCA?")
+    assert not agent._he_asked_to_send("Vinish Kumar", cid)
+
+
+def test_the_send_he_asked_for_goes_out_as_a_recorded_call(monkeypatch):
+    from app import loop, ops
+    sent: list[dict] = []
+
+    async def run(op):
+        sent.append(op)
+        return "📨 Sent to Vinish Kumar."
+
+    async def notify(msg, kind="", **k):
+        pass
+
+    from app import notify as notify_mod
+    monkeypatch.setattr(ops, "run", run)
+    monkeypatch.setattr(notify_mod, "notify", notify)
+    agent, cid = _asked(monkeypatch, "share this PR with vinish, ask him to review")
+    monkeypatch.setattr(tasks, "current_conversation", lambda: cid)
+
+    async def go_():
+        out = agent.prepare_to_send("can u review this PR when free\nhttps://github.com/a/b/pull/1252",
+                                    to="Vinish Kumar", channel="teams")
+        await asyncio.sleep(0.05)
+        return out
+
+    out = asyncio.run(go_())
+    assert out.startswith("Sending to Vinish Kumar now")
+    assert sent and sent[0]["name"] == "teams_send" and sent[0]["args"]["to_group"] is False
+    assert not loop.awaiting(cid), "nothing is left waiting for a second yes"
+
+
+def test_a_group_is_never_sent_without_his_yes(monkeypatch):
+    from app import ops
+
+    async def run(op):
+        raise AssertionError("sent to a group without his yes")
+
+    monkeypatch.setattr(ops, "run", run)
+    agent, cid = _asked(monkeypatch, "share this PR with the defect triage group")
+    monkeypatch.setattr(tasks, "current_conversation", lambda: cid)
+
+    async def go_():
+        out = agent.prepare_to_send("please review", to="Defect Triage", channel="teams",
+                                    to_group=True)
+        await asyncio.sleep(0.05)
+        return out
+
+    assert not asyncio.run(go_()).startswith("Sending to")

@@ -128,6 +128,9 @@ def _no_machine_side_effects(monkeypatch):
     # and stay pinned here; tests/test_say_it_once.py turns the live defaults on.
     monkeypatch.setenv("ASTA_PLAN_APPROVAL_FROM_TIER", "1")
     monkeypatch.setenv("ASTA_ASK_BEFORE_NEW_GROUND", "1")
+    # A red CI is re-run once on its own in production; the older lifecycle
+    # tests are about what he is told when it is NOT, and no test may reach gh.
+    monkeypatch.setenv("ASTA_CI_AUTO_RERUN", "0")
     # Telegram is the same door on another channel. It is dead in tests only by
     # accident today (the chat id lives in the isolated database), and a test
     # that stores one would push to his phone for real.

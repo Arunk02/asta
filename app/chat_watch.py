@@ -120,6 +120,37 @@ def note_unopenable(name: str) -> None:
     store.kv_set(_UNOPENABLE_KEY + name.strip().lower()[:80], str(_time.time()))
 
 
+def open_with_him(now: float | None = None, hours: float = 12) -> list[str]:
+    """Today's conversations that are not closed, newest first, one line each —
+    and any chat on his rail that could not be opened, said plainly."""
+    import time as _time
+    now = _time.time() if now is None else now
+    lines: list[str] = []
+    try:
+        with store._connect() as c:
+            rows = c.execute(
+                "SELECT counterpart, status, need, summary, last_activity FROM conv_threads "
+                "WHERE closed_at IS NULL AND last_activity > ? ORDER BY last_activity DESC LIMIT 12",
+                (now - hours * 3600,)).fetchall()
+    except Exception:                                          # noqa: BLE001
+        rows = []
+    for r in rows:
+        who, status, need, summary, at = r[0], r[1], (r[2] or "").strip(), (r[3] or "").strip(), r[4]
+        when = _time.strftime("%H:%M", _time.localtime(float(at or now)))
+        what = (f"waiting on you: {need}" if status == "awaiting_arun" and need
+                else need or summary[:160] or "open")
+        lines.append(f"• {who} ({when}) — {what}")
+    try:
+        rail = json.loads(store.kv_get("chatwatch_rail") or "[]")[:8]
+    except ValueError:
+        rail = []
+    blind = [n for n in rail if isinstance(n, str) and unopenable(n) and not is_furniture(n)]
+    if blind:
+        lines.append("⚠️ Active on your rail but I could not open: " + ", ".join(blind)
+                     + " — check those yourself.")
+    return lines
+
+
 def is_furniture(name: str) -> bool:
     low = (name or "").strip().lower()
     return (not low) or low.endswith(_SELF_MARK) or low in _RAIL_FURNITURE

@@ -80,6 +80,32 @@ def command(text: str) -> tuple[bool, int | None]:
     return True, (int(m.group(1)) if m.group(1) else None)
 
 
+_RERUN = re.compile(
+    r"^\s*(?:(?:yes|ok(?:ay)?|pls|please)[\s,]+)*(?:re-?run|reran|retry|run\s+again)\s*(?:the\s+)?"
+    r"(?:ci|pipeline|build|checks?|failed(?:\s+(?:one|ones|jobs?|run))?|it)?"
+    r"(?:\s+(?:for|on|of)?\s*(?:the\s+)?(?:task\s*)?#?\s*(\d{1,5}))?\s*[.!]*\s*$", re.I)
+
+
+async def rerun(text: str) -> str:
+    """"rerun it", "rerun ci 180" — re-run the failed jobs on the PR it can only
+    mean. "" when there is no such PR."""
+    from . import tasks
+    m = _RERUN.match(text or "")
+    if not m:
+        return ""
+    if m.group(1):
+        tid = int(m.group(1))
+    else:
+        red = [t["id"] for t in store.list_tasks(limit=80) if t["status"] == "pr_ci_failed"]
+        if len(red) != 1:
+            return ""
+        tid = red[0]
+    try:
+        return await tasks.rerun_ci(tid)
+    except (ValueError, RuntimeError) as exc:
+        return f"#{tid}: {exc}"
+
+
 def grant(task_id: int, words: str = "", *, ship: bool = True) -> None:
     prior = granted(task_id) or {}
     store.kv_set(f"task_go:{task_id}", json.dumps(

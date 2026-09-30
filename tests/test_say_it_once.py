@@ -1049,3 +1049,30 @@ def test_a_page_with_no_call_in_it_says_nothing(monkeypatch):
     monkeypatch.setenv("ASTA_INCOMING", "1")
     assert asyncio.run(incoming.on_ring_text("Chat\nVinish Kumar\nBro")) is False
     assert "calling you" in incoming.RING_WATCH_JS and "astaRing" in incoming.RING_WATCH_JS
+
+
+@pytest.mark.parametrize("previous, current, want", [
+    # the 1:1 arrived first, then five groups: it sits sixth and never rose
+    (["A", "B", "Vinish", "C", "D", "E", "F", "G", "H"],
+     ["G", "F", "E", "D", "C", "Vinish", "A", "B", "H"], {"G", "F", "E", "D", "C", "Vinish"}),
+    # nothing moved: only the head (a second message in the top chat moves nothing)
+    (["A", "B", "C"], ["A", "B", "C"], {"A"}),
+    # one message in B
+    (["A", "B", "C", "D"], ["B", "A", "C", "D"], {"B"}),
+    # a brand-new chat appears at the top
+    (["A", "B"], ["New", "A", "B"], {"New"}),
+])
+def test_touched_reads_activity_from_order_alone(previous, current, want):
+    from app import chat_watch
+    assert set(chat_watch.touched(previous, current)) == want
+
+
+def test_a_compact_rail_still_reads_the_burst_one_to_one_first():
+    from app import chat_watch
+    store.save_teams_messages([{"chat": "Vinish Kumar", "sender": "Vinish Kumar", "text": "hi",
+                                "sent_at": time.time() - 3600, "key": "k1", "stamp": ""}])
+    previous = ["A", "B", "Vinish Kumar", "C", "D", "E", "F", "G"]
+    current = ["G", "F", "E", "D", "C", "Vinish Kumar", "A", "B"]
+    rail = [{"name": n, "text": n} for n in current]           # names only, as live
+    first = chat_watch.changed_first(rail, current, previous)
+    assert first[0] == "Vinish Kumar" and set(first) == {"G", "F", "E", "D", "C", "Vinish Kumar"}

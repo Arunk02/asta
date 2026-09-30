@@ -800,7 +800,13 @@ def resolve_workspace(name: str) -> str:
     ):
         if len(candidates) == 1:
             return candidates.pop()
-    return ""
+    # A REPO named where a workspace was expected — the brain names what it sees.
+    # Three code tasks in September died on this ("unknown workspace
+    # 'telikos-activityplanworkflow-service'", "'activity-plan-service'").
+    from . import review
+    owners = {k for k, v in workspace_tools.WORKSPACES.items()
+              if review.resolve_repo(Path(str(v)), name)}
+    return owners.pop() if len(owners) == 1 else ""
 
 
 def _already_live(title: str, prompt: str, workspace: str | None) -> dict | None:

@@ -37,6 +37,13 @@ from . import store
 #: Excel is not installed; Numbers reads and writes .xlsx.
 STAND_INS = {"excel": ("Microsoft Excel", "Numbers"),
              "microsoft excel": ("Microsoft Excel", "Numbers")}
+#: Short names he uses for apps whose real names differ.
+ALIASES = {"vscode": "Visual Studio Code", "vs code": "Visual Studio Code",
+           "code": "Visual Studio Code", "idea": "IntelliJ IDEA", "intellij": "IntelliJ IDEA",
+           "teams": "Microsoft Teams", "word": "Microsoft Word",
+           "powerpoint": "Microsoft PowerPoint", "ppt": "Microsoft PowerPoint",
+           "outlook": "Microsoft Outlook", "pgadmin": "pgAdmin 4", "kafka tool": "Offset Explorer 2",
+           "offset explorer": "Offset Explorer 2", "mongo": "MongoDB Compass"}
 
 DICT_CHARS = 7000
 #: Always kept from a dictionary, whatever the goal says.
@@ -63,7 +70,7 @@ def resolve(name: str) -> tuple[Path, str]:
         real, alt = STAND_INS[key]
         if apps.find_app(real)[0] is None:
             wanted, note = alt, f"{real} isn't installed here, so I used {alt} (it reads .xlsx). "
-    path, _ = apps.find_app(wanted)
+    path, _ = apps.find_app(ALIASES.get(key, wanted) if wanted == name else wanted)
     if path is None:
         raise AppTaskError(f"no app called {name!r} on this Mac")
     return path, note
@@ -191,9 +198,14 @@ async def do(app_name: str, goal: str, *, context: str = "", confirmed: bool = F
     except AppTaskError as exc:
         return f"Not done — {exc}."
     app = path.stem
+    words = dictionary(path, goal)
+    if not words:
+        # No scripting door (IntelliJ, VS Code, Teams, Postman…): the window's
+        # own named controls, clicked by name and checked after every step.
+        return await by_screen(app, goal, context=context, confirmed=confirmed, note=note)
     brief = _BRIEF.format(app=app, goal=goal.strip(),
                           context=f"Context: {context.strip()}\n" if context.strip() else "",
-                          dictionary=dictionary(path, goal) or "(no dictionary published)")
+                          dictionary=words)
     try:
         plan = await _ask_model(brief)
     except Exception as exc:                                   # noqa: BLE001
@@ -231,6 +243,81 @@ async def do(app_name: str, goal: str, *, context: str = "", confirmed: bool = F
     return "Not done."
 
 
+_SCREEN_BRIEF = """You drive the macOS app "{app}" by its on-screen controls, for Arun.
+
+His ask: {goal}
+{context}
+What is on screen in {app} right now (accessibility tree, by name):
+{seen}
+
+Write the steps. Each step is one of:
+  {{"do":"menu","target":"Menu > Item > Sub item","expect":"..."}}
+  {{"do":"click","target":"button \"Name\"","expect":"..."}}
+  {{"do":"type","target":"text to type","expect":"..."}}
+  {{"do":"key","target":"return | escape | tab","expect":"..."}}
+Targets are NAMES you can see above (or standard menu paths), never coordinates.
+"expect" says what must be true afterwards: "exists: <name>", "gone: <name>" or
+"window: <title>". The LAST step must have an expect. Prefer menus over clicks.
+Never type passwords or secrets. If the ask would delete, discard, reset or quit
+anything, set "destructive" true. If something essential is missing, leave
+"steps" empty and ask ONE short question.
+
+Reply with ONLY this JSON:
+{{"steps":[],"changes":"one line: what this does","destructive":false,"question":""}}"""
+
+_SCREEN_DESTRUCTIVE = re.compile(r"\b(delete|remove|discard|quit|force|reset|drop|erase|"
+                                 r"revert|rollback|close without)\b", re.I)
+
+
+async def by_screen(app: str, goal: str, *, context: str = "", confirmed: bool = False,
+                    note: str = "") -> str:
+    """A task in an app with no scripting door — by its named controls."""
+    from . import apps, screen
+    if not screen.enabled():
+        return f"Not done — {app} can only be driven on screen, and ASTA_SCREEN is off."
+    try:
+        await apps.open_app(app)
+    except Exception:                                          # noqa: BLE001
+        pass                                # already open is fine; look() says if not
+    error = ""
+    for attempt in (1, 2):
+        try:
+            seen = await screen.look(app)
+        except screen.ScreenError as exc:
+            return f"Not done — {exc}."
+        brief = _SCREEN_BRIEF.format(app=app, goal=goal.strip(), seen=seen[:6000],
+                                     context=f"Context: {context.strip()}\n" if context.strip() else "")
+        if error:
+            brief += f"\n\nThe last attempt failed: {error[:500]}\nLook again and fix the steps."
+        try:
+            plan = await _ask_model(brief)
+        except Exception as exc:                               # noqa: BLE001
+            return f"Not done — I couldn't work out the steps in {app}: {exc}"
+        if (plan.get("question") or "").strip() and not plan.get("steps"):
+            return f"Before I do it in {app}: {plan['question'].strip()}"
+        raw = [s for s in plan.get("steps") or [] if isinstance(s, dict)]
+        risky = bool(plan.get("destructive")) or any(
+            _SCREEN_DESTRUCTIVE.search(str(s.get("target") or "")) for s in raw)
+        if risky and not confirmed:
+            _record(app, goal, {**plan, "script": json.dumps(raw)}, "needs yes", "")
+            return (f"{note}This would {plan.get('changes') or 'remove or discard something'} "
+                    f"in {app} — that can't be undone. Say yes and I'll go ahead.")
+        steps = [screen.Step(**{k: v for k, v in s.items() if k in ("do", "target", "expect", "window")})
+                 for s in raw]
+        try:
+            out = await screen.follow(app, steps, why=goal)
+        except (screen.ScreenError, TypeError) as exc:
+            error = str(exc)
+            if attempt == 2:
+                _record(app, goal, {**plan, "script": json.dumps(raw)}, "failed", error)
+                return f"Not done in {app} — {error[:300]}"
+            continue
+        _record(app, goal, {**plan, "script": json.dumps(raw)}, "done", " → ".join(out["steps"]))
+        return (f"{note}Done in {app} on screen: {(plan.get('changes') or goal).rstrip('.')}. "
+                f"Each step checked: {' → '.join(out['steps'])[:300]}")
+    return "Not done."
+
+
 def _record(app: str, goal: str, plan: dict, outcome: str, detail: str) -> None:
     store.record_outcome("app_task", outcome, subject=app[:80],
                          detail=json.dumps({"goal": goal[:200], "changes": plan.get("changes", ""),
@@ -241,9 +328,13 @@ def _record(app: str, goal: str, plan: dict, outcome: str, detail: str) -> None:
 
 #: Apps he refers to by a short name. Used to spot "…in numbers", "open word and…".
 _APP_WORDS = ("excel", "numbers", "word", "powerpoint", "keynote", "pages", "outlook",
-              "chrome", "notes", "reminders", "calendar", "safari")
+              "chrome", "notes", "reminders", "calendar", "safari", "intellij", "idea",
+              "vs code", "vscode", "teams", "postman", "pgadmin", "spotify", "mail",
+              "offset explorer", "mongo")
 _DOING = re.compile(r"\b(add|insert|create|make|write|put|fill|sort|rename|format|type|"
-                    r"change|update|set|move|copy|paste|highlight|bold|new|append|draft)\b", re.I)
+                    r"change|update|set|move|copy|paste|highlight|bold|new|append|draft|"
+                    r"open|show|find|search|run|go\s+to|navigate|click|select|build|"
+                    r"refresh|reload|play|pause|export|save|send|reply)\b", re.I)
 _APP_RE = re.compile(r"\b(" + "|".join(_APP_WORDS) + r")\b", re.I)
 
 
@@ -255,6 +346,9 @@ def asks_inside_an_app(text: str) -> bool:
     if not m:
         return False
     rest = t[:m.start()] + t[m.end():]
+    # The verb that opens the app is not the task: "open word" is only a window.
+    rest = re.sub(r"^\W*(?:(?:can|could|please|pls)\s+(?:you\s+)?)?(?:open|launch|start|go\s+to|in|on)\b",
+                  "", rest.strip(), flags=re.I)
     return bool(_DOING.search(rest))
 
 

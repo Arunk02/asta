@@ -3102,6 +3102,29 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                 await sink.send({"type": "done", "tools": []})
             return None
 
+    # A code walkthrough: "walk me through task 126", then next / back / questions
+    # / notes / done — see app/walkthrough.py. Handled before the staged-draft
+    # check, which would otherwise read "next" as feedback on a draft. A plain
+    # yes/send/no while a colleague's draft is waiting still goes to the draft.
+    from . import walkthrough
+    wt_target = walkthrough.wants_to_start(user_text)
+    if wt_target or walkthrough.get(cid) or walkthrough._APPLY_LATER.search(user_text or ""):
+        waiting = loop.awaiting(cid)
+        for_the_draft = waiting and (_affirmation(user_text)[0] or _DECLINE.match(user_text or ""))
+        if not for_the_draft:
+            if wt_target:
+                await sink.send({"type": "note", "text": "🧭 Reading the change…"})
+                reply = await walkthrough.start(cid, wt_target)
+            else:
+                reply = (await walkthrough.apply_later(cid, user_text)
+                         or await walkthrough.handle(cid, user_text))
+            if reply:
+                frontdesk.record("walkthrough", (user_text or "")[:60])
+                await sink.send({"type": "delta" if channel == "web" else "note", "text": reply})
+                if channel == "web":
+                    await sink.send({"type": "done", "tools": []})
+                return None
+
     # A drafted outward send is waiting on "can I send this?" — his next message is
     # the answer. A bare yes sends it (via the model's real send tool, so the send
     # itself still runs through that tool's own rules); anything else is revision.

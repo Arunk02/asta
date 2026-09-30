@@ -149,7 +149,18 @@ def resolve_repo(root: Path, repo: str) -> str:
         if _squash(name) == want or _squash(name).endswith(want):
             return name
     close = difflib.get_close_matches(want, {_squash(n): n for n in clones}, n=1, cutoff=0.8)
-    return {_squash(n): n for n in clones}[close[0]] if close else ""
+    if close:
+        return {_squash(n): n for n in clones}[close[0]]
+    # "activity-plan-service" for telikos-activityplanworkflow-service: every word
+    # that carries meaning is in exactly one repo's name.
+    words = [w for w in re.split(r"[^a-z0-9]+", repo.split("/")[-1].lower())
+             if w and w not in _FILLER]
+    hits = [n for n in clones if words and all(w in _squash(n) for w in words)]
+    return hits[0] if len(hits) == 1 else ""
+
+
+#: Words in a repo name that say nothing about which repo it is.
+_FILLER = {"service", "svc", "telikos", "repo", "the", "app", "api"}
 
 
 def _repo_dir(workspace: str, repo: str = "") -> Path:

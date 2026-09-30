@@ -136,10 +136,78 @@ def yesterday_line(cutoff: float) -> str:
     return "Yesterday: " + ", ".join(bits) + "."
 
 
+def readiness(now: float | None = None) -> str:
+    """One line: can he rely on Asta today? Said before anything else in the
+    brief, so a broken reader or a used-up model is known at 9, not at 3."""
+    from . import answers, attention, claude_cli, loop, scorecard
+    now = time.time() if now is None else now
+    bad: list[str] = []
+    good: list[str] = []
+    limited = claude_cli.limited_until(now)
+    if limited:
+        bad.append("Claude is limited until " + time.strftime("%H:%M", time.localtime(limited)))
+    for source, name in (("teams-chat", "Teams"), ("outlook", "Outlook")):
+        seen = attention.last_scrape(source)
+        if not seen:
+            continue
+        age = (now - seen) / 60
+        (good if age < 30 else bad).append(
+            f"{name} read {int(age)} min ago" if age >= 30 else f"{name} ✓")
+    try:
+        cv = scorecard.conversations(now - 86400, now)
+        if cv["model_share"] is not None:
+            share = cv["model_share"]
+            (good if share >= 0.9 else bad).append(
+                f"reader {share:.0%} by the model" + ("" if share >= 0.9 else " (rest by rules)"))
+    except Exception:                                          # noqa: BLE001
+        pass
+    waiting = len(answers._load_queue()) + (1 if loop.awaiting(answers.phone_conversation()) else 0)
+    if waiting:
+        bad.append(f"{waiting} decision(s) waiting on you")
+    head = "✅ Ready" if not bad else "⚠️ Not fully ready"
+    return f"{head}: " + " · ".join(bad + good) if (bad or good) else ""
+
+
+def learned_line(since: float) -> str:
+    """What Asta learned since `since`, in one line — so the learning is
+    something he can see, not a claim. Skills from finished work, rules he
+    agreed to, and how many of his decisions the ledger recorded."""
+    def rows(sql: str, *args) -> list:
+        try:
+            with store._connect() as conn:
+                return list(conn.execute(sql, args))
+        except Exception:                                      # noqa: BLE001
+            return []
+    skills = [r[0] for r in rows("SELECT subject FROM outcomes WHERE kind='skill' "
+                                 "AND outcome='written' AND created_at >= ?", since)]
+    rules = [r[0] for r in rows("SELECT words FROM rules WHERE created_at >= ?", since)]
+    decisions = (rows("SELECT count(*) FROM experience WHERE at >= ? "
+                      "AND coalesce(json_extract(features,'$.backfilled'),0)=0", since)
+                 or [(0,)])[0][0]
+    bits = []
+    if skills:
+        bits.append(f"{len(skills)} skill(s) from finished work ("
+                    + ", ".join(" ".join(sk.split("-")[:8]) for sk in skills[:2]) + ")")
+    if rules:
+        bits.append(f"{len(rules)} rule(s) you set")
+    if decisions:
+        bits.append(f"{decisions} of your decisions recorded")
+    return ("🧠 Learned since yesterday: " + " · ".join(bits)) if bits else ""
+
+
 async def morning_brief() -> str:
     day = dt.date.today().strftime("%a %d %b")
     cutoff = time.time() - 24 * 3600
-    parts = [f"☀️ Morning brief — {day}", yesterday_line(cutoff)]
+    parts = [f"☀️ Morning brief — {day}"]
+    try:
+        ready = readiness()
+    except Exception:                                          # noqa: BLE001
+        ready = ""
+    try:
+        learned = learned_line(cutoff)
+    except Exception:                                          # noqa: BLE001
+        learned = ""
+    parts += [ready, learned, yesterday_line(cutoff)]
     parts = [p for p in parts if p]
 
     done_tasks = _finished_since(store.list_tasks(), "finished_at", cutoff)
@@ -193,7 +261,7 @@ async def morning_brief() -> str:
     if problems:
         parts.append("🩺 Needs attention: " + ", ".join(problems))
 
-    if len(parts) == 1:
+    if len(parts) == 1 + bool(ready) + bool(learned):
         parts.append("Quiet night — nothing finished, nothing waiting, no reminders today.")
     return "\n\n".join(parts)
 

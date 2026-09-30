@@ -266,10 +266,31 @@ def _bare(new: list[str]) -> bool:
     return bool(bodies) and all(_BARE.match(b) and not _HAS_A_HANDLE.search(b) for b in bodies)
 
 
+#: "Bro", "Hi", "Arun?", "??" — a ping. It names nothing: not a call, not a time.
+_PING = re.compile(r"^\W*(?:(?:hi+|hey+|hello|helo|bro|da|sir|there|"
+                   r"good\s+(?:morning|afternoon|evening)|arun\w*(?:\s+k)?)\W*){0,3}$", re.I)
+
+
+def is_ping(new: list[str]) -> bool:
+    bodies = [re.sub(r"^[^:\n]{1,60}:\s", "", str(x)).strip() for x in new or []]
+    bodies = [b for b in bodies if b]
+    return bool(bodies) and all(_PING.match(b) for b in bodies)
+
+
 def settle(d: dict, item: dict) -> dict:
     """His rules the model does not reliably keep, applied after it reads."""
     if d.get("source") != "model" or not _bare(item.get("new") or []):
         return d
+    if is_ping(item.get("new") or []) and not item.get("handled_by_him"):
+        # 30 Sep, Vinish: "Bro". The reader filled in a need from the earlier
+        # conversation, and he was sent "Sure — is this about equipment
+        # container MNBU0654520 dual-state discrepancy, or something else?" His
+        # words: "don't respond blindly — if he said bro, you are answering the
+        # old conversation." A ping says nothing about its subject. It is an
+        # opener; whether they are WAITING on something is decided from the
+        # thread's own open need (chat_watch), never guessed at them.
+        return {**d, "state": "opener", "subject": "unclear", "question": "", "guess": "",
+                "reply": "", "settled": "a ping: no subject, no guess"}
     if d.get("state") == "ask" and d.get("subject") != "unclear":
         out = {**d, "subject": "unclear", "settled": "bare message: subject unclear"}
         if not safe_question(out.get("question") or "") and out.get("guess"):
@@ -316,14 +337,23 @@ _PROMISE = re.compile(r"\b(?:i'?ll|i\s+will|will\s+do|on\s+it|happy\s+to|sure[,!
                       r"we'?ll|arun\s+will|done\b)", re.I)
 
 
-def safe_question(q: str) -> str:
+def safe_question(q: str, who: str = "") -> str:
     """The model's clarifying question, if it is fit to send in his name, else ''.
 
     It goes out without his approval, so it has to be exactly what the exception
-    allows: a short question that promises nothing.
+    allows: a short question that promises nothing — and one that is addressed
+    TO them. "Do your logs match what Vinish found…?" was sent to Vinish, as
+    Arun (30 Sep): a question written for Arun, about the person it went to.
     """
     q = " ".join((q or "").split())
     if not (8 <= len(q) <= 220) or not q.endswith("?") or _PROMISE.search(q):
+        return ""
+    first = (who or "").split()[0] if (who or "").split() else ""
+    if first and len(first) > 2 and re.search(
+            rf"\b(?:what|that|as|like)\s+{re.escape(first)}\b|\b{re.escape(first)}(?:'s)?\s+"
+            rf"(?:found|said|sent|shared|meant|asked|finding|message|wants?|is|was|has)\b", q, re.I):
+        return ""
+    if re.search(r"\b(?:arun|he|she|they)\s+(?:should|needs?\s+to|wants?|asked)\b", q, re.I):
         return ""
     return q
 

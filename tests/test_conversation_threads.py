@@ -142,7 +142,8 @@ def test_the_model_answer_is_read_even_wrapped_in_a_code_fence(monkeypatch):
                 '"closing_confidence":0.1,"summary":"X asked about 88271","entities":["88271"],'
                 '"continues":null}]}\n```')
     monkeypatch.setattr(understand, "_call", call)
-    out = asyncio.run(understand.read([_item()]))
+    # A real ask: a bare "hello" is a ping, which is an opener whatever the model says.
+    out = asyncio.run(understand.read([_item(new=("can you check 88271",))]))
     assert out["teams:X"]["state"] == "ask" and out["teams:X"]["source"] == "model"
 
 

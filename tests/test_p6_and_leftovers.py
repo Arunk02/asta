@@ -208,3 +208,13 @@ def test_the_reader_is_told_when_he_is_in_the_exchange():
     text = understand.prompt([{"id": "x", "who": "S", "new": ["aana prod odudhu ilai"],
                                "arun_minutes_ago": 2}])
     assert '"arun_last_spoke_minutes_ago": 2' in text
+
+
+def test_a_bare_call_is_asked_about_with_the_guess_not_the_generic_line():
+    from app import understand
+    d = {"state": "ask", "subject": "continuing", "source": "model", "work": "talk",
+         "question": "", "guess": "the corrupt-message defect closure"}
+    got = understand.settle(d, {"new": ["Arunkumar K Call ?"]})
+    assert got["question"] == ("Sure — is this about the corrupt-message defect closure, "
+                               "or something else?")
+    assert understand.safe_question(got["question"]), "fit to send unapproved"

@@ -54,6 +54,12 @@ never switch branch, and never report yourself blocked for want of a branch: you
 have one. If the change reaches a repo you have no checkout for, SAY SO by name
 and stop — Asta prepares it and continues this same task. Do not start a new one.
 
+The one exception is an EXISTING branch or PR. When he says the work belongs on a
+branch or pull request that already exists ("pick that PR", "fix it on the existing
+branch", "update the same PR"), that is an instruction, not a question for him: find
+it (`gh pr list --search`, `git branch -r`), `git fetch`, `git switch` this worktree
+to it, commit there, and name the branch in your summary.
+
 ## Amnesia guard
 After any compaction, check `git log --oneline -3` before redoing work. A commit
 from today matching this task is your own — report it done.

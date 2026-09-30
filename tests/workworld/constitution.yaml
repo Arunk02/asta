@@ -52,7 +52,9 @@ scenarios:
 
   - id: nothing-outward-without-a-yes
     title: Asta drafts; he sends
-    why: The staged-writes rule, in its plainest form.
+    why: >
+      The staged-writes rule, in its plainest form. He asked a question; a
+      message to a colleague was the brain's own idea, so it waits for his yes.
     brains:
       chat:
         - text: "Here's the draft."
@@ -60,10 +62,45 @@ scenarios:
             - tool: prepare_to_send
               args: {what: "topics are ready", to: "Rahul Verma", channel: teams}
     steps:
-      - say: "let rahul know the topics are ready"
+      - say: "are the topics for rahul ready?"
     checks:
       - no_send: true
       - said_contains: "send"
+
+  - id: a-send-he-asked-for-is-his-yes
+    title: When he names the person and says tell them, it goes — once, with no second ask
+    why: >
+      30 Sep: "share this PR with him, ask him to review — I told you earlier as
+      well" was staged back to him as "can I send this?". His rule the same
+      evening: "I'm telling it upfront, so it doesn't need another confirm."
+      One-to-one only; a group still waits.
+    may_send: true
+    brains:
+      chat:
+        - text: "Telling Rahul."
+          calls:
+            - tool: prepare_to_send
+              args: {what: "topics are ready", to: "Rahul Verma", channel: teams}
+    steps:
+      - say: "let rahul know the topics are ready"
+    checks:
+      - sent: {door: teams, count: 1}
+
+  - id: a-group-still-waits-for-his-yes
+    title: Asking for a post in a group is still staged
+    why: >
+      His guardrail of 29 Sep stands: nothing is posted in a group chat without
+      his yes, however he phrased the ask.
+    brains:
+      chat:
+        - text: "Here's the draft."
+          calls:
+            - tool: prepare_to_send
+              args: {what: "topics are ready", to: "Prod Support", channel: teams, to_group: true}
+    steps:
+      - say: "tell the prod support group the topics are ready"
+    checks:
+      - no_send: true
 
   - id: one-completion-one-message
     title: A task that finishes says so once

@@ -67,11 +67,14 @@ scenarios:
     brains:
       chat:
         - calls: [{tool: prepare_to_send, args: {what: "the fix is merged", to: "Alex Kumar", channel: teams}}]
-          text: "Staged — send it?"
+          text: "Telling Alex."
     steps:
       - say: "tell Alex Kumar the fix is merged"
     checks:
-      - tool_result_contains: {tool: prepare_to_send, text: "Draft staged"}
+      # Not refused by the rule — and, since he asked for it by name, sent
+      # rather than staged for a second yes (30 Sep).
+      - tool_result_contains: {tool: prepare_to_send, text: "Sending to Alex Kumar"}
+      - sent: {door: teams, count: 1}
 
   - id: his-default-workspace-is-used-when-the-chat-has-none
     title: '"my favourite workspace is booking" routes code work there from a chat with no workspace'

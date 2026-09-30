@@ -3148,6 +3148,24 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                 await sink.send({"type": "done", "tools": []})
             return None
 
+    # His go-ahead on a code task — "do the change and create PR", "push and
+    # raise PR", "approval" — acted on from the task table, before a waiting
+    # draft can read it as feedback and before any brain is asked to find an
+    # approve tool (30 Sep, #178: five messages, nothing pushed). See app/go.py.
+    from . import go
+    if go.enabled() and not _TASK_CMD.match(user_text or ""):
+        is_go, wanted_task = go.command(user_text or "")
+        if is_go:
+            note = await go.act(user_text or "", wanted_task)
+            if note:
+                frontdesk.record("command", "go")
+                store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
+                store.add_ui_message(cid, "assistant", note, {"via": "go", "channel": channel})
+                await sink.send({"type": "note", "text": note})
+                if channel == "web":
+                    await sink.send({"type": "done", "tools": []})
+                return None
+
     # A drafted outward send is waiting on "can I send this?" — his next message is
     # the answer. A bare yes sends it (via the model's real send tool, so the send
     # itself still runs through that tool's own rules); anything else is revision.
@@ -3199,9 +3217,15 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                       + (f" to {staged['to']}" if staged.get("to") else "")
                       + f":\n\n{staged.get('what', '')}\n\nAfter it's sent, confirm in one line.")
         else:
+            # "Revise accordingly" is one reading. "enable MX … in develop and
+            # 3.1.6" typed at a waiting draft was a new instruction, and the
+            # draft was re-staged as a label of itself (30 Sep).
             prompt = (f"Arun did NOT approve sending the draft as-is. His feedback:\n"
                       f"{user_text.strip()}\n\nRevise accordingly. When it's ready to send "
-                      f"again, stage it with prepare_to_send; otherwise just continue the work.")
+                      f"again, stage it with prepare_to_send; otherwise just continue the work. "
+                      f"If what he typed is a new instruction rather than a change to the "
+                      f"draft, do that instead and do NOT stage the draft again — it is "
+                      f"dropped unless he asks for it.")
         return _start_turn(conv, prompt, sink, channel)
 
     # Asta offered to go do something ("CI failed — want me to analyse?"). His yes

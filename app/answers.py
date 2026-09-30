@@ -144,6 +144,12 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
     cid = phone_conversation()
     if not cid or not (reply or "").strip() or not chat:
         return False
+    more = followups(task_id)
+    if more:
+        first = (who or "They").split()[0]
+        said = "; ".join(f"“{m[:200]}”" for m in more[-3:])
+        note = ((note + "\n") if note else "") + (
+            f"⚠️ {first} added while I was on it: {said} — check the reply covers it.")
     intent = {"kind": "send", "what": reply.strip(), "to": chat, "channel": "teams",
               "to_group": bool(group), "task_id": task_id, "thread": thread,
               "who": who, "need": need, "analysis": analysis, "note": note,
@@ -346,6 +352,69 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
                          chat=meta.get("chat") or t.get("teams_chat", ""),
                          group=bool(meta.get("group")), analysis=analysis, reply=reply,
                          task_id=task_id, thread=meta.get("thread", ""))
+
+
+#: How long after an answer is finished a further message still belongs to it.
+FOLLOWUP_SECONDS = float(os.environ.get("ASTA_ANSWER_FOLLOWUP_MINUTES", "45")) * 60
+
+
+def _meta(task_id: int) -> dict:
+    try:
+        d = json.loads(store.kv_get(f"answer_meta:{task_id}") or "{}")
+    except ValueError:
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def followups(task_id: int | None) -> list[str]:
+    if not task_id:
+        return []
+    try:
+        d = json.loads(store.kv_get(f"answer_followups:{task_id}") or "[]")
+    except ValueError:
+        return []
+    return [str(x) for x in d if str(x).strip()] if isinstance(d, list) else []
+
+
+async def note_followup(thread: str, who: str, text: str, now: float | None = None) -> int | None:
+    """They said more while their answer was being worked out, or was waiting
+    for his "send". Kept with that answer, so it reaches him WITH the draft.
+
+    30 Sep: Sankalp asked for Mexico as a one-click country, then added "enable
+    in uat and pp both". The second message found nothing to check, went
+    nowhere, and the draft and the code task that followed were built for prod.
+    Returns the task it was kept with, or None."""
+    from . import loop, notify
+    text = " ".join((text or "").split())
+    if not thread or not text:
+        return None
+    now = time.time() if now is None else now
+    for t in store.list_tasks(limit=40):
+        meta = _meta(t["id"])
+        if meta.get("thread") != thread:
+            continue
+        live = t["status"] in ("running", "queued", "paused")
+        recent = t["status"] == "done" and now - float(t.get("finished_at") or 0) < FOLLOWUP_SECONDS
+        if not (live or recent):
+            continue
+        if now - float(t.get("created_at") or 0) < 20 or text[:80] in " ".join((t.get("prompt") or "").split()):
+            return None                     # the message that started it, not a follow-up
+        kept = followups(t["id"])
+        if text in kept:
+            return t["id"]
+        store.kv_set(f"answer_followups:{t['id']}", json.dumps((kept + [text[:400]])[-5:]))
+        store.record_outcome("answer", "followup", subject=str(t["id"]),
+                             detail=f"{who}: {text}"[:200])
+        cid = phone_conversation()
+        staged = loop.awaiting(cid) if cid else None
+        if staged and staged.get("task_id") == t["id"]:
+            # The draft in front of him was written before this. Say so, once.
+            first = (who or "They").split()[0]
+            await notify.notify(f"↪︎ {first} added, after that draft was written: “{text[:300]}”. "
+                                f"It isn't covered above — tell me what to change, or say send.",
+                                "answer", urgency="direct", considered=True)
+        return t["id"]
+    return None
 
 
 def remember_meta(task_id: int, *, who: str, need: str, chat: str, group: bool,

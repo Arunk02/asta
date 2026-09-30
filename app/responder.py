@@ -635,6 +635,14 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     # nothing to check it against.
     grounds = f"{context}\n{text}".strip() if context else text
     known, why = familiar(grounds)
+    if not known and reply_to and not is_broadcast(who, grounds) \
+            and os.environ.get("ASTA_ASK_BEFORE_NEW_GROUND", "0").strip().lower() \
+            not in ("1", "true", "on", "yes"):
+        # A colleague is waiting on it, and looking is read-only. "Want me to
+        # look into it?" was one more approval for work that changes nothing —
+        # his words, 30 Sep: "getting too much approval is drag". The offer
+        # stays for what nobody is waiting on (feeds, mail, broadcasts).
+        known, why = True, "a colleague is waiting on it"
     if not known:
         # A handle is permission only when a PERSON handed it over. "IT Service
         # Desk" mails "Incident INC… has been assigned to group OH - TELIKOS" all
@@ -772,6 +780,7 @@ def _waiting_brief(who: str, text: str, context: str, need: str = "",
     if context.strip():
         parts.append("\n\nWhat has already been said with them (continue from it, do not "
                      "ask again for anything already given):\n" + context.strip())
+    parts.append(_said_is_not_proof(who))
     try:
         from . import knowledge
         hits = knowledge.relevant(text, limit=3, at_least=0.5)
@@ -792,6 +801,43 @@ def _waiting_brief(who: str, text: str, context: str, need: str = "",
                      + "\n".join(f"- {p}" for p in shots))
     parts.append(answers.brief_rider(who))
     return "".join(parts)
+
+
+def _latest_finding(who: str, now: float | None = None) -> tuple[int, str]:
+    """(task id, its ANALYSIS) of the newest finished investigation for them today."""
+    import time as _t
+    from . import answers
+    now = _t.time() if now is None else now
+    for t in store.list_tasks(limit=40):
+        if t.get("status") != "done" or now - float(t.get("finished_at") or 0) > 24 * 3600:
+            continue
+        if (answers._meta(t["id"]).get("who") or "").lower() != (who or "").lower():
+            continue
+        analysis, _reply = answers.split(t.get("result") or "")
+        if analysis.strip():
+            return t["id"], analysis.strip()[:1200]
+    return 0, ""
+
+
+def _said_is_not_proof(who: str) -> str:
+    """Old chat is context, never evidence.
+
+    30 Sep, Vinish: asked for "the whole text flow", the investigation read the
+    1:1 chat and handed back the 12:12 message — "the ETA/revalidation update
+    triggered the cancellation" — as the answer. That line had been corrected
+    an hour later from the logs (it was the price-update save). His rule: old
+    conversation is context, not proof — think, check, decide."""
+    tid, finding = _latest_finding(who)
+    out = ("\n\nWhat was SAID in the chat is not what is TRUE. An earlier message — one of "
+           "Arun's included — may have been corrected since. Before you repeat any earlier "
+           "conclusion, check it against the evidence; where an earlier message and later "
+           "evidence disagree, the evidence wins, and you say plainly that the earlier "
+           "message was superseded rather than quoting it as the answer.")
+    if finding:
+        out += (f"\nThe most recent finished analysis for {who} (task #{tid}) — this, not "
+                f"older chat messages, is where things stand unless you find evidence "
+                f"against it:\n{finding}")
+    return out
 
 
 def line_for(task: dict, who: str, kind: str) -> str:

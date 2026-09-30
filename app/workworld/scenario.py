@@ -133,6 +133,10 @@ async def run(sc: Scenario, seed: int = 0, live: bool = False) -> list[str]:
             # off, and the scenario would quietly test nothing. `setup.env` wins.
             world.use_env({"ASTA_ATTENTION": "1", "ASTA_DELIVERY": "1",
                            "ASTA_ATTENTION_LEARN": "1", "ASTA_PUSH_BUDGET": "20"})
+        # Scenarios state the gate they test. Most were written as "spawn, then
+        # approve" and mean every plan waits; one that tests a small plan going
+        # ahead says so in `setup.env`, which is applied after this and wins.
+        world.use_env({"ASTA_PLAN_APPROVAL_FROM_TIER": "1", "ASTA_GO_AFTER_PLAN_SECONDS": "0"})
         world.assert_sandboxed()
         _apply_setup(sc, world, state)
         # A real brain leg takes a minute or more; a scripted one takes nothing.

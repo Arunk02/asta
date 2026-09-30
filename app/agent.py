@@ -1737,6 +1737,12 @@ def continue_working(next_step: str) -> str:
     return f"Continuing automatically: {next_step or 'next step'}"
 
 
+_LABEL_NOT_MESSAGE = re.compile(
+    r"^(?:a\s+|the\s+)?(?:reply|message|response|draft|update|note|follow[- ]?up)\s+"
+    r"(?:confirming|about|regarding|on|for|to\s+\w+\s+(?:about|confirming|regarding)|"
+    r"explaining|summari[sz]ing|asking|saying\s+that|with)\b", re.I)
+
+
 def prepare_to_send(what: str, to: str = "", channel: str = "chat",
                     to_group: bool = False) -> str:
     """Stage an outward-facing message for Arun to approve BEFORE it is sent.
@@ -1780,6 +1786,14 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
             return (f"Sending to {to} now under permission {allowed.id} "
                     f"({allowed.render()}) — no approval needed. Tell Arun in one line "
                     f"what is going and to whom.")
+    # The message itself, not a label for it. "Reply confirming Mexico
+    # single-click backend status" was staged as the draft to Sankalp (30 Sep)
+    # — one "send" from going out as the message.
+    if _LABEL_NOT_MESSAGE.match(what.strip()) and len(what.strip()) < 140 \
+            and not re.search(r"[.?!]\s|\n", what.strip()):
+        return ("Not staged — that is a description of a message, not the message. "
+                "Pass the exact words to be sent as `what`, or stage nothing if there "
+                "is nothing to send.")
     # Links are repaired here rather than asked for in a prompt. A full stop
     # welded to the end of a URL is what turned a PR link Alex was meant to
     # click into either a 404 or plain text, and "remember not to do that" is

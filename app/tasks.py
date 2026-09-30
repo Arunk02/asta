@@ -289,7 +289,7 @@ _ALREADY_REPORTED = FINAL + ("done",)
 
 # A task is "live" (owns the conversation's attention) while it runs or waits at
 # a gate — that's the window in which a follow-up should augment or redirect it.
-LIVE_STATUSES = ("running", "awaiting_approval")
+LIVE_STATUSES = ("running", "awaiting_approval", "queued")
 
 # Statuses a task can still be WORKED ON from, as opposed to still running.
 #
@@ -545,6 +545,132 @@ def _drain_addenda(task_id: int) -> str:
     store.kv_set(key, "")
     return ("\n\n[Additional instructions Arun added while this was running — "
             "apply these too]\n" + extra)
+
+
+# --- the investigation queue ------------------------------------------------------
+#
+# 30 Sep, his words: "5 people pinging at a time for different issues — you tell
+# me you do only 2 now and the remaining 3 after hours? No, this is not right."
+# Every real ask is worked. What is bounded is how many run AT ONCE (each is a
+# model session reading production); the rest wait their turn, highest priority
+# first, and nothing is ever dropped.
+
+def max_parallel_investigations() -> int:
+    from . import settings
+    try:
+        return max(1, int(settings.effective("ASTA_MAX_PARALLEL_INVESTIGATIONS",
+                                             int(os.environ.get("ASTA_MAX_PARALLEL_INVESTIGATIONS", "3")))))
+    except (TypeError, ValueError):
+        return 3
+
+
+class _Gate:
+    """A priority semaphore: a freed slot goes to the most urgent waiter."""
+
+    def __init__(self) -> None:
+        self.running = 0
+        self.waiting: list = []
+        self._seq = 0
+
+    async def acquire(self, priority: int, task_id: int) -> None:
+        import heapq
+        if self.running < max_parallel_investigations() and not self.waiting:
+            self.running += 1
+            return
+        fut = asyncio.get_running_loop().create_future()
+        self._seq += 1
+        heapq.heappush(self.waiting, (priority, self._seq, task_id, fut))
+        store.update_task(task_id, status="queued")
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                self.release()                 # the slot was handed over: pass it on
+            else:
+                self.waiting = [w for w in self.waiting if w[3] is not fut]
+                heapq.heapify(self.waiting)
+            raise
+
+    def release(self) -> None:
+        import heapq
+        while self.waiting:
+            *_, fut = heapq.heappop(self.waiting)
+            if not fut.done():
+                fut.set_result(True)           # the slot moves to the waiter
+                return
+        self.running = max(0, self.running - 1)
+
+    def queued_ids(self) -> list[int]:
+        return [w[2] for w in sorted(self.waiting)]
+
+
+_gate = _Gate()
+
+
+@contextlib.asynccontextmanager
+async def investigation_slot(task_id: int):
+    try:
+        priority = int(store.kv_get(f"task_priority:{task_id}") or 2)
+    except ValueError:
+        priority = 2
+    await _gate.acquire(priority, task_id)
+    try:
+        yield
+    finally:
+        _gate.release()
+
+
+def queue_summary() -> dict:
+    """What is running, waiting its turn, and paused on a limit — for "brain
+    status", the limit message and the morning line."""
+    rows = store.list_tasks(limit=200)
+    return {"running": sum(1 for t in rows if t["status"] == "running"),
+            "queued": sum(1 for t in rows if t["status"] == "queued"),
+            "paused": sum(1 for t in rows if t["status"] == "paused"),
+            "queued_ids": [t["id"] for t in rows if t["status"] == "queued"],
+            "paused_ids": [t["id"] for t in rows if t["status"] == "paused"]}
+
+
+_OVERRIDE_KEY = "brain_override"
+
+
+def brain_override() -> str:
+    """The brain he moved the work to ("use copilot"), while it holds."""
+    try:
+        o = _json.loads(store.kv_get(_OVERRIDE_KEY) or "{}")
+    except ValueError:
+        return ""
+    return o.get("brain", "") if float(o.get("until") or 0) > time.time() else ""
+
+
+async def use_brain(brain: str, until: float | None = None) -> str:
+    """"use copilot" / "use claude": new work goes to that brain until the
+    other one renews, and everything paused on a limit carries on there now."""
+    from . import agent as agent_mod
+    ex = {"claude": "claude", "copilot": "copilot"}.get((brain or "").lower())
+    if not ex:
+        return "I can move work to *claude* or *copilot* (the local model can't run tasks)."
+    spec = "claude_cli" if ex == "claude" else "copilot"
+    if not agent_mod.available(spec):
+        return f"{ex.title()} isn't installed here."
+    if agent_mod.quota_down(spec) or (ex == "claude" and claude_cli.limited_until()):
+        from . import brains
+        why = (f"its monthly quota is out until {brains.copilot_status()['resets_on']}"
+               if ex == "copilot" else "its session limit is reached right now")
+        return f"Can't move to {ex.title()} — {why}."
+    until = until or (time.time() + 12 * 3600)
+    store.kv_set(_OVERRIDE_KEY, _json.dumps({"brain": ex, "until": until}))
+    moved = []
+    for tid in queue_summary()["paused_ids"]:
+        try:
+            await resume_task(tid, switch_to=ex)
+            moved.append(f"#{tid}")
+        except Exception:                                      # noqa: BLE001
+            continue
+    store.record_outcome("brains", "switched", subject=ex, detail=", ".join(moved))
+    return (f"✅ New work goes to {ex.title()} now"
+            + (f"; resumed there: {', '.join(moved)}" if moved else "")
+            + ". Say “use claude” / “use copilot” to move it again.")
 
 
 def _ws_lock(workspace: str | None) -> asyncio.Semaphore:
@@ -832,7 +958,7 @@ def _already_live(title: str, prompt: str, workspace: str | None) -> dict | None
 def spawn(title: str, prompt: str, kind: str = "analysis",
           workspace: str | None = None, teams_chat: str = "",
           executor: str = "", context_from: int | None = None,
-          pipeline: str = "") -> dict:
+          pipeline: str = "", priority: int = 2) -> dict:
     """Create the task row and fire the worker; returns immediately.
 
     executor:     '' = auto (copilot, or claude while copilot's quota is down).
@@ -870,6 +996,9 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
         # the more annoying failure.
         return same
     t = store.create_task(title, kind, prompt, workspace or None, teams_chat)
+    # Where it stands in the investigation queue: 0 = he asked for it himself,
+    # 1 = urgent, then the attention ranks. Lower goes first.
+    store.kv_set(f"task_priority:{t['id']}", str(int(priority)))
     from . import routing
     if routing.enabled():
         # "use claude" in the ask itself names the brain; "cheap"/"max" the tier.
@@ -1173,7 +1302,7 @@ def _resolve_executor(task_id: int) -> str:
     ex = store.kv_get(f"task_executor:{task_id}") or ""
     if ex in _executor_names():
         return ex
-    ex = os.environ.get("ASTA_EXECUTOR", "copilot")
+    ex = brain_override() or os.environ.get("ASTA_EXECUTOR", "copilot")
     if ex == "copilot" and _copilot_quota_down() and claude_cli.available():
         ex = "claude"
     store.kv_set(f"task_executor:{task_id}", ex)
@@ -2106,8 +2235,9 @@ async def _worker(task_id: int) -> None:
                 else:
                     result = await _run_simple(task_id, t, prompt)
         else:
-            store.update_task(task_id, started_at=time.time())
-            result = await _run_simple(task_id, t, prompt)
+            async with investigation_slot(task_id):
+                store.update_task(task_id, status="running", started_at=time.time())
+                result = await _run_simple(task_id, t, prompt)
         if (store.get_task(task_id) or {}).get("status") in FINAL:
             return   # rejected while it ran — drop the result, stay quiet
         if t["kind"] == "teams_draft":
@@ -2292,25 +2422,65 @@ async def _pause_task(task_id: int, t: dict, exc: _LimitPaused) -> None:
     else:
         store.kv_del(f"task_resume_at:{task_id}")
     store.update_task(task_id, status="paused", error=exc.raw[:500])
-    alts = _switchable_brains(exc.brain)
-    switch_line = (f"\nOr reply “task {task_id} use {alts[0]}” to switch brains and carry "
-                   f"on now (a fresh session on {alts[0]} — it rebuilds context from the "
-                   f"repo)." if alts else "")
-    if t.get("kind") != "code":
-        # Nothing pinned to pick up: an analysis or a draft simply runs again.
-        switch_line = ""
-        lead = (f"I'll run it again on {exc.brain} at ~{when}. Say “resume task {task_id}” "
-                f"to try sooner." if when
-                else f"Say “resume task {task_id}” when {exc.brain} is back and I'll run it again.")
-    elif when:
-        lead = (f"Nothing is lost. I'll auto-resume on {exc.brain} at ~{when} and pick up "
-                f"exactly where it stopped. Say “resume task {task_id}” to try sooner.")
+    await _tell_the_limit_once(exc.brain, reset_at)
+    return
+
+
+def _gather_seconds() -> float:
+    try:
+        return float(os.environ.get("ASTA_LIMIT_NOTICE_GATHER_SECONDS", "20") or 20)
+    except ValueError:
+        return 20.0
+
+
+async def _tell_the_limit_once(brain: str, reset_at: float | None) -> None:
+    """ONE message when a brain runs out — everything paused and waiting, when
+    it renews, and exactly what the other brain can do. It was one message per
+    paused task, each offering a switch that was sometimes not possible."""
+    from . import brains, notify
+    key = f"limit_notice:{brain}"
+    try:
+        if time.time() - float(store.kv_get(key) or 0) < 15 * 60:
+            return                            # already told; the list is in "brain status"
+    except ValueError:
+        pass
+    store.kv_set(key, str(time.time()))
+    # Tasks hit the same wall seconds apart: gather them, then say it once.
+    await asyncio.sleep(_gather_seconds())
+    q = queue_summary()
+    paused = []
+    for tid in q["paused_ids"][:6]:
+        row = store.get_task(tid) or {}
+        paused.append(f"#{tid} {(row.get('title') or '')[:50]}")
+    when = (_dt.datetime.fromtimestamp(reset_at).strftime("%-I:%M%p").lower()
+            if reset_at else "")
+    cp = brains.copilot_status()
+    first = q["paused_ids"][0] if q["paused_ids"] else None
+    sooner = f" Say “resume task {first}” to try sooner." if first else ""
+    if brain == "copilot":
+        head = (f"⏸ Copilot's monthly quota is out — it renews {cp['resets_on']}.")
     else:
-        lead = (f"Nothing is lost — the pinned session is kept. Say “resume task {task_id}” "
-                f"when {exc.brain} is back and I'll pick up exactly where it stopped.")
-    await notify.notify(
-        f"⏸ Task #{task_id} paused — {exc.brain} hit its usage limit"
-        + (f" (renews ~{when})" if when else "") + ".\n" + lead + switch_line, "task")
+        head = "⏸ Claude hit its session limit" + (f" — it resets {when}." if when else ".")
+    if when:
+        renew = ("I'll run it again at " if len(q["paused_ids"]) <= 1 else
+                 "I'll run them again at ") + when + "." + sooner
+    else:
+        renew = (f"It won't renew on its own soon — say “resume task {first}” when you want "
+                 f"it picked up." if first else "")
+    other = "claude" if brain == "copilot" else "copilot"
+    if other == "copilot" and cp["out"]:
+        switch = f"Copilot's monthly quota is out until {cp['resets_on']}, so this waits for Claude."
+    elif other == "claude" and claude_cli.limited_until():
+        switch = "Claude is limited too right now."
+    else:
+        switch = f"Say “use {other}” to carry on there now."
+    lines = [head]
+    if paused:
+        lines.append("Nothing lost — paused: " + "; ".join(paused))
+    if q["queued"]:
+        lines.append(f"Waiting their turn: {q['queued']}.")
+    lines += [x for x in (renew, switch) if x]
+    await notify.notify("\n".join(lines), "task", urgency="direct", considered=True)
 
 
 async def resume_task(task_id: int, switch_to: str = "") -> str:

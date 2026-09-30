@@ -118,16 +118,53 @@ class WalkError(RuntimeError):
 
 # --- state ---------------------------------------------------------------------
 
+#: A session nobody has touched for this long is over. 30 Sep: a walkthrough of
+#: task 126 was left open, and an hour later his feedback on a colleague's draft
+#: was answered as a question about the helm file still on screen.
+IDLE_SECONDS = int(os.environ.get("ASTA_WALKTHROUGH_IDLE_MINUTES", "30") or 30) * 60
+
+
 def get(cid: str) -> dict | None:
+    import time
     try:
         s = json.loads(store.kv_get(_KEY + cid) or "null")
     except ValueError:
         return None
-    return s if isinstance(s, dict) else None
+    if not isinstance(s, dict):
+        return None
+    if time.time() - float(s.get("touched") or s.get("started") or 0) > IDLE_SECONDS:
+        store.kv_set(_KEY + cid, "")
+        store.record_outcome("walkthrough", "expired", subject=s.get("target", ""))
+        return None
+    return s
 
 
 def _save(cid: str, s: dict | None) -> None:
+    import time
+    if s:
+        s["touched"] = time.time()
     store.kv_set(_KEY + cid, json.dumps(s) if s else "")
+
+
+def takes(cid: str, text: str, draft_waiting: bool, affirms: bool = False) -> bool:
+    """Is this message for the walkthrough? Starting one always is. Otherwise
+    only while a session is open — and, while a colleague's draft is waiting,
+    only the session's own words that are not also a yes/no to the draft."""
+    if wants_to_start(text) or _APPLY_LATER.search(text or ""):
+        return True
+    if not get(cid):
+        return False
+    if draft_waiting:
+        return is_command(text) and not affirms
+    return True
+
+
+def is_command(text: str) -> bool:
+    """One of the session's own words — the only thing a walkthrough may take
+    while a colleague's draft is waiting for him."""
+    t = (text or "").strip()
+    return bool(_NEXT.match(t) or _BACK.match(t) or _AGAIN.match(t) or _DONE.match(t)
+                or _VOICE_ON.match(t) or _VOICE_OFF.match(t) or _APPLY.match(t) or _LATER.match(t))
 
 
 def notes_for(task_id: int) -> list[dict]:
@@ -347,7 +384,8 @@ async def start(cid: str, target: str, voice: bool = False) -> str:
         return f"Can't start the walkthrough — {exc}."
     except Exception as exc:                                   # noqa: BLE001
         return f"Can't start the walkthrough — {str(exc)[:200]}"
-    s = {"target": target, "title": change["title"], "root": change["root"],
+    import time
+    s = {"target": target, "title": change["title"], "root": change["root"], "started": time.time(),
          "task_id": change["task_id"], "pr": change["pr"], "workspace": change["workspace"],
          "steps": planned["steps"], "cursor": 0, "notes": [], "state": "walking",
          "voice": bool(voice)}

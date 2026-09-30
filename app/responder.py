@@ -42,17 +42,9 @@ def enabled() -> bool:
     return os.environ.get("ASTA_RESPOND", "").strip() not in ("", "0", "false", "no")
 
 
-#: Analyses started per hour, at most. A burst of ten people pinging must not
-#: become ten agentic investigations — that is a bill and a thundering herd, not
-#: attentiveness. Older than the window and the count resets.
-MAX_PER_HOUR = int(os.environ.get("ASTA_RESPOND_MAX_PER_HOUR", "4"))
-
-
-def max_per_hour() -> int:
-    """Tunable by evolution (app/settings.py), and still just MAX_PER_HOUR when
-    nothing has tuned it."""
-    from . import settings
-    return int(settings.effective("ASTA_RESPOND_MAX_PER_HOUR", MAX_PER_HOUR))
+#: There is no hourly cap any more (30 Sep). The thundering-herd concern it
+#: answered is met by the queue: tasks.investigation_slot runs at most
+#: ASTA_MAX_PARALLEL_INVESTIGATIONS at once and the rest wait, most urgent first.
 
 #: Only asks that actually matter get investigated. P_FYI and below are things he
 #: was copied on; spending a full agentic turn on each is the noise he already
@@ -501,8 +493,10 @@ def should_respond(kind: str, priority: int | None, key: str,
         return f"ranked p{priority} — below the bar for spending a turn"
     if already_handled(key):
         return "already investigated"
-    if len(_recent(now)) >= max_per_hour():
-        return f"rate limit — {max_per_hour()} investigations already this hour"
+    # No hourly cap. "5 people pinging at a time — you do only 2 now and the
+    # rest after hours? No, this is not right" (30 Sep). Every real ask is
+    # worked; how many run AT ONCE is the queue's job (tasks.investigation_slot),
+    # and duplicates are stopped above.
     return ""
 
 
@@ -653,7 +647,6 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         handle = "" if is_broadcast(who, grounds) else handed_over(grounds)
         if handle:
             known, why = True, f"they handed over {handle}"
-    _note_started(time.time())
     _note_handled(key)
     if not known:
         # New ground. Ask before spending a turn on it — and ask in the form that
@@ -687,7 +680,11 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         brief += _waiting_brief(who, text, context, need=need, questions=questions or [])
     t = tasks.spawn(title_for(kind, who, text), brief,
                     "analysis",                     # read-only. never code.
-                    workspace or None, teams_chat=reply_to)
+                    workspace or None, teams_chat=reply_to,
+                    priority=1 if kind == "incident" else (priority if priority is not None else 2))
+    # Counted when a task actually starts — a duplicate stopped by the dedup
+    # once used up a slot of the old cap (30 Sep: 3 of 4 were phantoms).
+    _note_started(time.time())
     store.kv_set(f"responder_task:{t['id']}",
                  f"{source}|{who}|{kind}|{why}")
     if reply_to:

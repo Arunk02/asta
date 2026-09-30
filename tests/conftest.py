@@ -80,7 +80,7 @@ _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND"
                        # some of these, and a test that pins the module constant
                        # then loses to the environment — machine-dependent, and
                        # silent about it.
-                       "ASTA_RESPOND_MAX_PER_HOUR", "ASTA_ATTENTION_MIN_SEEN",
+                       "ASTA_MAX_PARALLEL_INVESTIGATIONS", "ASTA_ATTENTION_MIN_SEEN",
                        "ASTA_ATTENTION_IGNORE_SHARE")
 
 
@@ -120,6 +120,9 @@ def _no_machine_side_effects(monkeypatch):
     # microphone and the voice server: the code path still runs, the message
     # reaches a closed port. A test ABOUT delivery patches `wa_send` itself.
     monkeypatch.setenv("WA_BRIDGE_URL", "http://127.0.0.1:9")
+    # The one limit message waits to gather tasks that pause together; a test
+    # must not sleep 20 seconds for it.
+    monkeypatch.setenv("ASTA_LIMIT_NOTICE_GATHER_SECONDS", "0")
     # Telegram is the same door on another channel. It is dead in tests only by
     # accident today (the chat id lives in the isolated database), and a test
     # that stores one would push to his phone for real.

@@ -146,6 +146,14 @@ def readiness(now: float | None = None) -> str:
     limited = claude_cli.limited_until(now)
     if limited:
         bad.append("Claude is limited until " + time.strftime("%H:%M", time.localtime(limited)))
+    else:
+        try:
+            from . import brains
+            share = float(_json.loads(store.kv_get("brains_status") or "{}").get("share") or 0)
+            if share >= brains.WARN_AT:
+                bad.append(f"Claude {share:.0%} of this window used")
+        except Exception:                                      # noqa: BLE001
+            pass
     for source, name in (("teams-chat", "Teams"), ("outlook", "Outlook")):
         seen = attention.last_scrape(source)
         if not seen:

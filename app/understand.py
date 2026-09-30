@@ -44,8 +44,21 @@ STATES = ("opener", "ask", "urgent", "status", "closing")
 
 
 def model() -> str:
-    """ASTA_UNDERSTAND_MODEL; '' means rules only."""
-    return os.environ.get("ASTA_UNDERSTAND_MODEL", "").strip()
+    """ASTA_UNDERSTAND_MODEL; '' means rules only.
+
+    When the Claude window is nearly spent the reader steps down to the cheaper
+    fallback (haiku), so reading messages never competes with the real work
+    for the last of the session (app/brains.py)."""
+    chosen = os.environ.get("ASTA_UNDERSTAND_MODEL", "").strip()
+    cheaper = os.environ.get("ASTA_UNDERSTAND_FALLBACK_MODEL", "").strip()
+    if chosen and cheaper and chosen != cheaper:
+        try:
+            from . import brains
+            if brains.tight():
+                return cheaper
+        except Exception:                                      # noqa: BLE001
+            pass
+    return chosen
 
 
 def second_model() -> str:

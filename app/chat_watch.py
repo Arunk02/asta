@@ -663,7 +663,7 @@ async def candidates() -> list[str]:
     except ValueError:
         cursor = 0
     readable = [r for r in current if not unopenable(r)]
-    first = changed_first(rail, readable)
+    first = changed_first(rail, readable, previous)
     rest, cursor = pick(readable, cursor, previous)
     store.kv_set(_CURSOR_KEY, str(cursor))
     chosen = list(dict.fromkeys(first + rest))[:MAX_OPENS]
@@ -677,7 +677,32 @@ _PREVIEWS_KEY = "chatwatch_previews"
 _OWED_KEY = "chatwatch_owed"
 
 
-def changed_first(rail: list[dict], readable: list[str]) -> list[str]:
+def touched(previous: list[str], current: list[str]) -> list[str]:
+    """Every chat that had activity since `previous`, from the ORDER alone.
+
+    Teams moves a chat with a new message to the top. So the chats that were
+    NOT touched keep their old relative order, and they form the tail of the
+    new list; everything before that tail was touched — including a 1:1 that
+    five later group messages pushed down to sixth, which never "rose".
+
+    Needed because his Teams renders the rail compact: no preview text under
+    any row, so there is nothing to compare but order (checked live, 30 Sep)."""
+    if not current:
+        return []
+    if not previous:
+        return current[:1]
+    pos = {n: i for i, n in enumerate(previous)}
+    k, last = len(current), len(previous)
+    for i in range(len(current) - 1, -1, -1):
+        p = pos.get(current[i])
+        if p is None or p >= last:
+            break
+        last, k = p, i
+    return list(dict.fromkeys([current[0], *current[:k]]))
+
+
+def changed_first(rail: list[dict], readable: list[str],
+                  previous: list[str] | None = None) -> list[str]:
     """Chats whose preview changed since the last look, plus any owed from the
     last sweep — 1:1s first, then groups that name him, then the rest.
 
@@ -697,10 +722,15 @@ def changed_first(rail: list[dict], readable: list[str]) -> list[str]:
         owed = []
     now = {r["name"]: _preview(r) for r in rail}
     store.kv_set(_PREVIEWS_KEY, json.dumps(now))
-    if not before:
+    if not before and any(now.values()):
         return owed                 # first look: nothing to compare with yet
-    fresh = [r for r in rail if r["name"] in readable and now[r["name"]]
-             and before.get(r["name"]) != now[r["name"]] and not _his_own(now[r["name"]])]
+    if any(now.values()):
+        fresh = [r for r in rail if r["name"] in readable and now[r["name"]]
+                 and before.get(r["name"]) != now[r["name"]] and not _his_own(now[r["name"]])]
+    else:
+        # A compact rail shows names only — read the order instead.
+        moved = set(touched(previous or [], [r["name"] for r in rail]))
+        fresh = [r for r in rail if r["name"] in readable and r["name"] in moved]
     rank = {r["name"]: (0 if _looks_one_to_one(r["name"]) else
                         1 if mentions_him(r["text"]) else 2) for r in fresh}
     ordered = sorted((r["name"] for r in fresh), key=lambda n: rank[n])

@@ -207,6 +207,11 @@ def numbers(monkeypatch):
     monkeypatch.setenv("ASTA_APPS", "1")
     monkeypatch.setattr(app_tasks, "_ask_model", ask)
     monkeypatch.setattr(app_tasks, "osascript", run)
+    # The app's scripting dictionary is read from its bundle, which exists on
+    # his Mac and not on the CI runner — where every one of these tests then
+    # took the on-screen route and failed (red on main from #48 to #55).
+    monkeypatch.setattr(app_tasks, "dictionary",
+                        lambda app, goal="": "command add column: add a column to a table")
     monkeypatch.setattr(app_tasks, "resolve", lambda name: (__import__("pathlib").Path(
         "/Applications/Numbers.app"), "Microsoft Excel isn't installed here, so I used Numbers. "))
     return app_tasks, plans, ran

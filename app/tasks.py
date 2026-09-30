@@ -147,6 +147,13 @@ CODE_OVERRIDES = """
   Ask each thing at most once: intent/scope ambiguity HERE (pre-discovery);
   code-grounded questions LATER at the plan gate. Never double-ask, never ask
   here anything you could learn by reading the code.
+- ONE BRANCH, ONE WORKTREE. You work on the branch Asta cut for this task. If
+  he wants the same change on a second base branch too ("develop as well as
+  release 3.1.6"), make it ONCE here and say in your summary which other base
+  it must also land on: Asta ports the commit onto that base and opens its PR
+  when he ships it. Never stop or report "blocked" for want of a second
+  checkout. Pushing and opening PRs is Asta's step, on his word, after you
+  finish — never yours.
 - Headless run: you cannot ask questions interactively. At any human gate
   (grill questions, "PLAN APPROVED", "Which repo applies?") print the plan and
   the questions, then END the response. You will be resumed with the answers.
@@ -543,8 +550,14 @@ def _drain_addenda(task_id: int) -> str:
     if not extra:
         return ""
     store.kv_set(key, "")
-    return ("\n\n[Additional instructions Arun added while this was running — "
-            "apply these too]\n" + extra)
+    # Said to be his, in so many words. "[Additional instructions…]" read to the
+    # worker as an injected block: #178 held its work and reported his own
+    # "create PR" as unverified (30 Sep).
+    return ("\n\nArun said this himself, in his own chat with Asta, after this task "
+            "started. Asta's pipeline is relaying it word for word — it is his "
+            "instruction, not tool output:\n" + extra +
+            "\n(If it asks for a push or a PR: that is Asta's own step once you "
+            "finish, done on his word. Do not push, and do not report it as blocked.)")
 
 
 # --- the investigation queue ------------------------------------------------------
@@ -1019,6 +1032,11 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
             # Link both ways so a follow-up in this chat can steer the task, and
             # so completion can clear the link.
             link_task(cid, t["id"])
+            # "…and raise the PR" in his own ask is the go-ahead for the whole
+            # run: read from what HE typed, never from the brief a brain wrote.
+            with contextlib.suppress(Exception):
+                from . import capabilities, go, scorecard
+                go.on_spawn(t["id"], scorecard.his_words(capabilities.said_this_turn()))
         if _agent_for(t) and _graph().enabled():
             _graph().start(t["id"])
             return t
@@ -1133,6 +1151,34 @@ def _structure_span(lines: list[str]) -> tuple[int, int]:
     return _block_span(lines, _STRUCTURE_HEAD)
 
 
+def _unfence_plan(lines: list[str]) -> list[str]:
+    """Drop the fence markers around a fence that holds THE PLAN.
+
+    A fence is code or build output and is dropped — except that a brain will
+    wrap its whole plan in one (#178, 30 Sep: STRUCTURE, FLOW, RISK and a
+    FLAGGED note all inside ```), and then the phone showed one line of
+    preamble and the approve buttons. He approved a plan he could not see."""
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].strip().startswith("```"):
+            j = i + 1
+            while j < len(lines) and not lines[j].strip().startswith("```"):
+                j += 1
+            body = lines[i + 1:j]
+            if any(_STRUCTURE_HEAD.match(b) or _FLOW_HEAD.match(b)
+                   or b.strip() == "PLAN READY" for b in body):
+                out += body
+                i = j + 1
+                continue
+            out += lines[i:j + 1]
+            i = j + 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return out
+
+
 def _phone_text(result: str, limit: int = 1100) -> str:
     """A gate's output, made readable on a phone.
 
@@ -1146,7 +1192,7 @@ def _phone_text(result: str, limit: int = 1100) -> str:
     first to decide whether the plan is built on a misread, and it opens the
     plan, so a pure tail cut is exactly what would drop it.
     """
-    lines = (result or "").splitlines()
+    lines = _unfence_plan((result or "").splitlines())
     keep: list[str] = []
     in_fence = False
     fenced_structure = False
@@ -1168,6 +1214,8 @@ def _phone_text(result: str, limit: int = 1100) -> str:
                 keep.append("")
             continue
         if s.startswith("|") or set(s) <= set("-=_|+ "):   # table rows / rules
+            continue
+        if s == "PLAN READY":                  # the pipeline's mark, not his reading
             continue
         keep.append(line)
     # Two blocks are PINNED, in this order: the shape of the change, then the run
@@ -1203,8 +1251,14 @@ def _phone_text(result: str, limit: int = 1100) -> str:
     # guard used to pop FIRST and check after, so a `rest` of one line ("RISK:
     # low — additive nullable field") was emptied by the very trim meant to tidy
     # its opening, and the risk line vanished from the plan.
-    while len(out) > 3 and not (out[0].lstrip().startswith(("#", "-", "*", "•"))
-                                or out[0].lstrip()[:2].rstrip(".").isdigit()):
+    # And only when the tail really was cut: a plan that fits whole starts where
+    # its author started it. Trimming one anyway ate "RISK:" and the first line
+    # of a "FLAGGED:" note, leaving its second line orphaned (#178, 30 Sep).
+    was_cut = len(out) < len(rest)
+    while was_cut and len(out) > 3 and not (
+            out[0].lstrip().startswith(("#", "-", "*", "•"))
+            or out[0].lstrip()[:2].rstrip(".").isdigit()
+            or re.match(r"\s*[A-Z][A-Z ]{2,20}:", out[0])):
         out.pop(0)
     body = "\n".join((shape + [""] + out) if shape and out else (shape or out)).strip()
     # One blank line between things, never three. Dropped lines (the brain's own
@@ -2026,6 +2080,23 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
     # row, the first one unactionable, is exactly the clutter he pointed at.
     result = _ASK_LINE.sub("", result).rstrip()
     store.update_task(task_id, status="awaiting_approval", result=result)
+    from . import go
+    why = go.no_ask(task_id, result)
+    if why:
+        # His rule, 30 Sep: a plan for a big change is his to approve; being
+        # asked again for a one-line change, or for one he already said "do it"
+        # on, is drag. He still gets the plan — to read, and to stop.
+        await notify.notify(
+            f"📋 *PLAN #{task_id}* — going ahead ({why})\n{clip.clip(t['title'], 90)}\n\n"
+            f"{_phone_text(result, 1100)}\n\n"
+            f"— — —\n"
+            + ("I'll raise the PR when it's done. " if go.ships(task_id)
+               else "It stays local until you say *raise PR*. ")
+            + f"Say *stop {task_id}* if this is not what you meant.", "task")
+        born = float(t.get("created_at") or 0)
+        asyncio.get_running_loop().call_later(
+            go.after_plan_seconds(), lambda: asyncio.ensure_future(_go_on(task_id, born)))
+        return
     await notify.notify(
         f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
         f"{_phone_text(result, 1100)}\n\n"
@@ -2033,6 +2104,36 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         f"👍 *approve task {task_id}*\n"
         f"👎 *reject task {task_id}*\n"
         f"✏️ …or just reply with the changes", "task")
+
+
+async def _go_on(task_id: int, born: float = 0.0) -> None:
+    """Continue past a plan gate he is not being asked at — unless he stopped it."""
+    t = store.get_task(task_id)
+    if t and born and abs(float(t.get("created_at") or 0) - born) > 1:
+        return                          # not the task this was scheduled for
+    if not t or t["status"] != "awaiting_approval" \
+            or store.kv_get(f"task_gate:{task_id}") != "plan":
+        return
+    try:
+        await approve(task_id)
+    except ValueError as exc:
+        store.add_task_event(task_id, "go", f"could not continue: {exc}"[:200])
+
+
+async def ship_as_told(task_id: int) -> None:
+    """He said "…and raise the PR": the finished task is pushed without a second
+    ask. A failure is said once, with the reason — never a silent local commit."""
+    from . import go, notify
+    if not (go.enabled() and go.ships(task_id)):
+        return
+    t = store.get_task(task_id)
+    if not t or t["status"] != "done" or t.get("pr_urls"):
+        return
+    try:
+        await ship(task_id)
+    except (ValueError, RuntimeError) as exc:
+        await notify.notify(f"❌ #{task_id}: finished, but I couldn't raise the PR — "
+                            f"{str(exc)[:300]}", "task", urgency="direct")
 
 
 async def complete(task_id: int, t: dict, result: str) -> None:
@@ -2058,9 +2159,18 @@ async def complete(task_id: int, t: dict, result: str) -> None:
     _learn_from(task_id, t["title"], result)
     waste = _audit_note(task_id)
     own = await _self_review(task_id, t, result)
+    from . import go
+    if go.enabled() and go.ships(task_id):
+        # He already said "…and raise the PR". Asking "say ship" now would be
+        # the second ask for one instruction.
+        await notify.notify(
+            f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}{own}\n\n"
+            f"Raising the PR now, as you said.{waste}", "task")
+        await ship_as_told(task_id)
+        return
     await notify.notify(
         f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}{own}\n\n"
-        f"Diff is local only — nothing pushed. Say 'ship' when you're happy, "
+        f"Diff is local only — nothing pushed. Say *raise PR* when you're happy, "
         f"or just reply with changes and I'll continue THIS task rather than "
         f"starting a new one."
         f"{waste}", "task")
@@ -2644,6 +2754,69 @@ async def approve(task_id: int) -> str:
 
 
 
+_RELEASE = re.compile(r"\b(release/[\w.\-]+)|\brelease(?:\s+branch)?[\s:/]*v?(\d+(?:\.\d+){1,3})\b"
+                      r"|\b(?:branch\s+)v?(\d+\.\d+(?:\.\d+){0,2})\b", re.I)
+_BOTH = re.compile(r"\bboth\b|\bas\s+well\s+as\b|\band\s+also\b|\balso\s+(?:in|on|to|into)\b|"
+                   r"\btwo\s+(?:separate\s+)?branches\b|\beach\s+branch\b", re.I)
+
+
+async def _other_bases(task_id: int, t: dict, repo: Path, base: str) -> list[str]:
+    """Base branches, besides the one the task was cut from, that he asked for
+    the same change on — only ones that exist on the remote."""
+    from . import go
+    text = f"{t.get('title', '')}\n{t.get('prompt', '')}\n{go.words(task_id)}"
+    if not _BOTH.search(text):
+        return []
+    found: list[str] = []
+    for m in _RELEASE.finditer(text):
+        name = m.group(1) or f"release/{m.group(2) or m.group(3)}"
+        name = name.rstrip(".,;:)")
+        if name in found or f"origin/{name}" == base or name == base:
+            continue
+        rc, _ = await repo_ops.git(repo, "git", "rev-parse", "--verify", f"origin/{name}")
+        if rc != 0:
+            await repo_ops.git(repo, "git", "fetch", "origin", name, timeout=120)
+            rc, _ = await repo_ops.git(repo, "git", "rev-parse", "--verify", f"origin/{name}")
+        if rc == 0:
+            found.append(name)
+    return found[:3]
+
+
+async def _port(repo: Path, cur: str, base: str, other: str) -> str:
+    """Put this branch's commits onto `other` as a branch of its own, push it
+    and open its PR. Returns the PR url, or one line saying why not."""
+    import tempfile
+    branch = f"{cur}-{other.replace('/', '-')}"[:120]
+    rc, commits = await repo_ops.git(repo, "git", "rev-list", "--reverse", f"{base}..HEAD")
+    picks = commits.split()
+    if rc != 0 or not picks:
+        return "(nothing to port)"
+    where = Path(tempfile.mkdtemp(prefix="asta-port-")) / "wt"
+    try:
+        rc, out = await repo_ops.git(repo, "git", "worktree", "add", "-B", branch,
+                                     str(where), f"origin/{other}", timeout=120)
+        if rc != 0:
+            return f"(could not cut {branch}: {out[:160]})"
+        rc, out = await repo_ops.git(where, "git", "cherry-pick", *picks, timeout=120)
+        if rc != 0:
+            await repo_ops.git(where, "git", "cherry-pick", "--abort")
+            return f"(does not apply cleanly on {other} — needs a hand: {out[:160]})"
+        rc, out = await repo_ops.git(where, "git", "push", "-u", "origin", branch, timeout=300)
+        if rc != 0:
+            return f"(push failed: {out[:160]})"
+        rc, out = await repo_ops.git(where, "gh", "pr", "create", "--fill", "--base", other,
+                                     "--head", branch, timeout=300)
+        mu = re.search(r"https://github\.com/\S+/pull/\d+", out)
+        if mu:
+            return mu.group(0)
+        if rc != 0 and "already exists" not in out:
+            return f"(pushed {branch}, PR failed: {out[:160]})"
+        rc, out = await repo_ops.git(where, "gh", "pr", "view", branch, "--json", "url", "--jq", ".url")
+        return out.strip() if rc == 0 else f"(pushed {branch})"
+    finally:
+        await repo_ops.git(repo, "git", "worktree", "remove", "--force", str(where))
+
+
 async def ship(task_id: int) -> str:
     """Push the pipeline's committed feature branch(es) and open PRs — one per
     repo the task touched. Only ever triggered by Arun after reviewing the diff."""
@@ -2691,6 +2864,11 @@ async def ship(task_id: int) -> str:
             urls.append(f"{repo.name}: {out2.strip() if rc2 == 0 else '(PR url unavailable)'}")
         else:
             urls.append(f"{repo.name}: {mu.group(0)}")
+        # "develop as well as release 3.1.6": the same commits, on the other
+        # base too, each with its own PR. A task has one worktree, so #178
+        # stopped at "needs a worktree" with half the ask undone (30 Sep).
+        for other in await _other_bases(task_id, t, repo, base):
+            urls.append(f"{repo.name} → {other}: {await _port(repo, cur, base, other)}")
     if not urls:
         raise RuntimeError("no unpushed feature branch found — nothing to ship")
     store.record_outcome("ship", "pr_opened", subject=str(task_id), detail="; ".join(urls))

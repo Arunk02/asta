@@ -107,6 +107,53 @@ scenarios:
       - brain_flags: {kind: task, leg: 0, effort: medium, plan_only: true}
       - brain_flags: {kind: task, leg: 1, effort: low, plan_only: false}
 
+  - id: a-one-file-plan-is-shown-and-goes-ahead
+    title: A one-file plan reaches his phone and starts — he is not asked to approve it
+    why: >
+      30 Sep, #178: one line in a Helm values file took five messages and three
+      approvals. "For a big coding task, plan and get approval is fine, but
+      getting too much approval is drag." The plan is still his to read, and to stop.
+    setup:
+      env: {ASTA_PLAN_APPROVAL_FROM_TIER: "2"}
+    brains:
+      task:
+        - text: |
+            STRUCTURE
+              README.md          heading typo fixed
+
+            RISK: none
+
+            PLAN READY
+        - {text: "Fixed the heading. Tests: n/a."}
+    steps:
+      - spawn: {title: "fix the typo in the README heading", prompt: "fix the typo in the README heading", kind: code, workspace: booking, as: job}
+    checks:
+      - task_status: {task: job, is: done}
+      - brain_flags: {kind: task, leg: 0, plan_only: true}
+      - brain_flags: {kind: task, leg: 1, plan_only: false}
+
+  - id: a-two-repo-plan-still-waits-for-him
+    title: A plan that reports two repos waits for his approval, however short it reads
+    why: >
+      The size of a change is what the brain reports, not how few lines the plan
+      has. Two repos is a big change; the gate that was relaxed for one-file
+      changes must not relax for this.
+    setup:
+      env: {ASTA_PLAN_APPROVAL_FROM_TIER: "2"}
+    brains:
+      task:
+        - calls: [{tool: report_outcome, args: {task_id: 1, kind: plan_ready, repos: [booking-service, ap-service]}}]
+          text: |
+            STRUCTURE
+              TransportPriority     new enum, 3 values
+              BookingMapper         maps it
+
+            PLAN READY
+    steps:
+      - spawn: {title: "carry the transport priority to AP", prompt: "carry the transport priority through to AP", kind: code, workspace: booking, as: job}
+    checks:
+      - task_status: {task: job, is: awaiting_approval}
+
   - id: a-two-repo-plan-implements-at-the-top-tier
     title: A plan that names two repos is implemented at T3 without anyone asking
     why: >

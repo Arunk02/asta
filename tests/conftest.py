@@ -123,6 +123,11 @@ def _no_machine_side_effects(monkeypatch):
     # The one limit message waits to gather tasks that pause together; a test
     # must not sleep 20 seconds for it.
     monkeypatch.setenv("ASTA_LIMIT_NOTICE_GATHER_SECONDS", "0")
+    # The older suites were written when every plan waited for him and new
+    # ground was offered before it was looked into. Those remain valid settings
+    # and stay pinned here; tests/test_say_it_once.py turns the live defaults on.
+    monkeypatch.setenv("ASTA_PLAN_APPROVAL_FROM_TIER", "1")
+    monkeypatch.setenv("ASTA_ASK_BEFORE_NEW_GROUND", "1")
     # Telegram is the same door on another channel. It is dead in tests only by
     # accident today (the chat id lives in the isolated database), and a test
     # that stores one would push to his phone for real.

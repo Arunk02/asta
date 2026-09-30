@@ -428,6 +428,11 @@ _ASKING = re.compile(
     re.I)
 
 
+#: "CC: Abhijit Mohapatra Maramreddy Rajasekhar Reddy", "fyi @Komal" — a line
+#: that only copies people in. Never the ask.
+_CC_ONLY = re.compile(r"^\s*(?:cc|fyi|fya|fyr|\+)\s*[:\-–]?\s*(?:@?[A-Z][\w.'’-]*[\s,;/&]*){1,10}\s*$")
+
+
 def rules(item: dict) -> dict:
     """The vocabulary this module replaced, kept as the floor."""
     from . import steward
@@ -436,6 +441,11 @@ def rules(item: dict) -> dict:
     bodies = [re.sub(r"\n\s*\d+\s+[^\n]{1,40}?\breactions?\.?\s*$", "",
                      re.sub(r"^[^:\n]{1,60}:\s", "", x), flags=re.I).strip() for x in new]
     last = bodies[-1] if bodies else ""
+    # What they ASKED, not whatever came last. "CC: Abhijit Mohapatra …" sent
+    # after the ask became the need, the title and the question the
+    # investigation was told to answer (Sankalp, 30 Sep).
+    said = [b for b in bodies if not _CC_ONLY.match(b)] or bodies
+    asked = next((b for b in reversed(said) if _ASKING.search(b)), said[-1] if said else "")
     # The summary the conversation already has, untouched. It used to be that
     # summary with the raw latest message glued on and cut at 400 characters —
     # so every fallback sweep grew it into "summary. Hi Vinish/ Arunkumar,
@@ -448,11 +458,11 @@ def rules(item: dict) -> dict:
     if item.get("handled_by_him"):
         return {**base, "state": "closing", "closing_confidence": 0.95}
     if any(steward._URGENT.search(b) for b in bodies):
-        return {**base, "state": "urgent", "closing_confidence": 0.0, "need": last[:200]}
+        return {**base, "state": "urgent", "closing_confidence": 0.0, "need": asked[:200]}
     if bodies and all(_CLOSER.match(b) for b in bodies):
         return {**base, "state": "closing", "closing_confidence": 0.9}
     if bodies and all(steward.is_greeting(b) for b in bodies):
         return {**base, "state": "opener", "closing_confidence": 0.0}
     if any(_ASKING.search(b) for b in bodies):
-        return {**base, "state": "ask", "closing_confidence": 0.0, "need": last[:200]}
+        return {**base, "state": "ask", "closing_confidence": 0.0, "need": asked[:200]}
     return {**base, "state": "status", "closing_confidence": 0.3}

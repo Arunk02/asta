@@ -32,6 +32,7 @@ opened at all. On a quiet poll nothing is opened.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -936,6 +937,11 @@ async def _sweep_threads(notify=None) -> list[dict]:
         referents.note(who, said, source=where)
         handled.append({"chat": c["chat"], "who": who, "text": "\n".join(c["new"]),
                         "priority": c["pri"], "key": c["keys"][-1], "state": state})
+        # More from someone whose answer is being worked out, or is waiting for
+        # his "send": it belongs with that answer, whatever else happens to it.
+        with contextlib.suppress(Exception):
+            from . import answers as _answers
+            await _answers.note_followup(tid, who, "\n".join(as_read(x) for x in c["new"]))
 
         if state == "status":
             # Nothing is needed from him: a line to read later, never a buzz.

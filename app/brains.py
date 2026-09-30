@@ -47,6 +47,7 @@ DEFAULT_CEILING = 12_000_000.0
 _LEVELS_KEY = "claude_limit_levels"
 _RESETS_KEY = "claude_resets"
 _WARNED_KEY = "brains_warned_window"
+_START_KEY = "claude_window_start"
 _STATUS_KEY = "brains_status"
 
 #: path -> (bytes read, {message id: (ts, weight, is_asta)})
@@ -126,20 +127,34 @@ def window_start(now: float, evs: list | None = None) -> float:
 
     A stated reset still ahead ("resets 3:40pm") fixes it exactly: five hours
     before. Otherwise windows are fixed blocks, as the subscription counts
-    them: from the first use after the previous block ended, for five hours
-    (his "resets 3:40am" means the window opened at 10:40pm — not on the hour). A rolling "last five hours" moved every minute,
-    so "once per window" warned every tick (found in test, 30 Sep)."""
-    ahead = [r for r in _floats(_RESETS_KEY) if now < r <= now + WINDOW]
+    them: from the first use after the previous block ended, for five hours.
+
+    The previous block's end has to be a FACT — a reset that was stated, or the
+    block this function last settled on — never "the first use I can still
+    see". Chaining from the oldest event inside a ten-hour lookback made the
+    chain's origin slide with the clock: on 30 Sep the warning said "resets
+    3:03pm", then 3:06pm, then 3:09pm, stayed at 100% after the real 3:00pm
+    reset, and was sent again each time because the window kept being new."""
+    resets = _floats(_RESETS_KEY)
+    ahead = [r for r in resets if now < r <= now + WINDOW]
     if ahead:
         return min(ahead) - WINDOW
-    stamps = [e[0] for e in (evs if evs is not None else events(now - 2 * WINDOW))
-              if e[0] <= now]
+    kept = (_floats(_START_KEY) or [0.0])[-1]
+    if kept and kept <= now < kept + WINDOW:
+        return kept
+    stamps = sorted(e[0] for e in (evs if evs is not None else events(now - 2 * WINDOW))
+                    if e[0] <= now)
+    ended = max([r for r in resets if r <= now] + ([kept + WINDOW] if kept else []),
+                default=0.0)
     start = None
-    for ts in sorted(stamps):
+    for ts in stamps:
+        if ts < ended:
+            continue
         if start is None or ts >= start + WINDOW:
             start = ts
     if start is None or now >= start + WINDOW:
         return now                             # nothing used in a live window yet
+    store.kv_set(_START_KEY, json.dumps([start]))
     return start
 
 
@@ -268,13 +283,14 @@ async def tick(notify=None, now: float | None = None) -> dict:
         from . import tasks
         q = tasks.queue_summary()
         cp = copilot_status(now)
-        alt = ("say “use copilot” to move the work there now"
-               if not cp["out"] else f"Copilot's monthly quota is out until {cp['resets_on']}")
+        alt = ("Say “use copilot” to move the work there now."
+               if not cp["out"] else
+               f"Copilot's monthly quota is out until {cp['resets_on']}, so it stays on Claude.")
         await notify(
-            f"⚠️ Claude is at {s['share']:.0%} of this session window — it resets "
-            f"{_hhmm(s['resets_at'])}. You've used {s['yours'] / 1e6:.1f}M of it, Asta "
-            f"{s['asta'] / 1e6:.1f}M. {q['running']} running, {q['queued']} queued: I'll do as "
-            f"much as I can and continue the rest at {_hhmm(s['resets_at'])} — or {alt}.",
+            f"⚠️ Claude is at {s['share']:.0%} of this session window, which resets "
+            f"{_hhmm(s['resets_at'])} (you {s['yours'] / 1e6:.1f}M, Asta "
+            f"{s['asta'] / 1e6:.1f}M). {q['running']} running, {q['queued']} queued — I'll keep "
+            f"going, and anything that doesn't fit continues at {_hhmm(s['resets_at'])}. {alt}",
             "brains", urgency="direct", considered=True)
     return s
 

@@ -870,3 +870,14 @@ def test_a_group_is_never_sent_without_his_yes(monkeypatch):
         return out
 
     assert not asyncio.run(go_()).startswith("Sending to")
+
+
+def test_a_pr_marked_red_with_green_checks_is_reported_as_recovered(monkeypatch):
+    """The state string already said green; the task still said CI failed."""
+    rollup = [{"workflowName": "cicd", "name": "Build", "conclusion": "SUCCESS", "startedAt": "1"}]
+    tid, _ = _shipped(monkeypatch, rollup)
+    store.update_task(tid, status="pr_ci_failed", pr_state="green/NONE")
+    line = asyncio.run(tasks.check_pr(tid))
+    assert line and "CI green" in line
+    assert store.get_task(tid)["status"] == "shipped"
+    assert asyncio.run(tasks.check_pr(tid)) is None

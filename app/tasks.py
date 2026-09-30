@@ -3164,7 +3164,11 @@ async def check_pr(task_id: int) -> str | None:
         # One state string carries both signals, so a change in EITHER is a
         # transition worth reporting and a repeat of both is silence.
         now_state = f"{checks}/{decision or 'NONE'}"
-        if now_state == was:
+        # Still marked red while the checks are green: that IS a transition,
+        # whatever the stored state string says. #180 sat at "pr_ci_failed" with
+        # every check passing, and he was never told it had recovered (30 Sep).
+        recovered = checks == "green" and t["status"] == "pr_ci_failed"
+        if now_state == was and not recovered:
             # Nothing moved — but someone may still have left a plain comment,
             # which changes no field on the PR and is exactly the kind of ask
             # that gets missed until somebody follows up in Teams.

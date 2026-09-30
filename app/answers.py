@@ -144,6 +144,13 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
     cid = phone_conversation()
     if not cid or not (reply or "").strip() or not chat:
         return False
+    if _already_put(chat, need, reply):
+        # The same ask for the same person, already in front of him (or already
+        # answered) today. "These we already discussed — why again?" (30 Sep,
+        # Vinish's "can we connect", re-read from an old message.)
+        store.record_outcome("answer", "duplicate", subject=str(task_id or ""),
+                             detail=f"{who}: {need}"[:200])
+        return False
     more = followups(task_id)
     if more:
         first = (who or "They").split()[0]
@@ -364,6 +371,33 @@ def _meta(task_id: int) -> dict:
     except ValueError:
         return {}
     return d if isinstance(d, dict) else {}
+
+
+#: How long the same answer for the same person is "already put to him".
+REPEAT_SECONDS = float(os.environ.get("ASTA_ANSWER_REPEAT_HOURS", "12")) * 3600
+
+
+def _gist(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s]", " ", (text or "").lower()).split())[:200]
+
+
+def _already_put(chat: str, need: str, reply: str, now: float | None = None) -> bool:
+    """Was this same answer — same person, same ask or same reply — already
+    shown to him recently? Records it when not."""
+    import hashlib
+    now = time.time() if now is None else now
+    key = f"answer_put:{(chat or '').strip().lower()[:60]}"
+    try:
+        seen = [x for x in json.loads(store.kv_get(key) or "[]")
+                if now - float(x.get("at", 0)) < REPEAT_SECONDS]
+    except (ValueError, TypeError, AttributeError):
+        seen = []
+    marks = {hashlib.sha1(g.encode()).hexdigest()[:16] for g in (_gist(need), _gist(reply)) if g}
+    if any(m in {x.get("h") for x in seen} for m in marks):
+        return True
+    seen += [{"h": m, "at": now} for m in marks]
+    store.kv_set(key, json.dumps(seen[-40:]))
+    return False
 
 
 def followups(task_id: int | None) -> list[str]:

@@ -260,18 +260,105 @@ async def watch_loop() -> None:
             continue
         if already_offered(call):
             continue
-        note_offered(call)
         if saved:
             from . import quiet
             quiet.note("incoming.toast_captured", RuntimeError(saved))
-        offers.staged_write(
-            "call_answer", {"speak": False},
-            describe(call),
-            f"{describe(call)} Say yes and I'll pick up and listen; "
-            f"say 'answer and talk' if you want me to speak to them.",
-            "Answer it?", kind="call")
-        with contextlib.suppress(Exception):
-            await notify.notify(offers.pending().render(), "calls", urgency="direct")
+        await offer(call)
+
+
+async def offer(call: dict) -> bool:
+    """Tell him who is calling and ask whether to pick up — once per ring,
+    whichever of the two watchers saw it first."""
+    from . import notify, offers
+    if already_offered(call):
+        return False
+    note_offered(call)
+    offers.staged_write(
+        "call_answer", {"speak": False},
+        describe(call),
+        f"{describe(call)} Say yes and I'll pick up and listen; "
+        f"say 'answer and talk' if you want me to speak to them.",
+        "Answer it?", kind="call")
+    store.record_outcome("incoming", "offered", subject=(call.get("who") or "")[:80],
+                         detail=call.get("via", "poll"))
+    with contextlib.suppress(Exception):
+        await notify.notify(offers.pending().render(), "calls", urgency="direct")
+    return True
+
+
+# --- the instant path ------------------------------------------------------------
+#
+# Polling every eight seconds means a call can ring for eight seconds before he
+# hears of it, out of the forty-five it rings. The Teams page itself says the
+# moment its call toast appears: an observer in the page calls back into Asta,
+# and the poll above stays as the safety net.
+
+RING_WATCH_JS = """
+(() => {
+  if (window.__astaRingWatch) return;
+  window.__astaRingWatch = true;
+  const RX = /incoming (?:video )?call|calling you/i;
+  let last = 0, queued = false;
+  const fire = () => {
+    queued = false;
+    const now = Date.now();
+    if (now - last < 15000) return;
+    const head = ((document.body && document.body.innerText) || '').slice(0, 4000);
+    if (!RX.test(head)) return;
+    last = now;
+    try { if (window.astaRing) window.astaRing(head); } catch (e) {}
+  };
+  const obs = new MutationObserver(ms => {
+    if (queued) return;
+    for (const m of ms) {
+      for (const n of m.addedNodes) {
+        if (RX.test(n.textContent || '') || RX.test((n.getAttribute && n.getAttribute('aria-label')) || '')) {
+          queued = true; setTimeout(fire, 250); return;
+        }
+      }
+    }
+  });
+  const start = () => obs.observe(document.documentElement, {childList: true, subtree: true});
+  if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start);
+})();
+"""
+
+
+def push_enabled() -> bool:
+    return enabled() and os.environ.get("ASTA_RING_PUSH", "1").strip().lower() not in (
+        "0", "false", "off", "no")
+
+
+async def on_ring_text(text: str) -> bool:
+    """The page saw a call toast. True when he was told about it."""
+    if not push_enabled() or meetings_busy():
+        return False
+    head = (text or "")[:4000]
+    if not looks_incoming(head):
+        return False
+    who = who_is_calling(head)
+    if not who:
+        return False
+    return await offer({"who": who, "group": is_group(who, head),
+                        "seen_text": head[:200], "via": "page"})
+
+
+async def attach(ctx, page) -> None:
+    """Install the observer on the pooled Teams browser. Never raises: the
+    eight-second poll is still there if this does not take."""
+    if not push_enabled():
+        return
+    import asyncio
+
+    async def _rang(source, text):
+        asyncio.ensure_future(on_ring_text(text))
+
+    with contextlib.suppress(Exception):
+        await ctx.expose_binding("astaRing", _rang)
+    with contextlib.suppress(Exception):
+        await ctx.add_init_script(RING_WATCH_JS)
+    with contextlib.suppress(Exception):
+        await page.evaluate(RING_WATCH_JS)
 
 
 def meetings_busy() -> bool:

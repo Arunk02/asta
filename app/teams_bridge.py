@@ -287,6 +287,10 @@ async def _pooled_page():
             await pw.stop()
         raise
     _POOL.update(pw=pw, ctx=ctx, page=page, born=time.time())
+    # A ringing call reaches him the moment Teams shows it, not at the next poll.
+    with contextlib.suppress(Exception):
+        from . import incoming
+        await incoming.attach(ctx, page)
     return page
 
 
@@ -920,11 +924,19 @@ _MARK_RAIL_ROW = """
 
 
 def _is_member_list(chat: str) -> bool:
-    """"Shabda Anubhav, Vinish, +2", "Rekha and Rini" — a group chat with no name
-    of its own. Channels and communities are on the same rail and are NOT this:
-    they stay reachable only through search, which is what keeps them out."""
-    c = (chat or "").strip()
-    return bool(re.search(r",\s*\+\d+$|,\s+\S|^\S+(?:\s\S+)?\s+and\s+\S+(?:\s\S+)?$", c))
+    """"Shabda Anubhav, Vinish, +2" — a group chat with no name of its own,
+    listed by its members. Channels and communities are on the same rail and are
+    NOT this: they stay reachable only through search, which keeps them out.
+
+    Commas only. "Team Booking and Execution" also reads as "A and B", and
+    opening it by its row sent every read of it down this path (30 Sep)."""
+    return bool(re.search(r",\s*\+\d+$|,\s+\S", (chat or "").strip()))
+
+
+def _maybe_member_list(chat: str) -> bool:
+    """"Rekha and Rini": two people — or a room named that way. Tried by its row
+    only after search found nothing."""
+    return bool(re.search(r"^\S+(?:\s\S+)?\s+and\s+\S+(?:\s\S+)?$", (chat or "").strip()))
 
 
 def _rail_title_ok(title: str, chat: str) -> bool:
@@ -959,6 +971,11 @@ async def _open_from_rail(page, chat: str) -> bool:
             timeout=15000)
         for _ in range(_TITLE_ATTEMPTS):
             if _rail_title_ok(await _chat_title(page), chat):
+                # A row with unread messages opens at the LAST-READ position, not
+                # the bottom — the newest messages would be off screen.
+                with contextlib.suppress(Exception):
+                    await page.evaluate(_BOTTOM_JS)
+                    await asyncio.sleep(0.8)
                 return True
             await asyncio.sleep(_TITLE_POLL)
     except Exception:                                          # noqa: BLE001
@@ -1087,6 +1104,20 @@ _SCROLL_JS = """
 }
 """
 
+_BOTTOM_JS = """
+() => {
+  const sel = ['[data-tid="message-pane-list-viewport"]',
+               '[data-tid="messages-pane"]',
+               '[role="log"]', '[role="list"]'];
+  for (const s of sel) {
+    for (const el of document.querySelectorAll(s)) {
+      if (el.scrollHeight > el.clientHeight + 50) { el.scrollTop = el.scrollHeight; return true; }
+    }
+  }
+  return false;
+}
+"""
+
 MAX_SCROLLBACKS = int(os.environ.get("TEAMS_MAX_SCROLLBACK", "12"))
 SCROLL_SETTLE_SECONDS = 1.2
 
@@ -1203,8 +1234,15 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
         if _is_member_list(chat) and await _open_from_rail(page, chat):
             title = chat
         else:
-            await _find_chat(page, chat, allow_group=True)  # reading a group is harmless
-            title = await _chat_title(page) or chat
+            try:
+                await _find_chat(page, chat, allow_group=True)  # reading a group is harmless
+                title = await _chat_title(page) or chat
+            except NotFound:
+                # "Rekha and Rini" may be a room or two people; search is tried
+                # first, the row itself only when search has nothing.
+                if not (_maybe_member_list(chat) and await _open_from_rail(page, chat)):
+                    raise
+                title = chat
 
         raw = await page.evaluate(_MESSAGE_JS, 0)
         # Only a time-windowed question justifies scrolling. "The last 15

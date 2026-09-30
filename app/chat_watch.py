@@ -64,7 +64,7 @@ ROTATE = int(os.environ.get("ASTA_CHATWATCH_ROTATE", "2"))
 
 #: Chats opened per sweep, at most. Each one is a real browser navigation on a
 #: profile that tolerates a single writer.
-MAX_OPENS = int(os.environ.get("ASTA_CHATWATCH_MAX_OPENS", "5"))
+MAX_OPENS = int(os.environ.get("ASTA_CHATWATCH_MAX_OPENS", "10"))
 
 _CURSOR_KEY = "chatwatch_cursor"
 
@@ -230,15 +230,47 @@ def unseen(chat: str, rows: list[dict]) -> list[dict]:
     if not mark:
         return rows[-1:]            # first sight of a thread: the latest only
     keys = [r.get("key") or "" for r in rows]
-    if mark not in keys:
-        return rows                 # the mark scrolled out of view — treat all as new
-    return rows[keys.index(mark) + 1:]
+    if mark in keys:
+        return rows[keys.index(mark) + 1:]
+    # The mark is not among what was read. A message's key includes its text,
+    # so a reaction added since ("1 Like reaction.") changes it — and treating
+    # the whole thread as new then re-read the same Team Booking messages every
+    # few minutes all evening, each time through the model (30 Sep). Newer than
+    # the newest message already processed is what "new" means.
+    try:
+        upto = float(store.kv_get(_seen_at_key(chat)) or 0)
+    except ValueError:
+        upto = 0.0
+    if upto:
+        return [r for r in rows if float(r.get("sent_at") or 0) > upto]
+    return rows                     # no record at all: as before
+
+
+def _identity(row: dict) -> tuple:
+    """Who, when and what — without the reaction counts Teams appends."""
+    text = _REACTION_TAIL.sub("", (row.get("text") or "")).strip()
+    text = re.sub(r"\s*\d+\s+[^\n]{1,40}?\breactions?\.?\s*$", "", text, flags=re.I)
+    when = row.get("sent_at")
+    return ((row.get("sender") or "").strip().lower(),
+            int(float(when)) // 60 if when else None,
+            " ".join(text.split()).lower()[:300])
+
+
+def _seen_at_key(chat: str) -> str:
+    return f"chatwatch_seen_at:{chat.strip().lower()[:60]}"
 
 
 def remember(chat: str, rows: list[dict]) -> None:
     mark = _mark_of(rows)
     if mark:
         store.kv_set(_seen_key(chat), mark)
+    times = [float(r.get("sent_at") or 0) for r in rows if r.get("sent_at")]
+    if times:
+        try:
+            before = float(store.kv_get(_seen_at_key(chat)) or 0)
+        except ValueError:
+            before = 0.0
+        store.kv_set(_seen_at_key(chat), str(max(before, max(times))))
 
 
 def _engaged_key(chat: str) -> str:
@@ -583,30 +615,43 @@ def looks_like_the_chat_list(rows: list[str]) -> bool:
     return any(m in head for m in _LIST_MARKERS)
 
 
+async def _rail_rows(page) -> list[dict]:
+    """The rail as {name, text}: the name and what Teams previews under it."""
+    from . import teams_bridge
+    try:
+        full = await page.evaluate(teams_bridge._CHAT_ROWS_FULL)
+        return [{"name": (r.get("name") or "").strip(), "text": (r.get("text") or "").strip()}
+                for r in full or [] if (r.get("name") or "").strip()]
+    except Exception:                                          # noqa: BLE001
+        rows = await page.evaluate(teams_bridge._CHAT_ROWS)
+        return [{"name": r.strip(), "text": ""} for r in rows or [] if r.strip()]
+
+
 async def candidates() -> list[str]:
-    """Rail names worth opening this sweep, newest activity first."""
+    """Rail names worth opening this sweep — every chat with something new,
+    the most important first — then the head of the list and the rotation."""
     from . import teams_bridge
     async with teams_bridge.teams_page() as page:
         await teams_bridge.wait_for_rail(page)
         try:
-            rows = await page.evaluate(teams_bridge._CHAT_ROWS)
+            rail = await _rail_rows(page)
         except Exception:
             return []
-        if not looks_like_the_chat_list(rows or []):
+        if not looks_like_the_chat_list([r["name"] for r in rail]):
             # Someone left a search on the shared page. Go back to the chat list
             # rather than comparing an order that means nothing.
             try:
                 await page.goto(teams_bridge.TEAMS_URL, wait_until="domcontentloaded",
                                 timeout=60000)
                 await teams_bridge.wait_for_rail(page)
-                rows = await page.evaluate(teams_bridge._CHAT_ROWS)
+                rail = await _rail_rows(page)
             except Exception:
                 return []
-            if not looks_like_the_chat_list(rows or []):
+            if not looks_like_the_chat_list([r["name"] for r in rail]):
                 return []          # still not the list — report nothing, change nothing
-    current = [r.strip() for r in (rows or [])
-               if r.strip() and r.strip().lower() not in teams_bridge._NOT_A_CHAT
-               and not is_furniture(r)]
+    rail = [r for r in rail if r["name"].lower() not in teams_bridge._NOT_A_CHAT
+            and not is_furniture(r["name"])]
+    current = [r["name"] for r in rail]
     # Read BEFORE it is overwritten: the comparison is the whole activity signal.
     try:
         previous = json.loads(store.kv_get(_RAIL_KEY) or "[]")
@@ -617,9 +662,80 @@ async def candidates() -> list[str]:
         cursor = int(store.kv_get(_CURSOR_KEY) or "0")
     except ValueError:
         cursor = 0
-    chosen, cursor = pick([r for r in current if not unopenable(r)], cursor, previous)
+    readable = [r for r in current if not unopenable(r)]
+    first = changed_first(rail, readable)
+    rest, cursor = pick(readable, cursor, previous)
     store.kv_set(_CURSOR_KEY, str(cursor))
+    chosen = list(dict.fromkeys(first + rest))[:MAX_OPENS]
+    # What did not fit this minute is owed to the next — never left to the
+    # rotation, which could take twenty minutes to come back round.
+    store.kv_set(_OWED_KEY, json.dumps([c for c in first if c not in chosen][:40]))
     return chosen
+
+
+_PREVIEWS_KEY = "chatwatch_previews"
+_OWED_KEY = "chatwatch_owed"
+
+
+def changed_first(rail: list[dict], readable: list[str]) -> list[str]:
+    """Chats whose preview changed since the last look, plus any owed from the
+    last sweep — 1:1s first, then groups that name him, then the rest.
+
+    The position of a chat on the rail was the only activity signal, and it
+    breaks under a burst: five messages landing after a 1:1 push the 1:1 DOWN
+    the list, so it never "rose", missed the cap, and waited for the rotation.
+    The preview Teams shows under every row changes when a message arrives,
+    wherever the row ends up. A preview that is his own reply ("You: …") is
+    something he has already dealt with: left alone, as he asked."""
+    try:
+        before = json.loads(store.kv_get(_PREVIEWS_KEY) or "{}")
+    except (ValueError, TypeError):
+        before = {}
+    try:
+        owed = [c for c in json.loads(store.kv_get(_OWED_KEY) or "[]") if c in readable]
+    except (ValueError, TypeError):
+        owed = []
+    now = {r["name"]: _preview(r) for r in rail}
+    store.kv_set(_PREVIEWS_KEY, json.dumps(now))
+    if not before:
+        return owed                 # first look: nothing to compare with yet
+    fresh = [r for r in rail if r["name"] in readable and now[r["name"]]
+             and before.get(r["name"]) != now[r["name"]] and not _his_own(now[r["name"]])]
+    rank = {r["name"]: (0 if _looks_one_to_one(r["name"]) else
+                        1 if mentions_him(r["text"]) else 2) for r in fresh}
+    ordered = sorted((r["name"] for r in fresh), key=lambda n: rank[n])
+    return list(dict.fromkeys(owed + ordered))
+
+
+def _preview(row: dict) -> str:
+    """The part of a rail row that changes when a message arrives."""
+    lines = [ln.strip() for ln in (row.get("text") or "").splitlines() if ln.strip()]
+    # The time label moves on its own ("9:48 PM" becomes "Yesterday" at
+    # midnight) — it is not a message, and must not look like one.
+    return " | ".join(ln for ln in lines[1:] if not _TIME_LABEL.match(ln))[:300]
+
+
+_TIME_LABEL = re.compile(
+    r"^(?:\d{1,2}[:.]\d{2}(?:\s*[ap]\.?m\.?)?|yesterday|today|now|just now|"
+    r"(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*|\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?|"
+    r"\d+\s*(?:m|min|mins|h|hr|hrs|d)(?:\s+ago)?)$", re.I)
+
+
+def _his_own(preview: str) -> bool:
+    return bool(re.match(r"^\s*(?:\S+\s+)?you\s*:", preview or "", re.I))
+
+
+def _looks_one_to_one(name: str) -> bool:
+    """A person's name rather than a room's: no separators, a few words, and —
+    when the history knows — someone who has written in a chat named after them."""
+    n = (name or "").strip()
+    if not n or re.search(r"[:,|&@/#()\[\]]|\+\d|\band\b", n, re.I) or len(n.split()) > 4:
+        return False
+    try:
+        return any((m.get("sender") or "").strip().lower() == n.lower()
+                   for m in store.teams_messages(chat=n, limit=20))
+    except Exception:                                          # noqa: BLE001
+        return len(n.split()) <= 3
 
 
 async def new_in(chat: str, advance: bool = True) -> list[dict]:
@@ -630,8 +746,22 @@ async def new_in(chat: str, advance: bool = True) -> list[dict]:
     answer empty and the first unrepeatable.
     """
     from . import teams_bridge
+    import time as _time
+    # What this chat already held BEFORE this read — read_history stores what
+    # it reads, so this has to be taken first.
+    try:
+        before = {_identity(r) for r in store.teams_messages(
+            chat=chat, since=_time.time() - 2 * 86400, limit=3000)}
+    except Exception:                                          # noqa: BLE001
+        before = set()
     rows = await teams_bridge.read_history(chat, limit=READ_LIMIT, max_scrolls=0)
     fresh = unseen(chat, rows or [])
+    # A message already processed is never new again, whatever happened to its
+    # key. A reaction changes the text a key is made from; Team Booking's "Hi
+    # Everyone — can we connect please" came back as "Vinish wants to connect"
+    # at 23:11, long after it was dealt with (30 Sep). Same sender, same time,
+    # same words with the reactions taken off: the same message.
+    fresh = [r for r in fresh if _identity(r) not in before]
     if advance:
         remember(chat, rows or [])
     import time as _time

@@ -605,7 +605,7 @@ def familiar(text: str) -> tuple[bool, str]:
 def respond(source: str, who: str, text: str, priority: int | None = None,
             key: str = "", workspace: str = "", sent_at: float | None = None,
             context: str = "", reply_to: str = "", group: bool = False,
-            need: str = "", thread: str = "") -> dict | None:
+            need: str = "", thread: str = "", questions: list | None = None) -> dict | None:
     """Start the investigation this message deserves. The spawned task, or None.
 
     Deliberately synchronous and tiny: it decides and delegates. Everything slow
@@ -684,7 +684,7 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
                 "at": hit.get("at")}
     brief = brief_for(kind, who, grounds)
     if reply_to:
-        brief += _waiting_brief(who, text, context)
+        brief += _waiting_brief(who, text, context, need=need, questions=questions or [])
     t = tasks.spawn(title_for(kind, who, text), brief,
                     "analysis",                     # read-only. never code.
                     workspace or None, teams_chat=reply_to)
@@ -739,7 +739,29 @@ def playbook(text: str) -> str:
             + "\n".join(f"- {x}" for x in steps))
 
 
-def _waiting_brief(who: str, text: str, context: str) -> str:
+def _their_questions(who: str, need: str, questions: list) -> str:
+    """What THEY asked, as questions the analysis must answer first.
+
+    30 Sep, Vinish: "could you check booking H65ZMWX52B2 … Rini said it's a
+    webhook failure … we need to verify one VTS fix". He needed: was VTS
+    triggered for it, and what came back. The analysis answered around it — a
+    billing error on the same id, a VTS plan document — true, and not his
+    question. Arun: "that doesn't require even the 5xx child VTS workflow"."""
+    qs = [" ".join(str(q).split()) for q in (questions or []) if str(q).strip()][:4]
+    if not qs and not need:
+        return ""
+    lines = ["\n\nWhat {who} needs answered — answer EACH of these first, one line each "
+             "with its evidence, before anything else:".format(who=who or "they")]
+    lines += [f"{i}. {q}" for i, q in enumerate(qs, 1)] or [f"1. {need}"]
+    lines.append("Stay on their question. Something else you notice (another service's "
+                 "error on the same id, an unrelated plan or doc) goes in at most ONE line "
+                 "starting \"Also noticed:\" — and only if it bears on their question. "
+                 "Leave the rest out.")
+    return "\n".join(lines)
+
+
+def _waiting_brief(who: str, text: str, context: str, need: str = "",
+                   questions: list | None = None) -> str:
     """What an investigation needs when a colleague is waiting on the answer.
 
     The conversation so far and their earlier conversations, so it continues
@@ -749,7 +771,7 @@ def _waiting_brief(who: str, text: str, context: str) -> str:
     "send?" — see app/answers.py.
     """
     from . import answers
-    parts = []
+    parts = [_their_questions(who, need, questions or [])]
     if context.strip():
         parts.append("\n\nWhat has already been said with them (continue from it, do not "
                      "ask again for anything already given):\n" + context.strip())
@@ -763,6 +785,14 @@ def _waiting_brief(who: str, text: str, context: str) -> str:
                      "document when you do:\n" + "\n\n".join(
                          f"[{h['document']} — {h['where']}]\n{h['text'][:700]}" for h in hits))
     parts.append(playbook(text))
+    from . import chat_watch
+    shots = chat_watch.image_paths(f"{context}\n{text}")
+    if shots:
+        # 30 Sep: screenshots used to be dropped before anyone saw them. The
+        # answer is often IN the image — an error dialog, a stack trace, a UI.
+        parts.append("\n\nThey sent screenshot(s). Open each with the Read tool BEFORE "
+                     "concluding — the answer may be in the image:\n"
+                     + "\n".join(f"- {p}" for p in shots))
     parts.append(answers.brief_rider(who))
     return "".join(parts)
 

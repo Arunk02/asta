@@ -304,6 +304,14 @@ def turn_context(user_text: str) -> str:
         facts = _tasks_named(user_text)
         if facts:
             parts.append(facts)
+    # A screenshot he sent (WhatsApp) or one he is asking about.
+    with contextlib.suppress(Exception):
+        from . import chat_watch
+        shots = chat_watch.image_paths(user_text)
+        if shots:
+            parts.append("He sent screenshot(s) — open each with the Read tool before you "
+                         "answer; it is the subject of his message:\n"
+                         + "\n".join(f"- {p}" for p in shots))
     # Writing to someone in his name: how he actually writes to them.
     if _WRITING_TO.search(user_text or ""):
         with contextlib.suppress(Exception):

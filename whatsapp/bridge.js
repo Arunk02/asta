@@ -15,7 +15,7 @@ import fs from "fs";
 import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
 import QRCode from "qrcode";
 import pino from "pino";
@@ -169,10 +169,28 @@ async function connect() {
     for (const msg of messages) {
       if (!config.enabled) continue;
       const jid = msg.key.remoteJid;
-      const text =
+      let text =
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption ||
         "";
+      // A photo or screenshot he sends: saved where Asta can open it, and named
+      // in the message as [image: path]. Until 30 Sep a photo was dropped here
+      // because it had no text.
+      if (msg.message?.imageMessage && isAllowedChat(jid) && !sentByMe.has(msg.key.id)) {
+        try {
+          const buf = await downloadMediaMessage(msg, "buffer", {});
+          const dir = path.join(__dirname, "..", "data", "media");
+          fs.mkdirSync(dir, { recursive: true });
+          const ext = (msg.message.imageMessage.mimetype || "image/jpeg").split("/")[1].split(";")[0] || "jpg";
+          const file = path.join(dir, `wa-${msg.key.id}.${ext}`);
+          fs.writeFileSync(file, buf);
+          text = (text ? text + "\n" : "") + `[image: ${file}]`;
+        } catch (e) {
+          console.log("image download failed:", e.message);
+          text = text || "(sent a photo I couldn't download)";
+        }
+      }
       if (text && !isAllowedChat(jid)) {
         console.log(`dropped (chat not allowed): jid=${jid} fromMe=${msg.key.fromMe} text="${text.slice(0, 40)}"`);
       }

@@ -3114,7 +3114,8 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         if not for_the_draft:
             if wt_target:
                 await sink.send({"type": "note", "text": "🧭 Reading the change…"})
-                reply = await walkthrough.start(cid, wt_target)
+                reply = await walkthrough.start(cid, wt_target,
+                                                voice=walkthrough.wants_voice(user_text))
             else:
                 reply = (await walkthrough.apply_later(cid, user_text)
                          or await walkthrough.handle(cid, user_text))

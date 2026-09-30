@@ -403,7 +403,7 @@ def as_read(text: str, known: set[str] | None = None) -> str:
 
 def summarise(text: str, limit: int = 160, known: set[str] | None = None) -> str:
     """One readable line for a message — links named rather than pasted raw."""
-    body = clean_message(text, known)
+    body = clean_message(without_image_paths(text), known)
     if not body:
         # A reply whose own body did not survive the capture. Saying so is honest;
         # showing the quoted text would put someone else's words in their mouth.
@@ -602,8 +602,31 @@ async def new_in(chat: str, advance: bool = True) -> list[dict]:
     fresh = unseen(chat, rows or [])
     if advance:
         remember(chat, rows or [])
+    import time as _time
+    old = _time.time() - 2 * 3600
     return [r for r in fresh if (r.get("text") or "").strip()
-            and not is_from_him(r.get("sender", ""))]
+            and not is_from_him(r.get("sender", ""))
+            # An image-only message Teams used to drop: not news once it is old.
+            and not (_only_images(r.get("text") or "") and float(r.get("sent_at") or 0) < old)]
+
+
+_IMAGE_MARK = re.compile(r"\[image: [^\]]+\]")
+
+
+def _only_images(text: str) -> bool:
+    return bool(_IMAGE_MARK.search(text)) and not _IMAGE_MARK.sub("", text).strip()
+
+
+def image_paths(text: str) -> list[str]:
+    return [m.group(0)[8:-1].strip() for m in _IMAGE_MARK.finditer(text or "")]
+
+
+def without_image_paths(text: str) -> str:
+    """For his phone: a screenshot is "📷 screenshot", never a file path."""
+    n = len(image_paths(text))
+    body = _IMAGE_MARK.sub("", text or "").strip()
+    tag = "📷 screenshot" if n == 1 else f"📷 {n} screenshots"
+    return (f"{body} ({tag})" if body else tag) if n else (text or "")
 
 
 async def pending() -> list[dict]:
@@ -960,7 +983,7 @@ async def _sweep_threads(notify=None) -> list[dict]:
         task = responder.respond("teams-chat", who, "\n".join(c["new"]), priority=c["pri"],
                                  key=c["keys"][-1], sent_at=c["sent_at"], context=context,
                                  reply_to=c["chat"], group=not c["one_to_one"], need=said,
-                                 thread=tid)
+                                 thread=tid, questions=d.get("questions") or [])
         if task and task.get("reused"):
             from . import answers
             analysis, reply = answers.split(task.get("result") or "")

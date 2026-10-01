@@ -165,6 +165,10 @@ def resolve_repo(root: Path, repo: str) -> str:
         return ""
     if (root / repo / ".git").is_dir():
         return repo
+    from . import prname
+    aliased = prname.repo_for(repo)
+    if aliased and (root / aliased / ".git").is_dir():
+        return aliased
     import difflib
     clones = [d.name for d in root.iterdir() if (d / ".git").is_dir()] if root.is_dir() else []
     want = _squash(repo.split("/")[-1])
@@ -200,6 +204,11 @@ def _where(pr: str, workspace: str, repo: str = "") -> tuple[str, list[str], Pat
     anywhere. A bare number still needs the clone that says which repo it means.
     """
     number, target = pr_target(pr)
+    # "booking PR 1459" names the repo as well as the number.
+    from . import prname
+    named_repo, named_number = prname.parse(pr)
+    if named_repo and not repo:
+        repo, number = named_repo, named_number
     if not target and not repo:
         # A bare number is ambiguous across workspaces — #1459 exists in more
         # than one repo, and "found it under empv3" reviewed the wrong one

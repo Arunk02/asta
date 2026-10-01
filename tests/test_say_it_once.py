@@ -1214,11 +1214,11 @@ def test_each_turn_carries_the_real_thread_and_his_prs(monkeypatch):
          "sent_at": now - 600, "key": "v2", "stamp": ""}])
     t = store.create_task("Fix RFP validation error messages", "code", "p", None)
     store.update_task(t["id"], status="shipped",
-                      pr_urls="telikos-booking-service: https://github.com/acme/booking/pull/1429")
+                      pr_urls="telikos-booking-service: https://github.com/acme/telikos-booking-service/pull/1429")
     store.kv_set(f"task_branch:{t['id']}", "feature/rfp-mandatory-field-validation")
     ctx = copilot_cli.turn_context("go ahead as vinish asked")
     assert "This PR, bro" in ctx and "PR 1429" in ctx
-    assert "pull/1429 — OPEN — branch feature/rfp-mandatory-field-validation" in ctx
+    assert "booking PR 1429 — OPEN" in ctx and "branch feature/rfp-mandatory-field-validation" in ctx
     assert "Never call one merged or closed" in ctx
 
 
@@ -1359,3 +1359,39 @@ def test_an_approval_needs_the_word_approve(monkeypatch):
     monkeypatch.setattr(capabilities, "said_this_turn", lambda: "go and post it")
     out = asyncio.run(agent.pr_review_post("1459", "approve", ""))
     assert out.startswith("Staged") and offers.pending() is not None
+
+
+# --- "booking PR 1459", never a bare "PR 1459" ------------------------------------
+
+def test_a_pr_is_named_with_its_service():
+    from app import prname
+    assert prname.from_url("https://github.com/Maersk-Global/telikos-booking-service/pull/1459") \
+        == "booking PR 1459"
+    assert prname.label("telikos-activityplanworkflow-service", 1252) == "AP PR 1252"
+    assert prname.label("telikos-email-service", "#34") == "email PR 34"
+    assert prname.label("telikos-charges-service", 7) == "charges PR 7"
+    assert prname.name_links("telikos-booking-service: https://github.com/a/telikos-booking-service/pull/1429") \
+        == "telikos-booking-service: booking PR 1429 — https://github.com/a/telikos-booking-service/pull/1429"
+
+
+def test_his_short_name_finds_the_repo():
+    from app import prname, review
+    assert prname.parse("review booking PR 1459 again") == ("telikos-booking-service", "1459")
+    assert prname.parse("AP PR 1252 CI is red") == ("telikos-activityplanworkflow-service", "1252")
+    assert prname.parse("PR 1459") == ("", "")
+
+
+def test_the_watcher_names_the_pr_with_its_service(monkeypatch):
+    rollup = [{"workflowName": "cicd", "name": "Build", "conclusion": "SUCCESS", "startedAt": "1"}]
+    tid, _ = _shipped(monkeypatch, rollup)
+    store.update_task(tid, pr_urls="svc: https://github.com/acme/telikos-booking-service/pull/1429")
+    line = asyncio.run(tasks.check_pr(tid))
+    assert line.startswith("✅ CI green on booking PR 1429")
+
+
+def test_his_prs_in_each_turn_lead_with_the_service():
+    from app import copilot_cli
+    t = store.create_task("Fix RFP validation error messages", "code", "p", None)
+    store.update_task(t["id"], status="shipped",
+                      pr_urls="telikos-booking-service: https://github.com/a/telikos-booking-service/pull/1429")
+    assert "• booking PR 1429 — OPEN" in copilot_cli._his_prs()

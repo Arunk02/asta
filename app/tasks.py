@@ -2249,6 +2249,7 @@ async def complete(task_id: int, t: dict, result: str) -> None:
     _learn_from(task_id, t["title"], result)
     waste = _audit_note(task_id)
     own = await _self_review(task_id, t, result)
+    from . import prname
     pushed = []
     with contextlib.suppress(Exception):
         pushed = await _already_pushed(task_id, t)
@@ -2259,7 +2260,8 @@ async def complete(task_id: int, t: dict, result: str) -> None:
                           pr_state="OPEN", pr_checked_at=0.0)
         await notify.notify(
             f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}{own}\n\n"
-            f"Already pushed — the PR is updated:\n" + "\n".join("• " + u for u in pushed)
+            f"Already pushed — the PR is updated:\n"
+            + "\n".join("• " + prname.name_links(u) for u in pushed)
             + f"\nI'm watching its CI and will tell you how it ends.{waste}", "task")
         return
     from . import go
@@ -3029,7 +3031,8 @@ async def ship(task_id: int) -> str:
     # events belong to something instead of arriving as orphaned noise.
     store.update_task(task_id, status="shipped", pr_urls="\n".join(urls),
                       pr_state="OPEN", pr_checked_at=0.0)
-    msg = (f"🔀 Task #{task_id} shipped:\n" + "\n".join("• " + u for u in urls)
+    from . import prname
+    msg = (f"🔀 Task #{task_id} shipped:\n" + "\n".join("• " + prname.name_links(u) for u in urls)
            + "\n\nStaying on it — I'll tell you if CI goes red, if review asks "
              "for changes, or when it merges.")
     await notify.notify(msg, "action", urgency="direct")
@@ -3290,6 +3293,7 @@ async def check_pr(task_id: int) -> str | None:
     if not links:
         return None
 
+    from . import prname
     was = t.get("pr_state") or "OPEN"
     title = t["title"][:60]
     for url in links:
@@ -3302,7 +3306,7 @@ async def check_pr(task_id: int) -> str | None:
             store.update_task(task_id, status="merged", pr_state="MERGED",
                               finished_at=time.time())
             store.record_outcome("ship", "merged", subject=str(task_id), detail=url)
-            return f"🎉 Merged — #{task_id} {title}\n{url}"
+            return f"🎉 Merged — {prname.from_url(url)} (#{task_id} {title})\n{url}"
         if pr.get("state") == "CLOSED":
             store.update_task(task_id, status="pr_closed", pr_state="CLOSED",
                               finished_at=time.time())
@@ -3342,9 +3346,9 @@ async def check_pr(task_id: int) -> str | None:
                 store.kv_set(f"task_ci_rerun:{task_id}", str(time.time()))
                 with contextlib.suppress(Exception):
                     await rerun_ci(task_id)
-                    return (f"🔴 CI red on the PR for #{task_id} {title}\n{url}{why}\n"
+                    return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}{why}\n"
                             f"Re-running the failed jobs once — I'll tell you how it ends.")
-            return (f"🔴 CI red on the PR for #{task_id} {title}\n{url}{why}\n"
+            return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}{why}\n"
                     f"Say *rerun ci {task_id}* to run the failed jobs again, or "
                     f"*fix #{task_id}* and I'll pick the task back up with everything "
                     f"it already knows.")
@@ -3354,16 +3358,16 @@ async def check_pr(task_id: int) -> str | None:
             # not something he can act on from his phone.
             asks = _new_review_notes(task_id, _review_notes(pr))
             detail = ("\n\n" + "\n".join(f"• {a}" for a in asks[:4])) if asks else ""
-            return (f"📝 Changes requested on #{task_id} {title}\n{url}{detail}\n\n"
+            return (f"📝 Changes requested on {prname.from_url(url)} (#{task_id} {title})\n{url}{detail}\n\n"
                     f"Say 'fix #{task_id}' and I'll address these in the same task.")
         if decision == "APPROVED" and checks == "green":
             store.update_task(task_id, status="shipped")
-            return f"✅ Approved and green — #{task_id} {title}\n{url}\nReady to merge."
+            return f"✅ Approved and green — {prname.from_url(url)} (#{task_id} {title})\n{url}\nReady to merge."
         if checks == "green":
             # The end of the CI run is news too — he raised the PR and then had
             # to ask, three times, whether the pipeline had passed (30 Sep).
             store.update_task(task_id, status="shipped")
-            return (f"✅ CI green on the PR for #{task_id} {title}\n{url}\n"
+            return (f"✅ CI green on {prname.from_url(url)} (#{task_id} {title})\n{url}\n"
                     f"Waiting on review.")
     return None
 

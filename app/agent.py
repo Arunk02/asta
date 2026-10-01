@@ -1558,7 +1558,10 @@ async def review_pr(pr: str, workspace: str = "", repo: str = "") -> str:
         text, meta = await review.brief(pr, workspace, repo)
     except (RuntimeError, ValueError) as exc:
         return f"Could not read that PR: {exc}"
-    t = tasks.spawn(f"Review PR #{meta['number']}: {meta['title'][:60]}", text,
+    from . import prname
+    named = prname.from_url(meta.get("url") or "") or prname.label(
+        (meta.get("headRepository") or {}).get("name") or repo or "", meta["number"])
+    t = tasks.spawn(f"Review {named}: {meta['title'][:60]}", text,
                     "analysis", workspace or None)
     return (f"Task #{t['id']} — reviewing PR #{meta['number']} "
             f"({meta.get('changedFiles', 0)} files, +{meta.get('additions', 0)}/"

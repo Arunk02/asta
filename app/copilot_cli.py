@@ -303,8 +303,9 @@ def _his_prs(hours: float = 96) -> str:
             continue
         state = {"merged": "MERGED", "pr_closed": "CLOSED"}.get(t["status"], "OPEN")
         branch = store.kv_get(f"task_branch:{t['id']}") or ""
+        from . import prname
         for url in tasks._pr_links(t):
-            out.append(f"• task #{t['id']} {t['title'][:60]} — {url} — {state}"
+            out.append(f"• {prname.from_url(url)} — {state} — task #{t['id']} {t['title'][:60]} — {url}"
                        + (f" — branch {branch}" if branch else ""))
     if not out:
         return ""
@@ -494,6 +495,9 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
         "find itself. Put his words in the brief verbatim. If he says it is a different "
         "ticket, do not carry another ticket's key into the brief: the branch is named "
         "from whatever key the brief contains.\n"
+        "NAME A PR WITH ITS SERVICE: 'booking PR 1459', 'AP PR 1252', 'email PR 34' — never "
+        "a bare 'PR 1459'; the same number exists in more than one repo. When he writes "
+        "'booking PR 1459' that names the repo too.\n"
         "FACTS, NOT MEMORY: what a colleague said is in the Teams chat block of this "
         "turn — quote only from there, never write a quote you cannot see. A PR's state "
         "(open/merged/closed) comes from the PR list in this turn or `gh pr view`, never "

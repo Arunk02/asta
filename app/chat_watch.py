@@ -44,6 +44,8 @@ from . import store
 #: How often to look. 180 put the modal message 1-3 minutes behind before the
 #: sweep even started; 60 is the difference between "he told me" and "I saw it".
 POLL_SECONDS = float(os.environ.get("ASTA_CHATWATCH_SECONDS", "60"))
+#: The least rest between two sweeps, however long the last one took.
+MIN_GAP_SECONDS = 5.0
 
 #: Conversations at the head of the list, read on EVERY sweep. These are the ones
 #: with recent activity, so this is where a new message almost always is.
@@ -1657,8 +1659,16 @@ def stand_down() -> bool:
 async def watch_loop() -> None:
     """Poll the rail forever. Quiet when nothing moved."""
     from . import notify, teams_bridge, wake
+    import time as _time
+    started = 0.0
     while True:
-        await wake.sleep(POLL_SECONDS)
+        # Start to start, not end to start. Sixty seconds of rest AFTER a sweep
+        # that itself takes a minute read each chat every two (1 Oct, 16:44 →
+        # 16:46 → 16:48). A short floor still leaves the browser free between
+        # sweeps for a send or a call.
+        since = _time.monotonic() - started if started else 0.0
+        await wake.sleep(max(MIN_GAP_SECONDS, POLL_SECONDS - since) if started else POLL_SECONDS)
+        started = _time.monotonic()
         # A call OWNS the browser. Chromium tolerates one writer per profile, so
         # a sweep during a call is not a slow read — it is a second instance
         # contending for the tree the call is holding, and with real Chrome the

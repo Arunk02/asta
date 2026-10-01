@@ -202,11 +202,19 @@ async function connect() {
         continue;
       }
       console.log("→ asta:", text.slice(0, 80));
+      await startWorking(jid, msg.key);
+      const mine = (working.get(jid) || []).slice(-1)[0];
       try {
         const data = await postToAsta(text);
         if (data.reply) await send(data.reply);
+        // Still working: the answer comes later through /send with done=true,
+        // and "typing…" stays until then.
+        if (!data.working) {
+          await finishOne(jid, mine, String(data.reply || "").trim().startsWith("⚠️") ? "⚠️" : "✅");
+        }
       } catch (e) {
         await send("(bridge error: " + e.message + ")");
+        await finishOne(jid, mine, "⚠️");
       }
     }
   });
@@ -258,6 +266,49 @@ async function sendVoiceNote(filePath, seconds) {
   });
   if (res?.key?.id) sentByMe.add(res.key.id);
   return true;
+}
+
+// Working on his message, shown the way a person shows it: 👀 on the message,
+// "typing…" in the header, ✅ (or ⚠️) on it when the answer is out. No
+// "⏳ Working on it" message cluttering the chat (1 Oct). FIFO per chat: if he
+// sends a second message, the first answer ticks the first message.
+const working = new Map(); // jid -> [{key, timer, stop}]
+const TYPING_EVERY_MS = 10000;      // WhatsApp drops "typing…" after ~25 s
+const TYPING_MAX_MS = 10 * 60 * 1000;
+
+async function react(jid, key, emoji) {
+  try { await sock.sendMessage(jid, { react: { text: emoji, key } }); } catch (e) {}
+}
+
+async function startWorking(jid, key) {
+  await react(jid, key, "👀");
+  const tick = async () => { try { await sock.sendPresenceUpdate("composing", jid); } catch (e) {} };
+  await tick();
+  const item = { key, timer: setInterval(tick, TYPING_EVERY_MS) };
+  item.stop = setTimeout(() => finishOne(jid, item, null), TYPING_MAX_MS);
+  if (!working.has(jid)) working.set(jid, []);
+  working.get(jid).push(item);
+}
+
+async function finishOne(jid, item, emoji) {
+  const list = working.get(jid) || [];
+  const i = list.indexOf(item);
+  if (i < 0) return;
+  list.splice(i, 1);
+  clearInterval(item.timer);
+  clearTimeout(item.stop);
+  if (!list.length) {
+    working.delete(jid);
+    try { await sock.sendPresenceUpdate("paused", jid); } catch (e) {}
+  }
+  if (emoji) await react(jid, item.key, emoji);
+}
+
+// The oldest message still being worked on, in any chat, is the one answered.
+async function finishOldest(emoji) {
+  for (const [jid, list] of working) {
+    if (list.length) { await finishOne(jid, list[0], emoji); return; }
+  }
 }
 
 async function send(text) {
@@ -365,6 +416,21 @@ http
       });
       return;
     }
+    if (req.method === "POST" && req.url === "/done") {
+      if (TOKEN && auth !== `Bearer ${TOKEN}`) {
+        res.writeHead(401); res.end(); return;
+      }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", async () => {
+        let ok = true;
+        try { ok = JSON.parse(body || "{}").ok !== false; } catch (e) {}
+        await finishOldest(ok ? "✅" : "⚠️");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
     if (req.method === "POST" && req.url === "/send") {
       if (TOKEN && auth !== `Bearer ${TOKEN}`) {
         res.writeHead(401); res.end(); return;
@@ -373,7 +439,9 @@ http
       req.on("data", (c) => (body += c));
       req.on("end", async () => {
         try {
-          const ok = await send(JSON.parse(body).text || "");
+          const b = JSON.parse(body);
+          const ok = await send(b.text || "");
+          if (b.done) await finishOldest(String(b.text || "").trim().startsWith("⚠️") ? "⚠️" : "✅");
           res.writeHead(ok ? 200 : 503, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok }));
         } catch (e) {

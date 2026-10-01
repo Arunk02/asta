@@ -944,3 +944,52 @@ def test_every_turn_starts_from_his_open_work(monkeypatch):
     assert "message to Vinish Kumar (sends by itself)" in work
     assert "send_later" in " ".join(__import__("app.tool_index", fromlist=["x"]).required_for(
         "notify vinish on monday to get both merged"))
+
+
+# --- WhatsApp: 👀, "typing…", ✅ — no filler message ----------------------------------
+
+def test_the_answer_after_a_long_turn_is_marked_as_the_answer(monkeypatch):
+    pushed: list[tuple] = []
+
+    async def wa(text, done=False):
+        pushed.append((text, done))
+        return True
+
+    sink = main.HybridSink(wa, "c1")
+    sink.handoff()
+    asyncio.run(sink.send({"type": "delta", "text": "No booking H69LMCN6KZY in UAT either."}))
+    asyncio.run(sink.send({"type": "done"}))
+    assert pushed == [("No booking H69LMCN6KZY in UAT either.", True)]
+
+
+def test_a_long_turn_that_ends_with_nothing_to_say_still_ticks_his_message(monkeypatch):
+    from app import notify
+    ticked: list[bool] = []
+
+    async def done(ok=True):
+        ticked.append(ok)
+        return True
+
+    async def wa(text, done=False):
+        raise AssertionError("nothing to send")
+
+    monkeypatch.setattr(notify, "wa_done", done)
+    sink = main.HybridSink(wa, "c1")
+    sink.handoff()
+    asyncio.run(sink.close())
+    assert ticked == [True]
+    asyncio.run(sink.close())
+    assert ticked == [True], "once"
+
+
+def test_the_bridge_shows_working_without_a_message():
+    import pathlib
+    import shutil
+    import subprocess
+    js = (pathlib.Path(main.__file__).resolve().parents[1] / "whatsapp" / "bridge.js").read_text()
+    assert 'sendPresenceUpdate("composing"' in js and '"👀"' in js and '"✅"' in js
+    assert 'req.url === "/done"' in js and "data.working" in js
+    node = shutil.which("node")
+    if node:
+        path = pathlib.Path(main.__file__).resolve().parents[1] / "whatsapp" / "bridge.js"
+        assert subprocess.run([node, "--check", str(path)], capture_output=True).returncode == 0

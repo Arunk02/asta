@@ -470,13 +470,16 @@ def test_a_meeting_that_merely_mentions_cancelling_stays():
 
 # --- 8. the same sentence every time ------------------------------------------------------------
 
-def test_the_acknowledgement_says_what_it_is_doing():
+def test_a_turn_with_nothing_to_report_sends_no_filler_line():
+    """It used to be one sentence per kind of ask; since 1 Oct it is none at all.
+    "Working" is shown by the bridge — 👀 on his message, "typing…" — and the
+    only line sent is one that says something: the task it started."""
     from app import main
     said = {main._working_note("none", t) for t in (
         "can you debug why the booking failed",
         "review the PR comments in 1409",
         "production is down for bulk booking")}
-    assert len(said) == 3, f"one sentence for every ask is the bug: {said}"
+    assert said == {""}
 
 
 def test_it_names_the_task_it_just_started():

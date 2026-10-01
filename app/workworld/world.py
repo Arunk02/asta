@@ -355,7 +355,7 @@ class World:
 
         # 2. His phone. notify's own ledger/dedup logic still runs; only the
         #    delivery at the end of it is a recorder.
-        async def wa_send(text: str) -> bool:
+        async def wa_send(text: str, done: bool = False) -> bool:
             self.pushes.append({"text": text, "level": "whatsapp", "urgency": "direct"})
             return True
 
@@ -382,6 +382,12 @@ class World:
             return True
 
         p.set(notify, "wa_send", wa_send)
+
+        # …and the tick on his message: a bench turn must never touch his chat.
+        async def wa_done(ok: bool = True) -> bool:
+            return True
+
+        p.set(notify, "wa_done", wa_done)
         #    And his voice. Same door, same reason: unstubbed, every bench run
         #    that spoke would speak to him for real — and the voice server would
         #    be asked to synthesise it, on his laptop, at whatever hour the

@@ -1657,7 +1657,7 @@ async def api_wa_incoming(request: Request):
         done, _pending = await asyncio.wait({job}, timeout=WA_INBAND_TIMEOUT)
         if not done:
             sink.handoff()
-            return {"reply": _working_note(conv["id"], text)}
+            return {"reply": _working_note(conv["id"], text), "working": True}
     return {"reply": (sink.text() or "")[:3500]}
 
 
@@ -1684,13 +1684,10 @@ def _working_note(cid: str, text: str) -> str:
         # because #201 was waiting on a plan from an hour before (1 Oct).
         if title and float(row.get("created_at") or 0) >= time.time() - WA_INBAND_TIMEOUT - 5:
             return f"⏳ #{live[-1]} — {title[:100]}. I'll report back here."
-    from . import responder
-    kind = responder.what_it_asks(text)
-    doing = {"incident": "Digging into the incident",
-             "pr_review": "Going through the PR",
-             "debug": "Debugging that",
-             "ask": "Looking that up"}.get(kind, "Working on it")
-    return f"⏳ {doing} — I'll send the answer here."
+    # Nothing to say beyond "working" — and that is said without a message: the
+    # bridge reacts 👀 to his message and shows "typing…" until the answer
+    # lands (1 Oct: "whenever I send something I get this quick reply").
+    return ""
 
 
 async def _telegram_turn(text: str) -> str:
@@ -1811,10 +1808,7 @@ class HybridSink:
         typ = payload.get("type")
         if typ == "done":
             if self._pushing:
-                out = self.text()
-                if out:
-                    with contextlib.suppress(Exception):
-                        await self._send(out[:4000])
+                await self._finish()
             return
         if typ == "delta":
             self._parts.append(payload.get("text", ""))
@@ -1847,10 +1841,29 @@ class HybridSink:
         """
         if not self._pushing:
             return          # still in-band: the HTTP reply carries it
+        await self._finish()
+
+    async def _finish(self) -> None:
+        """The last push of a handed-off turn — marked as the answer, so the
+        bridge stops "typing…" and ticks his message. Once."""
+        if getattr(self, "_finished", False):
+            out = self.text()
+            if out:
+                with contextlib.suppress(Exception):
+                    await self._send(out[:4000])
+            return
+        self._finished = True
         out = self.text()
+        failed = out.lstrip().startswith("⚠️")
         if out:
             with contextlib.suppress(Exception):
-                await self._send(out[:4000])
+                try:
+                    await self._send(out[:4000], done=True)
+                except TypeError:
+                    await self._send(out[:4000])
+            return
+        with contextlib.suppress(Exception):
+            await notify.wa_done(ok=not failed)
 
 
 class PushSink:

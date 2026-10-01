@@ -10,6 +10,11 @@ The list is his, in guardrails.md under `## Manager and above`, one name per
 bullet. Enforced in two places, so no path can skip it: the places that would
 speak on their own stage a draft instead, and `teams_bridge.send_message`
 refuses outright any send to them that does not carry his approval.
+
+Switching it off: delete the section from guardrails.md — no restart. Taking it
+out of the code for good: delete this file and every line that says `senior.`
+(`grep -rn "senior\." app/`), plus its tests at the end of
+tests/test_right_chat_right_yes.py.
 """
 
 from __future__ import annotations

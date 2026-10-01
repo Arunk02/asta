@@ -1076,3 +1076,96 @@ def test_a_compact_rail_still_reads_the_burst_one_to_one_first():
     rail = [{"name": n, "text": n} for n in current]           # names only, as live
     first = chat_watch.changed_first(rail, current, previous)
     assert first[0] == "Vinish Kumar" and set(first) == {"G", "F", "E", "D", "C", "Vinish Kumar"}
+
+
+# --- after sleep: nothing may hold Teams forever ------------------------------------
+
+def test_a_browser_launch_that_never_returns_is_cut_off(monkeypatch):
+    """1 Oct, 00:26: Chrome never came up in a maintenance wake; Teams and Outlook
+    waited behind the lock for ten hours."""
+    from app import teams_bridge as tb
+
+    async def never(*a, **k):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(tb, "_pool_alive", lambda: asyncio.sleep(0, result=False))
+    monkeypatch.setattr(tb, "_discard_pool", lambda why="": asyncio.sleep(0))
+    monkeypatch.setattr(tb, "_launch", never)
+    monkeypatch.setattr(tb, "in_a_call", lambda: False)
+    monkeypatch.setattr(tb, "LAUNCH_TIMEOUT", 0.05)
+    with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+        asyncio.run(tb._pooled_page())
+
+
+def test_a_dead_page_check_does_not_hang(monkeypatch):
+    from app import teams_bridge as tb
+
+    class Dead:
+        async def evaluate(self, js):
+            await asyncio.sleep(3600)
+
+    monkeypatch.setitem(tb._POOL, "page", Dead())
+    monkeypatch.setitem(tb._POOL, "born", time.time())
+    t0 = time.time()
+
+    async def run():
+        return await asyncio.wait_for(tb._pool_alive(), timeout=15)
+
+    assert asyncio.run(run()) is False and time.time() - t0 < 12
+    tb._POOL.clear()
+
+
+def test_the_watchdog_takes_the_browser_from_a_stuck_holder(monkeypatch):
+    from app import teams_bridge as tb, wake
+    resets: list[str] = []
+
+    async def reset(why):
+        resets.append(why)
+        tb._HELD["since"] = 0.0
+
+    calls = {"n": 0}
+
+    async def tick(seconds):
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise asyncio.CancelledError
+        return False
+
+    monkeypatch.setattr(tb, "reset", reset)
+    monkeypatch.setattr(wake, "sleep", tick)
+    monkeypatch.setattr(tb, "in_a_call", lambda: False)
+    tb._HELD["since"] = time.time() - tb.STUCK_SECONDS - 5
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(tb.watchdog_loop())
+    assert resets and "held the browser" in resets[0]
+
+
+def test_a_long_sleep_gets_a_fresh_browser_on_wake(monkeypatch):
+    from app import teams_bridge as tb, wake
+    resets: list[str] = []
+
+    async def reset(why):
+        resets.append(why)
+
+    monkeypatch.setattr(tb, "reset", reset)
+    monkeypatch.setattr(wake, "wait_for_network", lambda limit=0: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(wake, "_announce", lambda gap, ok: asyncio.sleep(0))
+    monkeypatch.setattr(wake, "TICK_SECONDS", 0.01)
+    real_time = time.time
+    jumped = {"done": False}
+
+    def fake_time():
+        if not jumped["done"]:
+            return real_time()
+        return real_time() + 10 * 3600
+
+    async def run():
+        task = asyncio.create_task(wake.watch_loop())
+        await asyncio.sleep(0.05)
+        jumped["done"] = True
+        await asyncio.sleep(0.1)
+        task.cancel()
+
+    monkeypatch.setattr(wake.time, "time", fake_time)
+    asyncio.run(run())
+    assert resets and "asleep" in resets[0]

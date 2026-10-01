@@ -136,6 +136,7 @@ async def startup() -> None:
     # the first scan after the lid opens happens then and not up to a poll
     # interval later. Started unconditionally — sleep is not a Teams feature.
     daemon.start("wake", wake.watch_loop)
+    daemon.start("teams_watchdog", teams_bridge.watchdog_loop)
     if msnotify.enabled():
         daemon.start("msnotify", _msnotify_loop)
     if telegram.enabled():

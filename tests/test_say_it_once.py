@@ -1333,3 +1333,29 @@ def test_waiting_for_a_call_outcome_is_not_a_step():
     assert main._WAITS_ON_A_TASK.search(
         "Wait for the discuss_in_call outcome with Vinish and Komal, then report back")
     assert not main._WAITS_ON_A_TASK.search("Run the mapper tests and report the failures")
+
+
+def test_go_and_post_it_posts_the_review_comment(monkeypatch):
+    from app import agent, capabilities, ops
+    ran: list[dict] = []
+
+    async def run(op):
+        ran.append(op)
+        return "Commented on PR #1459"
+
+    monkeypatch.setattr(ops, "run", run)
+    monkeypatch.setattr(capabilities, "said_this_turn", lambda: "go and post it")
+    out = asyncio.run(agent.pr_review_post("1459", "comment", "Solid logic; two notes."))
+    assert out.startswith("✅ Commented on PR #1459") and ran[0]["args"]["action"] == "comment"
+
+
+def test_an_approval_needs_the_word_approve(monkeypatch):
+    from app import agent, capabilities, ops, offers
+
+    async def run(op):
+        raise AssertionError("approved without his word")
+
+    monkeypatch.setattr(ops, "run", run)
+    monkeypatch.setattr(capabilities, "said_this_turn", lambda: "go and post it")
+    out = asyncio.run(agent.pr_review_post("1459", "approve", ""))
+    assert out.startswith("Staged") and offers.pending() is not None

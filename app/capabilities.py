@@ -518,6 +518,12 @@ READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=Fal
 #: once at the turn boundary, copied into everything the turn awaits.
 TURN_TEXT: ContextVar[str] = ContextVar("asta_turn_text", default="")
 
+#: The task whose brain is calling, when it is a task and not the chat. An offer
+#: a task stages has not been shown to him by any reply — the chat brain says
+#: what it staged, a task brain says nothing he reads — so his next "yes" must
+#: not answer it until it has actually reached him (see offers.Offer.shown).
+FROM_TASK: ContextVar[str] = ContextVar("asta_from_task", default="")
+
 
 def said_this_turn() -> str:
     """What he typed this turn, on EVERY brain path.

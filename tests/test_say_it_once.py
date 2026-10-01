@@ -1403,7 +1403,7 @@ def test_a_colleague_hears_checking_within_the_minute_once_an_hour(monkeypatch):
     from app import chat_watch, writing
     said: list[tuple] = []
 
-    async def say(chat, line, group=False):
+    async def say(chat, line, group=False, since=None):
         said.append((chat, line))
         return True
 
@@ -1420,7 +1420,7 @@ def test_an_unclear_ask_is_asked_back_to_them_not_to_him(monkeypatch):
     said: list[str] = []
     told: list[str] = []
 
-    async def say(chat, line, group=False):
+    async def say(chat, line, group=False, since=None):
         said.append(line)
         return True
 
@@ -1442,7 +1442,7 @@ def test_an_unclear_ask_is_asked_back_to_them_not_to_him(monkeypatch):
 def test_an_answer_still_waits_for_his_send(monkeypatch):
     from app import chat_watch
 
-    async def say(chat, line, group=False):
+    async def say(chat, line, group=False, since=None):
         raise AssertionError("an answer went out without his send")
 
     monkeypatch.setattr(chat_watch, "_say", say)

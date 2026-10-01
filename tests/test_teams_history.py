@@ -153,6 +153,8 @@ class FakePage:
         self.scrolls = 0
 
     async def evaluate(self, script, *args):
+        if "el.scrollTop = el.scrollHeight" in script:
+            return True             # to the newest message — not a scroll back
         if "scrollTop" in script:
             self.scrolls += 1
             if self.at < len(self.pages) - 1:

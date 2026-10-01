@@ -1834,6 +1834,16 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
+    # It goes out as HIM. A sentence about Arun, the assistant or a staged
+    # review cannot be his words (Komal, 1 Oct: "Will post once I confirm
+    # with Arun", sent in his name). Dropped here, for every brain.
+    if channel in ("teams", "chat", "whatsapp", "email"):
+        what = writing.as_him(what)
+    # "Shabda Anubhav, Vinish, +2" is a group by its very shape — a brain that
+    # forgot to say so must not turn it into a search for the people in it.
+    from . import teams_bridge as _tb
+    if channel == "teams" and _tb._is_member_list(to):
+        to_group = True
     # His standing rules, before anything is even drafted for him to approve.
     # "Unless I ask" holds when the person is named in what he said this turn.
     said = capabilities.said_this_turn().lower()
@@ -1908,7 +1918,8 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     if channel in ("teams", "chat", "whatsapp", "email"):
         overrun = writing.too_long(what, to)
         if overrun:
-            staged += f"\n⚠ Length: {overrun} Consider redrafting shorter before he sees it."
+            staged += (f"\n⚠ Length: {overrun} Shorten it yourself and stage it again "
+                       f"— do not ask Arun about its length.")
     return staged
 
 
@@ -2870,7 +2881,7 @@ async def teams_resolve(chat: str, to_group: bool = False) -> str:
         return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
     try:
         r = await teams_bridge.resolve_target(chat, allow_group=to_group)
-        kind = "group/channel" if to_group else "1:1 chat"
+        kind = "group/channel" if r.get("allow_group") else "1:1 chat with that person"
         return f"'{chat}' resolves to the {kind}: {r['opened']!r} — nothing was sent."
     except RuntimeError as exc:
         if "SESSION_EXPIRED" in str(exc):

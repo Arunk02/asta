@@ -131,8 +131,12 @@ def ask_back_enabled() -> bool:
 #: "Sure, happy to help" would be warmer and is not available: it promises, in
 #: his name, that he will help — and he has not seen the message yet. Courtesy
 #: has to come from HOW it asks, not from agreeing to something on his behalf.
+#:
+#: "…what you need help with?" was the line until 1 Oct, and he called it out:
+#: not everyone who writes to him is asking for help, and it reads as if they
+#: were. "Yes, could you share a bit more on this?" asks the same thing politely.
 ASK_BACK = os.environ.get(
-    "ASTA_ASK_BACK_LINE", "Could you tell me a bit more about what you need help with?")
+    "ASTA_ASK_BACK_LINE", "Yes, could you share a bit more on this?")
 
 
 #: The answer to a ping ("Bro", "Hi Arun"). It says he is there and asks nothing
@@ -163,6 +167,22 @@ def ping_back(chat: str) -> str:
         head, rest = line.split(",", 1)
         return f"{head} {terms[0]},{rest}"
     return line
+
+
+def opener_line(chat: str, who: str = "") -> str:
+    """The answer to "hi Arunkumar": "hi Shabda, yes tell me".
+
+    His words for it, 1 Oct — "ideally we should have asked yes please tell
+    something kind of, not like what is the issue?". Their first name, and the
+    term he uses with them when he has one; nothing about a subject."""
+    first = (who or "").split()[0] if (who or "").split() else ""
+    try:
+        from . import writing
+        terms = [t for t in writing.address_terms(chat) if t.lower() in ("bro", "da", "machi")]
+    except Exception:                                          # noqa: BLE001
+        terms = []
+    name = terms[0] if terms else first
+    return f"hi {name}, yes tell me" if name else "hi, yes tell me"
 
 
 def _asked_key(who: str) -> str:

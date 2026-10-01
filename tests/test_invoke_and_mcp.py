@@ -262,7 +262,7 @@ def test_mcp_proxy_forwards_to_invoke(monkeypatch):
     assert sent["url"].endswith("/api/_invoke")
     # conv_id rides on every forwarded call — without it the capabilities that
     # read the conversation fail on the far side of this hop, and did.
-    assert sent["payload"] == {"tool": "health_check", "args": {}, "conv_id": ""}
+    assert sent["payload"] == {"tool": "health_check", "args": {}, "conv_id": "", "task_id": ""}
 
 
 # --- the conversation has to survive the hop ---------------------------------

@@ -913,7 +913,8 @@ def _one_of(matches: list[dict], asked: str, noun: str,
         f"Refusing to guess: ask Arun which one he means and use the full name.")
 
 
-async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
+async def _find_chat(page, chat: str, allow_group: bool = False,
+                     group_only: bool = False) -> str:
     """Open a chat by name and return the title of what actually opened.
 
     SAFETY: Teams' search dropdown starts with FILTER CHIPS ("Chats", "Channels",
@@ -962,7 +963,15 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
     groups = _dedupe(o for o in options
                      if _kind(o) in ("group chat", "channel") and _matches(o, wanted))
 
-    if people:
+    if group_only:
+        # He named a GROUP. A person who shares a word with it is not that
+        # group: "Shabda Anubhav, Vinish, +2" went to Shabda's 1:1 because
+        # people always won the search (1 Oct) — the CT finding meant for four
+        # people reached one, and Shabda answered "sorry saw the ping now".
+        if not groups:
+            raise NotFound(f"no group named '{chat}' in Teams search — nothing sent")
+        pick = _one_of(groups, chat, "groups", chats)
+    elif people:
         pick = _one_of(people, chat, "people", chats)
     elif allow_group and groups:
         pick = _one_of(groups, chat, "groups", chats)
@@ -996,9 +1005,16 @@ async def _find_chat(page, chat: str, allow_group: bool = False) -> str:
             f"the Teams search results changed while picking '{chat}' — nothing opened")
     before = await _chat_title(page)
     await page.click('[data-asta-pick="1"]', timeout=10000)
-    await page.wait_for_selector(
-        '[data-tid="messageBodyContent"], [data-tid="chat-pane-message"], [role="main"]',
-        timeout=20000)
+    try:
+        await page.wait_for_selector(
+            '[data-tid="messageBodyContent"], [data-tid="chat-pane-message"], [role="main"]',
+            timeout=20000)
+    except Exception as exc:                                   # noqa: BLE001
+        # Nothing was typed: the result opened something that is not a chat.
+        # As NotFound the page goes home; as anything else the whole browser was
+        # thrown away and relaunched — twelve times between 15:00 and 15:20 on
+        # 1 Oct, half a minute each, while every other chat waited to be read.
+        raise NotFound(f"'{chat}' did not open as a chat ({type(exc).__name__})") from exc
 
     # Wait for the header to actually BECOME the thread asked for, rather than
     # sleeping two seconds and hoping. That selector above is already satisfied by
@@ -1049,26 +1065,33 @@ def _maybe_member_list(chat: str) -> bool:
     return bool(re.search(r"^\S+(?:\s\S+)?\s+and\s+\S+(?:\s\S+)?$", (chat or "").strip()))
 
 
-def _rail_title_ok(title: str, chat: str) -> bool:
+def _rail_title_ok(title: str, chat: str, strict: bool = False) -> bool:
     """Is the conversation that opened the rail row that was clicked?
 
     A named chat must show its name. A members-list row ("A, B, +2") shows the
-    members in full in the header, so its first member is what is checked."""
+    members in full in the header, so its first member is what is checked —
+    or, for a SEND (`strict`), every member the row names."""
     title, chat = (title or "").lower(), (chat or "").lower()
     if not title:
         return False
     if "," in chat:
-        first = chat.split(",")[0].split()
-        return bool(first) and first[0] in title
+        names = [p.split()[0] for p in chat.split(",")
+                 if p.strip() and not re.match(r"^\s*\+\d+\s*$", p)]
+        if strict:
+            return bool(names) and all(n in title for n in names)
+        return bool(names) and names[0] in title
+    if strict:
+        return chat in title
     return _title_matches(title, chat)
 
 
-async def _open_from_rail(page, chat: str) -> bool:
-    """Open a chat by clicking its own row on the rail. For READING only.
+async def _open_from_rail(page, chat: str, strict: bool = False) -> bool:
+    """Open a chat by clicking its own row on the rail.
 
     True when exactly one row carries that name and the conversation that
     opened is that one. Anything else — no row, two rows, a header that does
-    not match — is False, and the caller falls back to search."""
+    not match — is False, and the caller falls back to search (a read) or
+    refuses (a send, which passes `strict`)."""
     wanted = (chat or "").strip().lower()
     if not wanted:
         return False
@@ -1080,7 +1103,7 @@ async def _open_from_rail(page, chat: str) -> bool:
             '[data-tid="messageBodyContent"], [data-tid="chat-pane-message"], [role="main"]',
             timeout=15000)
         for _ in range(_TITLE_ATTEMPTS):
-            if _rail_title_ok(await _chat_title(page), chat):
+            if _rail_title_ok(await _chat_title(page), chat, strict=strict):
                 # A row with unread messages opens at the LAST-READ position, not
                 # the bottom — the newest messages would be off screen.
                 with contextlib.suppress(Exception):
@@ -1341,12 +1364,23 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
         # has no such result, so it was marked unopenable for a day and a whole
         # group where he is one of four went unread (30 Sep: "create a new
         # topic" — read by nobody). Reading needs no search: click the row.
-        if _is_member_list(chat) and await _open_from_rail(page, chat):
+        #
+        # Every chat, not only those: the sweep picked these names off the rail
+        # a moment ago, so the row is there, and clicking it is one step where
+        # search is four. Search is what is left for a chat that is not on it.
+        if await _open_from_rail(page, chat):
             title = chat
         else:
             try:
                 await _find_chat(page, chat, allow_group=True)  # reading a group is harmless
                 title = await _chat_title(page) or chat
+                # A chat opened from search lands where he last read it, not at
+                # the newest message. Shabda's 1:1 read back as June's messages
+                # (1 Oct), so the reply Arun sent at 14:50 was never seen and
+                # "sorry saw the ping now" looked like an opening.
+                with contextlib.suppress(Exception):
+                    await page.evaluate(_BOTTOM_JS)
+                    await asyncio.sleep(0.8)
             except NotFound:
                 # Search has nothing for it — a chat created this morning ("AP
                 # Changes Related to Soft Closure", 1 Oct) is on the rail before
@@ -1387,14 +1421,48 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
     return rows[-limit:] if limit > 0 else rows
 
 
+async def _open_target(page, chat: str, to_group: bool) -> str:
+    """Open exactly what a send to `chat` means, or refuse. Returns the title.
+
+    A person: their 1:1, found by search, people first — as always.
+    A group he named: its own row on the chat list, the exact name, and the
+    header checked to be it; search is tried for groups only. Never a person:
+    a group that cannot be opened is a refusal, not a guess at someone in it."""
+    if _is_member_list(chat):
+        to_group = True
+    if not to_group:
+        return await _find_chat(page, chat, allow_group=False)
+    with contextlib.suppress(Exception):
+        await wait_for_rail(page, timeout=10)
+    if await _open_from_rail(page, chat, strict=True):
+        return await _chat_title(page) or chat
+    if _is_member_list(chat):
+        # Listed by its members: search has no result for it, and a search for
+        # those names finds the PEOPLE. The row is the only way in.
+        raise NotFound(f"the group '{chat}' is not on the chat list right now — "
+                       f"nothing sent")
+    return await _find_chat(page, chat, allow_group=True, group_only=True)
+
+
+#: Every message this process put into Teams: (time, chat it landed in). What a
+#: reply claiming "sent" is checked against.
+SENT: list[tuple[float, str]] = []
+#: When each send began — a send the brain started a moment ago may still be
+#: on its way when the brain says so.
+STARTED: list[float] = []
+
+
 async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
     """Send a message to a person's 1:1 chat. Returns the chat it landed in.
 
     Groups/channels require allow_group=True — Arun's standing rule is that a
-    "ping X" means X's personal chat, never a team channel.
+    "ping X" means X's personal chat, never a team channel. A group is opened
+    by its own row and never resolved to a person in it.
     """
+    STARTED.append(time.time())
+    del STARTED[:-50]
     async with teams_page() as page:
-        title = await _find_chat(page, chat, allow_group=allow_group)
+        title = await _open_target(page, chat, allow_group)
         box = None
         for sel in ('[data-tid="ckeditor"] [contenteditable="true"]',
                     'div[contenteditable="true"][role="textbox"]',
@@ -1461,6 +1529,8 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
             raise RuntimeError(
                 f"message does not appear in '{title}' after sending — treat as NOT sent")
         store.kv_set("teams_session_ok", "1")
+        SENT.append((time.time(), title))
+        del SENT[:-50]
         return title
 
 
@@ -1474,9 +1544,10 @@ async def resolve_target(chat: str, allow_group: bool = False) -> dict:
     group targeting without putting a test message in front of fourteen people.
     """
     async with teams_page() as page:
-        title = await _find_chat(page, chat, allow_group=allow_group)
+        title = await _open_target(page, chat, allow_group)
         store.kv_set("teams_session_ok", "1")
-        return {"asked": chat, "opened": title, "allow_group": allow_group}
+        return {"asked": chat, "opened": title,
+                "allow_group": allow_group or _is_member_list(chat)}
 
 
 # --- presence ----------------------------------------------------------------

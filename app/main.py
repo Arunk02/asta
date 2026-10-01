@@ -536,6 +536,7 @@ async def api_invoke(body: dict):
     # failing only in a full run, which is what a leaked ContextVar looks like.
     conv_id = (body or {}).get("conv_id") or ""
     token = tasks.bind_conversation(conv_id) if conv_id else None
+    from_task = capabilities.FROM_TASK.set(str((body or {}).get("task_id") or ""))
     try:
         result = cap.fn(**args)
         if inspect.isawaitable(result):
@@ -568,6 +569,7 @@ async def api_invoke(body: dict):
     finally:
         if token is not None:
             tasks.unbind_conversation(token)
+        capabilities.FROM_TASK.reset(from_task)
     return {"result": result}
 
 
@@ -1942,6 +1944,7 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
     await out.send({"type": "tool", "status": "start", "name": tool_name, "args": ""})
     parts: list[str] = []
     t0 = time.monotonic()
+    started_at = time.time()
     first_token_ms: int | None = None
 
     async def on_delta(text: str) -> None:
@@ -2009,12 +2012,106 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
                     spent.cache_read, spent.cache_write)
     store.add_ui_message(conv["id"], "assistant", reply,
                          {"tools": [tool_name], "via": via, "channel": channel})
+    await _correct_claims(out, conv, reply, started_at)
     # Retire a session that has grown past the cap NOW, before the next message
     # can resume it — the idle digest never fires on a thread that never idles.
     cap = session_max_tokens()
     if cap and spent.context > cap:
         retire_session_for_size(conv, spent.context)
     await out.send({"type": "done", "tools": [tool_name]})
+
+
+async def _after_stall(out, conv: dict, user_text: str, failed: str, channel: str,
+                       exc: Exception) -> bool:
+    """A brain that went silent and said NOTHING hands the message on, once.
+
+    "Why u not reading any teams message ..?" (1 Oct, 14:58) went to Copilot,
+    which sat 138 s without a word and was stopped; the message was never
+    answered, and his next one was. A stall is not a quota: the brain is fine,
+    this turn is not. The next brain up takes the same message — and if there
+    is none, the error goes out as before, so he hears either way."""
+    from . import turn_budget
+    if not isinstance(exc, turn_budget.TurnStopped) or (exc.partial or "").strip():
+        return False
+    chain = _fallback_chain(failed)
+    if not chain:
+        return False
+    brain = chain[0]
+    store.record_outcome("turn", "stall_handoff", subject=failed, detail=brain)
+    note = f"↻ {failed} stalled without answering — {brain} is taking this one."
+    if agent_mod.is_cli(brain):
+        await _run_turn_cli(out, conv, user_text, agent_mod.runner(brain), brain,
+                            note=note, channel=channel)
+    else:
+        await out.send({"type": "note", "text": note})
+        await _run_turn_streaming(out, conv, user_text, brain, channel)
+    return True
+
+
+#: A reply saying something went out. Checked against what actually did.
+_SENT_CLAIM = re.compile(
+    r"\b(?:is|was|been|got|already|now|just)\s+(?:sent|posted|delivered)\b|"
+    r"✅\s*(?:sent|posted)\b|\bsent\s+(?:it\s+)?(?:to|now|with\s+your)\b|"
+    r"\bposted\s+(?:it\s+)?(?:to|on|in)\b", re.I)
+_NEGATED = re.compile(r"(?:\b(?:not|never|nothing|no)\b|n't)[^.!?\n]*$", re.I)
+_MAIL = re.compile(r"\b(?:the|an?|your|that)\s+(?:mail|email|e-mail|invite)\b|"
+                   r"\b(?:mail|email|e-mail|invite)\s+(?:is|was|has\s+been|got)\b|\boutlook\b", re.I)
+
+
+def unproven_send(reply: str, since: float) -> str:
+    """The sentence claiming a send that nothing performed since `since`, or ""."""
+    claim = ""
+    # Quoted words are the message, not the claim about it: "(… so this isn't
+    # why email CT is failing) is sent now" negates nothing and mails nobody.
+    text = re.sub(r"[\"“][^\"”\n]*[\"”]|\([^)\n]*\)|>[^\n]*", " ", reply or "")
+    for m in _SENT_CLAIM.finditer(text):
+        # Negation right before the claim ("nothing was sent", "hasn't been
+        # posted"), or the line is about mail/an invite, which go another way.
+        before = text[max(0, m.start() - 30):m.start()]
+        near = text[max(0, m.start() - 40):m.end() + 40]
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        line_end = text.find("\n", m.end())
+        line = text[line_start:line_end if line_end != -1 else len(text)]
+        if _NEGATED.search(before) or _MAIL.search(near):
+            continue
+        claim = line.strip()[-200:]
+        break
+    if not claim:
+        return ""
+    if any(t >= since for t, _ in teams_bridge.SENT) or any(t >= since for t, _ in ops.DONE) \
+            or any(t >= since for t in teams_bridge.STARTED):
+        return ""
+    # "Already sent Vinish: …" about a send that really happened earlier.
+    low, window = claim.lower(), since - 7200
+    for t, title in teams_bridge.SENT:
+        first = (title or "").split()[0].lower() if (title or "").split() else ""
+        if t >= window and len(first) >= 3 and first in low:
+            return ""
+    with contextlib.suppress(Exception):
+        from . import chat_watch
+        for r in store.teams_messages(since=window, limit=2000):
+            first = (r.get("chat") or "").split()[0].lower() if (r.get("chat") or "").split() else ""
+            if chat_watch.is_from_him(r.get("sender", "")) and len(first) >= 3 and first in low:
+                return ""
+    if re.search(r"\b(?:review|comment|pr)\b", low) and any(
+            t >= window and name.startswith(("pr_", "jira_")) for t, name in ops.DONE):
+        return ""
+    return claim
+
+
+async def _correct_claims(out, conv: dict, reply: str, since: float) -> None:
+    """"Already staged and ready — … is sent now with your confirm" (1 Oct, 14:40):
+    nothing had been sent. Whatever the brain, a claim that something went out
+    is checked against the record of what did, and corrected in the same breath."""
+    claim = unproven_send(reply, since)
+    if not claim:
+        return
+    line = ("⚠️ Correction: nothing was actually sent or posted just now — the line "
+            f"above (“{claim[:120]}”) is wrong. Tell me what to send and to whom, and "
+            "I'll stage it for your yes.")
+    store.record_outcome("turn", "false_send_claim", subject=conv["id"], detail=claim[:200])
+    store.add_ui_message(conv["id"], "assistant", line, {"via": "claim-check"})
+    await out.send({"type": "note", "text": line})
 
 
 async def _run_turn_copilot(out, conv: dict, user_text: str,
@@ -2129,9 +2226,10 @@ async def _run_turn(out, conv: dict, user_text: str, channel: str = "web") -> No
             await _run_turn_cli(out, conv, user_text, agent_mod.runner(model_name),
                                 model_name, channel=channel)
         except Exception as exc:
-            if not _is_quota_error(exc):
+            if _is_quota_error(exc):
+                await _cli_fallback(out, conv, user_text, model_name, channel)
+            elif not await _after_stall(out, conv, user_text, model_name, channel, exc):
                 raise
-            await _cli_fallback(out, conv, user_text, model_name, channel)
         return
 
     try:
@@ -2167,6 +2265,7 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     assistant_text = ""
     tools_used: list[str] = []
     t0 = time.monotonic()
+    started_at = time.time()
     first_token_ms: int | None = None
     trace_usage = {"input": 0, "output": 0, "cached": 0, "cache_write": 0}
 
@@ -2235,6 +2334,7 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
                     cache_write_tokens=trace_usage["cache_write"],
                     measured=bool(trace_usage["input"] or trace_usage["output"]))
     store.add_ui_message(conv["id"], "assistant", assistant_text, {"tools": tools_used, "channel": channel})
+    await _correct_claims(out, conv, assistant_text, started_at)
     # Measure-only: did the answer address the question? Fire-and-forget so it never
     # delays delivery, and a no-op unless ASTA_RELEVANCE is on.
     if relevance.enabled():
@@ -2768,16 +2868,116 @@ def _mechanical_send(staged: dict) -> dict | None:
                                            "to_group": bool(staged.get("to_group"))}}
 
 
-async def _run_op(op: dict, cid: str, sink, channel: str) -> None:
-    """Run one recorded outward call and report the outcome, success or failure."""
-    try:
-        line = await ops.run(op)
-    except Exception as exc:
-        line = f"⚠️ Couldn't do it — {type(exc).__name__}: {exc}"
+async def _run_op(op: dict, cid: str, sink, channel: str,
+                  staged: dict | None = None) -> None:
+    """Run one recorded outward call and report the outcome, success or failure.
+
+    A send that fails leaves its draft where it was: "send" again retries the
+    same words to the same chat. It used to vanish with the failure, and the
+    brain then re-made it from memory — into Shabda's 1:1 instead of the group,
+    and "already sent" when nothing had gone (1 Oct)."""
+    if op.get("name") == "teams_send" and teams_bridge.in_a_call():
+        # Asta's own call holds the Teams browser. The message goes out the
+        # moment it ends — he does not have to remember to ask again.
+        line = ("📞 I'm on a Teams call right now — this goes out the moment the call "
+                "ends, and I'll confirm here.")
+        daemon.once(f"after_call:{cid}", _send_after_call(op, cid, staged))
+    else:
+        try:
+            line = await ops.run(op)
+        except Exception as exc:
+            line = f"⚠️ Not sent — {type(exc).__name__}: {exc}"
+            if staged:
+                loop.stage(cid, staged)
+                line += ("\nThe draft is still waiting — say “send” to try again, or "
+                         "tell me what to change.")
     store.add_ui_message(cid, "assistant", line, {"via": "staged-send", "channel": channel})
     await sink.send({"type": "note", "text": line})
     if channel == "web":
         await sink.send({"type": "done", "tools": []})
+
+
+#: How long a send waits for Asta's own call to end before giving up on it.
+AFTER_CALL_SECONDS = 1800.0
+
+
+async def _send_after_call(op: dict, cid: str, staged: dict | None) -> None:
+    waited = 0.0
+    while teams_bridge.in_a_call() and waited < AFTER_CALL_SECONDS:
+        await asyncio.sleep(3)
+        waited += 3
+    try:
+        line = await ops.run(op)
+    except Exception as exc:                                    # noqa: BLE001
+        line = f"⚠️ Not sent after the call — {type(exc).__name__}: {exc}"
+        if staged:
+            loop.stage(cid, staged)
+            line += "\nThe draft is still waiting — say “send” to try again."
+    store.add_ui_message(cid, "assistant", line, {"via": "after-call", "channel": "whatsapp"})
+    await notify.notify(line, "send", urgency="direct", considered=True)
+
+
+#: "change the teams status into away", "set my status to busy", "teams status dnd".
+_PRESENCE_CMD = re.compile(
+    r"^\s*(?:pls\s+|please\s+)?(?:change|set|make|put|update|mark)?\s*(?:my\s+|the\s+)?"
+    r"(?:teams\s+)?status\s+(?:in\s*to|into|to|as|=)?\s*"
+    r"(available|online|free|busy|dnd|do not disturb|focus|brb|be right back|away|appear away|"
+    r"offline|appear offline)\s*[.!]*\s*$", re.I)
+
+
+#: A yes that says "send" — and nothing that could be a post on someone's work.
+_SEND_WORD = re.compile(r"^\s*(?:pls\s+|please\s+)?send\b", re.I)
+#: Offers that post under his name on a PR or ticket.
+_POST_KINDS = ("pr_write", "jira_write")
+
+
+def _draft_hash(staged: dict) -> str:
+    import hashlib
+    return hashlib.sha1(f"{staged.get('to')}|{staged.get('what')}".encode()).hexdigest()[:12]
+
+
+def _named_words() -> set[str]:
+    """First names and chat words from his chat list — what "someone" looks like."""
+    try:
+        rail = json.loads(store.kv_get("chatwatch_rail") or "[]")
+    except (ValueError, TypeError):
+        rail = []
+    words: set[str] = set()
+    for name in rail:
+        for w in re.findall(r"[a-z]{4,}", str(name).lower()):
+            words.add(w)
+    return words - _GENERIC_WORDS
+
+
+_GENERIC_WORDS = {"team", "group", "chat", "internal", "daily", "meeting", "slot", "time",
+                  "evening", "morning", "deployment", "telikos", "booking", "sprint",
+                  "demo", "support", "prod", "changes", "related", "discuss", "with",
+                  "issue", "review", "scrum", "fake", "working", "requirement", "send",
+                  "email", "service", "this", "that", "message", "update", "topic"}
+
+
+def _asked_about_someone_else(cid: str, staged: dict) -> str:
+    """Who his previous message asked to send something to, when the draft
+    waiting is NOT for them — else "". A second "send" to the same draft goes."""
+    if store.kv_get(f"draft_confirm:{cid}") == _draft_hash(staged):
+        store.kv_del(f"draft_confirm:{cid}")
+        return ""
+    try:
+        rows = [r for r in store.list_ui_messages(cid)[-12:] if r["role"] == "user"]
+    except Exception:                                           # noqa: BLE001
+        return ""
+    if not rows or time.time() - float(rows[-1].get("created_at") or 0) > 600:
+        return ""
+    said = (rows[-1].get("content") or "").lower()
+    if not re.search(r"\b(?:send|inform|tell|ping|message|reply|post|share|update)\b", said):
+        return ""
+    target = f"{staged.get('to') or ''} {staged.get('who') or ''}".lower()
+    mine = set(re.findall(r"[a-z]{4,}", target))
+    words = set(re.findall(r"[a-z]{4,}", said))
+    if words & mine:
+        return ""
+    named = sorted((words & _named_words()) - mine)
+    return ", ".join(w.capitalize() for w in named[:3])
 
 
 async def _run_staged_op(o, cid: str, sink, channel: str) -> None:
@@ -3264,8 +3464,23 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             await sink.send({"type": "done", "tools": []})
         return None
     if staged and (user_text or "").strip():
-        loop.clear_awaiting(cid)
         approved, read_as = _affirmation(user_text)
+        other = _asked_about_someone_else(cid, staged) if approved else ""
+        if other:
+            # His last message was about someone else, and the draft waiting is
+            # not for them. "Send the answer for shabda issue in the group" was
+            # followed by "Send" — and Komal's draft went out (1 Oct). One
+            # question costs a message; the wrong send costs his name.
+            store.kv_set(f"draft_confirm:{cid}", _draft_hash(staged))
+            target = staged.get("to") or "them"
+            await sink.send({"type": "note", "text": (
+                f"⚠️ The draft waiting is for *{target}* — your last message was about "
+                f"{other}, and nothing is staged for that. Say “send” again to send "
+                f"the {target} one, or tell me what to send to {other}.")})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+        loop.clear_awaiting(cid)
         if not approved:
             _judge_staged(cid, staged, user_text)
         if approved:
@@ -3280,7 +3495,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             # ends with Arun believing a message went out that never did.
             op = _mechanical_send(staged)
             if op:
-                await _run_op(op, cid, sink, channel)
+                await _run_op(op, cid, sink, channel, staged=staged)
                 # A colleague's answer went out: the conversation knows Asta spoke
                 # in it, and the next finished answer, if one is waiting, comes up.
                 from . import answers
@@ -3313,6 +3528,25 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # his phone and the answer usually comes back the same way.
     open_offer = offers.pending()
     if open_offer and (user_text or "").strip():
+        if _affirmation(user_text)[0] and not open_offer.shown:
+            # Staged by a task a moment ago and never shown to him: this yes was
+            # meant for something else. Show it; the NEXT yes may answer it.
+            await sink.send({"type": "note", "text": (
+                "Nothing you've seen is waiting on a yes — this just came in:\n\n"
+                + open_offer.render())})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+        if _affirmation(user_text)[0] and _SEND_WORD.match(user_text or "") \
+                and open_offer.kind in _POST_KINDS:
+            # "Send" approves a message. The open question is a post on a PR or
+            # a ticket, which carries his name on someone else's work.
+            await sink.send({"type": "note", "text": (
+                f"The open question is “{open_offer.prompt}” — that is a post, not a "
+                f"message. Say “yes” or “post” to do it; nothing is staged to send.")})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
         if _affirmation(user_text)[0]:
             offers.accept()
             _judge_offer(open_offer.kind, accepted=True)
@@ -3352,7 +3586,9 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         # questions that would misread a much later "yes" — and promoting a queued
         # one here would be worse: it would silently arm a question he has never
         # read, which is the exact failure the queue was added to prevent.
-        offers.drop_all()
+        # One he has not been shown yet is not one he moved on from.
+        if open_offer.shown:
+            offers.drop_all()
 
     # An open ask_user question owns the next message. Explicit form first
     # ("answer 3 the second one"), then the bare reply — which is how a person
@@ -3409,6 +3645,23 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             if channel == "web":
                 await sink.send({"type": "done", "tools": []})
             return None
+
+    # "change the teams status into away" — his own presence, set now. Through a
+    # brain it was "the Teams status tool is currently disconnected… will retry
+    # in ~2 min" (1 Oct, 13:33), and nothing ever retried.
+    m = _PRESENCE_CMD.match(user_text or "")
+    if m and teams_bridge.enabled():
+        try:
+            line = f"🟢 Teams status is now {await teams_bridge.set_presence(m.group(1))}."
+        except Exception as exc:                                # noqa: BLE001
+            line = f"⚠️ Teams status not changed — {exc}"
+        frontdesk.record("command", "presence")
+        store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
+        store.add_ui_message(cid, "assistant", line, {"via": "presence", "channel": channel})
+        await sink.send({"type": "note", "text": line})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
 
     # A STANDING instruction — "don't check incidents going forward", "my
     # favourite workspace is booking" — is proposed as a rule the code enforces,

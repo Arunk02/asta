@@ -423,7 +423,7 @@ def task_tools(task_id: int, cwd: str, kind: str = "") -> str:
     from . import copilot_cli, dev_mcp, mcp_server
     base = None
     if copilot_cli.mcp_cli_enabled():
-        base = mcp_server.config_entry(conv_id=conversation_of(task_id))
+        base = mcp_server.config_entry(conv_id=conversation_of(task_id), task_id=str(task_id))
     project = cwd if (not kind or kind in _DEV_MCP_KINDS) else ""
     return dev_mcp.config_json(project, base)
 

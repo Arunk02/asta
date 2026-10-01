@@ -323,3 +323,35 @@ those are written for a team and stay plain and professional. This is chat only.
 His actual messages, for tone:
 {examples}
 """.rstrip()
+
+
+#: A sentence in a message sent AS Arun that gives the machinery away: Arun in
+#: the third person ("Will post once I confirm with Arun" — to Komal, 1 Oct,
+#: in his own name), the assistant, or its staging words. To the colleague the
+#: message is from him; none of that is anything he would ever write.
+_NOT_HIS_VOICE = re.compile(
+    r"\b(?:arun(?:kumar)?(?:'s)?|asta)\b|"
+    r"\bstaged\s+(?:the\s+|my\s+|a\s+)?(?:comments?|review|reply|message|it|for)\b|"
+    r"\b(?:the|my|this)\s+draft\b(?!\s+(?:pr|pull))|\bdrafted\b|"
+    r"\bconfirm\s+with\s+(?:him|my\s+boss)\b|\bon\s+(?:his|arun'?s)\s+(?:behalf|yes|approval)\b",
+    re.I)
+_SENTENCE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)")
+
+
+def as_him(text: str) -> str:
+    """Drop the sentences that could only have come from his assistant.
+
+    Sentence by sentence, so the ask itself survives: "Reviewed it Komal — two
+    blocking ones … Will post once I confirm with Arun." loses only its last
+    sentence. A message that would be left empty is handed back unchanged —
+    he sees every draft, and an empty send is the worse failure."""
+    if not (text or "").strip():
+        return text
+    masked, held = _mask_urls(text)
+    out_lines = []
+    for line in masked.splitlines():
+        kept = [s for s in _SENTENCE.findall(line) if not _NOT_HIS_VOICE.search(s)]
+        out_lines.append("".join(kept).strip() if kept or not line.strip() else "")
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines)).strip()
+    cleaned = _unmask_urls(cleaned, held)
+    return cleaned if cleaned and re.search(r"\w", cleaned) else text

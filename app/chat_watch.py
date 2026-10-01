@@ -1789,6 +1789,9 @@ def on_rail(rows: list[str], now: float | None = None) -> list[str]:
     _RAIL.update(order=order, unread=unread, at=now)
     if not prev_order:
         hot = set(unread)                       # first look: catch up on all of it
+        with contextlib.suppress(Exception):
+            store.record_outcome("rail", "reporting",
+                                 detail=f"{len(order)} chats, {len(unread)} unread")
     else:
         hot = unread - prev_unread
         if order != prev_order:

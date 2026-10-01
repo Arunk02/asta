@@ -849,8 +849,8 @@ RAIL_WATCH_JS = """
     const out = [];
     for (const n of rows) {
       const sec = n.parentElement && n.parentElement.closest('[role="treeitem"][aria-level="1"]');
-      const section = sec ? (sec.innerText || '').split('\n')[0].trim() : '';
-      const name = (n.innerText || '').split('\n')[0].trim();
+      const section = sec ? (sec.innerText || '').split('\\n')[0].trim() : '';
+      const name = (n.innerText || '').split('\\n')[0].trim();
       const mentions = /^quick views$/i.test(section) && /^mentions$/i.test(name);
       if (SKIP.test(section) && !mentions) continue;
       if (!name || /^see (more|all)/i.test(name) || n.querySelector('[role="treeitem"]')) continue;
@@ -861,7 +861,7 @@ RAIL_WATCH_JS = """
       }
       out.push((bold ? '*' : '') + (mentions ? '!' : '') + name);
     }
-    const sig = out.join('\n');
+    const sig = out.join('\\n');
     if (sig === last && !force) return;
     last = sig;
     sent = Date.now();
@@ -890,7 +890,7 @@ RAIL_WATCH_JS = """
 _ROW_UNREAD_JS = """
 (wanted) => {
   for (const n of document.querySelectorAll('[role="treeitem"][aria-level="2"]')) {
-    if ((n.innerText || '').split('\n')[0].trim().toLowerCase() !== wanted) continue;
+    if ((n.innerText || '').split('\\n')[0].trim().toLowerCase() !== wanted) continue;
     for (const e of n.querySelectorAll('span, div, p')) {
       if (e.childElementCount === 0 && (e.textContent || '').trim().toLowerCase() === wanted
           && (parseInt(getComputedStyle(e).fontWeight) || 400) >= 600) return true;

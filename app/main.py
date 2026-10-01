@@ -1671,7 +1671,10 @@ def _working_note(cid: str, text: str) -> str:
     if live:
         row = store.get_task(live[-1]) or {}
         title = (row.get("title") or "").strip()
-        if title:
+        # Only a task THIS message started. "H69LMCN6KZY check do we received
+        # this booking" was answered "⏳ #201 — Fix Contract Test failure…"
+        # because #201 was waiting on a plan from an hour before (1 Oct).
+        if title and float(row.get("created_at") or 0) >= time.time() - WA_INBAND_TIMEOUT - 5:
             return f"⏳ #{live[-1]} — {title[:100]}. I'll report back here."
     from . import responder
     kind = responder.what_it_asks(text)
@@ -3729,7 +3732,8 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
                          f"Which task do you mean?\n{listing}\n\n"
                          "Say the number — e.g. “14 also cover the amend path” or “stop 15”."})
         return None
-    elif len(live) == 1 and not _names_another_task(user_text, live):
+    elif len(live) == 1 and not _names_another_task(user_text, live) \
+            and _conversation_is_on_task(cid, live[0]):
         if await _route_to_task(live[0], user_text, sink, channel, conv.get("model", "")):
             return None
         # Not about the task — fall through and answer it as an ordinary message.
@@ -3997,6 +4001,29 @@ def _names_another_task(text: str, live: list[int]) -> bool:
         if n not in live and store.get_task(n):
             return True
     return False
+
+
+def _conversation_is_on_task(cid: str, task_id: int) -> bool:
+    """Is the conversation, right now, about this task?
+
+    A plan waiting for his yes does not own every message after it. "check in
+    lower env as well" followed a booking question Asta had just answered, and
+    was filed under #201 — the CT fix — "when you approve its plan" (1 Oct).
+    A running task still takes what comes; a waiting one only what follows
+    Asta's own words about it."""
+    t = store.get_task(task_id) or {}
+    if t.get("status") == "running":
+        return True
+    try:
+        said = [r for r in store.list_ui_messages(cid)[-6:] if r["role"] == "assistant"]
+    except Exception:                                           # noqa: BLE001
+        return True
+    if not said:
+        return True
+    last = said[-1].get("content") or ""
+    title = (t.get("title") or "").lower()
+    words = [w for w in re.findall(r"[a-z]{5,}", title)][:6]
+    return f"#{task_id}" in last or (bool(words) and sum(w in last.lower() for w in words) >= 2)
 
 
 def _named_task(text: str, live: list[int]) -> int | None:

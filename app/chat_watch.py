@@ -706,6 +706,14 @@ async def candidates() -> list[str]:
                 return []
             if not looks_like_the_chat_list([r["name"] for r in rail]):
                 return []          # still not the list — report nothing, change nothing
+    # Chats only. Teams now lists every team and channel under the chats —
+    # "See more", then "General" ten times, "See all channels" — and the sweep
+    # was opening those one by one while Rajendra's 1:1 waited (1 Oct). The
+    # chat list ends at its "See more"; channels reach him through Activity.
+    for i, r in enumerate(rail):
+        if r["name"].strip().lower().startswith(("see more", "see all")):
+            rail = rail[:i]
+            break
     rail = [r for r in rail if r["name"].lower() not in teams_bridge._NOT_A_CHAT
             and not is_furniture(r["name"])]
     current = [r["name"] for r in rail]

@@ -228,6 +228,8 @@ def _named_in(text: str) -> str:
     try:
         from . import chat_watch, store
         names = json.loads(store.kv_get(chat_watch._RAIL_KEY) or "[]")
+        # And every thread history knows — the rail shows only the recent ones.
+        names += [n for n in store.teams_chats_known() if n not in names]
     except Exception:                                          # noqa: BLE001
         return ""
     low = (text or "").lower()
@@ -269,6 +271,48 @@ def _tasks_named(text: str) -> str:
             + "\n".join(lines)) if lines else ""
 
 
+def _teams_with(who: str, n: int = 12) -> str:
+    """The last messages of his 1:1 with this person, both sides, oldest first."""
+    import time as _t
+    from . import chat_watch, store
+    rows = store.teams_messages(chat=who, since=_t.time() - 3 * 86400, limit=4000)
+    rows = [r for r in rows if (r.get("chat") or "").strip().lower() == who.strip().lower()]
+    lines, seen = [], set()
+    for r in rows:
+        ident = chat_watch._identity(r)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        sender = "Arun" if chat_watch.is_from_him(r.get("sender", "")) else (r.get("sender") or "?")
+        when = _t.strftime("%d %b %H:%M", _t.localtime(float(r.get("sent_at") or r.get("seen_at") or 0)))
+        text = " ".join(chat_watch.as_read(r.get("text") or "").split())[:400]
+        lines.append(f"{when} {sender}: {text}")
+    if not lines:
+        return ""
+    return (f"His Teams chat with {who} — the last messages, as they were written "
+            f"(this is the conversation; continue from it):\n" + "\n".join(lines[-n:]))
+
+
+def _his_prs(hours: float = 96) -> str:
+    """His own PRs from recent tasks, with the state the PR watcher last saw."""
+    import time as _t
+    from . import store, tasks
+    out = []
+    for t in store.list_tasks(limit=60):
+        if not t.get("pr_urls") or _t.time() - float(t.get("created_at") or 0) > hours * 3600:
+            continue
+        state = {"merged": "MERGED", "pr_closed": "CLOSED"}.get(t["status"], "OPEN")
+        branch = store.kv_get(f"task_branch:{t['id']}") or ""
+        for url in tasks._pr_links(t):
+            out.append(f"• task #{t['id']} {t['title'][:60]} — {url} — {state}"
+                       + (f" — branch {branch}" if branch else ""))
+    if not out:
+        return ""
+    return ("His own PRs from recent tasks, as the PR watcher last saw them (checked every "
+            "5 min). Never call one merged or closed unless it says so here or `gh pr "
+            "view` says so now:\n" + "\n".join(out[:10]))
+
+
 def turn_context(user_text: str) -> str:
     """What a chat turn should know before it starts, besides the date.
 
@@ -298,6 +342,21 @@ def turn_context(user_text: str) -> str:
             known = threads.context_for(r["who"])
             if known:
                 parts.append(known)
+    # The conversation ITSELF, not a summary of it. 1 Oct: "go ahead as vinish
+    # asked" got "I can't see the Teams thread — only a summary", then the
+    # wrong PR (1252, yesterday's other task) and "1429 is merged", which it
+    # was not. The last messages with the person, and his own PRs as they
+    # stand, are facts to start from — not things to remember.
+    with contextlib.suppress(Exception):
+        from . import referents
+        who = _named_in(user_text) or next((r["who"] for r in referents.recent()[:1]), "")
+        convo = _teams_with(who) if who else ""
+        if convo:
+            parts.append(convo)
+    with contextlib.suppress(Exception):
+        prs = _his_prs()
+        if prs:
+            parts.append(prs)
     # "merge task 166's PR": what task 166 was, and every link in it. Without
     # this, 29 Sep's turn spent twelve model calls finding PR #1251 and its repo.
     with contextlib.suppress(Exception):
@@ -435,6 +494,12 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
         "find itself. Put his words in the brief verbatim. If he says it is a different "
         "ticket, do not carry another ticket's key into the brief: the branch is named "
         "from whatever key the brief contains.\n"
+        "FACTS, NOT MEMORY: what a colleague said is in the Teams chat block of this "
+        "turn — quote only from there, never write a quote you cannot see. A PR's state "
+        "(open/merged/closed) comes from the PR list in this turn or `gh pr view`, never "
+        "from memory. If a fact is not in front of you, check it before you say it.\n"
+        "A lookup for yourself is an ANALYSIS task (or just read it yourself) — a "
+        "teams_draft is only ever a message TO that person, in Arun's voice.\n"
         "Once a task is spawned or your answer is relayed to it, END the turn: the task "
         "reports to him itself at every gate and when it finishes. Never continue_working "
         "just to poll a task, and never send 'still running'. If he says the work belongs "

@@ -462,7 +462,16 @@ def as_read(text: str, known: set[str] | None = None) -> str:
     if not _REPLY_HEADER.search(raw):
         return raw
     body = clean_message(raw, known)
-    return f"{body} (replying to an earlier message)" if body else raw
+    if not body:
+        return raw
+    # What they quoted is kept, LABELLED — it is often the whole point. 1 Oct:
+    # Vinish's "can you please add this field also?" quoted Sonal's code (the
+    # field itself), and "This PR, bro" quoted Arun's PR 1429 link. With the
+    # quotes dropped, Asta knew neither the field nor the PR, guessed PR 1252,
+    # and went round in circles for twenty minutes.
+    quoted = " ".join(raw.replace(body, " ").split()) if body in raw else ""
+    line = f"{body} (replying to an earlier message)"
+    return f"{line}\n  ↳ quoting: {quoted[:500]}" if quoted else line
 
 
 def summarise(text: str, limit: int = 160, known: set[str] | None = None) -> str:
@@ -1238,7 +1247,8 @@ async def _sweep_threads(notify=None) -> list[dict]:
         if d.get("work") == "code" and state != "urgent" and not review:
             from . import answers
             await answers.offer_plan(who=who, chat=c["chat"], need=said,
-                                     summary=fields["summary"], thread=tid)
+                                     summary=fields["summary"], thread=tid,
+                                     words="\n".join(c["new"]))
             continue
 
         # 3. Everything else is worked — a call request too: if there is

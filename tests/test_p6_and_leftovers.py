@@ -159,7 +159,9 @@ def test_a_quoted_reply_is_read_as_the_reply():
     t = ("Arunkumar K\n25/09/2026 15:50\nHi Sankalp could you please confirm that this is "
          "the customer\nyes it is")
     got = chat_watch.as_read(t, {"Hi Sankalp could you please confirm that this is the customer"})
-    assert got == "yes it is (replying to an earlier message)"
+    # The reply leads; what it quotes follows, labelled (kept since 1 Oct).
+    assert got.splitlines()[0] == "yes it is (replying to an earlier message)"
+    assert "quoting:" in got
     assert chat_watch.as_read("plain words", None) == "plain words"
 
 

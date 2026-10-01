@@ -211,12 +211,17 @@ def _enqueue(item: dict) -> None:
                          detail=f"{item.get('type')}: {item.get('who')}: {item.get('need', '')}"[:200])
 
 
-async def offer_plan(*, who: str, chat: str, need: str, summary: str, thread: str) -> bool:
+async def offer_plan(*, who: str, chat: str, need: str, summary: str, thread: str,
+                     words: str = "") -> bool:
     """A colleague wants code changed: ask him whether to plan it — now, or
-    after whatever he is already deciding. True if shown now."""
+    after whatever he is already deciding. True if shown now.
+
+    `words` is what they actually wrote, quotes included. The plan is briefed
+    from it, not from a one-line summary: "add the field Sonal sent, to whatever
+    he's replying on" named neither the field nor the PR (1 Oct)."""
     from . import threads
     item = {"type": "plan", "who": who, "chat": chat, "need": need,
-            "summary": summary, "thread": thread}
+            "summary": summary, "thread": thread, "words": (words or "")[:2500]}
     if thread:
         threads.update(thread, status="awaiting_arun")
     cid = phone_conversation()
@@ -235,9 +240,12 @@ async def _show_plan(item: dict) -> None:
         context=f"{who}: {need}\n{item.get('summary', '')}",
         question="Want me to plan it? The plan comes to you before any code.",
         action=(f"Delegate a CODE task for: {need} — asked by {who} on Teams "
-                f"({item.get('summary', '')}). Its plan gate brings the plan back to "
-                f"Arun; nothing is written before he approves it, and nothing ships "
-                f"before he says ship."),
+                f"({item.get('summary', '')})."
+                + (f"\n\nWhat {who} actually wrote — quotes included; the field, the PR "
+                   f"and the repo are in here, so brief the task from THIS and do not ask "
+                   f"Arun for what it already says:\n{item['words']}" if item.get("words") else "")
+                + "\n\nIts plan gate brings the plan back to Arun; nothing big is "
+                  "written before he approves it, and nothing ships before he says ship."),
         kind="plan_code", payload={"who": who, "chat": item.get("chat"),
                                    "thread": item.get("thread")})
     await notify.notify(f"🛠 *{who}* asks for a code change: {need}\n\n"

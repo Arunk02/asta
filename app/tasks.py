@@ -976,6 +976,23 @@ def _already_live(title: str, prompt: str, workspace: str | None) -> dict | None
     return None
 
 
+#: A brief that asks to FIND something out, not to write to someone.
+_NOT_A_DRAFT = re.compile(
+    r"\bdo\s+not\s+draft\b|\bdon'?t\s+draft\b|\bno\s+draft\b|\bjust\s+report\b|"
+    r"\breport\s+back\b|\bfind\s+(?:out\s+)?(?:his|her|their|the)\s+(?:actual\s+)?"
+    r"(?:message|reply|confirmation|answer)\b|\blook\s+up\b", re.I)
+
+
+def _notes_about(text: str, who: str) -> bool:
+    """Does this read as notes ABOUT the person rather than a message TO them?"""
+    first = (who or "").split()[0] if (who or "").split() else ""
+    if len(first) < 3:
+        return False
+    return bool(re.search(
+        rf"\b{re.escape(first)}(?:'s|’s)\s|\b{re.escape(first)}\s+(?:confirmed|replied|said|"
+        rf"asked|wants|wrote|mentioned|referenced|is\s+asking)\b", text or "", re.I))
+
+
 def spawn(title: str, prompt: str, kind: str = "analysis",
           workspace: str | None = None, teams_chat: str = "",
           executor: str = "", context_from: int | None = None,
@@ -991,6 +1008,11 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
         raise ValueError(f"unknown task kind '{kind}' (analysis|code|teams_draft)")
     if kind == "teams_draft" and not teams_chat:
         raise ValueError("teams_draft tasks need teams_chat (who the draft is for)")
+    if kind == "teams_draft" and _NOT_A_DRAFT.search(prompt or ""):
+        # A lookup dressed as a draft. #186 (1 Oct) was told "do not draft a
+        # reply — just report back", was spawned as a teams_draft anyway, and
+        # its notes ("Vinish's confirmation reply…") went to Vinish on approve.
+        kind, teams_chat = "analysis", ""
     if executor and executor not in _executor_names():
         raise ValueError(f"unknown executor '{executor}' (copilot|claude, empty = auto)")
     if pipeline and pipeline not in ("micro", "full"):
@@ -2431,13 +2453,19 @@ async def _worker(task_id: int) -> None:
                 result = await _run_simple(task_id, t, prompt)
         if (store.get_task(task_id) or {}).get("status") in FINAL:
             return   # rejected while it ran — drop the result, stay quiet
-        if t["kind"] == "teams_draft":
+        if t["kind"] == "teams_draft" and _notes_about(result, t["teams_chat"]):
+            # It reads as notes about them, not a message to them: a finding for
+            # him, never something to send.
+            store.update_task(task_id, status="done", result=result, finished_at=time.time())
+            await notify.notify(f"🔎 #{task_id} {t['title']}\n\n{clip.clip(result, 900)}", "task")
+        elif t["kind"] == "teams_draft":
             store.update_task(task_id, status="awaiting_approval", result=result,
                               finished_at=time.time())
             await notify.notify(
-                f"📝 Task #{task_id} ({t['title']}) — draft for Teams chat "
-                f"'{t['teams_chat']}':\n\n{clip.clip(result, 600)}\n\n"
-                f"Reply 'approve task {task_id}' to send it, or 'reject task {task_id}'.",
+                f"📝 Task #{task_id} — a message to send to {t['teams_chat']} on Teams:\n\n"
+                f"{clip.clip(result, 600)}\n\n"
+                f"'approve task {task_id}' SENDS exactly this to {t['teams_chat']}. "
+                f"'reject task {task_id}' drops it.",
                 "task")
         elif t["kind"] == "code" and agent:
             await _finish_code(task_id, t, result, hops=0)
@@ -2819,6 +2847,10 @@ async def approve(task_id: int) -> str:
     if t["kind"] != "teams_draft" or t["status"] != "awaiting_approval":
         raise ValueError(f"task #{task_id} is not a draft awaiting approval "
                          f"(kind={t['kind']}, status={t['status']})")
+    if _notes_about(t["result"] or "", t["teams_chat"]):
+        store.update_task(task_id, status="done")
+        return (f"Not sent — #{task_id} reads as notes about {t['teams_chat']}, not a message "
+                f"to them. Kept as a finding for you.")
     try:
         await teams_bridge.send_message(t["teams_chat"], t["result"])
     except RuntimeError as exc:
@@ -2898,6 +2930,39 @@ async def _port(repo: Path, cur: str, base: str, other: str) -> str:
         await repo_ops.git(repo, "git", "worktree", "remove", "--force", str(where))
 
 
+_BRANCH_NAMED = re.compile(r"\b((?:feature|bugfix|hotfix|fix|release|chore)/[\w.\-/]+[\w])")
+
+
+async def _push_named_branches(task_id: int, t: dict) -> list[str]:
+    """Push branches the task NAMES (in its brief or its result) that are ahead
+    of origin — the existing-PR case. Returns "repo: url" per branch pushed."""
+    from . import worktrees as _wt
+    text = f"{t.get('prompt', '')}\n{t.get('result', '')}\n{store.kv_get(f'task_branch:{task_id}') or ''}"
+    names = list(dict.fromkeys(m.group(1).rstrip(".,;:)") for m in _BRANCH_NAMED.finditer(text)))
+    if not names:
+        return []
+    try:
+        root = Path(_cwd(t.get("workspace")))
+    except Exception:                                          # noqa: BLE001
+        return []
+    out: list[str] = []
+    for repo in _wt.repos_in(root):
+        for b in names:
+            rc, _ = await repo_ops.git(repo, "git", "rev-parse", "--verify", b)
+            if rc != 0:
+                continue
+            rc, ahead = await repo_ops.git(repo, "git", "rev-list", "--count", f"origin/{b}..{b}")
+            if rc != 0 or not ahead.strip().isdigit() or int(ahead.strip()) == 0:
+                continue
+            rc, msg = await repo_ops.git(repo, "git", "push", "origin", b, timeout=300)
+            if rc != 0:
+                raise RuntimeError(f"{repo.name}: push of {b} failed: {msg[:300]}")
+            rc, url = await repo_ops.git(repo, "gh", "pr", "view", b, "--json", "url", "--jq", ".url")
+            out.append(f"{repo.name}: {url.strip() if rc == 0 and url.strip() else b + ' (pushed)'}")
+            store.kv_set(f"task_branch:{task_id}", b)
+    return out
+
+
 async def ship(task_id: int) -> str:
     """Push the pipeline's committed feature branch(es) and open PRs — one per
     repo the task touched. Only ever triggered by Arun after reviewing the diff."""
@@ -2950,6 +3015,11 @@ async def ship(task_id: int) -> str:
         # stopped at "needs a worktree" with half the ask undone (30 Sep).
         for other in await _other_bases(task_id, t, repo, base):
             urls.append(f"{repo.name} → {other}: {await _port(repo, cur, base, other)}")
+    if not urls:
+        # The work may be on a branch that already has a PR — he sent the task
+        # to it ("add it to PR 1429"), so its commit is not on the task's own
+        # branch. #187 committed there and "ship" found nothing to push (1 Oct).
+        urls = await _push_named_branches(task_id, t)
     if not urls:
         raise RuntimeError("no unpushed feature branch found — nothing to ship")
     store.record_outcome("ship", "pr_opened", subject=str(task_id), detail="; ".join(urls))

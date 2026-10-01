@@ -87,7 +87,9 @@ def task_card(task_id: int) -> str:
     lines = [f"#{task_id} {t['title'][:60]}",
              f"{t['status'].replace('_', ' ')}{waiting} · {_ago(since)}"]
     if t.get("pr_urls"):
-        lines.append(f"PR: {t.get('pr_state') or 'open'} · " + t["pr_urls"].splitlines()[0])
+        from . import prname
+        lines.append(f"PR: {t.get('pr_state') or 'open'} · "
+                     + prname.name_links(t["pr_urls"].splitlines()[0]))
     events = [e for e in store.task_events(task_id, 8) if e["kind"] != "created"][-4:]
     for e in events:
         lines.append(f"  {time.strftime('%H:%M', time.localtime(e['created_at']))} "

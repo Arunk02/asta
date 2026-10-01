@@ -4,13 +4,11 @@ His suggestion, 1 Oct, after #1459 was reviewed in the wrong project — the sam
 number exists in empv3. A number alone names nothing; the service and the number
 together name exactly one PR, for him reading it and for Asta finding it again.
 
-One table of short names (the ones he uses), overridable with
-ASTA_REPO_ALIASES="telikos-booking-service=booking,…". Anything not in it gets
-its repo name without the "telikos-" and "-service" around it.
+One table of short names — the ones he uses; add a repo here when he names a
+new one. Anything not in it gets its repo name without "telikos-"/"-service".
 """
 from __future__ import annotations
 
-import os
 import re
 
 _DEFAULT = {
@@ -23,12 +21,7 @@ _URL = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)", re.I)
 
 
 def aliases() -> dict[str, str]:
-    out = dict(_DEFAULT)
-    for pair in (os.environ.get("ASTA_REPO_ALIASES") or "").split(","):
-        repo, _, short_name = pair.partition("=")
-        if repo.strip() and short_name.strip():
-            out[repo.strip()] = short_name.strip()
-    return out
+    return dict(_DEFAULT)
 
 
 def short(repo: str) -> str:

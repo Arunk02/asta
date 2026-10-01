@@ -44,7 +44,7 @@ CONSTITUTION = "constitution"
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_EVOLVE", "").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("ASTA_EVOLVE", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def l3_enabled() -> bool:

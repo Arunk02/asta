@@ -50,7 +50,7 @@ TIMEOUT = 25
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_APPS", "").strip() == "1"
+    return os.environ.get("ASTA_APPS", "1").strip() == "1"
 
 
 @dataclass(frozen=True)

@@ -29,7 +29,7 @@ def mcp_cli_enabled() -> bool:
     """Whether CLI brains reach Asta's capabilities as native MCP tools rather
     than by curling the API. Off by default: the curl path is proven, and this is
     the opt-in cutover (ASTA_CLI_MCP=1), flipped only after a real-turn test."""
-    return os.environ.get("ASTA_CLI_MCP", "0").lower() in ("1", "true", "yes", "on")
+    return os.environ.get("ASTA_CLI_MCP", "1").lower() in ("1", "true", "yes", "on")
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -536,7 +536,7 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     if not (os.environ.get("JIRA_BASE_URL") and os.environ.get("JIRA_API_TOKEN")):
         parts.append("Jira is NOT configured — the jira_* endpoints above will fail; say so "
                      "rather than guessing ticket contents.")
-    if os.environ.get("TEAMS_BRIDGE", "").lower() not in ("1", "true", "yes"):
+    if os.environ.get("TEAMS_BRIDGE", "1").lower() not in ("1", "true", "yes"):
         parts.append("The Teams/Outlook bridge is OFF — those shell capabilities are "
                      "unavailable this session.")
     if conv.get("workspace"):

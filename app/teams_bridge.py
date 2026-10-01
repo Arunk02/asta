@@ -42,7 +42,7 @@ _lock = asyncio.Lock()  # one browser at a time — Chromium profiles are single
 
 
 def enabled() -> bool:
-    return os.environ.get("TEAMS_BRIDGE", "").lower() in ("1", "true", "yes")
+    return os.environ.get("TEAMS_BRIDGE", "1").lower() in ("1", "true", "yes")
 
 
 def logged_in_once() -> bool:
@@ -148,7 +148,7 @@ def _no_http2() -> bool:
     a browser-wide setting; a site asks for it by setting "http1" in
     data/sites.json, and the environment variable still forces it.
     """
-    if os.environ.get("ASTA_BROWSER_NO_HTTP2", "").strip().lower() in ("1", "true", "yes"):
+    if os.environ.get("ASTA_BROWSER_NO_HTTP2", "1").strip().lower() in ("1", "true", "yes"):
         return True
     try:
         from . import sites
@@ -309,10 +309,10 @@ class NotFound(RuntimeError):
 #: When the Teams lock was last taken — 0 when free. The watchdog reads it.
 _HELD: dict = {"since": 0.0}
 #: Launching Chrome and loading Teams, at most this long.
-LAUNCH_TIMEOUT = float(os.environ.get("TEAMS_LAUNCH_TIMEOUT", "150"))
+LAUNCH_TIMEOUT = 150.0
 #: Any one operation holding the browser longer than this is stuck (a live call
 #: excepted — it owns the browser for as long as it lasts).
-STUCK_SECONDS = float(os.environ.get("TEAMS_STUCK_SECONDS", "600"))
+STUCK_SECONDS = 600.0
 
 
 async def reset(why: str) -> None:
@@ -406,7 +406,7 @@ async def site_page(url: str, timeout: int = 60000, watch=None, failed_watch=Non
 
 
 #: No Teams read for this long, while awake, means something is wedged.
-STALE_SECONDS = float(os.environ.get("TEAMS_STALE_SECONDS", "1200"))
+STALE_SECONDS = 1200.0
 
 
 def _last_read() -> float:
@@ -1348,9 +1348,11 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
                 await _find_chat(page, chat, allow_group=True)  # reading a group is harmless
                 title = await _chat_title(page) or chat
             except NotFound:
-                # "Rekha and Rini" may be a room or two people; search is tried
-                # first, the row itself only when search has nothing.
-                if not (_maybe_member_list(chat) and await _open_from_rail(page, chat)):
+                # Search has nothing for it — a chat created this morning ("AP
+                # Changes Related to Soft Closure", 1 Oct) is on the rail before
+                # search has indexed it, and "Rekha and Rini" may be two people.
+                # Its own row on the rail is the way in; reading opens nothing new.
+                if not await _open_from_rail(page, chat):
                     raise
                 title = chat
 

@@ -187,7 +187,7 @@ def test_one_unreadable_thread_does_not_end_the_sweep(monkeypatch):
 
 
 def test_it_is_off_until_switched_on(monkeypatch):
-    monkeypatch.delenv("ASTA_CHATWATCH", raising=False)
+    monkeypatch.setenv("ASTA_CHATWATCH", "0")
     assert not chat_watch.enabled()
 
 

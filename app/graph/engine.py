@@ -32,7 +32,7 @@ _TRUEY = ("1", "true", "yes", "on")
 
 def enabled() -> bool:
     """The three P7 graphs. Off by default, like every engine change before it."""
-    return os.environ.get("ASTA_GRAPHS", "").strip().lower() in _TRUEY
+    return os.environ.get("ASTA_GRAPHS", "1").strip().lower() in _TRUEY
 
 
 def thread(kind: str, key: str | int) -> dict:

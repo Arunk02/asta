@@ -61,7 +61,7 @@ PROBE_PORT = int(os.environ.get("ASTA_WAKE_PROBE_PORT", "443"))
 
 LAST_GAP_KEY = "wake_last_gap"
 #: A sleep at least this long gets a fresh Teams browser on wake.
-BROWSER_RESET_AFTER_SECONDS = float(os.environ.get("ASTA_WAKE_BROWSER_RESET_SECONDS", "600"))
+BROWSER_RESET_AFTER_SECONDS = 600.0
 
 #: Bumped on every detected wake. A watcher compares the value it went to sleep
 #: under with the value it wakes to, so a wake that lands between two sleeps is

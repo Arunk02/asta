@@ -438,7 +438,7 @@ def test_a_task_finishes_on_the_engine_it_started_on(world, monkeypatch):
     async def go():
         t = _spawn()
         await _settle(t["id"])
-        monkeypatch.delenv("ASTA_GRAPH")                      # flag flipped mid-task
+        monkeypatch.setenv("ASTA_GRAPH", "0")                      # flag flipped mid-task
         tasks.reply(t["id"], "PLAN APPROVED")
         await _settle(t["id"])
         return t["id"]
@@ -447,7 +447,7 @@ def test_a_task_finishes_on_the_engine_it_started_on(world, monkeypatch):
 
 
 def test_with_the_flag_off_code_tasks_stay_on_the_old_engine(world, monkeypatch):
-    monkeypatch.delenv("ASTA_GRAPH")
+    monkeypatch.setenv("ASTA_GRAPH", "0")
     _use(monkeypatch, Brain("Plan\n\nPLAN READY"))
 
     async def go():

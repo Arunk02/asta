@@ -14,7 +14,7 @@ from app import verify
 # --- gating -------------------------------------------------------------------
 
 def test_off_by_default(monkeypatch):
-    monkeypatch.delenv("ASTA_VERIFY", raising=False)
+    monkeypatch.setenv("ASTA_VERIFY", "0")
     assert verify.enabled() is False
     monkeypatch.setenv("ASTA_VERIFY", "1")
     assert verify.enabled() is True

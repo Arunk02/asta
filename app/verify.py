@@ -42,7 +42,7 @@ _MAX_TAIL = 3000
 
 def enabled() -> bool:
     """Off by default. The gate only engages when this is set AND an oracle exists."""
-    return os.environ.get("ASTA_VERIFY", "0").strip().lower() not in _FALSEY
+    return os.environ.get("ASTA_VERIFY", "1").strip().lower() not in _FALSEY
 
 
 def max_rounds() -> int:

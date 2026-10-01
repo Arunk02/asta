@@ -72,9 +72,10 @@ bears on their question.
 REPLY:
 The message to send to {who}, in Arun's voice: short, plain and polite, no
 greeting ceremony, no sign-off. Answer what they asked, in the order they asked
-it; nothing they did not ask about. If you could not find it,
-say briefly what you checked and ask them for the one thing you need. Never
-promise work Arun has not agreed to.
+it; nothing they did not ask about. If you could not find it, or a term or
+reference is unclear ("topic refresh", "the prod PR"), the REPLY is the one short
+question to {who} that gets you what you need — ALWAYS write a REPLY; never end
+by asking Arun whether to ask them. Never promise work Arun has not agreed to.
 
 If what they asked for is Arun himself — a call, a discussion — the ANALYSIS
 prepares him for it (where the topic stands, what changed, what is still open)
@@ -363,6 +364,17 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
     analysis, reply = split(result)
     if not reply:
         return False
+    # A question back to them goes straight to them — clarifying is his rule
+    # (29 Sep: "talk to them directly, get what they want"); he hears what was
+    # asked. Answers still wait for his "send".
+    chat = meta.get("chat") or t.get("teams_chat", "")
+    if not meta.get("group") and chat and _is_clarifying(reply, meta.get("who", "")):
+        from . import chat_watch, notify
+        if await chat_watch._say(chat, reply.strip(), group=False):
+            first = (meta.get("who") or "them").split()[0]
+            await notify.notify(f"❓ Asked {first}: “{reply.strip()}”\n\n{analysis}".strip(),
+                                "answer", urgency="direct", considered=True)
+            return True
     return await present(who=meta.get("who", ""), need=meta.get("need", ""),
                          chat=meta.get("chat") or t.get("teams_chat", ""),
                          group=bool(meta.get("group")), analysis=analysis, reply=reply,
@@ -370,7 +382,7 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
 
 
 #: How long after an answer is finished a further message still belongs to it.
-FOLLOWUP_SECONDS = float(os.environ.get("ASTA_ANSWER_FOLLOWUP_MINUTES", "45")) * 60
+FOLLOWUP_SECONDS = 45 * 60
 
 
 def _meta(task_id: int) -> dict:
@@ -382,7 +394,7 @@ def _meta(task_id: int) -> dict:
 
 
 #: How long the same answer for the same person is "already put to him".
-REPEAT_SECONDS = float(os.environ.get("ASTA_ANSWER_REPEAT_HOURS", "12")) * 3600
+REPEAT_SECONDS = 12 * 3600
 
 
 def _gist(text: str) -> str:
@@ -457,6 +469,14 @@ async def note_followup(thread: str, who: str, text: str, now: float | None = No
                                 "answer", urgency="direct", considered=True)
         return t["id"]
     return None
+
+
+def _is_clarifying(reply: str, who: str) -> bool:
+    """A short question that asks them for something, promising nothing."""
+    from . import understand
+    r = " ".join((reply or "").split())
+    return bool(r) and r.count("?") >= 1 and len(r) <= 260 \
+        and bool(understand.safe_question(r if r.endswith("?") else r.rsplit("?", 1)[0] + "?", who))
 
 
 def remember_meta(task_id: int, *, who: str, need: str, chat: str, group: bool,

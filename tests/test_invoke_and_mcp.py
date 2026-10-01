@@ -96,7 +96,7 @@ def test_cli_mcp_is_off_by_default_and_opt_in(monkeypatch):
     """The cutover must be off by default — the curl path stays the proven one
     until a real-turn test flips it on."""
     from app import copilot_cli
-    monkeypatch.delenv("ASTA_CLI_MCP", raising=False)
+    monkeypatch.setenv("ASTA_CLI_MCP", "0")
     assert copilot_cli.mcp_cli_enabled() is False
     monkeypatch.setenv("ASTA_CLI_MCP", "1")
     assert copilot_cli.mcp_cli_enabled() is True

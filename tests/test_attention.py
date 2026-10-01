@@ -33,7 +33,7 @@ def on(monkeypatch):
 # --- the no-op contract ---------------------------------------------------------
 
 def test_disabled_pushes_everything_and_records_nothing(monkeypatch):
-    monkeypatch.delenv("ASTA_ATTENTION", raising=False)
+    monkeypatch.setenv("ASTA_ATTENTION", "0")
     assert attention.consider("outlook", "k1", who="Sam", what="ping") is True
     assert attention.consider("outlook", "k1", who="Sam", what="ping") is True
     assert store.attention_get("k1") is None       # nothing written at all
@@ -157,7 +157,7 @@ def test_purge_clears_settled_history_but_never_live_work(on):
 
 def test_a_source_that_never_ran_is_off_not_broken(monkeypatch):
     """Alarming about a Teams bridge he never enabled is crying wolf on day one."""
-    monkeypatch.delenv("ASTA_ATTENTION", raising=False)
+    monkeypatch.setenv("ASTA_ATTENTION", "0")
     assert attention.stale_sources(now=10**9) == {}
 
 
@@ -167,7 +167,7 @@ def test_a_watcher_that_never_once_succeeded_is_reported(monkeypatch):
     poll — which then never reports, and so is never called broken. That is the
     state the Teams activity watcher was actually in: enabled, session healthy,
     failing silently every five minutes while Outlook beside it ran fine."""
-    monkeypatch.delenv("ASTA_ATTENTION", raising=False)
+    monkeypatch.setenv("ASTA_ATTENTION", "0")
     attention.note_watching("teams", now=1000)
     assert attention.stale_sources(("teams",), now=1000 + 30 * 60) == {}   # grace
     assert attention.stale_sources(("teams",), now=1000 + 91 * 60) == {"teams": 91}
@@ -213,7 +213,7 @@ def test_a_source_that_just_read_is_healthy():
 
 
 def test_a_source_that_worked_and_went_quiet_is_reported(monkeypatch):
-    monkeypatch.delenv("ASTA_ATTENTION", raising=False)   # heartbeat is NOT flagged
+    monkeypatch.setenv("ASTA_ATTENTION", "0")   # heartbeat is NOT flagged
     attention.note_scrape("outlook", now=1000)
     stale = attention.stale_sources(("outlook",), now=1000 + 91 * 60)
     assert stale == {"outlook": 91}
@@ -264,7 +264,7 @@ def test_outlook_announces_one_mail_once_across_polls(on):
 
 
 def test_outlook_with_the_ledger_off_behaves_exactly_as_before(monkeypatch):
-    monkeypatch.delenv("ASTA_ATTENTION", raising=False)
+    monkeypatch.setenv("ASTA_ATTENTION", "0")
     n = _Notify()
     m = _mail("Sam", "please review the deploy plan")
     asyncio.run(outlook._push_mail(n, [m]))

@@ -2174,8 +2174,17 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
                else "It stays local until you say *raise PR*. ")
             + f"Say *stop {task_id}* if this is not what you meant.", "task")
         born = float(t.get("created_at") or 0)
-        asyncio.get_running_loop().call_later(
-            go.after_plan_seconds(), lambda: asyncio.ensure_future(_go_on(task_id, born)))
+        if _graph().manages(task_id):
+            # The workflow engine is still inside this step; its gate, next,
+            # reads this and goes on without waiting. Approving from here raced
+            # the gate — the answer landed before it was waiting, and the
+            # finished work came back as a "plan" to approve (1 Oct, bench).
+            store.kv_set(f"task_goes_on:{task_id}", "1")
+        elif go.after_plan_seconds() <= 0:
+            await _go_on(task_id, born)          # no pause asked for: go on now
+        else:
+            asyncio.get_running_loop().call_later(
+                go.after_plan_seconds(), lambda: asyncio.ensure_future(_go_on(task_id, born)))
         return
     await notify.notify(
         f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
@@ -2515,6 +2524,22 @@ def reply(task_id: int, text: str) -> str:
     # "PLAN APPROVED — but hold the PDF half" was scored as a rejection, run at
     # planning effort, and sent back for a whole extra planning round before it
     # would write a line. Narrowing scope at the gate is the normal case.
+    approved, full_text = record_answer(task_id, t, text)
+    store.update_task(task_id, status="running")
+    if _graph().manages(task_id):
+        _graph().answer(task_id, {"approved": approved, "text": full_text})
+    else:
+        job = asyncio.create_task(_resume_worker(task_id, full_text, approved=approved))
+        _running[task_id] = job
+        job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
+    return (f"Task #{task_id}: plan approved — implementing now."
+            if approved
+            else f"Task #{task_id}: feedback sent to the pipeline — it will re-plan.")
+
+
+def record_answer(task_id: int, t: dict, text: str) -> tuple[bool, str]:
+    """Everything an answer at the plan gate records — whoever gives it: him,
+    or the go-ahead rules. Returns (approved, the text the next leg receives)."""
     approved = text.strip().upper().startswith("PLAN APPROVED")
     # Did the plan hold? The cheapest honest measure of planning quality: a plan
     # Arun approves as-is versus one he sends back.
@@ -2546,16 +2571,7 @@ def reply(task_id: int, text: str) -> str:
     # Anything buffered by augment() while the task ran rides in now, on the user's
     # gate action — so mid-flight additions land without a session restart.
     full_text = text + _drain_addenda(task_id)
-    store.update_task(task_id, status="running")
-    if _graph().manages(task_id):
-        _graph().answer(task_id, {"approved": approved, "text": full_text})
-    else:
-        job = asyncio.create_task(_resume_worker(task_id, full_text, approved=approved))
-        _running[task_id] = job
-        job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
-    return (f"Task #{task_id}: plan approved — implementing now."
-            if approved
-            else f"Task #{task_id}: feedback sent to the pipeline — it will re-plan.")
+    return approved, full_text
 
 
 async def _resume_worker(task_id: int, text: str, approved: bool = False) -> None:
@@ -3177,8 +3193,12 @@ async def _why_red(pr: dict, url: str) -> str:
     return ("\nFailed: " + "; ".join(found)) if found else ""
 
 
+#: The first red CI on his task PR is re-run once by itself. Tests may set it.
+CI_AUTO_RERUN = True
+
+
 def _auto_rerun() -> bool:
-    return os.environ.get("ASTA_CI_AUTO_RERUN", "1").strip().lower() not in ("0", "false", "off", "no")
+    return CI_AUTO_RERUN
 
 
 async def rerun_ci(task_id: int) -> str:
@@ -3201,6 +3221,8 @@ async def rerun_ci(task_id: int) -> str:
     if not done:
         return f"Task #{task_id}: nothing failed on its latest CI runs — nothing to re-run."
     store.update_task(task_id, pr_state="OPEN")           # so the next result is reported
+    for url in links:
+        store.kv_del(f"pr_told:{url}")
     store.add_task_event(task_id, "ci", "; ".join(done)[:200])
     return f"🔁 #{task_id}: " + "; ".join(done) + ". I'll tell you how it ends."
 
@@ -3323,6 +3345,13 @@ async def check_pr(task_id: int) -> str | None:
         # whatever the stored state string says. #180 sat at "pr_ci_failed" with
         # every check passing, and he was never told it had recovered (30 Sep).
         recovered = checks == "green" and t["status"] == "pr_ci_failed"
+        # Two tasks on one PR (#185 and #187 both on booking PR 1429) must not
+        # each report the same change: "CI green" arrived twice at 12:49.
+        told_key = f"pr_told:{url}"
+        if now_state != was and store.kv_get(told_key) == now_state:
+            store.update_task(task_id, pr_state=now_state,
+                              status="shipped" if checks == "green" else t["status"])
+            continue
         if now_state == was and not recovered:
             # Nothing moved — but someone may still have left a plain comment,
             # which changes no field on the PR and is exactly the kind of ask
@@ -3334,6 +3363,7 @@ async def check_pr(task_id: int) -> str | None:
                         + f"\n\nSay 'fix #{task_id}' to address it in the same task.")
             continue
         store.update_task(task_id, pr_state=now_state)
+        store.kv_set(told_key, now_state)
 
         if checks == "red":
             store.update_task(task_id, status="pr_ci_failed")

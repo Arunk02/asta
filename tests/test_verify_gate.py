@@ -60,7 +60,7 @@ def _counts(kind: str) -> dict[str, int]:
 # --- the safety contract: additive, never subtractive --------------------------
 
 def test_disabled_is_a_noop(wired, monkeypatch):
-    monkeypatch.delenv("ASTA_VERIFY", raising=False)
+    monkeypatch.setenv("ASTA_VERIFY", "0")
     monkeypatch.setenv("ASTA_VERIFY_CMD", "false")     # would be RED if the gate ran
     asyncio.run(tasks._finish_code(wired["tid"], wired["t"], "done result", 0))
     assert store.get_task(wired["tid"])["status"] == "done"

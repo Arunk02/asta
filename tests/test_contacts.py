@@ -116,7 +116,7 @@ def test_somebody_he_sits_in_meetings_with_is_never_auto_muted(on):
 
 
 def test_disabled_it_changes_nothing(monkeypatch):
-    monkeypatch.delenv("ASTA_CONTACTS", raising=False)
+    monkeypatch.setenv("ASTA_CONTACTS", "0")
     _history("blast@x.com", ignored=50)
     assert contacts.adjust(attention.P_FYI, "blast@x.com") == (attention.P_FYI, "")
 
@@ -133,7 +133,7 @@ def test_reputation_is_learned_even_while_the_prior_is_switched_off(monkeypatch)
     """So flipping ASTA_CONTACTS on later starts with real history rather than an
     empty table that has to earn its evidence from zero."""
     monkeypatch.setenv("ASTA_ATTENTION", "1")
-    monkeypatch.delenv("ASTA_CONTACTS", raising=False)
+    monkeypatch.setenv("ASTA_CONTACTS", "0")
     attention.consider("outlook", "k1", who="sam@x.com", what="approve?")
     attention.mark_acted("k1")
     assert store.contact_get("sam@x.com")["engaged"] == 1

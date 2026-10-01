@@ -51,7 +51,7 @@ PAST_DAYS = 30
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_THREADS", "").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("ASTA_THREADS", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def tid(channel: str, counterpart: str) -> str:

@@ -286,7 +286,7 @@ def test_the_ledger_stores_the_deadline_it_parsed(on):
 
 
 def test_with_the_ledger_off_nothing_is_ranked_and_the_message_is_the_old_one(monkeypatch):
-    monkeypatch.delenv("ASTA_ATTENTION", raising=False)
+    monkeypatch.setenv("ASTA_ATTENTION", "0")
     n = _Notify()
     asyncio.run(outlook._push_mail(n, [
         _mail("Sam", "please approve the release", "we ship tonight, need it asap")]))

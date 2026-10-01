@@ -45,7 +45,7 @@ POLL_SECONDS = 900
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_BENCH_NIGHTLY", "").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("ASTA_BENCH_NIGHTLY", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _budget() -> dict:

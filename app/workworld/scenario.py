@@ -136,7 +136,9 @@ async def run(sc: Scenario, seed: int = 0, live: bool = False) -> list[str]:
         # Scenarios state the gate they test. Most were written as "spawn, then
         # approve" and mean every plan waits; one that tests a small plan going
         # ahead says so in `setup.env`, which is applied after this and wins.
-        world.use_env({"ASTA_PLAN_APPROVAL_FROM_TIER": "1", "ASTA_GO_AFTER_PLAN_SECONDS": "0"})
+        from app import go as _go
+        world._patch.set(_go, "APPROVAL_FROM_TIER", int((sc.setup or {}).get("approval_from_tier", 1)))
+        world._patch.set(_go, "AFTER_PLAN_SECONDS", 0.0)
         world.assert_sandboxed()
         _apply_setup(sc, world, state)
         # A real brain leg takes a minute or more; a scripted one takes nothing.

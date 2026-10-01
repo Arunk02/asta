@@ -35,7 +35,7 @@ PENDING_MAX = 20
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_DELIVERY", "").strip().lower() in _TRUEY
+    return os.environ.get("ASTA_DELIVERY", "1").strip().lower() in _TRUEY
 
 
 # --- quiet hours ---------------------------------------------------------------

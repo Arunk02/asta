@@ -34,7 +34,7 @@ from . import store
 
 #: Off by default. It clicks things in a live Teams session on his behalf.
 def enabled() -> bool:
-    return os.environ.get("ASTA_INCOMING", "").strip() not in ("", "0", "false", "no")
+    return os.environ.get("ASTA_INCOMING", "1").strip() not in ("", "0", "false", "no")
 
 
 #: How often to look. A ring lasts about thirty seconds, so anything slower than
@@ -325,8 +325,7 @@ RING_WATCH_JS = """
 
 
 def push_enabled() -> bool:
-    return enabled() and os.environ.get("ASTA_RING_PUSH", "1").strip().lower() not in (
-        "0", "false", "off", "no")
+    return enabled()
 
 
 async def on_ring_text(text: str) -> bool:

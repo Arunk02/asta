@@ -117,7 +117,7 @@ def test_every_known_gap_is_still_a_gap(bench):
 
 def test_the_nightly_bench_spends_nothing_by_default(monkeypatch):
     from app.workworld import nightly
-    monkeypatch.delenv("ASTA_BENCH_NIGHTLY", raising=False)
+    monkeypatch.setenv("ASTA_BENCH_NIGHTLY", "0")
     assert "off" in nightly.why_not()
 
 

@@ -177,7 +177,7 @@ def _no_batching(monkeypatch):
     """Coalescing is on in Arun's .env and absent on CI, so a health test that
     did not say which it wanted would assert the batching window on his laptop
     and the mute on CI. These are about the mute."""
-    monkeypatch.delenv("ASTA_DELIVERY", raising=False)
+    monkeypatch.setenv("ASTA_DELIVERY", "0")
 
 
 def test_a_muted_problem_stops_being_announced(_no_phone, _no_batching, monkeypatch):

@@ -72,7 +72,7 @@ def self_originated(row: dict) -> bool:
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_ATTENTION", "").strip().lower() in _TRUEY
+    return os.environ.get("ASTA_ATTENTION", "1").strip().lower() in _TRUEY
 
 
 # --- what makes two arrivals the same thing ----------------------------------

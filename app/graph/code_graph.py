@@ -185,6 +185,21 @@ def gate(state: JobState) -> dict:
     return {"answer": interrupt({"gate": "plan", "task_id": state["task_id"]})}
 
 
+def go_on(state: JobState) -> dict:
+    """A plan he is not asked about (small, or he already said go) goes on here,
+    as its own step — never by answering the gate from outside before it waits
+    (1 Oct: that raced, and the finished work came back as a plan)."""
+    tid = state["task_id"]
+    store.kv_del(f"task_goes_on:{tid}")
+    approved, text = _tasks().record_answer(tid, _task(tid), "PLAN APPROVED")
+    store.update_task(tid, status="running")
+    return {"answer": {"approved": approved, "text": text}}
+
+
+def after_announce(state: JobState) -> str:
+    return "go_on" if store.kv_get(f"task_goes_on:{state['task_id']}") else "gate"
+
+
 def wait_answer(state: JobState) -> dict:
     return {"answer": interrupt({"gate": "context", "task_id": state["task_id"]})}
 
@@ -426,7 +441,7 @@ def build() -> StateGraph:
     g = StateGraph(JobState)
     for name, fn in (("plan", plan), ("escalate", escalate), ("ask", ask),
                      ("wait_answer", wait_answer), ("announce_plan", announce_plan),
-                     ("gate", gate), ("implement", implement), ("hop", hop),
+                     ("gate", gate), ("go_on", go_on), ("implement", implement), ("hop", hop),
                      ("verify", verify_node), ("fix", fix), ("stronger", stronger),
                      ("park", park), ("wait_verify", wait_verify), ("complete", complete)):
         g.add_node(name, fn)
@@ -437,7 +452,8 @@ def build() -> StateGraph:
     g.add_edge("escalate", "plan")
     g.add_edge("ask", "wait_answer")
     g.add_conditional_edges("wait_answer", after_answer, {"plan": "plan", "end": END})
-    g.add_edge("announce_plan", "gate")
+    g.add_conditional_edges("announce_plan", after_announce, {"gate": "gate", "go_on": "go_on"})
+    g.add_conditional_edges("go_on", after_gate, {"implement": "implement", "plan": "plan", "end": END})
     g.add_conditional_edges("gate", after_gate,
                             {"implement": "implement", "plan": "plan", "end": END})
     building = {"hop": "hop", "verify": "verify", "park": "park"}

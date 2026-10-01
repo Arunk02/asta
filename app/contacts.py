@@ -39,7 +39,7 @@ MIN_EVIDENCE = 5
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_CONTACTS", "").strip().lower() in _TRUEY
+    return os.environ.get("ASTA_CONTACTS", "1").strip().lower() in _TRUEY
 
 
 def min_evidence() -> int:

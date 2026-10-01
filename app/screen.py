@@ -40,7 +40,7 @@ PATHS_KEY = "screen_paths"
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_SCREEN", "").strip() == "1"
+    return os.environ.get("ASTA_SCREEN", "1").strip() == "1"
 
 
 class ScreenError(RuntimeError):

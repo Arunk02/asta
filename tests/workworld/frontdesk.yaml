@@ -114,7 +114,7 @@ scenarios:
       approvals. "For a big coding task, plan and get approval is fine, but
       getting too much approval is drag." The plan is still his to read, and to stop.
     setup:
-      env: {ASTA_PLAN_APPROVAL_FROM_TIER: "2"}
+      approval_from_tier: 2
     brains:
       task:
         - text: |
@@ -139,7 +139,7 @@ scenarios:
       has. Two repos is a big change; the gate that was relaxed for one-file
       changes must not relax for this.
     setup:
-      env: {ASTA_PLAN_APPROVAL_FROM_TIER: "2"}
+      approval_from_tier: 2
     brains:
       task:
         - calls: [{tool: report_outcome, args: {task_id: 1, kind: plan_ready, repos: [booking-service, ap-service]}}]

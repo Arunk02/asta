@@ -17,7 +17,20 @@ import os
 
 import pytest
 
-from app import store
+#: Features that are ON by default in production (1 Oct: "make it enable by
+#: default and remove from .env"). Tests start with each of them OFF and turn on
+#: what they test — the way the suites were written. Set before `app` is
+#: imported, so neither the machine's .env nor a module-scoped fixture (the bench
+#: runs before any function fixture) can switch one on behind a test's back.
+OFF_IN_TESTS = ("ASTA_CLI_MCP", "TEAMS_BRIDGE", "ASTA_ATTENTION", "ASTA_CONTACTS",
+                "ASTA_DELIVERY", "ASTA_MEET2", "ASTA_VERIFY", "ASTA_GRAPH", "ASTA_ROUTING",
+                "ASTA_EVOLVE", "ASTA_APPS", "ASTA_SCREEN", "ASTA_GRAPHS", "ASTA_RESPOND",
+                "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_BENCH_NIGHTLY", "ASTA_ASK_BACK",
+                "ASTA_THREADS", "ASTA_THREAD_CHECKIN", "ASTA_BROWSER_NO_HTTP2")
+for _name in OFF_IN_TESTS:
+    os.environ[_name] = "0"
+
+from app import store  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -126,15 +139,20 @@ def _no_machine_side_effects(monkeypatch):
     # The older suites were written when every plan waited for him and new
     # ground was offered before it was looked into. Those remain valid settings
     # and stay pinned here; tests/test_say_it_once.py turns the live defaults on.
-    monkeypatch.setenv("ASTA_PLAN_APPROVAL_FROM_TIER", "1")
-    monkeypatch.setenv("ASTA_ASK_BEFORE_NEW_GROUND", "1")
+    from app import agent as _agent, go as _go, responder as _responder, tasks as _tasks
+    monkeypatch.setattr(_go, "APPROVAL_FROM_TIER", 1)
+    monkeypatch.setattr(_responder, "LOOK_FOR_WAITING_COLLEAGUE", False)
     # A red CI is re-run once on its own in production; the older lifecycle
     # tests are about what he is told when it is NOT, and no test may reach gh.
-    monkeypatch.setenv("ASTA_CI_AUTO_RERUN", "0")
-    # The staging tests below this line predate "a send he asked for is his
-    # yes"; they are about the draft path, which is still what happens for
-    # anything he did not ask for. tests/test_say_it_once.py turns it on.
-    monkeypatch.setenv("ASTA_SEND_WHEN_ASKED", "0")
+    monkeypatch.setattr(_tasks, "CI_AUTO_RERUN", False)
+    # The staging tests predate "a send he asked for is his yes"; they are about
+    # the draft path, which is still what happens for anything he did not ask
+    # for. tests/test_say_it_once.py turns it on.
+    monkeypatch.setattr(_agent, "SEND_WHEN_ASKED", False)
+    # Older conversation tests count every line sent to a colleague; the
+    # "checking, will update you" acknowledgement has its own tests.
+    from app import chat_watch as _chat_watch
+    monkeypatch.setattr(_chat_watch, "ACKNOWLEDGE", False)
     # Telegram is the same door on another channel. It is dead in tests only by
     # accident today (the chat id lives in the isolated database), and a test
     # that stores one would push to his phone for real.
@@ -146,8 +164,8 @@ def _no_machine_side_effects(monkeypatch):
     from app import apps
     monkeypatch.setattr(apps, "OSASCRIPT", "/nonexistent/osascript")
     monkeypatch.setattr(apps, "SHORTCUTS", "/nonexistent/shortcuts")
-    monkeypatch.delenv("ASTA_APPS", raising=False)
-    monkeypatch.delenv("ASTA_SCREEN", raising=False)
+    monkeypatch.setenv("ASTA_APPS", "0")
+    monkeypatch.setenv("ASTA_SCREEN", "0")
     # The call tests were written against the device chain (BlackHole, the Mac's
     # input). Asta's in-browser microphone is the default live, and has its own
     # tests (test_call_rtc.py), which switch it on themselves.
@@ -177,7 +195,13 @@ def _own_guardrails_file(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_wall_clock_dependence(monkeypatch):
     for name in _TIME_DEPENDENT_ENV + _FIXTURE_SHAPING_ENV + _MACHINE_PINNED_ENV:
-        monkeypatch.delenv(name, raising=False)
+        if name in OFF_IN_TESTS:
+            monkeypatch.setenv(name, "0")
+        else:
+            monkeypatch.delenv(name, raising=False)
+    for name in OFF_IN_TESTS:
+        if os.environ.get(name) is None:
+            monkeypatch.setenv(name, "0")
     yield
 
 

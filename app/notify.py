@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -265,6 +266,13 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
         # Straight out, past the batch: nothing else is going to his phone today
         # for it to ride along with, and the door itself would hold it.
         return await deliver(text, force=True, keys=keys)
+
+    # Voice on: what matters is SAID, instead of buzzing his phone — unless it
+    # asks him something and the mic is off, when it goes both ways.
+    with contextlib.suppress(Exception):
+        from . import voice_mode
+        if await voice_mode.update(text, level, urgency):
+            return {"bell": True, "spoken": True, "whatsapp": False, "telegram": False}
 
     from . import budget, delivery
     # The day's budget of interruptions. Breakage and things he is blocked on are

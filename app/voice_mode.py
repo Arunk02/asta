@@ -404,7 +404,10 @@ async def turn(text: str) -> str:
     if conv is None:
         conv = store.create_conversation(model="claude_cli", workspace=None)
         store.kv_set("wa_conversation", conv["id"])
-    conv["model"] = main._channel_model(conv)
+    # The brain his phone conversation uses; if that cannot be worked out, the
+    # conversation's own — never no answer.
+    with contextlib.suppress(Exception):
+        conv["model"] = main._channel_model(conv)
     sink = VoiceSink()
     started = time.time()
     job = await main._dispatch(conv, text, sink, "voice")

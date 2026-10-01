@@ -345,8 +345,9 @@ def test_the_websocket_wants_the_token_and_speaks_the_protocol(monkeypatch):
 
 
 def test_the_menu_bar_helper_builds(tmp_path):
-    if not shutil.which("swiftc"):
-        pytest.skip("no Swift compiler")
+    import sys
+    if sys.platform != "darwin" or not shutil.which("swiftc") or not shutil.which("zsh"):
+        pytest.skip("the helper is a macOS app (AppKit, Carbon) — built on a Mac only")
     root = Path(main.__file__).resolve().parents[1]
     out = subprocess.run(["zsh", str(root / "deploy" / "voice" / "install.sh"), "--build"],
                          capture_output=True, text=True, timeout=600,
@@ -445,3 +446,20 @@ def test_the_helper_interrupts_and_queues_lines():
     src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
     assert "func interrupt()" in src and "waiting.removeAll()" in src
     assert "onBargeIn" in src and '"type": "barge"' in src
+
+
+def test_a_voice_turn_answers_even_when_no_brain_can_be_chosen(helper, monkeypatch):
+    """CI, 2 Oct: no Claude CLI on the runner, so picking the brain raised and the
+    turn died. The conversation's own model carries on."""
+    def no_pick(conv):
+        raise RuntimeError("tests must not reach a hosted model")
+
+    async def dispatch(conv, text, sink, channel):
+        await sink.send({"type": "delta", "text": "Nothing pending right now."})
+        return None
+
+    monkeypatch.setattr(main, "_channel_model", no_pick)
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    assert run(vm.handle("what is pending?"))["did"] == "answered"
+    assert helper.said() == ["Nothing pending right now."]

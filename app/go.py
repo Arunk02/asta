@@ -32,13 +32,30 @@ from . import store
 #: "raise the PR", "create PR", "push", "ship it" — the end state he grants.
 _PR = re.compile(
     r"\b(?:raise|create|open|make|put\s+up|send)\s+(?:a\s+|an\s+|the\s+|both\s+)?"
-    r"(?:pr|prs|pull\s+requests?)\b|\bpush(?:ed)?\b(?!\s*back)|\bship\b|\bpr\s+raise\b", re.I)
+    r"(?:pr|prs|pull\s+requests?)\b|\bpush(?:ed)?\b(?!\s*back)|\bship\b|\bpr\s+raise\b|"
+    r"\bupdate\s+(?:it\s+)?(?:in\s+|to\s+)?(?:the\s+)?(?:same\s+)?(?:pr|pull\s+request)\b", re.I)
+
+#: "…and inform Vinish" — the part of a go-ahead that is a message, not a command.
+_AND_TELL = re.compile(
+    r"\s*(?:,|and|then|&)\s*(?:then\s+)?((?:inform|tell|ping|message|msg|notify|let)\b.*)$",
+    re.I | re.S)
+
+
+def split_tell(text: str) -> tuple[str, str]:
+    """("commit and update in same PR", "inform Vinish") — or (text, "")."""
+    m = _AND_TELL.search(text or "")
+    if not m:
+        return text, ""
+    head = (text or "")[:m.start()].strip()
+    return (head, m.group(1).strip()) if head else (text, "")
 #: "don't push", "no PR yet", "before raising the PR" — the opposite.
 _NOT = re.compile(r"\b(?:don'?t|do\s+not|not|never|without|before|hold|no\s+need\s+to|"
                   r"stop\s+after)\b[^.\n!?]{0,28}$", re.I)
 
 _PHRASE = (r"(?:approval|approved?|go\s+ahead|do\s+(?:it|that|the\s+changes?)|just\s+do\s+it|"
-           r"update\s+(?:it\s+)?in\s+helm|"
+           r"update\s+(?:it\s+)?in\s+helm|commit(?:\s+it)?|"
+           r"update\s+(?:it\s+)?(?:in\s+|to\s+)?(?:the\s+)?(?:same\s+)?(?:pr|pull\s+request)(?:\s+#?\d+)?|"
+           r"push\s+(?:it\s+)?(?:to|in)\s+(?:the\s+)?(?:same\s+)?(?:pr|branch)(?:\s+#?\d+)?|"
            r"push(?:\s+(?:it|this|that|the\s+(?:changes?|branch|code)))?|"
            r"(?:raise|create|open)\s+(?:a\s+|the\s+)?(?:pr|prs|pull\s+requests?)|"
            r"ship(?:\s+(?:it|this|that))?)")

@@ -219,6 +219,11 @@ _ABOUT_A_CONVERSATION = re.compile(
     r"\bwhat\s+did\s+\w+(?:\s+\w+)?\s+(?:want|need|ask)\b", re.I)
 
 
+_ABOUT_SHIPPING = re.compile(
+    r"\b(?:commit|push|ship)\b|\b(?:update|raise|create|open|merge)\s+(?:in\s+|to\s+)?"
+    r"(?:the\s+|a\s+)?(?:same\s+)?(?:pr|pull\s+request)\b", re.I)
+
+
 def required_for(query: str) -> list[str]:
     """Capabilities this message names outright, whatever the ranker thinks."""
     from . import consent
@@ -239,6 +244,12 @@ def required_for(query: str) -> list[str]:
         out.append("grafana_logs")
     if _ABOUT_WORKFLOWS.search(query or ""):
         out += ["temporal_workflows", "temporal_workflow"]
+    # "commit and update in the same PR": the tools that move a task's work.
+    # Ranked out on 1 Oct, the brain then told him its approve/ship tools had
+    # "dropped from the session".
+    if _ABOUT_SHIPPING.search(query or ""):
+        out += ["approve_task", "ship_task", "update_task_pr", "task_pr_status",
+                "list_background_tasks"]
     # "what's happening with Navya?" is answered from the conversation's record,
     # never from the brain's guess — so the tool that reads it must be offered.
     if _ABOUT_A_CONVERSATION.search(query or ""):

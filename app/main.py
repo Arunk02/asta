@@ -3208,15 +3208,22 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # approve tool (30 Sep, #178: five messages, nothing pushed). See app/go.py.
     from . import go
     if go.enabled() and not _TASK_CMD.match(user_text or ""):
-        is_go, wanted_task = go.command(user_text or "")
-        note = await go.rerun(user_text or "")
+        # "commit and update in same PR and inform Vinish": the PR half is a
+        # command, the "inform Vinish" half is a message for the brain to write
+        # — with the outcome of the command in front of it.
+        go_part, tell_part = go.split_tell(user_text or "")
+        is_go, wanted_task = go.command(go_part)
+        note = await go.rerun(go_part)
         if note or is_go:
-            note = note or await go.act(user_text or "", wanted_task)
+            note = note or await go.act(go_part, wanted_task)
             if note:
                 frontdesk.record("command", "go")
                 store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
                 store.add_ui_message(cid, "assistant", note, {"via": "go", "channel": channel})
                 await sink.send({"type": "note", "text": note})
+                if tell_part:
+                    return _start_turn(conv, f"{tell_part}\n\n[Done just now, at his word: "
+                                             f"{note}]", sink, channel)
                 if channel == "web":
                     await sink.send({"type": "done", "tools": []})
                 return None

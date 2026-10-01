@@ -1169,3 +1169,112 @@ def test_a_long_sleep_gets_a_fresh_browser_on_wake(monkeypatch):
     monkeypatch.setattr(wake.time, "time", fake_time)
     asyncio.run(run())
     assert resets and "asleep" in resets[0]
+
+
+# --- 1 Oct: Vinish's facilityCityCode ask -------------------------------------------
+
+def test_a_lookup_is_never_spawned_as_a_draft_to_send(monkeypatch):
+    """#186: "Do not draft a reply yet — just report back" was a teams_draft."""
+    monkeypatch.setattr(tasks, "_worker", lambda tid: asyncio.sleep(0))
+
+    async def go_():
+        return tasks.spawn("Find Vinish's PR/field confirmation", "Read the recent 1:1 thread with "
+                           "Vinish. Do not draft a reply yet — just report back the PR number.",
+                           kind="teams_draft", teams_chat="Vinish Kumar")
+
+    t = asyncio.run(go_())
+    row = store.get_task(t["id"])
+    assert row["kind"] == "analysis" and not row["teams_chat"]
+
+
+def test_notes_about_a_person_are_never_sent_to_them(monkeypatch):
+    from app import teams_bridge
+    sent: list[str] = []
+
+    async def send(chat, text, allow_group=False):
+        sent.append(text)
+
+    monkeypatch.setattr(teams_bridge, "send_message", send)
+    t = store.create_task("Find confirmation", "teams_draft", "p", None, teams_chat="Vinish Kumar")
+    store.update_task(t["id"], status="awaiting_approval",
+                      result="Vinish's confirmation reply (Thu 01 Oct 10:35): 'This PR, bro' — PR 1429.")
+    out = asyncio.run(tasks.approve(t["id"]))
+    assert out.startswith("Not sent") and sent == []
+    assert tasks._notes_about("Vinish confirmed the field", "Vinish Kumar")
+    assert not tasks._notes_about("bro which field exactly did Sonal send?", "Vinish Kumar")
+
+
+def test_each_turn_carries_the_real_thread_and_his_prs(monkeypatch):
+    from app import copilot_cli
+    now = time.time()
+    store.save_teams_messages([
+        {"chat": "Vinish Kumar", "sender": "Arunkumar K", "text": "bro PR 1429 - ashwin's comments taken care of",
+         "sent_at": now - 3600, "key": "v1", "stamp": ""},
+        {"chat": "Vinish Kumar", "sender": "Vinish Kumar", "text": "This PR, bro",
+         "sent_at": now - 600, "key": "v2", "stamp": ""}])
+    t = store.create_task("Fix RFP validation error messages", "code", "p", None)
+    store.update_task(t["id"], status="shipped",
+                      pr_urls="telikos-booking-service: https://github.com/acme/booking/pull/1429")
+    store.kv_set(f"task_branch:{t['id']}", "feature/rfp-mandatory-field-validation")
+    ctx = copilot_cli.turn_context("go ahead as vinish asked")
+    assert "This PR, bro" in ctx and "PR 1429" in ctx
+    assert "pull/1429 — OPEN — branch feature/rfp-mandatory-field-validation" in ctx
+    assert "Never call one merged or closed" in ctx
+
+
+def test_a_quoted_reply_keeps_what_it_quotes():
+    """Vinish's ask quoted the field; his "This PR, bro" quoted the PR."""
+    from app import chat_watch
+    text = ("Arunkumar K\n30/09/2026 21:46\nbro PR 1429 - ashwin's comments taken care of, can u "
+            "review https://github.com/Maersk-Global/telikos-booking-service/pull/1429\n\nThis PR, bro")
+    read = chat_watch.as_read(text)
+    assert read.startswith("This PR, bro (replying to an earlier message)")
+    assert "quoting:" in read and "pull/1429" in read
+
+
+def test_the_code_offer_carries_what_they_actually_wrote(monkeypatch):
+    from app import offers
+    sent: list[str] = []
+
+    async def notify(msg, kind="", **k):
+        sent.append(msg)
+
+    from app import notify as notify_mod
+    monkeypatch.setattr(notify_mod, "notify", notify)
+    words = ("Bro, can you please add this field also? (replying to an earlier message)\n"
+             "  ↳ quoting: Sonal Pathak @NotBlank private String facilityCityCode;")
+    asyncio.run(answers.offer_plan(who="Vinish Kumar", chat="Vinish Kumar",
+                                   need="add the field Sonal sent", summary="", thread="t",
+                                   words=words))
+    o = offers.pending()
+    assert o and "facilityCityCode" in o.action and "brief the task from THIS" in o.action
+
+
+def test_commit_and_update_in_same_pr_and_inform_someone_splits_into_command_and_message():
+    head, tell = go.split_tell("Commit and update in same PR and inform \nVinish")
+    assert head == "Commit and update in same PR" and tell.startswith("inform")
+    assert go.command(head)[0] and go.wants_pr(head)
+    assert go.split_tell("commit and update in the same PR") == ("commit and update in the same PR", "")
+
+
+def test_ship_pushes_the_existing_pr_branch_the_task_committed_to(monkeypatch, tmp_path):
+    """#187 committed on PR 1429's branch; "ship" found nothing on its own branch."""
+    from app import worktrees
+    ran: list[tuple] = []
+
+    async def git(cwd, *args, **k):
+        ran.append(args)
+        if args[:2] == ("git", "rev-list"):
+            return 0, "1\n"
+        if args[:3] == ("gh", "pr", "view"):
+            return 0, "https://github.com/acme/booking/pull/1429\n"
+        return 0, ""
+
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
+    monkeypatch.setattr(worktrees, "repos_in", lambda root: [tmp_path / "telikos-booking-service"])
+    t = store.create_task("Add @NotBlank on facilityCityCode (PR #1429)", "code",
+                          "On the existing PR #1429 (branch feature/rfp-mandatory-field-validation)", "booking")
+    urls = asyncio.run(tasks._push_named_branches(t["id"], store.get_task(t["id"])))
+    assert urls == ["telikos-booking-service: https://github.com/acme/booking/pull/1429"]
+    assert ("git", "push", "origin", "feature/rfp-mandatory-field-validation") in ran

@@ -23,7 +23,7 @@ _TRUEY = ("1", "true", "yes", "on")
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_MEET2", "").strip().lower() in _TRUEY
+    return os.environ.get("ASTA_MEET2", "1").strip().lower() in _TRUEY
 
 
 # --- which meeting does he mean? ----------------------------------------------

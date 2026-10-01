@@ -166,10 +166,12 @@ def test_teams_push_splits_asks_from_mentions_with_no_ask():
     assert "Priya" in text and "Ravi" in text
 
 
-def test_a_batch_of_only_tags_still_reaches_him():
+def test_a_batch_of_only_tags_still_reaches_him(monkeypatch):
     """Formerly `test_teams_all_quiet_batch_does_not_interrupt`, which asserted the
     behaviour that lost four pings. A batch where nobody used an ask verb is not a
-    quiet batch if his name is in it."""
+    quiet batch if his name is in it. Needs the attention ledger, which ranks a
+    tag — on in production; this test used to get it from the machine's .env."""
+    monkeypatch.setenv("ASTA_ATTENTION", "1")
     n = _Notify()
     asyncio.run(teams_bridge._push_activity(n, ["Ravi — mentioned you — nice work"]))
     assert n.sent[0][1] == "direct"
@@ -251,6 +253,6 @@ def test_the_feed_still_delivers_what_only_it_can_see(row, monkeypatch):
 
 def test_with_the_chat_reader_off_the_feed_keeps_everything(monkeypatch):
     """Deduplicating against a reader that is not running would lose the message."""
-    monkeypatch.delenv("ASTA_CHATWATCH", raising=False)
+    monkeypatch.setenv("ASTA_CHATWATCH", "0")
     assert not teams_bridge.duplicates_chat_watch(
         "Glen Hart mentioned you — hi Arunkumar K — In chat with you")

@@ -1768,14 +1768,16 @@ def continue_working(next_step: str) -> str:
 
 
 #: A message longer than this is something he would want to read first.
-SEND_WHEN_ASKED_MAX = int(os.environ.get("ASTA_SEND_WHEN_ASKED_MAX_CHARS", "600"))
+SEND_WHEN_ASKED_MAX = 600
+#: A message he asked for by name goes out without a second yes. Tests may set it.
+SEND_WHEN_ASKED = True
 _SEND_VERB = re.compile(r"\b(?:send|share|ping|tell|ask|message|msg|forward|inform|nudge|"
                         r"reply\s+to|let\s+\w+\s+know)\b", re.I)
 
 
 def _he_asked_to_send(to: str, cid: str) -> bool:
     """Did HE, in his own words this turn, ask for a message to this person?"""
-    if os.environ.get("ASTA_SEND_WHEN_ASKED", "1").strip().lower() in ("0", "false", "off", "no"):
+    if not SEND_WHEN_ASKED:
         return False
     from . import capabilities, scorecard, store
     said = scorecard.his_words(capabilities.said_this_turn()).lower()

@@ -37,9 +37,9 @@ def everything(monkeypatch):
 
 @pytest.fixture
 def nothing(monkeypatch):
-    for flag in ("ASTA_ATTENTION", "ASTA_CONTACTS", "ASTA_DELIVERY", "ASTA_MEET2",
-                 "ASTA_QUIET_HOURS"):
-        monkeypatch.delenv(flag, raising=False)
+    for flag in ("ASTA_ATTENTION", "ASTA_CONTACTS", "ASTA_DELIVERY", "ASTA_MEET2"):
+        monkeypatch.setenv(flag, "0")             # on by default now; off is "0"
+    monkeypatch.delenv("ASTA_QUIET_HOURS", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -181,7 +181,7 @@ def test_the_night_guard_is_inert_when_delivery_is_switched_off(monkeypatch):
     """ASTA_QUIET_HOURS set without ASTA_DELIVERY must not make flush_held refuse
     to run — notify would have already decided to deliver, and the held batch
     would be reported as sent while going nowhere."""
-    monkeypatch.delenv("ASTA_DELIVERY", raising=False)
+    monkeypatch.setenv("ASTA_DELIVERY", "0")
     monkeypatch.setenv("ASTA_QUIET_HOURS", "22:00-07:00")
     monkeypatch.setattr(delivery, "in_quiet_hours", lambda now=None: True)
     assert delivery.quiet_now() is False
@@ -205,7 +205,7 @@ def test_history_survives_the_flags_going_off_and_on(monkeypatch, _no_channels):
     monkeypatch.setenv("ASTA_ATTENTION", "1")
     attention.consider("outlook", "k1", who="sam@x.com", what="approve?")
     attention.mark_acted("k1")
-    monkeypatch.delenv("ASTA_ATTENTION", raising=False)
+    monkeypatch.setenv("ASTA_ATTENTION", "0")
     assert store.contact_get("sam@x.com")["engaged"] == 1      # learning kept
     monkeypatch.setenv("ASTA_ATTENTION", "1")
     assert store.attention_get("k1")["state"] == "acted"       # ledger kept

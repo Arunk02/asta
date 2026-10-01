@@ -54,7 +54,7 @@ AUDIENCES: dict[str, tuple[str, ...]] = {
     "coding": ("code",),
     "communication": ("chat", "draft"),
     "investigation": ("chat", "analysis"),
-    "git and accounts": ("chat", "code"),
+    "git and accounts": ("chat", "code", "analysis"),
     "standing instructions": ("chat", "analysis", "draft"),
 }
 _DEFAULT_AUDIENCE = ("chat",)

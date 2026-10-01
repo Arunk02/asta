@@ -99,7 +99,7 @@ def test_nothing_is_held_during_the_day(on):
 
 
 def test_disabled_holds_nothing(monkeypatch):
-    monkeypatch.delenv("ASTA_DELIVERY", raising=False)
+    monkeypatch.setenv("ASTA_DELIVERY", "0")
     monkeypatch.setenv("ASTA_QUIET_HOURS", "22:00-07:00")
     assert delivery.hold_for_quiet("direct", attention.P_TODAY, _at(2)) is False
 
@@ -285,7 +285,7 @@ def test_the_stale_release_no_longer_claims_a_delivery_it_never_checked(on, monk
 
 
 def test_disabled_nothing_changes_at_all(monkeypatch, _no_channels):
-    monkeypatch.delenv("ASTA_DELIVERY", raising=False)
+    monkeypatch.setenv("ASTA_DELIVERY", "0")
     monkeypatch.setenv("ASTA_QUIET_HOURS", "22:00-07:00")
     out = asyncio.run(notify.notify("anything", "outlook", urgency="direct",
                                     priority=attention.P_TODAY))

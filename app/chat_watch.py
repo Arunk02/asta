@@ -103,7 +103,10 @@ _RAIL_FURNITURE = ("telikos - all teams", "followed threads")
 #: same rail as chats and are not reachable as one. Skipped for a day rather
 #: than tried (and failed) on every sweep.
 _UNOPENABLE_KEY = "chatwatch_unopenable:"
-UNOPENABLE_SECONDS = 24 * 3600
+#: An hour, not a day: a chat that could not be opened at 12:14 was still
+#: being written in at 13:00, unread (1 Oct). And a chat that moves on the rail
+#: is tried again at once — see `candidates`.
+UNOPENABLE_SECONDS = 3600
 
 
 def unopenable(name: str) -> bool:
@@ -157,7 +160,7 @@ def is_furniture(name: str) -> bool:
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_CHATWATCH", "").strip() not in ("", "0", "false", "no")
+    return os.environ.get("ASTA_CHATWATCH", "1").strip() not in ("", "0", "false", "no")
 
 
 def _seen_key(chat: str) -> str:
@@ -671,7 +674,10 @@ async def candidates() -> list[str]:
         cursor = int(store.kv_get(_CURSOR_KEY) or "0")
     except ValueError:
         cursor = 0
-    readable = [r for r in current if not unopenable(r)]
+    # A chat that just moved has something new in it — try it, even if it
+    # could not be opened earlier.
+    moved = set(touched(previous, current))
+    readable = [r for r in current if r in moved or not unopenable(r)]
     first = changed_first(rail, readable, previous)
     rest, cursor = pick(readable, cursor, previous)
     store.kv_set(_CURSOR_KEY, str(cursor))
@@ -869,7 +875,7 @@ def checkin_line() -> str:
 
 
 def _checkin_enabled() -> bool:
-    return os.environ.get("ASTA_THREAD_CHECKIN", "").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("ASTA_THREAD_CHECKIN", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 def group_silent() -> bool:
@@ -925,6 +931,30 @@ def _transcript(chat: str, now: float, hours: float = 6, at_most: int = 14) -> l
         if text:
             out.append(f"{'Arun' if is_from_him(r.get('sender', '')) else r.get('sender', '?')}: {text}")
     return out
+
+
+#: A colleague whose 1:1 ask is being worked on is told so at once. Tests may set it.
+ACKNOWLEDGE = True
+#: How long one acknowledgement covers a conversation.
+ACK_SECONDS = 3600
+
+
+async def _acknowledge(tid: str, c: dict) -> bool:
+    """"checking bro, will update you" — once per thread per ACK_SECONDS."""
+    import time as _t
+    from . import steward
+    key = f"chatwatch_acked:{tid}"
+    try:
+        last = float(store.kv_get(key) or 0)
+    except ValueError:
+        last = 0.0
+    if _t.time() - last < ACK_SECONDS:
+        return False
+    line = steward.ack_line(c["chat"])
+    if await _say(c["chat"], line, group=False):
+        store.kv_set(key, str(_t.time()))
+        return True
+    return False
 
 
 def _concrete(text: str) -> bool:
@@ -1278,6 +1308,15 @@ async def _sweep_threads(notify=None) -> list[dict]:
                 continue
         if task and not task.get("joined") and not task.get("reused"):
             threads.update(tid, status="working")
+            # They hear back within the minute — "checking", in his words — and
+            # the answer follows. 1 Oct: Vinish asked at 13:36 and heard nothing
+            # while Asta worked; "earlier we acknowledged them and got them what
+            # they wanted". 1:1 only, once per thread an hour, and never while he
+            # himself is in the conversation.
+            if ACKNOWLEDGE and c["one_to_one"] and (c.get("arun_minutes_ago") is None
+                                    or c["arun_minutes_ago"] > 5):
+                with contextlib.suppress(Exception):
+                    await _acknowledge(tid, c)
             if state == "urgent" and _worth_telling(tid, said, fyi=False,
                                                     group=not c["one_to_one"], now=now):
                 red.append(f"🚨 {tell}" if tell else f"🚨 {name}: {said}")

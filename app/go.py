@@ -68,11 +68,13 @@ _COMMAND = re.compile(
     r"(?:\s+(?:for|on|of)?\s*(?:the\s+)?(?:task\s*)?#?\s*(\d{1,5}))?"
     rf"(?:\s+{_FILL})*\s*[.!]*\s*$", re.I)
 
-RECENT_SECONDS = float(os.environ.get("ASTA_GO_RECENT_HOURS", "24")) * 3600
+RECENT_SECONDS = 24 * 3600
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_GO_MEANS_GO", "1").strip().lower() not in ("0", "false", "off", "no")
+    """Always: his go-ahead is a command. (A switch for it was one more flag
+    with only one right answer — removed 1 Oct.)"""
+    return True
 
 
 def wants_pr(text: str) -> bool:
@@ -149,20 +151,21 @@ def words(task_id: int) -> str:
 
 #: The pause between showing a plan he is not asked about and starting it: long
 #: enough for the gate to be in place, short enough not to be a wait.
+#: Seconds between showing a plan that is not waiting for him and starting it.
+AFTER_PLAN_SECONDS = 3.0
+#: The smallest change whose plan waits for his approval: tier 2 = anything past
+#: one or two files in one repo; contracts and high-risk plans always wait.
+APPROVAL_FROM_TIER = 2
+
+
 def after_plan_seconds() -> float:
-    try:
-        return float(os.environ.get("ASTA_GO_AFTER_PLAN_SECONDS", "3"))
-    except ValueError:
-        return 3.0
+    return AFTER_PLAN_SECONDS
 
 
 def ask_from_tier() -> int:
     """The smallest change whose plan waits for his approval (1 = every plan,
     2 = anything past one class or file, 4 = never)."""
-    try:
-        return int(os.environ.get("ASTA_PLAN_APPROVAL_FROM_TIER", "2"))
-    except ValueError:
-        return 2
+    return APPROVAL_FROM_TIER
 
 
 def no_ask(task_id: int, plan: str) -> str:

@@ -193,7 +193,7 @@ def test_it_runs_on_the_night_not_on_the_live_benchs_flag(monkeypatch):
     LIVE bench's, which is off, and proving a candidate costs no brain at all."""
     import datetime as dt
     from app.workworld import nightly
-    monkeypatch.delenv("ASTA_BENCH_NIGHTLY", raising=False)
+    monkeypatch.setenv("ASTA_BENCH_NIGHTLY", "0")
     night = dt.datetime(2026, 9, 17, 3, 0)
     assert "ASTA_BENCH_NIGHTLY" in nightly.why_not(night)      # the live tier stays off
     assert nightly.quiet_window(night) == ""                   # the free work may run

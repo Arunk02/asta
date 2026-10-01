@@ -67,7 +67,7 @@ def test_a_missing_argument_is_refused_before_the_app_is_touched(monkeypatch):
 
 
 def test_the_doors_are_shut_unless_he_opens_them(monkeypatch):
-    monkeypatch.delenv("ASTA_APPS", raising=False)
+    monkeypatch.setenv("ASTA_APPS", "0")
     calls: list = []
     _fake_runner(monkeypatch, wrote=calls, reads="")
     with pytest.raises(apps.AppError, match="app doors are off"):

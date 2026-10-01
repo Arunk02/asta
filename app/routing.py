@@ -37,7 +37,7 @@ NAMES = {T1: "T1", T2: "T2", T3: "T3"}
 
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_ROUTING", "").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("ASTA_ROUTING", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 # --- what the words say ------------------------------------------------------------

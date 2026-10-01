@@ -77,7 +77,7 @@ def test_urgency_outranks_the_opener(said):
 # --- the one send that does not wait for him ----------------------------------
 
 def test_it_is_off_unless_switched_on(monkeypatch):
-    monkeypatch.delenv("ASTA_ASK_BACK", raising=False)
+    monkeypatch.setenv("ASTA_ASK_BACK", "0")
     assert not steward.ask_back_enabled()
 
 

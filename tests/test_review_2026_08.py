@@ -403,7 +403,7 @@ async def test_with_the_ledger_off_nothing_changes(pushes, monkeypatch):
     """The no-op contract: a system with ASTA_ATTENTION unset behaves exactly as
     it did before any of this existed."""
     from app import attention, notify as notify_mod
-    monkeypatch.delenv("ASTA_ATTENTION", raising=False)
+    monkeypatch.setenv("ASTA_ATTENTION", "0")
     assert not attention.enabled()
     text = "same words twice"
     await notify_mod.notify(text, "outlook")

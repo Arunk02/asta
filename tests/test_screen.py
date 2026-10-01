@@ -84,7 +84,7 @@ def test_gone_is_an_expectation_too(monkeypatch):
 
 
 def test_it_is_off_unless_he_turns_it_on(monkeypatch):
-    monkeypatch.delenv("ASTA_SCREEN", raising=False)
+    monkeypatch.setenv("ASTA_SCREEN", "0")
     with pytest.raises(screen.ScreenError, match="screen fallback is off"):
         asyncio.run(screen.follow("TextEdit", [Step("click", "x", expect="exists: y")]))
 

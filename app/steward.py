@@ -118,7 +118,7 @@ def is_greeting(text: str) -> bool:
 #:
 #: Off unless switched on, like everything else that acts outward.
 def ask_back_enabled() -> bool:
-    return os.environ.get("ASTA_ASK_BACK", "").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get("ASTA_ASK_BACK", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 #: Deliberately a question and nothing else. No "sure", no "I'll look at it" —
@@ -138,7 +138,17 @@ ASK_BACK = os.environ.get(
 #: The answer to a ping ("Bro", "Hi Arun"). It says he is there and asks nothing
 #: about a subject — a ping has none, and guessing one from the earlier chat is
 #: answering a conversation they did not start.
-PING_BACK = os.environ.get("ASTA_PING_BACK_LINE", "Yes, tell me")
+PING_BACK = "Yes, tell me"
+
+
+def ack_line(chat: str) -> str:
+    """What a colleague hears the moment their ask is being worked on."""
+    try:
+        from . import writing
+        terms = [t for t in writing.address_terms(chat) if t.lower() in ("bro", "da", "machi")]
+    except Exception:                                          # noqa: BLE001
+        terms = []
+    return f"checking {terms[0]}, will update you" if terms else "checking, will update you"
 
 
 def ping_back(chat: str) -> str:

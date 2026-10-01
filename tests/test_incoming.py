@@ -179,7 +179,7 @@ def test_answering_is_a_recorded_op_not_a_brain_instruction():
 
 
 def test_nothing_rings_by_default(monkeypatch):
-    monkeypatch.delenv("ASTA_INCOMING", raising=False)
+    monkeypatch.setenv("ASTA_INCOMING", "0")
     assert not incoming.enabled()
 
 

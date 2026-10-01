@@ -201,7 +201,7 @@ def test_low_priority_noise_is_not_worth_a_turn(spawned):
 
 def test_it_is_off_until_switched_on(monkeypatch, spawned):
     """Same as every other behaviour that spends money on his behalf."""
-    monkeypatch.delenv("ASTA_RESPOND", raising=False)
+    monkeypatch.setenv("ASTA_RESPOND", "0")
     assert responder.respond("teams", "Alex", TEMPORAL,
                              priority=attention.P_NOW) is None
     assert not spawned
@@ -209,7 +209,7 @@ def test_it_is_off_until_switched_on(monkeypatch, spawned):
 
 def test_every_refusal_has_a_stated_reason(monkeypatch):
     """"why didn't you check that one" must have an answer, and it is this."""
-    monkeypatch.delenv("ASTA_RESPOND", raising=False)
+    monkeypatch.setenv("ASTA_RESPOND", "0")
     assert "off" in responder.should_respond("incident", 0, "k1")
     monkeypatch.setenv("ASTA_RESPOND", "1")
     assert responder.should_respond("", 0, "k2") == "nothing checkable in it"

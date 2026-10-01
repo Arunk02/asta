@@ -285,7 +285,9 @@ class World:
         configuration it needs, and a value being PROVED is not overwritten.
         """
         for key, value in values.items():
-            if keep_existing and os.environ.get(key):
+            # "0" is the test harness starting a default-on feature off, not a
+            # value under test — the day states its own configuration over it.
+            if keep_existing and os.environ.get(key) not in (None, "", "0"):
                 continue
             self._env_undo = getattr(self, "_env_undo", [])
             self._env_undo.append((key, os.environ.get(key)))

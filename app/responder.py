@@ -39,7 +39,7 @@ from . import attention, store
 #: Off by default, like every other behaviour that spends money on his behalf.
 #: One flag, read at call time so a restart is not needed to turn it off.
 def enabled() -> bool:
-    return os.environ.get("ASTA_RESPOND", "").strip() not in ("", "0", "false", "no")
+    return os.environ.get("ASTA_RESPOND", "1").strip() not in ("", "0", "false", "no")
 
 
 #: There is no hourly cap any more (30 Sep). The thundering-herd concern it
@@ -596,6 +596,11 @@ def familiar(text: str) -> tuple[bool, str]:
 
 # --- the act ------------------------------------------------------------------
 
+#: A colleague waiting on an answer gets it looked into (read-only) without a
+#: "want me to look into it?" first. Module constant; tests may set it.
+LOOK_FOR_WAITING_COLLEAGUE = True
+
+
 def respond(source: str, who: str, text: str, priority: int | None = None,
             key: str = "", workspace: str = "", sent_at: float | None = None,
             context: str = "", reply_to: str = "", group: bool = False,
@@ -635,9 +640,7 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     # nothing to check it against.
     grounds = f"{context}\n{text}".strip() if context else text
     known, why = familiar(grounds)
-    if not known and reply_to and not is_broadcast(who, grounds) \
-            and os.environ.get("ASTA_ASK_BEFORE_NEW_GROUND", "0").strip().lower() \
-            not in ("1", "true", "on", "yes"):
+    if not known and reply_to and not is_broadcast(who, grounds) and LOOK_FOR_WAITING_COLLEAGUE:
         # A colleague is waiting on it, and looking is read-only. "Want me to
         # look into it?" was one more approval for work that changes nothing —
         # his words, 30 Sep: "getting too much approval is drag". The offer

@@ -25,7 +25,7 @@ _TRUEY = ("1", "true", "yes", "on")
 
 def enabled() -> bool:
     """New code tasks run on the graph when ASTA_GRAPH is on. Off by default."""
-    return os.environ.get("ASTA_GRAPH", "").strip().lower() in _TRUEY
+    return os.environ.get("ASTA_GRAPH", "1").strip().lower() in _TRUEY
 
 
 def manages(task_id: int) -> bool:

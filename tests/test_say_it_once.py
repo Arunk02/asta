@@ -98,8 +98,8 @@ def quiet(monkeypatch, tmp_path):
     monkeypatch.setattr(tasks, "committed_so_far", lambda *a, **k: [])
     monkeypatch.setattr(tasks, "_audit_note", lambda tid: "")
     monkeypatch.setattr(tasks, "_learn_from", lambda *a, **k: None)
-    monkeypatch.setenv("ASTA_PLAN_APPROVAL_FROM_TIER", "2")
-    monkeypatch.setenv("ASTA_GO_AFTER_PLAN_SECONDS", "0")
+    monkeypatch.setattr(go, "APPROVAL_FROM_TIER", 2)
+    monkeypatch.setattr(go, "AFTER_PLAN_SECONDS", 0.0)
     return pushed
 
 
@@ -278,7 +278,7 @@ def test_a_big_plan_he_already_said_go_on_does_not_wait(monkeypatch, quiet):
 
 
 def test_every_plan_can_be_made_to_wait_again(monkeypatch, quiet):
-    monkeypatch.setenv("ASTA_PLAN_APPROVAL_FROM_TIER", "1")
+    monkeypatch.setattr(go, "APPROVAL_FROM_TIER", 1)
     t = store.create_task("Enable MX", "code", "p", None)
     assert _announce(t, PLAN_178, monkeypatch) == []
 
@@ -452,7 +452,7 @@ def test_a_follow_up_after_the_draft_is_shown_is_said_once(monkeypatch):
 def test_a_waiting_colleague_is_investigated_without_asking_him_first(monkeypatch):
     from app import offers, responder
     monkeypatch.setenv("ASTA_RESPOND", "1")
-    monkeypatch.setenv("ASTA_ASK_BEFORE_NEW_GROUND", "0")
+    monkeypatch.setattr(responder, "LOOK_FOR_WAITING_COLLEAGUE", True)
     monkeypatch.setattr(responder, "familiar", lambda g: (False, ""))
     monkeypatch.setattr(responder, "should_respond", lambda *a, **k: "")
     monkeypatch.setattr(responder, "what_it_asks", lambda t: "debug")
@@ -698,13 +698,14 @@ def test_ci_red_names_the_failing_test_and_offers_the_rerun(monkeypatch):
                "startedAt": "1", "detailsUrl": "https://github.com/acme/svc/actions/runs/777/job/1"}]
     log = ("build\tRun tests\t[ERROR] ReadyForPlanningActivityImplTest."
            "readyForPlanning_BookingRfpFailedStatus_ClosesActivityAsFailed:212 -- expected: <A> but was: <B>\n")
-    monkeypatch.setenv("ASTA_CI_AUTO_RERUN", "1")
+    monkeypatch.setattr(tasks, "CI_AUTO_RERUN", True)
     tid, ran = _shipped(monkeypatch, rollup, log)
     line = asyncio.run(tasks.check_pr(tid))
     assert "CI red" in line and "ReadyForPlanningActivityImplTest" in line
     assert "Re-running the failed jobs once" in line, "the first red is re-run on its own"
     assert any(a[0][:4] == ("gh", "run", "rerun", "777") for a in ran)
     store.update_task(tid, pr_state="OPEN")
+    store.kv_del("pr_told:https://github.com/acme/svc/pull/1252")    # as a rerun does
     again = asyncio.run(tasks.check_pr(tid))
     assert f"rerun ci {tid}" in again and f"fix #{tid}" in again, "a second red is his call"
     assert sum(1 for a in ran if a[0][:3] == ("gh", "run", "rerun")) == 1
@@ -804,7 +805,7 @@ def _asked(monkeypatch, said, earlier=()):
     cid = _conv()["id"]
     for e in earlier:
         store.add_ui_message(cid, "user", e, {})
-    monkeypatch.setenv("ASTA_SEND_WHEN_ASKED", "1")
+    monkeypatch.setattr(agent, "SEND_WHEN_ASKED", True)
     monkeypatch.setattr(capabilities, "said_this_turn", lambda: said)
     return agent, cid
 
@@ -1033,7 +1034,6 @@ def test_a_ring_seen_by_the_page_is_offered_once_whichever_watcher_sees_it(monke
     from app import notify as notify_mod
     monkeypatch.setattr(notify_mod, "notify", notify)
     monkeypatch.setenv("ASTA_INCOMING", "1")
-    monkeypatch.setenv("ASTA_RING_PUSH", "1")
     monkeypatch.setattr(incoming, "meetings_busy", lambda: False)
     incoming.clear()
     toast = "Vinish Kumar is calling you\nAccept\nDecline"
@@ -1395,3 +1395,60 @@ def test_his_prs_in_each_turn_lead_with_the_service():
     store.update_task(t["id"], status="shipped",
                       pr_urls="telikos-booking-service: https://github.com/a/telikos-booking-service/pull/1429")
     assert "• booking PR 1429 — OPEN" in copilot_cli._his_prs()
+
+
+# --- 1 Oct 13:36: Vinish heard nothing --------------------------------------------
+
+def test_a_colleague_hears_checking_within_the_minute_once_an_hour(monkeypatch):
+    from app import chat_watch, writing
+    said: list[tuple] = []
+
+    async def say(chat, line, group=False):
+        said.append((chat, line))
+        return True
+
+    monkeypatch.setattr(chat_watch, "_say", say)
+    monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: ["bro"])
+    c = {"chat": "Vinish Kumar"}
+    assert asyncio.run(chat_watch._acknowledge("teams:Vinish Kumar", c)) is True
+    assert asyncio.run(chat_watch._acknowledge("teams:Vinish Kumar", c)) is False, "once an hour"
+    assert said == [("Vinish Kumar", "checking bro, will update you")]
+
+
+def test_an_unclear_ask_is_asked_back_to_them_not_to_him(monkeypatch):
+    from app import chat_watch, notify as notify_mod
+    said: list[str] = []
+    told: list[str] = []
+
+    async def say(chat, line, group=False):
+        said.append(line)
+        return True
+
+    async def notify(msg, kind="", **k):
+        told.append(msg)
+
+    monkeypatch.setattr(chat_watch, "_say", say)
+    monkeypatch.setattr(notify_mod, "notify", notify)
+    t = store.create_task("Vinish Kumar asked: topic refresh", "analysis", "p", None)
+    answers.remember_meta(t["id"], who="Vinish Kumar", need="topic refresh", chat="Vinish Kumar",
+                          group=False, thread="teams:Vinish Kumar")
+    result = ("ANALYSIS:\nNothing documents a topic refresh for booking PR 1429.\n\n"
+              "REPLY:\nwhich PR do you mean by the prod PR bro, the topic config one?")
+    assert asyncio.run(answers.present_task(t["id"], store.get_task(t["id"]), result)) is True
+    assert said == ["which PR do you mean by the prod PR bro, the topic config one?"]
+    assert told and told[0].startswith("❓ Asked Vinish")
+
+
+def test_an_answer_still_waits_for_his_send(monkeypatch):
+    from app import chat_watch
+
+    async def say(chat, line, group=False):
+        raise AssertionError("an answer went out without his send")
+
+    monkeypatch.setattr(chat_watch, "_say", say)
+    store.kv_set("wa_conversation", _conv()["id"])
+    t = store.create_task("Vinish Kumar asked", "analysis", "p", None)
+    answers.remember_meta(t["id"], who="Vinish Kumar", need="x", chat="Vinish Kumar",
+                          group=False, thread="teams:Vinish Kumar")
+    result = "ANALYSIS:\nfound it\n\nREPLY:\nit is in prod since 12:40, the topic is refreshed"
+    assert asyncio.run(answers.present_task(t["id"], store.get_task(t["id"]), result)) is True

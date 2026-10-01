@@ -75,7 +75,7 @@ def test_an_invite_is_told_by_the_mail_reader_alone(monkeypatch):
     store.kv_set("attention_scrape:outlook", str(time.time()))
     assert teams_bridge.duplicates_chat_watch(row)
     store.kv_set("attention_scrape:outlook", str(time.time() - 7200))
-    monkeypatch.delenv("ASTA_CHATWATCH", raising=False)
+    monkeypatch.setenv("ASTA_CHATWATCH", "0")
     assert not teams_bridge.duplicates_chat_watch(row), "mail not being read: the feed keeps it"
 
 

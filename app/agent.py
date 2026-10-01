@@ -1198,9 +1198,10 @@ async def pr_review_post(pr: str, action: str, body: str = "",
     the finished comment — his yes posts exactly these words under his name, so write them
     for the PR author to read, not for Arun.
 
-    This does NOT post. Approving someone's change is visible to the whole team the moment
-    it lands, so it always waits for his explicit yes. Use review_pr first to form the
-    opinion; use this only when he says to post it."""
+    When he has just said to post it ("go and post it", "comment on the PR"), this posts
+    and returns the result — his words are the yes. Otherwise it stages and waits for
+    his yes. An approval or a request for changes posts only when he used that word.
+    Use review_pr first to form the opinion."""
     from . import offers, review
     if action not in review.ACTIONS:
         return f"action must be one of: {', '.join(sorted(review.ACTIONS))}"
@@ -1208,6 +1209,22 @@ async def pr_review_post(pr: str, action: str, body: str = "",
         return f"a '{action}' review needs a body — write the comment first"
     verb = {"approve": "Approve", "comment": "Comment on",
             "request_changes": "Request changes on"}[action]
+    # He said "post it" about these comments: that IS the yes. 1 Oct: "go and
+    # post it" was staged for another yes, then "go ahead" ran a post that
+    # failed, and the brain told him it "keeps staging" (PR #1459). An approval
+    # or a request for changes goes only when he used that word himself.
+    from . import capabilities, ops, scorecard
+    said = scorecard.his_words(capabilities.said_this_turn()).lower()
+    asked = {"comment": r"\b(?:post|comment|share|send|add)\b",
+             "approve": r"\bapprov",
+             "request_changes": r"\brequest(?:ed)?\s+changes\b"}[action]
+    if said and re.search(asked, said):
+        try:
+            return "✅ " + await ops.run({"name": "pr_review", "args": {
+                "pr": pr, "workspace": workspace, "repo": repo, "action": action,
+                "body": body}}) + " — posted as he asked. Tell him in one line."
+        except Exception as exc:                               # noqa: BLE001
+            return f"Not posted — {exc}. Tell him exactly that; do not retry blindly."
     offers.staged_write(
         "pr_review", {"pr": pr, "workspace": workspace, "repo": repo,
                       "action": action, "body": body},

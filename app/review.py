@@ -207,6 +207,9 @@ def _where(pr: str, workspace: str, repo: str = "") -> tuple[str, list[str], Pat
         target = _linked_recently(number)
     if target:
         return number, ["-R", target], Path.home()
+    if not workspace:
+        raise RuntimeError(f"PR #{number}: no link for it in his chats and no workspace given "
+                           f"— send the PR link, or name the repo.")
     cwd = _repo_dir(workspace, repo)
     if not (cwd / ".git").is_dir():
         raise RuntimeError(f"{cwd} is not a git repository — send the PR link, "

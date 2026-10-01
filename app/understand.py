@@ -223,8 +223,19 @@ def prompt(items: list[dict]) -> str:
             + json.dumps(blocks, ensure_ascii=False, indent=1))
 
 
+#: The rung that reads with LM Studio instead of a CLI.
+LOCAL = "local"
+
+
 async def _call(text: str, model_name: str = "") -> str:
     """The model, with no tools. Its own seam so tests never start a CLI."""
+    if model_name == LOCAL:
+        import asyncio
+        from . import memory
+        out = await asyncio.to_thread(memory.local_llm_complete, text, 1500)
+        if not (out or "").strip():
+            raise RuntimeError("local model not running")
+        return out
     from . import claude_cli
     return await claude_cli.one_shot(text, model=model_name or model() or "haiku",
                                      tools_off=True, timeout=150)
@@ -419,6 +430,10 @@ async def _ladder(items: list[dict], why: list[str]) -> dict[str, dict]:
     rungs = [("first", CHUNK, None), ("retry", RETRY_CHUNK, None)]
     if second_model() and second_model() != model():
         rungs.append(("second model", CHUNK, second_model()))
+    # Last before the rules: the local model, when it is running. On 30 Sep
+    # Claude's window ran out and 27 sweeps were read by regexes alone; a
+    # local read is far better than none, and it costs nothing.
+    rungs.append(("local", RETRY_CHUNK, LOCAL))
     for rung, size, name in rungs:
         missing = [it for it in items if it["id"] not in got]
         if not missing:

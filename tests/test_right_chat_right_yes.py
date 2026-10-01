@@ -649,3 +649,188 @@ def test_asking_for_it_in_his_own_words_still_stages_it(above, monkeypatch):
     out = agent.prepare_to_send("PR is merged", to="Praveen Kumar", channel="teams")
     assert not out.startswith("Sending to"), "staged, not sent"
     assert loop.take(cid)["to"] == "Praveen Kumar"
+
+
+# --- without LM Studio: still speaks, still reads, still catches the ask ---------------
+
+def test_a_quick_verdict_falls_back_to_claude_then_copilot(monkeypatch):
+    from app import claude_cli, copilot_cli, memory
+    asked: list[str] = []
+
+    async def claude(prompt, **k):
+        asked.append("claude")
+        raise RuntimeError("claude usage limit")
+
+    async def copilot(prompt, **k):
+        asked.append("copilot")
+        return "CODE"
+
+    monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: None)
+    monkeypatch.setattr(claude_cli, "one_shot", claude)
+    monkeypatch.setattr(copilot_cli, "one_shot", copilot)
+    assert asyncio.run(memory.quick_verdict("CODE or PERSON?")) == "CODE"
+    assert asked == ["claude", "copilot"]
+    monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: "PERSON")
+    assert asyncio.run(memory.quick_verdict("CODE or PERSON?")) == "PERSON", "local first when up"
+
+
+def test_a_call_answers_aloud_without_lm_studio(monkeypatch):
+    from app import call_brain, memory
+
+    async def verdict(prompt, max_tokens=8, timeout=25):
+        return "CODE"
+
+    monkeypatch.setattr(call_brain, "CONFIRM_SPEECH", True)
+    monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: None)
+    monkeypatch.setattr(memory, "quick_verdict", verdict)
+    assert asyncio.run(call_brain.confident("how does the amend flow handle the ATA date?"))
+
+
+def test_reading_teams_falls_to_the_local_model_before_the_rules(monkeypatch):
+    from app import understand
+    used: list[str] = []
+
+    async def call(text, model_name=""):
+        used.append(model_name or "first")
+        if model_name == understand.LOCAL:
+            return '{"threads": [{"id": "t1", "state": "ask", "need": "check booking"}]}'
+        raise RuntimeError("claude usage limit")
+
+    monkeypatch.setattr(understand, "_call", call)
+    got = asyncio.run(understand._ladder([{"id": "t1", "new": ["can u check H69 booking"]}], []))
+    assert "t1" in got and used[-1] == understand.LOCAL
+
+
+def test_a_call_knows_every_open_pr_of_his_by_what_it_changed(monkeypatch):
+    from app import conversation, prname
+    monkeypatch.setattr(prname, "his_open_prs", lambda limit=15: (
+        "• AP PR 1252 — Derive ATA/ATD order-level references from TMS execution events\n"
+        "• empv3-tenant-intake PR 44342 — Feature/topic refresh telikos prod"))
+    brief = conversation.with_history("Vinish Kumar", "find out what he wanted")
+    assert "AP PR 1252 — Derive ATA/ATD" in brief and "never pick the nearest one" in brief
+
+
+def test_an_ask_to_him_is_still_caught_when_the_local_model_is_closed(monkeypatch):
+    from app import memory, triage
+
+    async def verdict(prompt, max_tokens=8, timeout=25):
+        return "ACT"
+
+    monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: None)
+    monkeypatch.setattr(memory, "quick_verdict", verdict)
+    v = triage.Verdict(False, "addressed to you, no ask", "Rajendra: H69LMCN6KZY")
+    assert asyncio.run(triage.refine(v, "Rajendra Kumar", "H69LMCN6KZY")).action
+    quiet = triage.Verdict(False, "no ask detected", "deploy done")
+    assert not asyncio.run(triage.refine(quiet, "Sumith", "deploy done")).action, \
+        "only what is addressed to him is worth a paid look"
+
+
+# --- the page reports; Asta reads only what changed ------------------------------------
+
+@pytest.fixture
+def rail(monkeypatch):
+    chat_watch._RAIL.update(order=[], unread=set(), at=0.0, mentioned=False)
+    chat_watch._HOT.clear()
+    chat_watch._RESTORED.clear()
+    chat_watch._CHECKED.clear()
+    chat_watch._EVENT["ev"] = None
+    tb.MENTIONED["ev"] = None
+    yield
+    chat_watch._RAIL.update(order=[], unread=set(), at=0.0, mentioned=False)
+    chat_watch._HOT.clear()
+    chat_watch._RESTORED.clear()
+
+
+def test_after_a_restart_every_unread_chat_is_read_first(rail):
+    """Offline all night, back online: what is bold on the rail is read now."""
+    hot = chat_watch.on_rail(["*Vinish Kumar", "Komal Jayswal", "*Telikos SCP Internal Tech"])
+    assert hot == ["Telikos SCP Internal Tech", "Vinish Kumar"]
+
+
+def test_a_chat_turning_unread_or_moving_up_is_read_and_nothing_else(rail):
+    chat_watch.on_rail(["Vinish Kumar", "Komal Jayswal", "Rajendra Kumar"])
+    chat_watch.take_hot()
+    assert chat_watch.on_rail(["Vinish Kumar", "*Komal Jayswal", "Rajendra Kumar"]) == ["Komal Jayswal"]
+    chat_watch.take_hot()
+    hot = chat_watch.on_rail(["Rajendra Kumar", "Vinish Kumar", "*Komal Jayswal"])
+    assert hot == ["Rajendra Kumar"], "moved to the top: read; the rest only shifted down"
+    assert chat_watch.on_rail(["Rajendra Kumar", "Vinish Kumar", "*Komal Jayswal"]) == [], \
+        "the same picture again (the heartbeat) is not news"
+
+
+def test_a_muted_group_marked_unread_is_read(rail):
+    """1 Oct: the minute sweep never saw these — marking unread moves nothing."""
+    chat_watch.on_rail(["Vinish Kumar", "UAT Code Promotion - Sept'Release"])
+    assert chat_watch.on_rail(["Vinish Kumar", "*UAT Code Promotion - Sept'Release"]) == \
+        ["UAT Code Promotion - Sept'Release"]
+
+
+def test_asta_giving_a_chat_back_unread_is_not_news_but_is_rechecked(rail):
+    chat_watch.on_rail(["Vinish Kumar", "Komal Jayswal"])
+    chat_watch.take_hot()
+    chat_watch.note_restored("Komal Jayswal")
+    assert chat_watch.on_rail(["Vinish Kumar", "*Komal Jayswal"]) == [], "our own Mark as unread"
+    chat_watch._RESTORED["Komal Jayswal"] -= 120
+    assert "Komal Jayswal" in chat_watch.take_hot(), \
+        "still unread a minute later: a second message there changes nothing on the rail"
+    chat_watch.on_rail(["Vinish Kumar", "Komal Jayswal"])
+    assert "Komal Jayswal" not in chat_watch._restored_due(time.time() + 120), \
+        "he read it himself: no more rechecks"
+
+
+def test_furniture_and_his_own_note_chat_are_never_opened(rail):
+    chat_watch.on_rail(["Vinish Kumar"])
+    hot = chat_watch.on_rail(["*Arunkumar K (You)", "*Copilot", "Vinish Kumar"])
+    assert hot == []
+
+
+def test_the_watch_loop_falls_back_to_every_minute_when_the_page_goes_quiet(rail):
+    assert not chat_watch.rail_alive()
+    chat_watch.on_rail(["Vinish Kumar"])
+    assert chat_watch.rail_alive()
+    assert not chat_watch.rail_alive(time.time() + chat_watch.RAIL_SILENT_SECONDS + 1)
+
+
+def test_a_report_wakes_the_loop_within_seconds(rail, monkeypatch):
+    monkeypatch.setattr(chat_watch, "HOT_DEBOUNCE_SECONDS", 0.0)
+
+    async def go():
+        waiting = asyncio.ensure_future(chat_watch._wait_for_work(30))
+        await asyncio.sleep(0.05)
+        chat_watch.on_rail(["*Vinish Kumar"])
+        return await asyncio.wait_for(waiting, 2)
+
+    assert asyncio.run(go()) == "hot"
+
+
+def test_a_hot_sweep_opens_only_the_chats_reported(monkeypatch):
+    opened: list[str] = []
+
+    async def new_in(chat, advance=True):
+        opened.append(chat)
+        return []
+
+    async def candidates():
+        raise AssertionError("a hot sweep must not read the whole rail")
+
+    monkeypatch.setattr(chat_watch, "new_in", new_in)
+    monkeypatch.setattr(chat_watch, "candidates", candidates)
+    asyncio.run(chat_watch.sweep(None, only=["Vinish Kumar"]))
+    assert opened == ["Vinish Kumar"]
+
+
+def test_the_watcher_reports_chats_not_channels_and_says_who_is_unread():
+    js = tb.RAIL_WATCH_JS
+    assert 'aria-level="1"' in js and "teams and channels" in js, "channels are a section, skipped"
+    assert "fontWeight" in js and ">= 600" in js, "unread is the name in bold"
+    assert "astaRail" in js and "60000" in js, "it reports, and it has a heartbeat"
+
+
+def test_a_browser_grown_past_its_limit_is_recycled(monkeypatch):
+    monkeypatch.setattr(tb, "profile_mb", lambda: 3500.0)
+    monkeypatch.setattr(tb, "in_a_call", lambda: False)
+    tb._SIZE.update(at=0.0, mb=0.0)
+    assert tb._too_big()
+    tb._SIZE.update(at=0.0, mb=0.0)
+    monkeypatch.setattr(tb, "in_a_call", lambda: True)
+    assert not tb._too_big(), "never in the middle of a call"

@@ -240,7 +240,8 @@ _JUDGE = (
 
 
 async def refine(v: Verdict, who: str, subject: str, preview: str = "") -> Verdict:
-    """Upgrade an ambiguous verdict using the FREE local model; never paid.
+    """Upgrade an ambiguous verdict — the FREE local model first; a quick paid
+    look only for a message addressed to him when the local model is closed.
 
     Only ever flips FYI → ACT. The rules already catch explicit asks, so the risk
     worth insuring against is a real request phrased in a way no regex predicted;
@@ -251,7 +252,13 @@ async def refine(v: Verdict, who: str, subject: str, preview: str = "") -> Verdi
         return v
     try:
         from . import memory
-        raw = await _complete(memory, _JUDGE.format(blob=f"{who}: {subject}\n{preview}"[:1200]))
+        prompt = _JUDGE.format(blob=f"{who}: {subject}\n{preview}"[:1200])
+        raw = await _complete(memory, prompt)
+        # Addressed to him and still unclear: worth a quick paid look when the
+        # local model is closed — that is exactly the ask phrased as an FYI.
+        # Everything else stays free-or-nothing, as before.
+        if not (raw or "").strip() and v.why == "addressed to you, no ask":
+            raw = await memory.quick_verdict(prompt, 8)
     except Exception:
         return v
     if raw and raw.strip().upper().startswith("ACT"):

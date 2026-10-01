@@ -1140,10 +1140,28 @@ async def test_closing_the_pool_really_closes_it(fake_browser):
 
 
 def test_a_ping_reaches_him_within_a_minute():
-    """Arun's actual complaint: someone pings and he is not told immediately. The
-    old five-minute interval was chosen when a poll cost a browser launch."""
-    assert teams_bridge.ACTIVITY_POLL_SECONDS <= 60, \
-        "a ping can sit unreported for longer than a minute"
+    """Arun's actual complaint: someone pings and he is not told immediately.
+
+    Since 1 Oct the promise is kept by the page, not the poll: a chat turning
+    unread is reported by the rail watcher in seconds, and a channel @mention
+    turns "Mentions" bold, which reads the Activity feed at once. The poll is
+    the net — and it still exists."""
+    import asyncio
+    from app import chat_watch
+    assert teams_bridge.ACTIVITY_POLL_SECONDS > 0
+    chat_watch._RAIL.update(order=["Vinish Kumar"], unread=set(), at=0.0, mentioned=False)
+
+    async def go():
+        teams_bridge.mentioned().clear()
+        hot = chat_watch.on_rail(["Vinish Kumar", "*!Mentions"])
+        return hot, teams_bridge.mentioned().is_set()
+
+    hot, mention = asyncio.run(go())
+    assert mention, "a channel @mention reads the feed now, not in five minutes"
+    assert "Mentions" not in " ".join(hot)
+    assert "*Vinish Kumar" not in hot
+    assert chat_watch.on_rail(["*Vinish Kumar", "*!Mentions"]) == ["Vinish Kumar"], \
+        "a 1:1 turning unread is read within seconds"
 
 
 # --- 22. A task he stopped is the lesson -------------------------------------

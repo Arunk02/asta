@@ -537,14 +537,30 @@ def with_history(who: str, agenda: str) -> str:
     days after they asked about it heard it asked again. The same few lines his
     chat and the investigations get — see threads.context_for.
     """
-    try:
+    parts: list[str] = []
+    with contextlib.suppress(Exception):
         from . import threads
-        known = threads.context_for(who)
-    except Exception:                                          # noqa: BLE001
-        known = ""
+        parts.append(threads.context_for(who))
+    # His work as it stands, and what was last said with this person. On 1 Oct
+    # Vinish asked about "the activity plan PR where he updated the actual time
+    # of departure and arrival" — AP PR 1252, the ATA/ATD change — and the call,
+    # knowing only the two PRs in its topic, told him it was the topic refresh.
+    with contextlib.suppress(Exception):
+        from . import copilot_cli
+        parts.append(copilot_cli._his_prs())
+        parts.append(copilot_cli._teams_with(who))
+    with contextlib.suppress(Exception):
+        from . import prname
+        mine = prname.his_open_prs()
+        if mine:
+            parts.append("Every PR of his still open (service, number, what it does):\n" + mine)
+    known = "\n\n".join(p for p in parts if (p or "").strip())
     if not known:
         return agenda
-    return f"{agenda}\n\nWhat you already know — do not ask again for anything here:\n{known}".strip()
+    return (f"{agenda}\n\nWhat you already know — do not ask again for anything here. "
+            f"When they mention a piece of his work, match it to THIS by what it changed "
+            f"(the service, the field, the feature); if nothing here matches, say you will "
+            f"check with Arun — never pick the nearest one:\n{known}").strip()
 
 
 async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0,

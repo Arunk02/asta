@@ -221,6 +221,30 @@ def local_llm_complete(prompt: str, max_tokens: int = 400) -> str | None:
         return None
 
 
+async def quick_verdict(prompt: str, max_tokens: int = 8, timeout: int = 25) -> str | None:
+    """A one-word judgement, from whichever brain is up — the local model first.
+
+    LM Studio is the fast, free answer when it is running (under a second), but
+    it is optional: three checks used to return "no" whenever it was closed —
+    a call stayed silent on every code question (1 Oct), and a real ask phrased
+    as an FYI was never caught. Claude's quick model answers in ~5 s, Copilot
+    in ~16 s; None only when all three are unavailable."""
+    out = await asyncio.to_thread(local_llm_complete, prompt, max_tokens)
+    if (out or "").strip():
+        return out.strip()
+    from . import claude_cli, copilot_cli
+    tries = (lambda: claude_cli.one_shot(prompt, model="haiku", tools_off=True, timeout=timeout),
+             lambda: copilot_cli.one_shot(prompt, timeout=timeout))
+    for attempt in tries:
+        try:
+            out = await asyncio.wait_for(attempt(), timeout=timeout + 5)
+        except Exception:                                       # noqa: BLE001
+            continue
+        if (out or "").strip():
+            return out.strip()
+    return None
+
+
 async def cheap_complete(prompt: str, max_tokens: int = 400,
                          paid_ok: bool = False) -> str | None:
     """One short completion, free if possible, from whichever brain is actually up.

@@ -173,6 +173,13 @@ def _no_machine_side_effects(monkeypatch):
     # A call's warm brain is a real Claude process; tests get none.
     from app import call_mind
     monkeypatch.setattr(call_mind, "CLAUDE", "/nonexistent/claude")
+    # His open PRs are read with the real office gh; tests get none.
+    from app import prname
+    monkeypatch.setattr(prname, "GH", "/nonexistent/gh")
+    # The live Asta's Chrome runs on this Mac; its size is not the suite's.
+    from app import teams_bridge as _tb
+    monkeypatch.setattr(_tb, "profile_mb", lambda: 0.0)
+    prname._OPEN.update(at=0.0, lines=[])
     yield
 
 

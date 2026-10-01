@@ -72,3 +72,35 @@ def parse(text: str) -> tuple[str, str]:
         if repo:
             return repo, m.group(2)
     return "", ""
+
+
+#: The office gh. A module constant so the suite can point it at nothing.
+GH = "gh"
+
+#: His open PRs, cached: one lookup per call, not per sentence.
+_OPEN: dict = {"at": 0.0, "lines": []}
+OPEN_CACHE_SECONDS = 600
+
+
+def his_open_prs(limit: int = 15) -> str:
+    """Every PR he has open in the work org, named by service, newest first.
+
+    Read with the office `gh` he is logged in with. A call used to know only the
+    PRs Asta had raised for him, so a colleague asking about one he had raised
+    himself was answered with the nearest wrong one. '' when gh cannot answer."""
+    import json
+    import subprocess
+    import time
+    if time.time() - _OPEN["at"] < OPEN_CACHE_SECONDS and _OPEN["lines"]:
+        return "\n".join(_OPEN["lines"])
+    try:
+        out = subprocess.run(
+            [GH, "search", "prs", "--author=@me", "--state=open", "--owner", "Maersk-Global",
+             "--sort", "updated", "--json", "number,title,repository,url", "--limit", str(limit)],
+            capture_output=True, text=True, timeout=12, check=False)
+        rows = json.loads(out.stdout or "[]") if out.returncode == 0 else []
+    except Exception:                                           # noqa: BLE001
+        return ""
+    lines = [f"• {label(r['repository']['name'], r['number'])} — {r['title'][:90]}" for r in rows]
+    _OPEN.update(at=time.time(), lines=lines)
+    return "\n".join(lines)

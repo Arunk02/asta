@@ -216,9 +216,9 @@ def spoken_form(answer: str) -> str:
     cut = max(clipped.rfind(". "), clipped.rfind("? "), clipped.rfind("! "))
     return clipped[:cut + 1] if cut > 40 else clipped + "…"
 
-#: Second opinion before Asta opens its mouth. Local model only, and only when it
-#: is already running: this sits between hearing a question and answering it, so a
-#: paid round trip here would cost more latency than the answer itself.
+#: Second opinion before Asta opens its mouth. The local model when it is
+#: running (under a second); otherwise Claude's quick model, then Copilot — a few
+#: seconds of thought beats never answering aloud at all.
 CONFIRM_SPEECH = os.environ.get("ASTA_CONFIRM_SPEECH", "1").strip().lower() \
     not in ("0", "false", "no", "off")
 
@@ -231,9 +231,11 @@ async def confident(line: str) -> bool:
     check how the amend flow handles that" and "how does the amend flow handle
     that" differ by three words and by who is being committed to an answer.
 
-    So a second opinion, from the local model that is already running. If it is
-    not running, the honest answer is no: silence is always a safe outcome in a
-    conversation, and an unnecessary sentence never is.
+    So a second opinion: the local model when it is running, else Claude's
+    quick model, else Copilot (memory.quick_verdict). Only when none of them
+    answers is it no — silence is always a safe outcome in a conversation. It
+    used to be the local model alone, and with LM Studio closed Asta never
+    answered a code question aloud at all (1 Oct).
     """
     if not CONFIRM_SPEECH:
         return True
@@ -246,7 +248,7 @@ async def confident(line: str) -> bool:
         "person (asking them to do something, decide something, or say when)?\n\n"
         "Answer with one word: CODE or PERSON.")
     try:
-        verdict = await asyncio.to_thread(memory.local_llm_complete, prompt, 8)
+        verdict = await memory.quick_verdict(prompt, 8, timeout=15)
     except Exception as exc:                          # noqa: BLE001
         quiet.note("call.confirm_speech", exc)
         return False

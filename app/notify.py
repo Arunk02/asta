@@ -16,7 +16,7 @@ def bridge_url() -> str:
     return os.environ.get("WA_BRIDGE_URL", "http://127.0.0.1:8323")
 
 
-async def wa_send(text: str) -> bool:
+async def wa_send(text: str, done: bool = False) -> bool:
     """Push a message through the WhatsApp bridge; False if bridge is down/unpaired.
 
     Markup is converted at this boundary, not by callers. WhatsApp is the only
@@ -28,9 +28,22 @@ async def wa_send(text: str) -> bool:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.post(
                 f"{bridge_url()}/send",
-                json={"text": wa_format.for_whatsapp(text)},
+                json={"text": wa_format.for_whatsapp(text), "done": bool(done)},
                 headers={"Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")},
             )
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def wa_done(ok: bool = True) -> bool:
+    """The turn he is waiting on is over: the bridge stops "typing…" and turns
+    the 👀 on his message into ✅ (or ⚠️). For a turn that ended with nothing
+    left to say — the answer went out another way."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(f"{bridge_url()}/done", json={"ok": bool(ok)},
+                             headers={"Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")})
             return r.status_code == 200
     except Exception:
         return False

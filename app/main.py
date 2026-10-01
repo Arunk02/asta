@@ -1612,6 +1612,18 @@ def _channel_model(conv: dict) -> str:
     return agent_mod.default_chat_model()
 
 
+async def run_on_phone(text: str) -> None:
+    """Do something on his phone conversation as if he had just asked it — the
+    answer is pushed to WhatsApp. For work he asked to be done LATER."""
+    conv_id = store.kv_get("wa_conversation")
+    conv = store.get_conversation(conv_id) if conv_id else None
+    if conv is None:
+        return
+    conv["model"] = _channel_model(conv)
+    store.add_ui_message(conv["id"], "user", text, {"channel": "whatsapp", "via": "scheduled"})
+    await _dispatch(conv, text, PushSink(notify.wa_send, conv["id"]), "whatsapp")
+
+
 @app.post("/api/wa/incoming", dependencies=[Depends(require_auth)])
 async def api_wa_incoming(request: Request):
     """The WhatsApp bridge posts user messages here; reply goes back to the same chat."""
@@ -2307,7 +2319,12 @@ def _workspace_repos(workspace: str) -> tuple[str, ...]:
 #: A "next step" that is only waiting on a background task.
 _WAITS_ON_A_TASK = re.compile(
     r"\b(?:wait(?:ing)?\s+(?:for|on)|check(?:ing)?\s+(?:on\s+)?(?:the\s+)?(?:status\s+of\s+)?|"
-    r"poll(?:ing)?|monitor(?:ing)?|re-?check)\s*(?:the\s+)?task\s*#?\d+", re.I)
+    r"poll(?:ing)?|monitor(?:ing)?|re-?check)\s*(?:the\s+)?task\s*#?\d+"
+    # …and waiting on anything else that reports by itself: a call's outcome,
+    # a reply, a notification (1 Oct: "Wait for the discuss_in_call outcome").
+    r"|^\s*(?:wait(?:ing)?|keep\s+(?:checking|waiting)|poll(?:ing)?|monitor(?:ing)?)\b"
+    r"|\b(?:wait(?:ing)?\s+for|until)\s+(?:the\s+|its\s+|his\s+|their\s+)?[\w\s]{0,30}?"
+    r"(?:outcome|result|notification|reply|response|completion|call\s+to\s+end)\b", re.I)
 
 
 def _start_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task:

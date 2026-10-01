@@ -372,7 +372,7 @@ _FIND_ATTEMPTS = int(os.environ.get("ASTA_CALL_FIND_ATTEMPTS", "4"))
 _FIND_BACKOFF = 1.5
 
 
-async def _find_chat_settled(page, who: str) -> str:
+async def _find_chat_settled(page, who: str, allow_group: bool = False) -> str:
     """Find the chat, retrying while the headed window is still settling.
 
     Placing a real call to Alex is what exposed this. Headless `resolve` finds
@@ -395,7 +395,7 @@ async def _find_chat_settled(page, who: str) -> str:
     last: Exception | None = None
     for attempt in range(_FIND_ATTEMPTS):
         try:
-            return await teams_bridge._find_chat(page, who, allow_group=False)
+            return await teams_bridge._find_chat(page, who, allow_group=allow_group)
         except RuntimeError as exc:
             last = exc
             # Only a "wrong chat / not found" is a timing problem. A refusal on
@@ -412,7 +412,7 @@ async def _find_chat_settled(page, who: str) -> str:
         f"{last} — still wrong after {_FIND_ATTEMPTS} attempts; nothing was dialled")
 
 
-async def call_person(who: str, video: bool = False) -> str:
+async def call_person(who: str, video: bool = False, group: bool = False) -> str:
     """Ring a PERSON on Teams. Returns who it actually rang.
 
     Lives here rather than in the bridge because a call is not a message: the
@@ -429,6 +429,10 @@ async def call_person(who: str, video: bool = False) -> str:
     leaves a colleague waiting for a call that was never coming.
     """
     from . import teams_bridge
+    # A group only when he NAMED it; `who` is then the group chat, never a list.
+    if not group and re.search(r",|\s&\s|\band\b", who or ""):
+        raise RuntimeError(f"{who!r} is more than one person — call the group chat "
+                           f"they share, by its name (group=True)")
     if not teams_bridge.enabled():
         raise RuntimeError("Teams bridge is off (set TEAMS_BRIDGE=1 in .env)")
     if _CALL:
@@ -438,7 +442,7 @@ async def call_person(who: str, video: bool = False) -> str:
     # who is the person he actually talks to. A message there reaches the wrong
     # person; a call RINGS them, and neither is undone by noticing afterwards.
     from . import contacts as _contacts
-    settled, candidates = _contacts.resolve_name(who)
+    settled, candidates = (who, []) if group else _contacts.resolve_name(who)
     if settled and settled.lower() != (who or "").strip().lower():
         who = settled
     elif not settled and len(candidates) > 1:
@@ -529,7 +533,7 @@ async def call_person(who: str, video: bool = False) -> str:
                 f"nothing. macOS has not granted microphone access to the browser "
                 f"Asta drives: System Settings → Privacy & Security → Microphone. "
                 f"Nobody was rung.")
-        title = await _find_chat_settled(page, who)
+        title = await _find_chat_settled(page, who, allow_group=group)
         if not await _click_first(page, _CALL_BUTTONS[kind], timeout=5000):
             raise RuntimeError(
                 f"no {kind} call button in the chat with '{title}' — either the Teams "

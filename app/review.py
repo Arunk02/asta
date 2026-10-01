@@ -127,6 +127,29 @@ def pr_target(pr: str) -> tuple[str, str]:
     return str(pr or "").strip().lstrip("#"), ""
 
 
+def _linked_recently(number: str, days: float = 7) -> str:
+    """"owner/repo" of the newest /pull/<number> link in his Teams history, or ""."""
+    import time as _t
+    from . import store
+    if not str(number).isdigit():
+        return ""
+    try:
+        with store._connect() as conn:
+            rows = conn.execute(
+                "SELECT text FROM teams_messages WHERE text LIKE ? AND COALESCE(sent_at, seen_at) > ? "
+                "ORDER BY COALESCE(sent_at, seen_at) DESC LIMIT 20",
+                (f"%/pull/{number}%", _t.time() - days * 86400)).fetchall()
+    except Exception:                                          # noqa: BLE001
+        return ""
+    for (text,) in rows:
+        for m in _PR_LINK.finditer(text or ""):
+            owner, repo, n = (m.group(1), m.group(2), m.group(3)) if m.group(3) \
+                else (m.group(4), m.group(5), m.group(6))
+            if n == str(number):
+                return f"{owner}/{repo}"
+    return ""
+
+
 def _squash(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
@@ -177,6 +200,11 @@ def _where(pr: str, workspace: str, repo: str = "") -> tuple[str, list[str], Pat
     anywhere. A bare number still needs the clone that says which repo it means.
     """
     number, target = pr_target(pr)
+    if not target and not repo:
+        # A bare number is ambiguous across workspaces — #1459 exists in more
+        # than one repo, and "found it under empv3" reviewed the wrong one
+        # (1 Oct). The link someone actually posted about it says which.
+        target = _linked_recently(number)
     if target:
         return number, ["-R", target], Path.home()
     cwd = _repo_dir(workspace, repo)

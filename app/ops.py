@@ -64,9 +64,9 @@ async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> s
 
 
 @op("teams_call", lambda a: f"Call {a.get('who', '?')} on Teams")
-async def _teams_call(who: str = "", video: bool = False) -> str:
+async def _teams_call(who: str = "", video: bool = False, group: bool = False) -> str:
     import asyncio as _asyncio
-    result = await meetings.call_person(who, video=video)
+    result = await meetings.call_person(who, video=video, **({"group": True} if group else {}))
     # The join paths have always spawned a watcher; this one never did. Without
     # it a placed call is never noticed ringing out, never hung up, never
     # reported — and `teams_in_call` stays set, so the NEXT call is refused as

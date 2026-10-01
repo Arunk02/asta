@@ -986,6 +986,16 @@ def remember(title: str, fact: str, kind: str = "fact") -> str:
     if ruled:
         return ruled
     path = memory.remember(title, fact, kind)
+    # "Remember to check Komal's PR tomorrow morning" is a job with a time, not
+    # only a note: a note is read when something recalls it, and nothing did.
+    from . import capabilities, reminders, scorecard
+    said = scorecard.his_words(capabilities.said_this_turn()) or fact
+    job = reminders.schedule_work(said if reminders.later_when(said) else fact)
+    if job:
+        import datetime as _dt
+        when = _dt.datetime.fromtimestamp(job["due_at"]).strftime("%a %d %b %H:%M")
+        return (f"Remembered in {path}, and scheduled to DO it {when} (reminder "
+                f"#{job['id']}) — tell him both, in one line.")
     return f"Remembered in {path}"
 
 
@@ -2846,8 +2856,13 @@ async def teams_resolve(chat: str, to_group: bool = False) -> str:
         return f"Would NOT send: {exc}"
 
 
-async def teams_call(who: str, video: bool = False) -> str:
+async def teams_call(who: str, video: bool = False, group: bool = False) -> str:
     """Ring someone on Teams. Places the call; use discuss_in_call to actually talk.
+
+    To call SEVERAL people together, call the group chat they share, by its
+    name, with group=True — "connect a Fake Internal Team call with Vinish and
+    Komal" is who="Fake Internal Team", group=True. Never pass a list of names
+    as `who`: that is not a person and nothing rings.
 
     When Arun asked for the call in his own words this DIALS. His asking is the
     consent — staging it back to him is a second gate on a door he just opened,
@@ -2860,19 +2875,31 @@ async def teams_call(who: str, video: bool = False) -> str:
     if not teams_bridge.enabled():
         return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
     kind = "video call" if video else "call"
-    if consent.asked_to_call(capabilities.said_this_turn()):
+    said = capabilities.said_this_turn()
+    if group and not _names_the_group(who, said):
+        return (f"Not calling {who!r} as a group — Arun did not name that group. Call a "
+                f"group only when he names it.")
+    if consent.asked_to_call(said):
         # The same recorded call an approval would run — one execution path, so a
         # dialled call and an approved call cannot drift apart.
         try:
             return await ops.run({"name": "teams_call",
-                                  "args": {"who": who, "video": video}})
+                                  "args": {"who": who, "video": video, **({"group": True} if group else {})}})
         except RuntimeError as exc:
             return f"Didn't place the {kind} to {who} — {exc}. Nothing rang."
     offers.staged_write(
-        "teams_call", {"who": who, "video": video},
+        "teams_call", {"who": who, "video": video, **({"group": True} if group else {})},
         f"📞 {kind.title()} {who}", f"Teams {kind} to {who}.",
         f"Ring {who} on Teams?", kind="teams_write")
     return f"Staged the {kind} to {who} — waiting for Arun's yes. Nothing is ringing yet."
+
+
+def _names_the_group(group_name: str, said: str) -> bool:
+    """Did his words name this group chat? "fake internal team call" names
+    "Fake Internal Team"."""
+    words = [w for w in re.findall(r"[a-z0-9]+", (group_name or "").lower()) if len(w) > 2]
+    low = (said or "").lower()
+    return bool(words) and sum(w in low for w in words) >= max(1, (len(words) + 1) // 2)
 
 
 async def discuss_in_call(who: str, topic: str, workspace: str = "", minutes: float = 0,

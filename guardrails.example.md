@@ -35,6 +35,7 @@ the health check tells you when one is over. Keep rules as short bullets.
 Nothing goes to these people on Asta's own: no "checking, will update you", no
 "can you share more", no send-when-asked. Every line is staged and goes only on
 my "send". One name per bullet, as it appears in Teams.
+Delete this section to switch it off; nothing else to change.
 
 ## Communication
 - Phone channels (WhatsApp, Telegram): about 120 words, headline first, *bold* with single asterisks, no code formatting.

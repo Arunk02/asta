@@ -429,6 +429,10 @@ async def call_person(who: str, video: bool = False, group: bool = False) -> str
     leaves a colleague waiting for a call that was never coming.
     """
     from . import teams_bridge
+    # A group only when he NAMED it; `who` is then the group chat, never a list.
+    if not group and re.search(r",|\s&\s|\band\b", who or ""):
+        raise RuntimeError(f"{who!r} is more than one person — call the group chat "
+                           f"they share, by its name (group=True)")
     if not teams_bridge.enabled():
         raise RuntimeError("Teams bridge is off (set TEAMS_BRIDGE=1 in .env)")
     if _CALL:
@@ -438,10 +442,6 @@ async def call_person(who: str, video: bool = False, group: bool = False) -> str
     # who is the person he actually talks to. A message there reaches the wrong
     # person; a call RINGS them, and neither is undone by noticing afterwards.
     from . import contacts as _contacts
-    # A group only when he NAMED it; `who` is then the group chat, never a list.
-    if not group and re.search(r",|\s&\s|\band\b", who or ""):
-        raise RuntimeError(f"{who!r} is more than one person — call the group chat "
-                           f"they share, by its name (group=True)")
     settled, candidates = (who, []) if group else _contacts.resolve_name(who)
     if settled and settled.lower() != (who or "").strip().lower():
         who = settled

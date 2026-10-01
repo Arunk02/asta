@@ -60,6 +60,8 @@ PROBE_HOST = os.environ.get("ASTA_WAKE_PROBE_HOST", "1.1.1.1")
 PROBE_PORT = int(os.environ.get("ASTA_WAKE_PROBE_PORT", "443"))
 
 LAST_GAP_KEY = "wake_last_gap"
+#: A sleep at least this long gets a fresh Teams browser on wake.
+BROWSER_RESET_AFTER_SECONDS = float(os.environ.get("ASTA_WAKE_BROWSER_RESET_SECONDS", "600"))
 
 #: Bumped on every detected wake. A watcher compares the value it went to sleep
 #: under with the value it wakes to, so a wake that lands between two sleeps is
@@ -215,6 +217,15 @@ async def watch_loop() -> None:
             await meetings.drop_call_lost_to_sleep(gap)
         except Exception:
             pass
+        # A browser that slept for an hour is a browser whose connections died
+        # in the sleep. Reusing it is how 1 Oct's morning stalled; a fresh one
+        # costs ten seconds. Done before the watchers are released.
+        if gap >= BROWSER_RESET_AFTER_SECONDS:
+            try:
+                from . import teams_bridge
+                await teams_bridge.reset(f"woke after {describe(gap)} asleep")
+            except Exception:
+                pass
         _mark_wake(gap)
         # Re-baseline against now rather than the top of the tick: probing and
         # announcing can take a couple of minutes, and leaving that time on the

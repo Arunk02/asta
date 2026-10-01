@@ -224,8 +224,11 @@ async def _pool_alive() -> bool:
         return False
     try:
         # A real round-trip to the page. `page.is_closed()` alone lies: the tab can
-        # be open while the renderer behind it is gone.
-        return bool(await page.evaluate("() => !!document.querySelector('body')"))
+        # be open while the renderer behind it is gone. Bounded: after a night
+        # with the lid shut, a round-trip to a browser whose connection died in
+        # sleep can wait forever — and it waits holding the one Teams lock.
+        return bool(await asyncio.wait_for(
+            page.evaluate("() => !!document.querySelector('body')"), timeout=10))
     except Exception:
         return False
 
@@ -245,7 +248,8 @@ async def _discard_pool(why: str = "") -> None:
         if closer is None:
             continue
         with contextlib.suppress(Exception):
-            await (closer.close() if hasattr(closer, "close") else closer.stop())
+            await asyncio.wait_for(
+                closer.close() if hasattr(closer, "close") else closer.stop(), timeout=20)
 
 
 def in_a_call() -> bool:
@@ -274,12 +278,15 @@ async def _pooled_page():
         raise RuntimeError("a call is in progress — the Teams browser is busy")
     had = bool(_POOL)
     await _discard_pool()
-    pw, ctx = await _launch(headless=True)
+    # Bounded, like every step that holds the lock: a launch that never returns
+    # froze Teams AND Outlook from 00:26 to 10:30 (1 Oct) — the Mac had briefly
+    # woken for maintenance with the lid shut, and Chrome never came up.
+    pw, ctx = await asyncio.wait_for(_launch(headless=True), timeout=LAUNCH_TIMEOUT)
     store.record_outcome("browser", "launched", subject="teams",
                          detail=(_WHY["discard"] or ("pool went stale" if had else "cold start"))[:200])
     _WHY["discard"] = ""
     try:
-        page = await _open_teams(ctx)
+        page = await asyncio.wait_for(_open_teams(ctx), timeout=LAUNCH_TIMEOUT)
     except Exception:
         with contextlib.suppress(Exception):
             await ctx.close()
@@ -299,6 +306,31 @@ class NotFound(RuntimeError):
     anything was typed. The browser is fine; only the page needs to go home."""
 
 
+#: When the Teams lock was last taken — 0 when free. The watchdog reads it.
+_HELD: dict = {"since": 0.0}
+#: Launching Chrome and loading Teams, at most this long.
+LAUNCH_TIMEOUT = float(os.environ.get("TEAMS_LAUNCH_TIMEOUT", "150"))
+#: Any one operation holding the browser longer than this is stuck (a live call
+#: excepted — it owns the browser for as long as it lasts).
+STUCK_SECONDS = float(os.environ.get("TEAMS_STUCK_SECONDS", "600"))
+
+
+async def reset(why: str) -> None:
+    """Throw the browser away WITHOUT waiting for the lock — the way to free a
+    lock held by an operation that will never finish: closing the browser makes
+    it fail, and failing releases the lock. Never during a call."""
+    if in_a_call() or not _POOL:
+        return
+    store.record_outcome("browser", "reset", subject="teams", detail=why[:200])
+    await _discard_pool(why)
+
+
+def stuck_for() -> float:
+    """Seconds the current holder has had the browser, 0 when free."""
+    since = _HELD.get("since") or 0.0
+    return time.time() - since if since else 0.0
+
+
 @contextlib.asynccontextmanager
 async def teams_page():
     """The one way a headless operation gets at Teams.
@@ -307,7 +339,12 @@ async def teams_page():
     but the expensive part now happens once rather than per operation.
     """
     async with _lock:
-        page = await _pooled_page()
+        _HELD["since"] = time.time()
+        try:
+            page = await _pooled_page()
+        except BaseException:
+            _HELD["since"] = 0.0
+            raise
         try:
             yield page
         except NotFound:
@@ -327,6 +364,8 @@ async def teams_page():
             exc = _sys.exc_info()[1]
             await _discard_pool(f"operation failed: {type(exc).__name__}: {str(exc)[:120]}")
             raise
+        finally:
+            _HELD["since"] = 0.0
 
 
 @contextlib.asynccontextmanager
@@ -339,6 +378,7 @@ async def site_page(url: str, timeout: int = 60000, watch=None, failed_watch=Non
     browser, one lock, a throwaway tab per operation.
     """
     async with _lock:
+        _HELD["since"] = time.time()
         await _pooled_page()                      # makes sure a context exists
         ctx = _POOL.get("ctx")
         if ctx is None:
@@ -360,8 +400,78 @@ async def site_page(url: str, timeout: int = 60000, watch=None, failed_watch=Non
             await tab.goto(url, wait_until="domcontentloaded", timeout=timeout)
             yield tab
         finally:
+            _HELD["since"] = 0.0
             with contextlib.suppress(Exception):
-                await tab.close()
+                await asyncio.wait_for(tab.close(), timeout=15)
+
+
+#: No Teams read for this long, while awake, means something is wedged.
+STALE_SECONDS = float(os.environ.get("TEAMS_STALE_SECONDS", "1200"))
+
+
+def _last_read() -> float:
+    try:
+        return float(store.kv_get("attention_scrape:teams-chat") or 0)
+    except ValueError:
+        return 0.0
+
+
+async def watchdog_loop() -> None:
+    """Nothing may hold Teams forever, and Teams may not go quiet unnoticed.
+
+    1 Oct: a Chrome launch during a maintenance wake never returned. It held the
+    one browser lock, and Teams chats, the Activity feed, calls and Outlook all
+    waited behind it for ten hours — every loop "alive", nothing read. So:
+
+      * an operation holding the browser past STUCK_SECONDS has it taken away
+        (closing the browser fails the operation, which frees the lock);
+      * no successful Teams read for STALE_SECONDS while awake gets a fresh
+        browser; if that does not bring reading back, he is told once, and Asta
+        restarts itself when no task is running (launchd brings it back).
+    """
+    import time as _t
+    from . import wake
+    started = _t.time()
+    reset_at = 0.0
+    told = False
+    while True:
+        woke = await wake.sleep(60)
+        if woke:
+            started = _t.time()            # a fresh start of the clock after sleep
+            continue
+        try:
+            held = stuck_for()
+            if held > STUCK_SECONDS and not in_a_call():
+                await reset(f"an operation held the browser for {int(held)}s")
+                reset_at = _t.time()
+                continue
+            if not (enabled() and logged_in_once()) or in_a_call():
+                continue
+            since = _t.time() - max(_last_read(), started)
+            if since < STALE_SECONDS:
+                reset_at, told = 0.0, False
+                continue
+            if not reset_at:
+                await reset(f"no Teams read for {int(since // 60)} min")
+                reset_at = _t.time()
+                continue
+            if _t.time() - reset_at > STALE_SECONDS and not told:
+                told = True
+                from . import notify, tasks
+                live = tasks.queue_summary()
+                busy = live.get("running") or live.get("queued")
+                await notify.notify(
+                    f"🩺 Teams reading has been stuck for {int(since // 60)} min and a fresh "
+                    f"browser did not fix it. "
+                    + ("Restarting Asta now." if not busy else
+                       "Not restarting while a task is running — say “restart” when it is safe."),
+                    "health", urgency="direct")
+                if not busy:
+                    store.record_outcome("browser", "self_restart", subject="teams",
+                                         detail=f"stale {int(since)}s")
+                    os._exit(3)                # launchd KeepAlive starts a clean process
+        except Exception:                                      # noqa: BLE001
+            continue
 
 
 async def close_pool() -> None:

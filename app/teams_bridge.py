@@ -1459,6 +1459,8 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
     "ping X" means X's personal chat, never a team channel. A group is opened
     by its own row and never resolved to a person in it.
     """
+    from . import senior
+    senior.check(chat)        # manager and above: only with his yes, whoever calls
     STARTED.append(time.time())
     del STARTED[:-50]
     async with teams_page() as page:
@@ -2183,7 +2185,8 @@ async def send_voice_note(chat: str, text: str, allow_group: bool = False) -> st
     back in a `finally`: recording holds the system input, and leaving it on the
     virtual device would mute Arun's own next call.
     """
-    from . import call_audio, voice
+    from . import call_audio, senior, voice
+    senior.check(chat)
     audio = await voice.speak(text)
     if not audio:
         raise RuntimeError("speech synthesis produced nothing — no voice note sent")

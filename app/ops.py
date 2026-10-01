@@ -51,8 +51,9 @@ async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> s
     about the send instead of performing it. All four look identical to Arun,
     because all four end with the message not arriving.
     """
-    from . import attention, teams_bridge
-    where = await teams_bridge.send_message(to, text, allow_group=to_group)
+    from . import attention, senior, teams_bridge
+    with senior.approved():           # this op runs only on his "send"
+        where = await teams_bridge.send_message(to, text, allow_group=to_group)
     # A reply IS the answer. Without this, Asta sent the message he approved and
     # then went on chasing him at end of day about the very question it had just
     # answered on his behalf — "Retry fix merged?" was still listed as waiting on him

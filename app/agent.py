@@ -1852,8 +1852,9 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
         return f"Not staged — {ruled.why}. Tell Arun, in one line, that this rule stopped it."
     # A standing permission he granted (app/authority.py): send it now, tell him
     # after, and count it against the day's allowance for that permission.
-    from . import authority
-    allowed = authority.may("send", to) if channel in ("teams", "chat") else None
+    from . import authority, senior
+    above = channel in ("teams", "chat") and senior.is_senior(to)
+    allowed = authority.may("send", to) if channel in ("teams", "chat") and not above else None
     if allowed:
         # It goes on the loop rather than through the gate: he already said yes to
         # this, once, in so many words. With no loop running (a test, a script)
@@ -1874,7 +1875,7 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # review — I told you earlier as well" was staged back to him as "can I send
     # this?" (30 Sep). One-to-one only; a group always waits for his yes, and so
     # does anything long enough that he would want to read it first.
-    if channel in ("teams", "chat") and to and not to_group \
+    if channel in ("teams", "chat") and to and not to_group and not above \
             and _he_asked_to_send(to, cid) and len(what.strip()) <= SEND_WHEN_ASKED_MAX \
             and not _LABEL_NOT_MESSAGE.match(what.strip()):
         import asyncio

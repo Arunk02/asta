@@ -280,6 +280,10 @@ async def _show(cid: str, intent: dict) -> None:
     note = intent.get("note", "")
     if intent["_showings"] > 1:
         note = (note + "\n" if note else "") + "(Asking again — this one is still unanswered.)"
+    from . import senior
+    if not intent.get("to_group") and senior.is_senior(intent.get("to") or ""):
+        note = (note + "\n" if note else "") + \
+            "🔒 Manager and above — this goes only on your *send*. Check every word."
     text = render(intent["who"], intent.get("need", ""), intent.get("analysis", ""),
                   intent["what"], note, lead=intent.get("lead", ""))
     if waiting:

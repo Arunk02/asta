@@ -2869,8 +2869,10 @@ async def approve(task_id: int) -> str:
         store.update_task(task_id, status="done")
         return (f"Not sent — #{task_id} reads as notes about {t['teams_chat']}, not a message "
                 f"to them. Kept as a finding for you.")
+    from . import senior
     try:
-        await teams_bridge.send_message(t["teams_chat"], t["result"])
+        with senior.approved():       # he approved this draft
+            await teams_bridge.send_message(t["teams_chat"], t["result"])
     except RuntimeError as exc:
         msg = ("Teams session expired — run: python -m app.teams_bridge login"
                if "SESSION_EXPIRED" in str(exc) else str(exc)[:300])

@@ -2662,6 +2662,12 @@ def _recipient_warning(intent: dict) -> str:
             f"person before it goes out.\n\n")
 
 
+def _senior(intent: dict) -> bool:
+    from . import senior
+    return (intent.get("channel") or "teams") in ("teams", "chat") \
+        and not intent.get("to_group") and senior.is_senior(intent.get("to") or "")
+
+
 async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> None:
     """Show Arun a drafted outward message and ask before it is sent. The draft is
     persisted as an assistant turn so it survives in history, and the loop waits:
@@ -2673,7 +2679,9 @@ async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> No
     to = f" to {where}*{intent['to']}*" if intent.get("to") else ""
     body = (f"📤 Ready to send{to} on **{intent.get('channel', 'chat')}** — can I send this?\n\n"
             f"———\n{intent.get('what', '')}\n———\n\n"
-            + _recipient_warning(intent) +
+            + _recipient_warning(intent)
+            + ("🔒 *Manager and above* — this goes only on your “send”. Check every word.\n\n"
+               if _senior(intent) else "") +
             "Reply “send” to confirm, or tell me what to change.")
     store.add_ui_message(cid, "assistant", body, {"via": "loop-confirm-send", "channel": channel})
     await sink.send({"type": "delta", "text": body})

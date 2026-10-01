@@ -31,6 +31,11 @@ the health check tells you when one is over. Keep rules as short bullets.
 - If the same logic already exists in the repo, call it. Never write a second copy under a different name.
 - Tests are part of the change, not a follow-up: cover the new behaviour AND the case that used to work and must still work. A test that cannot fail is worse than no test.
 
+## Manager and above
+Nothing goes to these people on Asta's own: no "checking, will update you", no
+"can you share more", no send-when-asked. Every line is staged and goes only on
+my "send". One name per bullet, as it appears in Teams.
+
 ## Communication
 - Phone channels (WhatsApp, Telegram): about 120 words, headline first, *bold* with single asterisks, no code formatting.
 - One message per event. Never announce the same completion twice; never ask the same question twice.

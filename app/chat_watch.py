@@ -978,6 +978,17 @@ async def _say(chat: str, line: str, *, group: bool = False,
         store.record_outcome("thread", "held back", subject=chat[:80],
                              detail=f"he answered himself — not said: {line}"[:200])
         return False
+    from . import senior
+    if senior.is_senior(chat):
+        # Manager and above: not even "checking, will update you" goes on its
+        # own. The line is his to read first — staged, like any reply.
+        from . import answers
+        store.record_outcome("thread", "held back", subject=chat[:80],
+                             detail=f"manager and above — staged for his yes: {line}"[:200])
+        await answers.present(who=chat, need="wrote to you", chat=chat, group=False,
+                              analysis="🔒 Manager and above — I did not reply on my own.",
+                              reply=line)
+        return False
     from . import teams_bridge as _bridge
     try:
         await _bridge.send_message(chat, line)

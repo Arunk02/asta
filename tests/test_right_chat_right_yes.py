@@ -577,3 +577,75 @@ def test_the_working_note_names_only_a_task_this_message_started(monkeypatch):
     store_get = store.get_task
     monkeypatch.setattr(store, "get_task", lambda i: {**store_get(i), "created_at": time.time() - 3600})
     assert f"#{t['id']}" not in main._working_note(conv["id"], "H69LMCN6KZY check do we received this booking")
+
+
+# --- manager and above: only on his "send" -------------------------------------------
+
+@pytest.fixture
+def above(monkeypatch, tmp_path):
+    g = tmp_path / "guardrails.md"
+    g.write_text("## Manager and above\nOnly on my send.\n- Praveen Kumar — my manager\n- Ravi Shankar\n")
+    monkeypatch.setenv("ASTA_GUARDRAILS", str(g))
+    return g
+
+
+def test_the_list_is_his_guardrail_and_empty_means_off(above):
+    from app import senior
+    assert senior.people() == ["Praveen Kumar", "Ravi Shankar"]
+    assert senior.is_senior("Praveen Kumar") and senior.is_senior("Praveen Kumar S")
+    assert not senior.is_senior("Kumar") and not senior.is_senior("Vinish Kumar")
+    assert not senior.is_senior("Praveen Kumar, Vinish, +2"), "a group waits for his yes anyway"
+    above.write_text("## Communication\n- be polite\n")
+    import os
+    os.utime(above, (time.time() + 5, time.time() + 5))
+    assert senior.people() == [] and not senior.is_senior("Praveen Kumar"), "removed → off"
+
+
+def test_nothing_reaches_them_without_his_yes(above, monkeypatch):
+    from app import senior
+    with pytest.raises(senior.NeedsHisYes):
+        asyncio.run(tb.send_message("Praveen Kumar", "checking, will update you"))
+    with pytest.raises(senior.NeedsHisYes):
+        asyncio.run(tb.send_voice_note("Praveen Kumar", "hi"))
+
+
+def test_his_send_is_what_lets_it_through(above, monkeypatch):
+    from app import senior
+    seen: list[bool] = []
+
+    async def fake(chat, text, allow_group=False):
+        senior.check(chat)
+        seen.append(True)
+        return chat
+
+    monkeypatch.setattr(tb, "send_message", fake)
+    monkeypatch.setattr(tb, "SENT", [])
+    out = asyncio.run(ops._teams_send(to="Praveen Kumar", text="done, PR is merged"))
+    assert seen and "Praveen Kumar" in out
+
+
+def test_no_automatic_line_goes_to_them_it_is_staged_for_him(above, monkeypatch, told):
+    sent: list[str] = []
+
+    async def send(chat, text, allow_group=False):
+        sent.append(text)
+        return chat
+
+    monkeypatch.setattr(tb, "send_message", send)
+    store.kv_set("wa_conversation", _conv()["id"])
+    assert asyncio.run(chat_watch._say("Praveen Kumar", "checking, will update you")) is False
+    assert sent == []
+    staged = loop.awaiting(answers.phone_conversation())
+    assert staged and staged["to"] == "Praveen Kumar" and staged["what"] == "checking, will update you"
+    assert told and "Manager and above" in told[-1]
+
+
+def test_asking_for_it_in_his_own_words_still_stages_it(above, monkeypatch):
+    from app import agent
+    monkeypatch.setattr(agent, "SEND_WHEN_ASKED", True)
+    cid = _conv()["id"]
+    monkeypatch.setattr(tasks, "current_conversation", lambda: cid)
+    monkeypatch.setattr(capabilities, "said_this_turn", lambda: "tell praveen kumar the PR is merged")
+    out = agent.prepare_to_send("PR is merged", to="Praveen Kumar", channel="teams")
+    assert not out.startswith("Sending to"), "staged, not sent"
+    assert loop.take(cid)["to"] == "Praveen Kumar"

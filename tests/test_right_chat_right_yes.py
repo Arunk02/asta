@@ -522,3 +522,58 @@ def test_his_teams_status_is_set_without_a_brain(monkeypatch):
     assert set_to == ["away"] and "Appear away" in str(sink.sent)
     assert main._PRESENCE_CMD.match("change the teams status into offline or away") is None, \
         "two choices is a question for him, not a setting"
+
+
+# --- 16:22: the booking question, the channels, and #201 ----------------------------
+
+def test_the_sweep_reads_chats_not_the_teams_and_channels_below_them(monkeypatch):
+    rows = [{"name": n, "text": n} for n in
+            ["Copilot", "Mentions", "BEP_Telikos : Defect Triage", "Rajendra Kumar", "Vinish Kumar",
+             "See more", "General", "Announcements", "See all channels", "General", "Techbytes"]]
+
+    class Page:
+        pass
+
+    class Ctx:
+        async def __aenter__(self):
+            return Page()
+
+        async def __aexit__(self, *a):
+            return False
+
+    async def rail_rows(page):
+        return rows
+
+    async def wait(page, timeout=20.0):
+        return len(rows)
+
+    monkeypatch.setattr(tb, "teams_page", lambda: Ctx())
+    monkeypatch.setattr(tb, "wait_for_rail", wait)
+    monkeypatch.setattr(chat_watch, "_rail_rows", rail_rows)
+    store.kv_set(chat_watch._RAIL_KEY, json.dumps(["Vinish Kumar", "Rajendra Kumar",
+                                                   "BEP_Telikos : Defect Triage"]))
+    chosen = asyncio.run(chat_watch.candidates())
+    assert "Rajendra Kumar" in chosen
+    assert not {"General", "Announcements", "Techbytes", "See more"} & set(chosen)
+
+
+def test_a_plan_waiting_for_his_yes_does_not_swallow_an_unrelated_follow_up(monkeypatch):
+    conv = _conv()
+    t = store.create_task("Fix Contract Test failure on email PR 675", "code", "p", None)
+    store.update_task(t["id"], status="awaiting_approval")
+    store.add_ui_message(conv["id"], "assistant",
+                         "No booking H69LMCN6KZY in prod logs — should I check Temporal?", {})
+    assert not main._conversation_is_on_task(conv["id"], t["id"])
+    store.add_ui_message(conv["id"], "assistant",
+                         f"📋 PLAN #{t['id']} Fix Contract Test failure on email PR 675", {})
+    assert main._conversation_is_on_task(conv["id"], t["id"])
+
+
+def test_the_working_note_names_only_a_task_this_message_started(monkeypatch):
+    conv = _conv()
+    t = store.create_task("Fix Contract Test failure on email PR 675", "code", "p", None)
+    store.update_task(t["id"], status="awaiting_approval")
+    monkeypatch.setattr(tasks, "live_tasks_for", lambda cid: [t["id"]])
+    store_get = store.get_task
+    monkeypatch.setattr(store, "get_task", lambda i: {**store_get(i), "created_at": time.time() - 3600})
+    assert f"#{t['id']}" not in main._working_note(conv["id"], "H69LMCN6KZY check do we received this booking")

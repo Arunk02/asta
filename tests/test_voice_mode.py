@@ -39,7 +39,7 @@ class _Helper:
 def helper(monkeypatch):
     h = _Helper()
     vm._STATE.update(speaker=False, mic=False, busy=False, mic_on_at=0.0, last_heard=0.0,
-                     last_spoke=0.0, helper=h)
+                     last_spoke=0.0, barged_at=0.0, helper=h)
     vm._QUEUE.clear()
 
     async def speak(text, **k):
@@ -269,11 +269,12 @@ def test_a_sentence_for_asta_runs_through_the_same_pipeline_and_is_answered_alou
     vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
     out = run(vm.handle("what's pending with my PRs"))
     assert out["did"] == "answered" and seen == [("what's pending with my PRs", "voice")]
-    assert helper.said() == ["Booking PR 1429 is open. AP PR 1252 is open."]
+    assert helper.said() == ["Booking PR 1429 is open.", "AP PR 1252 is open."], \
+        "the first sentence goes the moment it is written"
 
 
 def test_a_long_turn_says_on_it_once_then_the_answer(helper, monkeypatch):
-    monkeypatch.setattr(vm, "ON_IT_SECONDS", 0.05)
+    monkeypatch.setattr(vm, "ACK_SECONDS", 0.05)
 
     async def dispatch(conv, text, sink, channel):
         async def work():
@@ -357,3 +358,90 @@ def test_the_menu_bar_helper_builds(tmp_path):
     assert "kVK_ANSI_A" in src and "kVK_ANSI_M" in src, "⌃⌥A and ⌃⌥M"
     assert "setVoiceProcessingEnabled(true)" in src, "echo cancelling on the input"
     assert "AVSpeechSynthesizer" in src, "the Mac's voice when Asta's is down"
+
+
+# --- back and forth without lag ---------------------------------------------------------
+
+def test_a_question_is_acknowledged_within_a_second_with_audio_made_beforehand(helper, monkeypatch):
+    monkeypatch.setattr(vm, "ACK_SECONDS", 0.05)
+    vm._CACHE["Let me check."] = "UkVBRFk="
+
+    async def dispatch(conv, text, sink, channel):
+        async def work():
+            await asyncio.sleep(0.2)
+            await sink.send({"type": "delta", "text": "Nothing pending."})
+        return asyncio.ensure_future(work())
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.handle("what is pending with my PRs?"))
+    first = [m for m in helper.sent if m.get("type") == "say"][0]
+    assert first["text"] == "Let me check." and first["audio"] == "UkVBRFk=", "no synthesis wait"
+    vm._CACHE.clear()
+
+
+def test_the_first_sentence_is_said_while_the_rest_is_still_being_written(helper, monkeypatch):
+    monkeypatch.setattr(vm, "ACK_SECONDS", 5)
+    said_at: list[float] = []
+
+    async def dispatch(conv, text, sink, channel):
+        async def work():
+            await sink.send({"type": "delta", "text": "Booking PR 1429 is still waiting on Vinish. "})
+            await sink.send({"type": "delta", "text": "AP"})
+            said_at.append(len(helper.said()))
+            await asyncio.sleep(0.05)
+            await sink.send({"type": "delta", "text": " PR 1252 is mergeable. And more detail here."})
+        return asyncio.ensure_future(work())
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.handle("status of my PRs?"))
+    assert said_at == [1], "said before the answer was finished"
+    assert helper.said() == ["Booking PR 1429 is still waiting on Vinish.",
+                             "AP PR 1252 is mergeable. The details are in the chat."]
+
+
+def test_talking_over_asta_drops_the_rest_of_that_answer(helper, monkeypatch):
+    monkeypatch.setattr(vm, "ACK_SECONDS", 5)
+
+    async def dispatch(conv, text, sink, channel):
+        async def work():
+            await sink.send({"type": "delta", "text": "Booking PR 1429 is still waiting on Vinish. "})
+            await sink.send({"type": "delta", "text": "x"})
+            vm._STATE["barged_at"] = time.time() + 1          # he started talking
+            await sink.send({"type": "delta", "text": " AP PR 1252 is mergeable."})
+        return asyncio.ensure_future(work())
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time(), barged_at=0.0)
+    run(vm.handle("status of my PRs?"))
+    assert helper.said() == ["Booking PR 1429 is still waiting on Vinish."]
+
+
+def test_a_comment_while_asta_works_is_folded_into_that_work(helper, monkeypatch):
+    """The dispatcher already does this for WhatsApp; voice goes through it."""
+    seen: list[str] = []
+
+    async def dispatch(conv, text, sink, channel):
+        seen.append(text)
+        await sink.send({"type": "note", "text": "✚ adding that to what I'm doing — same task, no restart."})
+        return None
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.handle("also check UAT"))
+    assert seen == ["also check UAT"]
+    assert helper.said() == ["adding that to what I'm doing — same task, no restart."]
+
+
+def test_acks_are_prepared_when_the_voice_comes_on(helper, monkeypatch):
+    vm._CACHE.clear()
+    run(vm.warm_acks())
+    assert set(vm._CACHE) == set(vm.ACKS.values())
+    vm._CACHE.clear()
+
+
+def test_the_helper_interrupts_and_queues_lines():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert "func interrupt()" in src and "waiting.removeAll()" in src
+    assert "onBargeIn" in src and '"type": "barge"' in src

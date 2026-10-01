@@ -96,10 +96,29 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     let synth = AVSpeechSynthesizer()
     var speaking = false
     var onDone: (() -> Void)?
+    // Lines wait their turn: "Let me check." is not cut off by the answer.
+    private var waiting: [(String, Data?, Bool)] = []
 
     func say(text: String, audio: Data?, chime: Bool) {
+        if speaking {
+            waiting.append((text, audio, chime))
+            return
+        }
+        play(text: text, audio: audio, chime: chime)
+    }
+
+    /// He started talking: Asta stops at once and forgets what it was about to say.
+    func interrupt() {
+        waiting.removeAll()
+        player?.stop()
+        synth.stopSpeaking(at: .immediate)
+        speaking = false
+    }
+
+    private func play(text: String, audio: Data?, chime: Bool) {
+        speaking = true                     // from the chime on: the next line queues
         let go = {
-            self.speaking = true
+            guard self.speaking else { return }    // interrupted during the chime
             if let audio = audio, let p = try? AVAudioPlayer(data: audio) {
                 self.player = p
                 p.delegate = self
@@ -121,6 +140,7 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     }
 
     func stop() {
+        waiting.removeAll()
         player?.stop()
         synth.stopSpeaking(at: .immediate)
         finished()
@@ -131,6 +151,12 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     }
 
     private func finished() {
+        guard speaking else { return }
+        if !waiting.isEmpty {
+            let (t, a, c) = waiting.removeFirst()
+            play(text: t, audio: a, chime: c)
+            return
+        }
         // A short tail: the room's echo of the last word is not him talking.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             self.speaking = false
@@ -146,6 +172,8 @@ final class Ears {
     var running = false
     var mouth: Mouth?
     var onUtterance: ((Data) -> Void)?
+    var onBargeIn: (() -> Void)?
+    private var bargeFrames = 0
 
     // Voice activity, on 16 kHz mono frames.
     private let rate: Double = 16000
@@ -207,12 +235,29 @@ final class Ears {
         }
         guard err == nil, let p = out.int16ChannelData?[0], out.frameLength > 0 else { return }
         let frames = Array(UnsafeBufferPointer(start: p, count: Int(out.frameLength)))
-        if mouth?.speaking == true { reset(); return }      // half duplex while Asta talks
         var sum: Float = 0
         for s in frames { let f = Float(s) / 32768; sum += f * f }
         let rms = sqrt(sum / Float(max(frames.count, 1)))
         let db = 20 * log10(max(rms, 1e-6))
         let ms = Double(frames.count) / rate * 1000
+        if mouth?.speaking == true {
+            // Barge-in. Echo cancelling removes most of Asta's own voice; what
+            // is left is far quieter than him talking, so the bar is high:
+            // 18 dB over the room for about a third of a second.
+            bargeFrames = (db > floorDb + 18 && db > -38) ? bargeFrames + 1 : 0
+            if bargeFrames >= 14 {
+                bargeFrames = 0
+                inSpeech = true
+                speech = preroll + frames
+                quietMs = 0
+                DispatchQueue.main.async { self.onBargeIn?() }
+            } else {
+                preroll += frames
+                if preroll.count > Int(rate * 0.3) { preroll.removeFirst(preroll.count - Int(rate * 0.3)) }
+            }
+            return
+        }
+        bargeFrames = 0
         if !inSpeech {
             floorDb = min(-30, max(-75, floorDb * 0.97 + db * 0.03))
             preroll += frames
@@ -286,6 +331,10 @@ final class App: NSObject, NSApplicationDelegate {
         ears.mouth = mouth
         ears.onUtterance = { [weak self] wav in
             self?.link.send(["type": "utterance", "wav": wav.base64EncodedString()])
+        }
+        ears.onBargeIn = { [weak self] in
+            self?.mouth.interrupt()
+            self?.link.send(["type": "barge"])
         }
         link.onState = { [weak self] _ in self?.redraw() }
         link.onMessage = { [weak self] msg in self?.handle(msg) }

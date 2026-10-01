@@ -42,8 +42,14 @@ MIC_IDLE_SECONDS = 300.0
 #: Within this long of Asta last speaking (or the mic opening), what he says is
 #: taken as meant for Asta without asking.
 FOLLOW_WINDOW_SECONDS = 120.0
-#: A voice turn that has said nothing by now says "On it" once.
-ON_IT_SECONDS = 8.0
+#: A voice turn that has said nothing by now gets a spoken acknowledgement.
+#: Measured 2 Oct: 0.9 s to know he stopped, 1.4 s to transcribe, then the brain
+#: takes 20-35 s. Silence that long reads as "it didn't hear me".
+ACK_SECONDS = 1.2
+#: Prepared when the voice comes on, so they play with no synthesis wait.
+ACKS = {"question": "Let me check.", "do": "On it.", "long": "Still on it."}
+#: A turn still working after this says "Still on it" once.
+STILL_SECONDS = 25.0
 #: How long a voice turn may run before its answer goes to the chat instead.
 TURN_SECONDS = 600.0
 #: The levels of `notify` that are worth saying out loud, when they are addressed to him.
@@ -54,9 +60,21 @@ SPOKEN_SENTENCES = 2
 QUEUE_MAX = 10
 
 _STATE: dict = {"speaker": False, "mic": False, "busy": False, "mic_on_at": 0.0,
-                "last_heard": 0.0, "last_spoke": 0.0, "helper": None}
+                "last_heard": 0.0, "last_spoke": 0.0, "barged_at": 0.0, "helper": None}
 _QUEUE: list[str] = []
 _KV = "voice_mode"
+#: Ready-made audio for the acknowledgements: phrase -> base64 wav.
+_CACHE: dict[str, str] = {}
+
+
+async def warm_acks() -> None:
+    """Make the acknowledgements once, so each plays the instant it is needed."""
+    from . import voice
+    for phrase in ACKS.values():
+        if phrase in _CACHE:
+            continue
+        with contextlib.suppress(Exception):
+            _CACHE[phrase] = base64.b64encode(await voice.speak(phrase, voice="assistant")).decode()
 
 
 # --- the two switches -----------------------------------------------------------------
@@ -97,6 +115,7 @@ async def set_mode(speaker: bool | None = None, mic: bool | None = None,
             asyncio.ensure_future(voice.warm_the_ears())
         if speaker:
             asyncio.ensure_future(voice.warm_the_voice())
+            asyncio.ensure_future(warm_acks())
     store.record_outcome("voice", "mode", detail=f"speaker={_STATE['speaker']} "
                                                 f"mic={_STATE['mic']} {why}"[:200])
     await _to_helper({"type": "state", **state(), "why": why})
@@ -148,20 +167,36 @@ _MARK = re.compile(r"[*_`#>|]+")
 _EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿️]")
 
 
-def speakable(text: str, sentences: int = SPOKEN_SENTENCES) -> str:
-    """What of a written answer can be said out loud: no links, code, markup or
-    emoji; the first sentences; and where the rest is."""
+def _sentences(text: str) -> tuple[list[str], bool]:
+    """The answer as plain spoken sentences, and whether it carried links or code."""
     raw = _CODE.sub(" ", text or "")
-    links = bool(_URL.search(raw))
+    extra = bool(_URL.search(raw)) or "```" in (text or "")
     raw = _URL.sub(" ", raw)
     raw = _EMOJI.sub(" ", _MARK.sub(" ", raw))
     lines = [ln.strip(" -•\t") for ln in raw.splitlines() if ln.strip(" -•\t")]
     flat = re.sub(r"\s+", " ", " ".join(lines)).strip()
-    parts = re.split(r"(?<=[.!?।])\s+", flat)
-    said = " ".join(parts[:sentences]).strip()
-    more = len(parts) > sentences or links or "```" in (text or "")
-    if said and more:
-        said += " The details are in the chat."
+    return [p for p in re.split(r"(?<=[.!?।])\s+", flat) if p], extra
+
+
+def first_sentence(text: str) -> str:
+    """The first sentence of an answer still being written — only once it is
+    complete (more text follows it) and long enough to be worth saying alone."""
+    if (text or "").count("```") % 2:
+        return ""                                  # inside a code block
+    parts, _ = _sentences(text)
+    if len(parts) > 1 and len(parts[0]) >= 20:
+        return parts[0]
+    return ""
+
+
+def speakable(text: str, sentences: int = SPOKEN_SENTENCES, skip: int = 0) -> str:
+    """What of a written answer can be said out loud: no links, code, markup or
+    emoji; the first sentences (after `skip` already said); and where the rest is."""
+    parts, extra = _sentences(text)
+    said = " ".join(parts[skip:sentences]).strip()
+    more = len(parts) > sentences or extra
+    if more and (said or skip):
+        said = (said + " The details are in the chat.").strip()
     return said[:600]
 
 
@@ -191,10 +226,11 @@ async def say(text: str, kind: str = "answer") -> bool:
         _QUEUE.append(words)
         del _QUEUE[:-QUEUE_MAX]
         return True
-    audio = ""
-    with contextlib.suppress(Exception):
-        from . import voice
-        audio = base64.b64encode(await voice.speak(words, voice="assistant")).decode()
+    audio = _CACHE.get(words, "")
+    if not audio:
+        with contextlib.suppress(Exception):
+            from . import voice
+            audio = base64.b64encode(await voice.speak(words, voice="assistant")).decode()
     sent = await _to_helper({"type": "say", "text": words, "audio": audio,
                              "chime": kind == "update"})
     if sent:
@@ -313,32 +349,55 @@ async def handle(text: str) -> dict:
 
 
 class VoiceSink:
-    """Collects a voice turn's words; nothing goes to WhatsApp."""
+    """Collects a voice turn's words — and says the first sentence the moment it
+    is written, instead of after the whole answer. Nothing goes to WhatsApp."""
 
     def __init__(self) -> None:
         self.alive = True
         self._parts: list[str] = []
+        self.spoken = 0                     # sentences of the answer already said
+        self.started = time.time()
+
+    def cut(self) -> bool:
+        """He talked over this answer: say no more of it."""
+        return _STATE["barged_at"] > self.started
 
     async def send(self, payload: dict) -> None:
         typ = payload.get("type")
         if typ == "delta":
             self._parts.append(payload.get("text", ""))
+            if self.spoken == 0 and not self.cut():
+                first = first_sentence("".join(self._parts))
+                if first:
+                    self.spoken = 1
+                    await say(first, kind="answer")
         elif typ == "note":
             self._parts.append("\n" + payload.get("text", "") + "\n")
         elif typ == "error":
             self._parts.append(f"\nSomething went wrong: {payload.get('message', 'error')}\n")
 
     def text(self) -> str:
-        out = "".join(self._parts).strip()
-        self._parts.clear()
-        return out
+        return "".join(self._parts).strip()
 
     async def close(self) -> None:
         return None
 
 
+def _kind_of(text: str) -> str:
+    t = (text or "").strip().lower()
+    if t.endswith("?") or re.match(r"^(?:asta,?\s+)?(?:what|why|how|when|where|who|which|is|are|"
+                                   r"was|were|do|does|did|can|could|any|has|have)\b", t):
+        return "question"
+    return "do"
+
+
 async def turn(text: str) -> str:
-    """Run what he said through the same pipeline as WhatsApp, and say the answer."""
+    """Run what he said through the same pipeline as WhatsApp, and say the answer.
+
+    He hears something within about a second — the acknowledgement, or the
+    answer's first sentence the moment the brain writes it — and the rest when
+    it is done. Whatever he says meanwhile is its own turn: a comment on work in
+    progress is folded into it by the dispatcher, as it is on WhatsApp."""
     from . import main
     cid = store.kv_get("wa_conversation") or ""
     conv = store.get_conversation(cid) if cid else None
@@ -347,15 +406,22 @@ async def turn(text: str) -> str:
         store.kv_set("wa_conversation", conv["id"])
     conv["model"] = main._channel_model(conv)
     sink = VoiceSink()
+    started = time.time()
     job = await main._dispatch(conv, text, sink, "voice")
     if job is not None:
-        done, _ = await asyncio.wait({job}, timeout=ON_IT_SECONDS)
+        done, _ = await asyncio.wait({job}, timeout=ACK_SECONDS)
+        if not done and sink.spoken == 0 and not sink.cut():
+            await say(ACKS[_kind_of(text)], kind="answer")
         if not done:
-            await say("On it.", kind="answer")
-            done, _ = await asyncio.wait({job}, timeout=TURN_SECONDS)
+            done, _ = await asyncio.wait({job}, timeout=max(0.0, STILL_SECONDS - (time.time() - started)))
+        if not done and sink.spoken == 0 and not sink.cut():
+            await say(ACKS["long"], kind="answer")
+            await asyncio.wait({job}, timeout=TURN_SECONDS)
     reply = sink.text()
-    if reply:
-        await say(reply, kind="answer")
+    rest = "" if sink.cut() else speakable(reply, skip=sink.spoken)
+    if rest:
+        await say(rest, kind="answer")
+    store.record_outcome("voice", "turn", detail=f"{time.time() - started:.1f}s · {text[:120]}")
     return reply
 
 
@@ -405,6 +471,10 @@ async def serve(ws) -> None:
                     # In the background: a turn can take minutes, and the hotkeys
                     # must keep working while it does.
                     asyncio.ensure_future(_heard_quietly(wav))
+            elif kind == "barge":
+                # He talked over Asta: what it was saying is dropped — it is in
+                # the chat — and what he says next is the turn.
+                _STATE["barged_at"] = time.time()
             elif kind == "busy":
                 await set_busy(bool(msg.get("value")))
             elif kind == "locked":

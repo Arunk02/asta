@@ -834,3 +834,33 @@ def test_a_browser_grown_past_its_limit_is_recycled(monkeypatch):
     tb._SIZE.update(at=0.0, mb=0.0)
     monkeypatch.setattr(tb, "in_a_call", lambda: True)
     assert not tb._too_big(), "never in the middle of a call"
+
+
+def test_every_script_asta_puts_into_a_page_compiles(tmp_path):
+    """1 Oct: the rail watcher shipped with a line break where "\\n" belonged.
+    The browser rejected the whole script, so nothing reported, and only the
+    fallback sweep kept Teams read. A substring test cannot see that; a parser can."""
+    import importlib
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    checked = 0
+    for mod_name in ("teams_bridge", "incoming", "chat_watch", "meetings", "call_rtc",
+                     "call_screen", "call_rehearsal", "voice"):
+        try:
+            mod = importlib.import_module(f"app.{mod_name}")
+        except Exception:                                      # noqa: BLE001
+            continue
+        for name in dir(mod):
+            src = getattr(mod, name)
+            if not (name.endswith("_JS") or name in ("_CHAT_ROWS", "_CHAT_ROWS_FULL", "_MARK_RAIL_ROW")) \
+                    or not isinstance(src, str) or not src.strip().startswith(("(", "async")):
+                continue
+            f = tmp_path / f"{mod_name}_{name}.js"
+            f.write_text("const f = (" + src.strip().rstrip(";") + ");\n")
+            out = subprocess.run([node, "--check", str(f)], capture_output=True, text=True)
+            assert out.returncode == 0, f"{mod_name}.{name} does not compile:\n{out.stderr[:400]}"
+            checked += 1
+    assert checked >= 5

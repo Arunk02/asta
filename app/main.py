@@ -98,6 +98,14 @@ async def startup() -> None:
     health.mark_serving()
     store.init()
     memory.ensure_dirs()
+    # Voice mode starts OFF on every start; if it had been on, he hears so once.
+    from . import voice_mode as _voice_mode
+    if _voice_mode.startup():
+        with contextlib.suppress(Exception):
+            asyncio.create_task(notify.notify(
+                "🔇 Asta restarted — voice and mic are off. ⌃⌥A for voice, ⌃⌥M for the mic.",
+                "voice", urgency="direct", considered=True))
+    daemon.start("voice_idle", _voice_mode.idle_loop)
     memory.reindex()
     # A question whose waiter died with the process can never be answered, and a
     # stale one would swallow Arun's next message as its answer.
@@ -2400,6 +2408,45 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     await out.send({"type": "done", "tools": tools_used})
 
 
+@app.websocket("/ws/voice-mode")
+async def ws_voice_mode(ws: WebSocket) -> None:
+    """The Asta Voice menu-bar helper: hotkeys and mic in, speech out."""
+    expected = _token()
+    supplied = ws.query_params.get("token", "")
+    if expected and not secrets.compare_digest(supplied, expected):
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    from . import voice_mode
+    await voice_mode.serve(ws)
+
+
+@app.get("/api/voice-mode", dependencies=[Depends(require_auth)])
+def api_voice_mode():
+    from . import voice_mode
+    return voice_mode.state()
+
+
+@app.post("/api/voice-mode", dependencies=[Depends(require_auth)])
+async def api_set_voice_mode(request: Request):
+    """{"speaker": bool?, "mic": bool?} or {"toggle": "speaker"|"mic"}."""
+    from . import voice_mode
+    b = await request.json() if await request.body() else {}
+    if b.get("toggle") in ("speaker", "mic"):
+        return await voice_mode.toggle(b["toggle"], why="api")
+    return await voice_mode.set_mode(
+        speaker=b.get("speaker") if "speaker" in b else None,
+        mic=b.get("mic") if "mic" in b else None, why="api")
+
+
+@app.post("/api/voice-mode/say", dependencies=[Depends(require_auth)])
+async def api_voice_mode_say(request: Request):
+    """Say a line through the helper — for checking the voice works."""
+    from . import voice_mode
+    b = await request.json()
+    return {"said": await voice_mode.say(b.get("text", ""), kind=b.get("kind", "answer"))}
+
+
 @app.websocket("/ws")
 async def ws_chat(ws: WebSocket) -> None:
     expected = _token()
@@ -3345,6 +3392,15 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # When he last spoke to Asta. Read by the nightly bench, which must never
     # compete with him for a subscription window he is in the middle of using.
     store.kv_set("last_user_message_at", str(time.time()))
+
+    # "voice on" / "mic off" — the two switches, from any channel, no brain.
+    from . import voice_mode
+    said = await voice_mode.command(user_text or "")
+    if said:
+        await sink.send({"type": "note", "text": said})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
 
     # "new chat" on a phone channel — the clean slate the web UI gets from its
     # button. Answered here so it never reaches a brain and costs a turn.

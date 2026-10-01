@@ -1149,7 +1149,7 @@ def _worth_telling(tid: str, line: str, *, fyi: bool, group: bool, now: float) -
     return True
 
 
-async def _sweep_threads(notify=None) -> list[dict]:
+async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dict]:
     """One pass, by CONVERSATION: read, group, understand once, act per thread.
 
     The design of 29 Sep. The old sweep judged every message on its own, which is
@@ -1177,7 +1177,7 @@ async def _sweep_threads(notify=None) -> list[dict]:
     now = _time.time()
     opened = failed = 0
     convs: dict[str, dict] = {}
-    for chat in await candidates():
+    for chat in (only if only is not None else await candidates()):
         opened += 1
         try:
             known = {(r.get("text") or "") for r in store.teams_messages(chat=chat, limit=300)}
@@ -1501,7 +1501,7 @@ async def _sweep_threads(notify=None) -> list[dict]:
     return handled
 
 
-async def sweep(notify=None) -> list[dict]:
+async def sweep(notify=None, only: list[str] | None = None) -> list[dict]:
     """One pass: what moved, what is new in it, judged and acted on.
 
     Returns the messages it handled, so a test can assert on the decision rather
@@ -1512,13 +1512,13 @@ async def sweep(notify=None) -> list[dict]:
     """
     from . import threads
     if threads.enabled():
-        return await _sweep_threads(notify)
+        return await _sweep_threads(notify, only)
     from . import attention, responder, triage
     handled: list[dict] = []
     lines: list[str] = []
     started: list[str] = []
     opened = failed = 0
-    for chat in await candidates():
+    for chat in (only if only is not None else await candidates()):
         opened += 1
         # What has already been said in this thread. A quoted line is by
         # definition one of these, which is how the quote is told from the reply
@@ -1668,18 +1668,30 @@ def stand_down() -> bool:
 
 
 async def watch_loop() -> None:
-    """Poll the rail forever. Quiet when nothing moved."""
+    """Read Teams the moment a chat changes; everything, every few minutes.
+
+    The page itself reports a chat turning unread or moving up (see
+    attach_rail), and only that chat is opened, seconds later. A full sweep
+    still runs every FULL_SWEEP_SECONDS as the net — and every POLL_SECONDS,
+    as before, whenever the page has stopped reporting. The first sweep runs
+    straight away: after a restart or a night offline, what came in meanwhile
+    is read now, not a cycle later."""
     from . import notify, teams_bridge, wake
     import time as _time
-    started = 0.0
+    last_full = 0.0
+    first = True
     while True:
-        # Start to start, not end to start. Sixty seconds of rest AFTER a sweep
-        # that itself takes a minute read each chat every two (1 Oct, 16:44 →
-        # 16:46 → 16:48). A short floor still leaves the browser free between
-        # sweeps for a send or a call.
-        since = _time.monotonic() - started if started else 0.0
-        await wake.sleep(max(MIN_GAP_SECONDS, POLL_SECONDS - since) if started else POLL_SECONDS)
-        started = _time.monotonic()
+        if first:
+            first = False
+            await asyncio.sleep(STARTUP_SECONDS)
+            why = "full"
+        else:
+            every = FULL_SWEEP_SECONDS if rail_alive() else POLL_SECONDS
+            due = max(MIN_GAP_SECONDS, every - (_time.monotonic() - last_full))
+            why = await _wait_for_work(due)
+        hot = [] if why == "full" else take_hot()
+        if why == "hot" and not hot:
+            continue                    # nothing worth opening after all
         # A call OWNS the browser. Chromium tolerates one writer per profile, so
         # a sweep during a call is not a slow read — it is a second instance
         # contending for the tree the call is holding, and with real Chrome the
@@ -1695,7 +1707,12 @@ async def watch_loop() -> None:
                 and store.kv_get("teams_session_ok") != "0"):
             continue
         try:
-            await sweep(notify.notify)
+            if hot:
+                await sweep(notify.notify, only=hot)
+            else:
+                last_full = _time.monotonic()
+                take_hot()                  # a full sweep reads them all anyway
+                await sweep(notify.notify)
         except Exception as exc:                               # noqa: BLE001
             from . import quiet
             quiet.note("chatwatch.sweep", exc)
@@ -1713,3 +1730,139 @@ async def watch_loop() -> None:
                 from . import quiet
                 quiet.note("chatwatch.dissolve", exc)
         await asyncio.sleep(0)
+
+
+# --- the page reports; nothing polls ------------------------------------------------
+
+#: The full sweep, with the rail watcher alive. The net, not the way in.
+FULL_SWEEP_SECONDS = 300.0
+#: Before the first sweep after a start — enough for Teams to come up.
+STARTUP_SECONDS = 20.0
+#: A report is gathered this long, so a burst of messages is one read.
+HOT_DEBOUNCE_SECONDS = 2.0
+#: The watcher reports at least once a minute; quiet longer than this, it is down.
+RAIL_SILENT_SECONDS = 180.0
+#: A chat Asta gave back to him unread is re-read this often while it stays
+#: unread: a new message in an already-bold chat changes nothing on the rail.
+RESTORED_RECHECK_SECONDS = 60.0
+
+_RAIL: dict = {"order": [], "unread": set(), "at": 0.0}
+_HOT: dict[str, float] = {}
+_RESTORED: dict[str, float] = {}
+_CHECKED: dict[str, float] = {}
+_EVENT: dict = {"ev": None}
+
+
+def _hot_event() -> asyncio.Event:
+    if _EVENT["ev"] is None:
+        _EVENT["ev"] = asyncio.Event()
+    return _EVENT["ev"]
+
+
+def rail_alive(now: float | None = None) -> bool:
+    import time as _t
+    now = _t.time() if now is None else now
+    return bool(_RAIL["at"]) and now - _RAIL["at"] < RAIL_SILENT_SECONDS
+
+
+def note_restored(chat: str) -> None:
+    """Asta read this chat and put it back to unread for him."""
+    import time as _t
+    _RESTORED[chat] = _t.time()
+
+
+def on_rail(rows: list[str], now: float | None = None) -> list[str]:
+    """What the page reported, turned into the chats to read now."""
+    import time as _t
+    from . import teams_bridge
+    now = _t.time() if now is None else now
+    marks = [r for r in rows or [] if r.lstrip("*").startswith("!")]
+    rows = [r for r in rows or [] if r not in marks]
+    # "Mentions" bold: a channel @mention — the Activity feed reads it now.
+    if any(m.startswith("*") for m in marks) and not _RAIL.get("mentioned"):
+        with contextlib.suppress(Exception):
+            teams_bridge.mentioned().set()
+    _RAIL["mentioned"] = any(m.startswith("*") for m in marks)
+    order = [r[1:] if r.startswith("*") else r for r in rows]
+    unread = {r[1:] for r in rows if r.startswith("*")}
+    prev_order, prev_unread = _RAIL["order"], _RAIL["unread"]
+    _RAIL.update(order=order, unread=unread, at=now)
+    if not prev_order:
+        hot = set(unread)                       # first look: catch up on all of it
+    else:
+        hot = unread - prev_unread
+        if order != prev_order:
+            hot |= set(touched(prev_order, order))
+    # Our own "Mark as unread" is not news.
+    hot = {c for c in hot if not (c in _RESTORED and now - _RESTORED[c] < 30
+                                  and c not in touched(prev_order, order)[1:])}
+    for c in list(_RESTORED):
+        if c not in unread and now - _RESTORED[c] > 30:
+            _RESTORED.pop(c, None)              # he has read it himself
+    hot = {c for c in hot if c and c.lower() not in teams_bridge._NOT_A_CHAT
+           and not is_furniture(c) and not c.lower().endswith("(you)")}
+    for c in hot:
+        _HOT.setdefault(c, now)
+    if hot:
+        _hot_event().set()
+    return sorted(hot)
+
+
+def _restored_due(now: float) -> list[str]:
+    return [c for c, at in _RESTORED.items()
+            if c in _RAIL["unread"] and now - _CHECKED.get(c, at) >= RESTORED_RECHECK_SECONDS]
+
+
+def take_hot() -> list[str]:
+    """The chats to read now, oldest report first; the queue is emptied."""
+    import time as _t
+    now = _t.time()
+    due = _restored_due(now)
+    chats = sorted(_HOT, key=_HOT.get) + [c for c in due if c not in _HOT]
+    _HOT.clear()
+    _hot_event().clear()
+    for c in chats:
+        _CHECKED[c] = now
+    return chats[:MAX_OPENS]
+
+
+async def _wait_for_work(timeout: float) -> str:
+    """"hot" when the page reported something, "woke" after sleep, else "full"."""
+    import time as _t
+    from . import wake
+    ev = _hot_event()
+    if _RESTORED:
+        timeout = min(timeout, RESTORED_RECHECK_SECONDS)
+    sleeper = asyncio.ensure_future(wake.sleep(timeout))
+    waiter = asyncio.ensure_future(ev.wait())
+    try:
+        done, _ = await asyncio.wait({sleeper, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for f in (sleeper, waiter):
+            if not f.done():
+                f.cancel()
+    if waiter in done:
+        await asyncio.sleep(HOT_DEBOUNCE_SECONDS)
+        return "hot"
+    if sleeper.result():
+        return "full"                           # the Mac woke: read everything
+    return "hot" if _restored_due(_t.time()) else "full"
+
+
+async def attach_rail(ctx, page) -> None:
+    """Install the rail watcher on the pooled Teams browser. Never raises: the
+    sweep falls back to once a minute if this does not take."""
+    if not enabled():
+        return
+    from . import teams_bridge
+
+    async def _reported(source, rows):
+        with contextlib.suppress(Exception):
+            on_rail(list(rows or []))
+
+    with contextlib.suppress(Exception):
+        await ctx.expose_binding("astaRail", _reported)
+    with contextlib.suppress(Exception):
+        await ctx.add_init_script(teams_bridge.RAIL_WATCH_JS)
+    with contextlib.suppress(Exception):
+        await page.evaluate(teams_bridge.RAIL_WATCH_JS)

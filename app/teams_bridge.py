@@ -215,12 +215,42 @@ _POOL: dict = {}
 POOL_MAX_AGE = float(os.environ.get("TEAMS_POOL_MAX_AGE", "1800"))
 
 
+#: Recycled past this much memory as well. Teams grows: 3-4 GB on 1 Oct, on a Mac
+#: whose swap was full — memory pressure is what made it hot.
+POOL_MAX_MB = 3000
+_SIZE: dict = {"at": 0.0, "mb": 0.0}
+
+
+def profile_mb() -> float:
+    """Resident memory of every browser process on Asta's profile, in MB."""
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-Ao", "rss,command"], capture_output=True,
+                             text=True, timeout=5, check=False).stdout
+    except Exception:                                          # noqa: BLE001
+        return 0.0
+    marker = str(PROFILE_DIR)
+    return sum(int(line.split(None, 1)[0]) for line in out.splitlines()[1:]
+               if marker in line and line.split(None, 1)[0].isdigit()) / 1024
+
+
+def _too_big() -> bool:
+    """Checked once a minute at most; never while a call holds the browser."""
+    if in_a_call() or time.time() - _SIZE["at"] < 60:
+        return False
+    _SIZE.update(at=time.time(), mb=profile_mb())
+    return _SIZE["mb"] > POOL_MAX_MB
+
+
 async def _pool_alive() -> bool:
     """Whether the pooled page can still be used. Cheap, and never optimistic."""
     page = _POOL.get("page")
     if page is None:
         return False
     if time.time() - _POOL.get("born", 0) > POOL_MAX_AGE:
+        return False
+    if _too_big():
+        _WHY["discard"] = f"browser grew past {POOL_MAX_MB} MB"
         return False
     try:
         # A real round-trip to the page. `page.is_closed()` alone lies: the tab can
@@ -298,6 +328,10 @@ async def _pooled_page():
     with contextlib.suppress(Exception):
         from . import incoming
         await incoming.attach(ctx, page)
+    # …and so does a chat turning unread: the page reports it, nothing polls.
+    with contextlib.suppress(Exception):
+        from . import chat_watch
+        await chat_watch.attach_rail(ctx, page)
     return page
 
 
@@ -794,6 +828,122 @@ async def rail_diagnostic(limit: int = 12) -> list[dict]:
             return [{"error": f"rail painted {found} treeitem(s) but none parsed",
                      "url": page.url[:120]}]
     return (rows or [])[:limit]
+#: Watches the chat list from inside the page and reports, through the
+#: `astaRail` binding, every chat in it with "*" in front of the unread ones —
+#: whenever that picture changes. Measured on 1 Oct against the minute sweep:
+#: new messages seen 9-59 s sooner, and muted chats marked unread seen at all
+#: (the sweep never saw them: marking unread does not move a chat up).
+#:
+#: Chats only. Teams groups the rail by `aria-level="1"` sections — Quick views,
+#: Favourites, Chats, Teams and channels — and channels are not watched.
+#: Unread is the chat's name in bold (600+); nothing else on a compact rail says it.
+RAIL_WATCH_JS = """
+(() => {
+  if (window.__astaRailWatch) return;
+  window.__astaRailWatch = true;
+  const SKIP = /^(quick views|teams and channels|teams|communities)$/i;
+  let last = '', sent = 0;
+  const scan = (force) => {
+    const rows = document.querySelectorAll('[role="treeitem"][aria-level="2"]');
+    if (!rows.length) return;
+    const out = [];
+    for (const n of rows) {
+      const sec = n.parentElement && n.parentElement.closest('[role="treeitem"][aria-level="1"]');
+      const section = sec ? (sec.innerText || '').split('\n')[0].trim() : '';
+      const name = (n.innerText || '').split('\n')[0].trim();
+      const mentions = /^quick views$/i.test(section) && /^mentions$/i.test(name);
+      if (SKIP.test(section) && !mentions) continue;
+      if (!name || /^see (more|all)/i.test(name) || n.querySelector('[role="treeitem"]')) continue;
+      let bold = false;
+      for (const e of n.querySelectorAll('span, div, p')) {
+        if (e.childElementCount === 0 && (e.textContent || '').trim() === name
+            && (parseInt(getComputedStyle(e).fontWeight) || 400) >= 600) { bold = true; break; }
+      }
+      out.push((bold ? '*' : '') + (mentions ? '!' : '') + name);
+    }
+    const sig = out.join('\n');
+    if (sig === last && !force) return;
+    last = sig;
+    sent = Date.now();
+    try { if (window.astaRail) window.astaRail(out); } catch (e) {}
+  };
+  let queued = false;
+  const kick = () => {
+    if (queued) return;
+    queued = true;
+    setTimeout(() => { queued = false; scan(); }, 1500);
+  };
+  const start = () => {
+    new MutationObserver(kick).observe(document.documentElement,
+      {subtree: true, childList: true, characterData: true});
+    setInterval(() => scan(false), 15000);
+    // A heartbeat: the same picture once a minute, so a quiet afternoon is
+    // never mistaken for a watcher that died.
+    setInterval(() => scan(Date.now() - sent > 55000), 60000);
+    scan(true);
+  };
+  if (document.documentElement) start(); else document.addEventListener('DOMContentLoaded', start);
+})();
+"""
+
+#: Is this row's name in bold — unread for him — right now?
+_ROW_UNREAD_JS = """
+(wanted) => {
+  for (const n of document.querySelectorAll('[role="treeitem"][aria-level="2"]')) {
+    if ((n.innerText || '').split('\n')[0].trim().toLowerCase() !== wanted) continue;
+    for (const e of n.querySelectorAll('span, div, p')) {
+      if (e.childElementCount === 0 && (e.textContent || '').trim().toLowerCase() === wanted
+          && (parseInt(getComputedStyle(e).fontWeight) || 400) >= 600) return true;
+    }
+    return false;
+  }
+  return false;
+}
+"""
+
+
+async def row_unread(page, chat: str) -> bool:
+    """Bold on the rail: he has not read it. False when the row is not there."""
+    try:
+        return bool(await page.evaluate(_ROW_UNREAD_JS, (chat or "").strip().lower()))
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+async def park(page) -> None:
+    """Leave the open chat for the Saved view.
+
+    A chat left open in Asta's page is a chat Teams considers read: every new
+    message in it was marked read on his phone and laptop the moment it arrived,
+    and never turned bold for anyone — including the watcher (1 Oct)."""
+    with contextlib.suppress(Exception):
+        if not await _chat_title(page):
+            return
+        row = page.locator('[role="treeitem"][aria-level="2"]', has_text="Saved").first
+        await row.click(timeout=3000)
+        await asyncio.sleep(0.4)
+
+
+async def mark_unread(page, chat: str) -> bool:
+    """Put a chat back to unread for him — the rail row's own "Mark as unread".
+
+    Asta reading a chat is not him reading it. Called after `park`, so the chat
+    is not open while it is marked."""
+    wanted = (chat or "").strip().lower()
+    try:
+        if await page.evaluate(_MARK_RAIL_ROW, wanted) != 1:
+            return False
+        await page.click('[data-asta-row="1"]', button="right", timeout=4000)
+        item = page.locator('[role="menuitem"]', has_text="Mark as unread").first
+        await item.click(timeout=3000)
+        await asyncio.sleep(0.3)
+        return True
+    except Exception:                                          # noqa: BLE001
+        with contextlib.suppress(Exception):
+            await page.keyboard.press("Escape")
+        return False
+
+
 #: Rail entries that are furniture rather than conversations.
 _NOT_A_CHAT = {"copilot", "mentions", "discover", "drafts", "saved", "chats",
                "favorites", "quick views", "new chat", "unread"}
@@ -1359,6 +1509,8 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
     browser at all.
     """
     async with teams_page() as page:
+        # Whether HE had read it, before Asta opening it says he has.
+        was_unread = await row_unread(page, chat)
         # The rail row itself, when the chat is on it. A group chat nobody named
         # is listed by its members — "Shabda Anubhav, Vinish, +2" — and search
         # has no such result, so it was marked unopenable for a day and a whole
@@ -1414,6 +1566,12 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
 
         await _photograph_images(page, title, raw)
         store.kv_set("teams_session_ok", "1")
+        # Never left open (see `park`), and given back to him unread if it was.
+        await park(page)
+        if was_unread and await mark_unread(page, chat):
+            with contextlib.suppress(Exception):
+                from . import chat_watch
+                chat_watch.note_restored(chat)
 
     rows = _capture(title, raw)
     if since is not None:
@@ -1531,6 +1689,7 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
             raise RuntimeError(
                 f"message does not appear in '{title}' after sending — treat as NOT sent")
         store.kv_set("teams_session_ok", "1")
+        await park(page)
         SENT.append((time.time(), title))
         del SENT[:-50]
         return title
@@ -1767,7 +1926,33 @@ async def read_activity(limit: int = 25) -> list[str]:
 # With the context pooled a poll costs 0.01s plus the read, and Arun's actual
 # complaint was that a ping does not reach him immediately. Five minutes was the
 # thing standing between someone asking him a question and him knowing about it.
-ACTIVITY_POLL_SECONDS = int(os.environ.get("TEAMS_ACTIVITY_POLL", "60"))
+#
+# Five minutes again, 1 Oct — now that it is not the way in. Chats come from the
+# rail watcher in seconds, and a channel @mention turns "Mentions" bold, which
+# reads the feed at once (MENTIONED). This poll is the net, and every minute of
+# it was a navigation of the shared page: heat, and a lock everyone else waited on.
+ACTIVITY_POLL_SECONDS = int(os.environ.get("TEAMS_ACTIVITY_POLL", "300"))
+#: Set when "Mentions" turns bold on the rail.
+MENTIONED: dict = {"ev": None}
+
+
+def mentioned() -> asyncio.Event:
+    if MENTIONED["ev"] is None:
+        MENTIONED["ev"] = asyncio.Event()
+    return MENTIONED["ev"]
+
+
+async def _activity_wait(seconds: float) -> None:
+    ev = mentioned()
+    sleeper = asyncio.ensure_future(wake.sleep(seconds))
+    waiter = asyncio.ensure_future(ev.wait())
+    try:
+        await asyncio.wait({sleeper, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for f in (sleeper, waiter):
+            if not f.done():
+                f.cancel()
+    ev.clear()
 ACTIVITY_SEEN_KEY = "teams_activity_seen"
 # feed entries worth pinging about; reactions are deliberately excluded as noise
 _ACTIVITY_INTERESTING = ("mentioned you", "missed call", "invited you", "replied to")
@@ -1929,7 +2114,10 @@ async def activity_watch_loop() -> None:
         # wake.sleep, not asyncio.sleep: when the lid opens after eight hours
         # this returns immediately instead of idling out the remainder of a
         # five-minute timer that was set before the machine went under.
-        await wake.sleep(ACTIVITY_POLL_SECONDS)
+        # …or sooner: the moment "Mentions" turns bold on the rail (chat_watch
+        # sets the event), the feed is read — a channel @mention is not left
+        # for the next five-minute look.
+        await _activity_wait(ACTIVITY_POLL_SECONDS)
         if not (enabled() and logged_in_once() and store.kv_get("teams_session_ok") != "0"):
             continue
         try:

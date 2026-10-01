@@ -158,6 +158,23 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
         said = "; ".join(f"“{m[:200]}”" for m in more[-3:])
         note = ((note + "\n") if note else "") + (
             f"⚠️ {first} added while I was on it: {said} — check the reply covers it.")
+    from . import chat_watch, writing
+    # He answered them himself while this was being worked out — Shabda's
+    # "please review the email service issue" got his "will check and update
+    # and approve" at 14:51, and a reply for him to send arrived at 14:53
+    # anyway (1 Oct). The finding still reaches him; a second reply does not.
+    if await chat_watch.he_replied_since(chat, chat_watch.their_last(chat)):
+        first = (who or "them").split()[0]
+        await notify.notify(
+            f"💬 You've already answered {first} yourself — what I found, in case "
+            f"it helps:\n\n{(analysis or reply).strip()[:1500]}",
+            "answer", urgency="ambient", considered=True)
+        if thread:
+            threads.update(thread, status="awaiting_arun")
+        store.record_outcome("answer", "he answered", subject=str(task_id or ""),
+                             detail=f"{who}: {need}"[:200])
+        return True
+    reply = writing.as_him(reply)
     intent = {"kind": "send", "what": reply.strip(), "to": chat, "channel": "teams",
               "to_group": bool(group), "task_id": task_id, "thread": thread,
               "who": who, "need": need, "analysis": analysis, "note": note,
@@ -370,7 +387,8 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
     chat = meta.get("chat") or t.get("teams_chat", "")
     if not meta.get("group") and chat and _is_clarifying(reply, meta.get("who", "")):
         from . import chat_watch, notify
-        if await chat_watch._say(chat, reply.strip(), group=False):
+        if await chat_watch._say(chat, reply.strip(), group=False,
+                                 since=chat_watch.their_last(chat)):
             first = (meta.get("who") or "them").split()[0]
             await notify.notify(f"❓ Asked {first}: “{reply.strip()}”\n\n{analysis}".strip(),
                                 "answer", urgency="direct", considered=True)

@@ -71,6 +71,11 @@ class Offer:
     payload: dict = field(default_factory=dict)   # whatever the action needs
     action: str = ""   # instruction for a brain to run on yes ("" = use the kind's)
     op: dict = field(default_factory=dict)        # {"name": …, "args": {…}} run in Python
+    #: Has this reached him? A task's staged review had not — it was pushed nine
+    #: seconds AFTER his "Send", which was meant for a Teams message, posted it
+    #: as a request for changes on Komal's PR (1 Oct). Only a shown offer can
+    #: be answered by a yes.
+    shown: bool = True
 
     def expired(self, now: float | None = None) -> bool:
         ttl = ttl_seconds()
@@ -98,6 +103,9 @@ class Offer:
         and every existing caller becomes correct without being touched.
         """
         body = f"{self.subject}\n{self.context}".strip()
+        if self.is_asked() and not self.shown:
+            self.shown = True
+            mark_shown(self.id)
         if not self.is_asked():
             head = pending()
             behind = f" behind “{head.subject}”" if head else ""
@@ -149,7 +157,7 @@ def offer(kind: str, subject: str, context: str, prompt: str,
     """
     o = Offer(id=uuid.uuid4().hex[:12], kind=kind, subject=subject, context=context,
               prompt=prompt, created=time.time(), payload=payload or {},
-              action=action, op=op or {})
+              action=action, op=op or {}, shown=not _from_task())
     head = pending()
     if head is None:
         store.kv_set(KEY, json.dumps(asdict(o)))
@@ -176,6 +184,31 @@ def offer(kind: str, subject: str, context: str, prompt: str,
     # stale anyway, and dropping the newest would hide what is happening NOW.
     store.kv_set(QUEUE_KEY, json.dumps(queued[-QUEUE_MAX:]))
     return o
+
+
+def _from_task() -> bool:
+    try:
+        from . import capabilities
+        return bool(capabilities.FROM_TASK.get())
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def mark_shown(oid: str) -> None:
+    """It reached him — his next yes may answer it."""
+    raw = store.kv_get(KEY)
+    o = _load(raw) if raw else None
+    if o is not None and o.id == oid and not o.shown:
+        o.shown = True
+        store.kv_set(KEY, json.dumps(asdict(o)))
+    queued = _queue()
+    changed = False
+    for row in queued:
+        if row.get("id") == oid and not row.get("shown", True):
+            row["shown"] = True
+            changed = True
+    if changed:
+        store.kv_set(QUEUE_KEY, json.dumps(queued))
 
 
 def _same_question(row: dict, o: Offer) -> bool:
@@ -221,6 +254,9 @@ def _promote() -> Offer | None:
         row = queued.pop(0)
         o = _load(json.dumps(row))
         if o is not None and not o.expired():
+            # Waiting behind another question is not having been asked: it is
+            # answerable once announce_offer has put it in front of him.
+            o.shown = False
             store.kv_set(KEY, json.dumps(asdict(o)))
             store.kv_set(QUEUE_KEY, json.dumps(queued))
             # Queued offers told him "I'll ask when that one is answered" — and

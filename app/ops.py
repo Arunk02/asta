@@ -205,6 +205,11 @@ _ACTS = {"teams_send": ("send", "to"), "teams_call": ("call", "who"),
          "calendar_send": ("send", "summary")}
 
 
+#: Every outward operation that ran: (time, op name). What a reply claiming
+#: "sent" or "posted" is checked against.
+DONE: list[tuple[float, str]] = []
+
+
 async def run(op_spec: dict) -> str:
     """Execute a staged operation and return the line Arun reads.
 
@@ -228,6 +233,9 @@ async def run(op_spec: dict) -> str:
             return (f"⛔ Not done — {d.why}. Say “drop rule {d.rule.id}” if that has "
                     f"changed.")
     out = await entry["run"](**args)
+    import time as _time
+    DONE.append((_time.time(), op_spec.get("name", "")))
+    del DONE[:-50]
     if act:
         # He approved this exact act, as written. Ten of the same and Asta may
         # ask for a standing permission — never sooner, never for a new person.

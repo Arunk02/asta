@@ -100,7 +100,7 @@ def test_the_typo_sends_instead_of_re_staging_the_same_draft(monkeypatch):
     ran: list[dict] = []
     started: list[str] = []
 
-    async def fake_run_op(op, cid, sink, channel):
+    async def fake_run_op(op, cid, sink, channel, staged=None):
         ran.append(op)
 
     monkeypatch.setattr(main, "_run_op", fake_run_op)
@@ -124,7 +124,7 @@ def test_real_feedback_still_revises_rather_than_sending(monkeypatch):
     and it must not be widened by the typo rule."""
     ran: list[dict] = []
 
-    async def fake_run_op(op, cid, sink, channel):
+    async def fake_run_op(op, cid, sink, channel, staged=None):
         ran.append(op)
 
     started: list[str] = []
@@ -144,7 +144,7 @@ def test_real_feedback_still_revises_rather_than_sending(monkeypatch):
 def test_a_word_that_means_no_does_not_send(monkeypatch):
     ran: list[dict] = []
 
-    async def fake_run_op(op, cid, sink, channel):
+    async def fake_run_op(op, cid, sink, channel, staged=None):
         ran.append(op)
 
     monkeypatch.setattr(main, "_run_op", fake_run_op)

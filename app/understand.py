@@ -355,7 +355,18 @@ def safe_question(q: str, who: str = "") -> str:
         return ""
     if re.search(r"\b(?:arun|he|she|they)\s+(?:should|needs?\s+to|wants?|asked)\b", q, re.I):
         return ""
+    if _CURT.search(q):
+        return ""
     return q
+
+
+#: Questions that are correct and curt. "Hi Shabda, what's the issue?" went to a
+#: colleague who had written politely (1 Oct); in his name it reads as
+#: impatience. The caller falls back to the courteous fixed line.
+_CURT = re.compile(
+    r"\bwhat(?:'s|\s+is|s)\s+(?:the\s+)?(?:issue|problem|matter|this|it)\b|"
+    r"\bwhat\s+do\s+(?:you|u)\s+(?:need|want)\b|\bwhat\s+happened\b|^\s*(?:hi|hello|hey)\b[^?]{0,30}\bwhat\b",
+    re.I)
 
 
 #: Conversations per model call. Measured: 4 took ~30 s, 28 took ~60 s — so a

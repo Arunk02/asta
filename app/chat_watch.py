@@ -263,6 +263,51 @@ def _seen_at_key(chat: str) -> str:
     return f"chatwatch_seen_at:{chat.strip().lower()[:60]}"
 
 
+def _done_key(chat: str) -> str:
+    return f"chatwatch_done:{chat.strip().lower()[:60]}"
+
+
+#: How many processed messages a chat remembers — far more than one read returns.
+DONE_MAX = 400
+
+
+def _ident_hash(row: dict) -> str:
+    import hashlib
+    return hashlib.sha1(repr(_identity(row)).encode()).hexdigest()[:16]
+
+
+def processed(chat: str) -> set[str]:
+    """Messages the SWEEP has handled in this chat — never what some other reader
+    merely stored. A chat with no record yet counts what is older than its
+    high-water time, which only the sweep advances."""
+    try:
+        got = json.loads(store.kv_get(_done_key(chat)) or "[]")
+        if got:
+            return set(got)
+    except (ValueError, TypeError):
+        pass
+    try:
+        upto = float(store.kv_get(_seen_at_key(chat)) or 0)
+    except ValueError:
+        upto = 0.0
+    if not upto:
+        return set()
+    try:
+        rows = store.teams_messages(chat=chat, since=upto - 2 * 86400, limit=3000)
+    except Exception:                                          # noqa: BLE001
+        return set()
+    return {_ident_hash(r) for r in rows if float(r.get("sent_at") or 0) <= upto}
+
+
+def mark_processed(chat: str, rows: list[dict]) -> None:
+    try:
+        old = json.loads(store.kv_get(_done_key(chat)) or "[]")
+    except (ValueError, TypeError):
+        old = []
+    new = [h for h in (_ident_hash(r) for r in rows) if h not in set(old)]
+    store.kv_set(_done_key(chat), json.dumps((old + new)[-DONE_MAX:]))
+
+
 def remember(chat: str, rows: list[dict]) -> None:
     mark = _mark_of(rows)
     if mark:
@@ -791,14 +836,6 @@ async def new_in(chat: str, advance: bool = True) -> list[dict]:
     answer empty and the first unrepeatable.
     """
     from . import teams_bridge
-    import time as _time
-    # What this chat already held BEFORE this read — read_history stores what
-    # it reads, so this has to be taken first.
-    try:
-        before = {_identity(r) for r in store.teams_messages(
-            chat=chat, since=_time.time() - 2 * 86400, limit=3000)}
-    except Exception:                                          # noqa: BLE001
-        before = set()
     rows = await teams_bridge.read_history(chat, limit=READ_LIMIT, max_scrolls=0)
     fresh = unseen(chat, rows or [])
     # A message already processed is never new again, whatever happened to its
@@ -806,9 +843,18 @@ async def new_in(chat: str, advance: bool = True) -> list[dict]:
     # Everyone — can we connect please" came back as "Vinish wants to connect"
     # at 23:11, long after it was dealt with (30 Sep). Same sender, same time,
     # same words with the reactions taken off: the same message.
-    fresh = [r for r in fresh if _identity(r) not in before]
+    #
+    # PROCESSED, not stored. This used to be "anything already in the database",
+    # and every other reader stores what it reads — a brain reading the chat for
+    # context, "what's unread", the check before a reply. Komal's "u would have
+    # called and cleared your doubts … typical Arun" (1 Oct, 14:56) was stored by
+    # one of those first, and the sweep then took it for handled: it never
+    # reached him.
+    done = processed(chat)
+    fresh = [r for r in fresh if _ident_hash(r) not in done]
     if advance:
         remember(chat, rows or [])
+        mark_processed(chat, rows or [])
     import time as _time
     old = _time.time() - 2 * 3600
     return [r for r in fresh if (r.get("text") or "").strip()
@@ -887,14 +933,40 @@ def group_silent() -> bool:
     return os.environ.get("ASTA_GROUP_SILENT", "1").strip().lower() not in ("0", "false", "no")
 
 
-async def _say(chat: str, line: str, *, group: bool = False) -> bool:
+async def he_replied_since(chat: str, since: float | None) -> bool:
+    """A fresh look at the chat, right now: has Arun written in it since `since`?
+
+    What the sweep read can be minutes old by the time a line is ready — the
+    model reads first. He opened Shabda's chat and answered, and Asta then sent
+    "Hi Shabda, what's the issue?" on top of his reply (1 Oct). The look costs a
+    few seconds; a second voice answering the same message costs his name."""
+    if not since:
+        return False
+    from . import teams_bridge as _bridge
+    if not _bridge.enabled():
+        return False
+    try:
+        rows = await _bridge.read_history(chat, limit=8, max_scrolls=0)
+    except Exception:                                          # noqa: BLE001
+        return False
+    return any(float(r.get("sent_at") or 0) > float(since) and is_from_him(r.get("sender", ""))
+               for r in rows)
+
+
+async def _say(chat: str, line: str, *, group: bool = False,
+               since: float | None = None) -> bool:
     """One of the two unapproved lines Asta may send: the ask-back and the check-in.
 
     Never in a group while ASTA_GROUP_SILENT is on — False, and the caller
-    carries on as if the line could not be sent."""
+    carries on as if the line could not be sent. Never once he has answered
+    the message (`since`) himself."""
     if group and group_silent():
         store.record_outcome("thread", "held back", subject=chat[:80],
                              detail=f"group — not said: {line}"[:200])
+        return False
+    if await he_replied_since(chat, since):
+        store.record_outcome("thread", "held back", subject=chat[:80],
+                             detail=f"he answered himself — not said: {line}"[:200])
         return False
     from . import teams_bridge as _bridge
     try:
@@ -905,6 +977,33 @@ async def _say(chat: str, line: str, *, group: bool = False) -> bool:
         return False
     store.record_outcome("thread", "said", subject=chat[:80], detail=line[:200])
     return True
+
+
+def their_last(chat: str, hours: float = 12) -> float | None:
+    """When the other side last wrote in this chat, from what has been read."""
+    import time as _t
+    try:
+        rows = store.teams_messages(chat=chat, since=_t.time() - hours * 3600, limit=400)
+    except Exception:                                          # noqa: BLE001
+        return None
+    times = [float(r["sent_at"]) for r in rows
+             if r.get("sent_at") and not is_from_him(r.get("sender", ""))]
+    return max(times) if times else None
+
+
+def answering_him(chat: str, sent_at: float | None, hours: float = 24) -> bool:
+    """Was the last message before theirs his? Then what they sent is a reply."""
+    if not sent_at:
+        return False
+    try:
+        rows = store.teams_messages(chat=chat, since=float(sent_at) - hours * 3600, limit=400)
+    except Exception:                                          # noqa: BLE001
+        return False
+    before = [r for r in rows if r.get("sent_at") and float(r["sent_at"]) < float(sent_at)]
+    if not before:
+        return False
+    last = max(before, key=lambda r: float(r["sent_at"]))
+    return is_from_him(last.get("sender", ""))
 
 
 def _his_last_minutes(chat: str, now: float, hours: float = 6) -> int | None:
@@ -951,7 +1050,7 @@ async def _acknowledge(tid: str, c: dict) -> bool:
     if _t.time() - last < ACK_SECONDS:
         return False
     line = steward.ack_line(c["chat"])
-    if await _say(c["chat"], line, group=False):
+    if await _say(c["chat"], line, group=False, since=c.get("sent_at")):
         store.kv_set(key, str(_t.time()))
         return True
     return False
@@ -1092,7 +1191,7 @@ async def _sweep_threads(notify=None) -> list[dict]:
                 "id": tid, "who": who, "chat": chat, "counterpart": counterpart,
                 "one_to_one": one_to_one, "new": [], "keys": [], "known": known,
                 "handled_by_him": False, "wanted": False, "pri": pri,
-                "last": "", "sent_at": None})
+                "last": "", "sent_at": None, "first_at": m.get("sent_at")})
             seen = as_read(text, known)
             c["new"].append(seen if one_to_one else f"{who}: {seen}")
             c["keys"].append(key)
@@ -1183,7 +1282,8 @@ async def _sweep_threads(notify=None) -> list[dict]:
                 attention.mark_dropped(k)
             if conf < CLOSE_SURE and c["asta_spoke"] and not c["checked_in"] \
                     and _checkin_enabled() \
-                    and await _say(c["chat"], checkin_line(), group=not c["one_to_one"]):
+                    and await _say(c["chat"], checkin_line(), group=not c["one_to_one"],
+                                   since=c.get("sent_at")):
                 threads.update(tid, checked_in=1, status="checked_in", asta_spoke=1)
                 continue
             threads.close(tid, why=f"closing ({d.get('source')}, {conf:.2f})", now=now)
@@ -1206,12 +1306,29 @@ async def _sweep_threads(notify=None) -> list[dict]:
                 if line:
                     red.append(line)
                 continue
+            if c["one_to_one"] and answering_him(c["chat"], c.get("first_at") or c.get("sent_at")):
+                # They are answering HIM — his message was the last word before
+                # theirs. "hi Arunkumar, sorry saw the ping now" was Shabda
+                # replying to Arun's own message (1 Oct) and got "Hi Shabda,
+                # what's the issue?" back. Nothing to ask: his conversation.
+                line = f"💬 {who.split()[0]} replied to your message: " \
+                       f"{summarise(' / '.join(c['new']), limit=140)}"
+                if _worth_telling(tid, line, fyi=False, group=False, now=now):
+                    red.append(line)
+                continue
+            # The model's question when it knows what this is about and asks it
+            # politely ("is this about the event-history defect?"); otherwise
+            # "hi Shabda, yes tell me", in his words. Never a curt "what's the
+            # issue?" (1 Oct) — safe_question refuses those, and a colleague
+            # saying hello has no issue yet.
             if ping:
                 ask = steward.ping_back(c["chat"])
             else:
-                ask = understand.safe_question(d.get("question") or "", who) or steward.ASK_BACK
+                ask = understand.safe_question(d.get("question") or "", who) \
+                    or steward.opener_line(c["chat"], who)
             if not c["asked_back"] and steward.ask_back_enabled() \
-                    and await _say(c["chat"], ask, group=not c["one_to_one"]):
+                    and await _say(c["chat"], ask, group=not c["one_to_one"],
+                                   since=c.get("sent_at")):
                 steward.note_asked_back(who)
                 threads.update(tid, asked_back=c["asked_back"] + 1, status="clarifying",
                                asta_spoke=1)
@@ -1263,7 +1380,7 @@ async def _sweep_threads(notify=None) -> list[dict]:
             q = steward.ASK_BACK
         if state == "ask" and q and c["asked_back"] < MAX_QUESTIONS \
                 and steward.ask_back_enabled() \
-                and await _say(c["chat"], q, group=not c["one_to_one"]):
+                and await _say(c["chat"], q, group=not c["one_to_one"], since=c.get("sent_at")):
             threads.update(tid, asked_back=c["asked_back"] + 1, status="clarifying",
                            asta_spoke=1)
             continue

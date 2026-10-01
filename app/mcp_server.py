@@ -64,7 +64,8 @@ def _proxy(cap):
             r = await c.post(
                 f"{_asta_url()}/api/_invoke",
                 json={"tool": cap.name, "args": kwargs,
-                      "conv_id": os.environ.get("ASTA_MCP_CONV", "")},
+                      "conv_id": os.environ.get("ASTA_MCP_CONV", ""),
+                      "task_id": os.environ.get("ASTA_MCP_TASK", "")},
                 headers={"Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")},
             )
             if r.status_code >= 400:
@@ -120,7 +121,8 @@ def _describe(cap) -> str:
     return text
 
 
-def config_entry(tools: list[str] | None = None, conv_id: str = "") -> dict:
+def config_entry(tools: list[str] | None = None, conv_id: str = "",
+                 task_id: str = "") -> dict:
     """The mcpServers entry a CLI needs to spawn this server.
 
     The env is carried explicitly rather than left to inheritance: the spawned
@@ -150,6 +152,8 @@ def config_entry(tools: list[str] | None = None, conv_id: str = "") -> dict:
         env["ASTA_MCP_TOOLS"] = ",".join(tools)
     if conv_id:
         env["ASTA_MCP_CONV"] = conv_id
+    if task_id:
+        env["ASTA_MCP_TASK"] = str(task_id)
     return {
         "mcpServers": {
             SERVER_NAME: {

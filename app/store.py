@@ -710,6 +710,13 @@ def get_reminder(reminder_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+def reminders_since(ts: float) -> list[dict]:
+    """Reminders created at or after `ts`, whatever their state."""
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM reminders WHERE created_at >= ?", (ts,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 def list_reminders(pending_only: bool = True, limit: int = 50) -> list[dict]:
     q = "SELECT * FROM reminders"
     if pending_only:

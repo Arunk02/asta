@@ -442,6 +442,10 @@ _TABLE: tuple[Capability, ...] = (
     Capability("set_reminder", "reminders",
                http='POST /api/reminders {"text":"…","due":"<LOCAL ISO>","repeat":""}',
                note="due is LOCAL ISO time you compute yourself; repeat: ''|daily|weekdays|weekly."),
+    Capability("send_later", "reminders", write=True,
+               http='POST /api/reminders/message {"to":"…","text":"…","due":"<LOCAL ISO>"}',
+               note="A follow-up sent LATER, by itself — 'notify X on Monday'. Not "
+                    "set_reminder, which only pings Arun."),
     Capability("list_my_reminders", "reminders", http="GET /api/reminders"),
     Capability("cancel_reminder", "reminders", http="POST /api/reminders/{id}/cancel"),
     Capability("morning_brief", "rhythm", http="POST /api/brief/now",

@@ -1644,6 +1644,39 @@ async def set_reminder(text: str, due_iso: str, repeat: str = "") -> str:
             f"show in the app. Link WhatsApp or Telegram to get it on your phone.")
 
 
+async def send_later(to: str, text: str, due_iso: str, to_group: bool = False) -> str:
+    """Schedule a follow-up for later (Monday 9am, after 2:30) — it goes out by itself.
+
+    Use for "notify Vinish on Monday morning", "follow up with him after 2:30",
+    "remind him tomorrow". `text` is the exact message, in Arun's voice; `due_iso`
+    is LOCAL time you compute ('2026-10-05T09:00'). When Arun asked for it in his
+    own words it is approved now and simply sends; otherwise it waits for his yes
+    when due. Calling it again for the same person and time REPLACES the earlier
+    one — never set a second reminder for the same thing. Say it is scheduled only
+    after this returns "Scheduled"."""
+    from . import capabilities, reminders, tasks, teams_bridge, writing
+    try:
+        due = reminders.parse_due(due_iso)
+    except ValueError as exc:
+        return f"Not scheduled — {exc}"
+    import time as _t
+    if due < _t.time() - 60:
+        return "Not scheduled — that time has passed; pick a future time."
+    if teams_bridge._is_member_list(to):
+        to_group = True
+    cid = tasks.current_conversation() or ""
+    asked = bool(cid) and _he_asked_to_send(to, cid)
+    said = capabilities.said_this_turn().lower()
+    first = (to or "").split()[0].lower() if (to or "").split() else ""
+    asked = asked or bool(first and first in said)
+    body = writing.fit_address(writing.tidy_links(writing.as_him(text)), to)
+    r = reminders.schedule_send(to, body, due, to_group=to_group, approved=asked)
+    import datetime as dt
+    when = dt.datetime.fromtimestamp(due).strftime("%a %d %b %H:%M")
+    how = "it sends by itself" if asked else "it will ask your yes first"
+    return f"Scheduled #{r['id']} — {when}, to {to}; {how}. Tell Arun in one line."
+
+
 def list_my_reminders() -> str:
     """List pending reminders."""
     import datetime as dt
@@ -1651,9 +1684,10 @@ def list_my_reminders() -> str:
     rows = store.list_reminders()
     if not rows:
         return "No pending reminders."
+    from . import reminders
     return "\n".join(
         f"#{r['id']} {dt.datetime.fromtimestamp(r['due_at']).strftime('%a %d %b %H:%M')} — "
-        f"{r['text']}" + (f" (repeats {r['repeat']})" if r["repeat"] else "")
+        f"{reminders.describe(r)}" + (f" (repeats {r['repeat']})" if r["repeat"] else "")
         for r in rows)
 
 

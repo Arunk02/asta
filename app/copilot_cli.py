@@ -314,6 +314,24 @@ def _his_prs(hours: float = 96) -> str:
             "view` says so now:\n" + "\n".join(out[:10]))
 
 
+def open_work() -> str:
+    """Every PR of his still open, and every follow-up already scheduled."""
+    import datetime as _dt
+    from . import prname, reminders, store
+    lines = []
+    mine = prname.his_open_prs()
+    if mine:
+        lines.append("His open PRs (\"my PR\", \"this\", \"both\" mean these — never "
+                     "a colleague's PR unless he names it):\n" + mine)
+    due = [r for r in store.list_reminders() if r["due_at"] < __import__("time").time() + 14 * 86400]
+    if due:
+        lines.append("Already scheduled — update these with cancel_reminder / "
+                     "send_later; never add a second one for the same thing:\n" + "\n".join(
+                         f"• #{r['id']} {_dt.datetime.fromtimestamp(r['due_at']).strftime('%a %d %b %H:%M')}"
+                         f" — {reminders.describe(r)}" for r in due[:10]))
+    return "\n\n".join(lines)
+
+
 def turn_context(user_text: str) -> str:
     """What a chat turn should know before it starts, besides the date.
 
@@ -358,6 +376,14 @@ def turn_context(user_text: str) -> str:
         prs = _his_prs()
         if prs:
             parts.append(prs)
+    # His open work and what is already promised, every turn, whichever brain.
+    # 1 Oct: "notify Vinish on Monday to get this merged" got "is that PR 1459,
+    # Komal's?" — "my PR, why would I chase others' PRs, simple things" — and a
+    # follow-up said to be scheduled for 14:32 had never been stored at all.
+    with contextlib.suppress(Exception):
+        work = open_work()
+        if work:
+            parts.append(work)
     # "merge task 166's PR": what task 166 was, and every link in it. Without
     # this, 29 Sep's turn spent twelve model calls finding PR #1251 and its repo.
     with contextlib.suppress(Exception):

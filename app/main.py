@@ -1485,6 +1485,14 @@ async def api_create_reminder(request: Request):
         raise HTTPException(400, str(e))
 
 
+@app.post("/api/reminders/message", dependencies=[Depends(require_auth)])
+async def api_send_later(request: Request):
+    """A Teams message sent later by itself — the same tool the chat brain has."""
+    b = await request.json()
+    return {"result": await agent_mod.send_later(
+        b.get("to", ""), b.get("text", ""), b.get("due", ""), bool(b.get("to_group")))}
+
+
 @app.post("/api/reminders/{reminder_id}/cancel", dependencies=[Depends(require_auth)])
 def api_cancel_reminder(reminder_id: int):
     try:
@@ -2102,10 +2110,44 @@ def unproven_send(reply: str, since: float) -> str:
     return claim
 
 
+#: A reply saying something was scheduled or a reminder set.
+_SCHEDULE_CLAIM = re.compile(
+    r"\b(?:scheduled|reminder\s+(?:is\s+)?(?:set|updated|created|added)|set\s+(?:a|the)\s+reminder|"
+    r"(?:it\s+)?goes\s+out\s+(?:at|on)|"
+    r"\b(?:monday|tuesday|wednesday|thursday|friday|tomorrow|tonight|\d{1,2}[:.]\d{2})\b[^.\n]{0,25}"
+    r"\bi'?ll\s+(?:send|ping|remind|message|notify)|"
+    r"i'?ll\s+(?:send|ping|remind|message|notify)\s+\w+\b[^.\n]{0,40}"
+    r"\b(?:at\s+\d|on\s+\w+day|monday|tuesday|wednesday|thursday|friday|tomorrow|morning))", re.I)
+
+
+def unproven_schedule(reply: str, since: float) -> str:
+    """The line claiming something was scheduled when no reminder was created, or ""."""
+    text = re.sub(r"[\"“][^\"”\n]*[\"”]|>[^\n]*", " ", reply or "")
+    for m in _SCHEDULE_CLAIM.finditer(text):
+        if _NEGATED.search(text[max(0, m.start() - 30):m.start()]):
+            continue
+        with contextlib.suppress(Exception):
+            if store.reminders_since(since - 5):
+                return ""
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        line_end = text.find("\n", m.end())
+        return text[line_start:line_end if line_end != -1 else len(text)].strip()[-200:]
+    return ""
+
+
 async def _correct_claims(out, conv: dict, reply: str, since: float) -> None:
     """"Already staged and ready — … is sent now with your confirm" (1 Oct, 14:40):
     nothing had been sent. Whatever the brain, a claim that something went out
     is checked against the record of what did, and corrected in the same breath."""
+    planned = unproven_schedule(reply, since)
+    if planned:
+        line = ("⚠️ Correction: nothing was actually scheduled — no reminder or "
+                f"scheduled message exists for “{planned[:120]}”. Say it again and I'll "
+                "set it properly.")
+        store.record_outcome("turn", "false_schedule_claim", subject=conv["id"],
+                             detail=planned[:200])
+        store.add_ui_message(conv["id"], "assistant", line, {"via": "claim-check"})
+        await out.send({"type": "note", "text": line})
     claim = unproven_send(reply, since)
     if not claim:
         return

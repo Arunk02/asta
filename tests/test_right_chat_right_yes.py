@@ -864,3 +864,83 @@ def test_every_script_asta_puts_into_a_page_compiles(tmp_path):
             assert out.returncode == 0, f"{mod_name}.{name} does not compile:\n{out.stderr[:400]}"
             checked += 1
     assert checked >= 5
+
+
+# --- follow-through: what Asta promised, it does, and it remembers ---------------------
+
+def test_a_scheduled_message_replaces_the_earlier_ones_for_the_same_thing():
+    from app import reminders
+    due = time.time() + 3 * 86400
+    a = store.create_reminder('Send Vinish: "bro can you merge PR 1429"', due, "")
+    b = store.create_reminder("Send Vinish: merge booking PR 1429 and AP PR 1252", due + 60, "")
+    other = store.create_reminder("Standup", due, "")
+    s = reminders.schedule_send("Vinish Kumar", "bro can u merge these when u get a chance", due)
+    pending = {r["id"] for r in store.list_reminders()}
+    assert s["id"] in pending and other["id"] in pending
+    assert a["id"] not in pending and b["id"] not in pending, "one message per person per time"
+    s2 = reminders.schedule_send("Vinish Kumar", "bro can u merge both", due)
+    assert s["id"] not in {r["id"] for r in store.list_reminders()} and s2["id"]
+
+
+def test_an_approved_scheduled_message_is_sent_when_due(monkeypatch, told):
+    from app import reminders
+    sent: list[dict] = []
+
+    async def run(op):
+        sent.append(op)
+        return "✅ Sent to Vinish Kumar."
+
+    monkeypatch.setattr(ops, "run", run)
+    reminders.schedule_send("Vinish Kumar", "bro can u merge these", time.time() - 5, approved=True)
+    assert asyncio.run(reminders.fire_due()) == 1
+    assert sent and sent[0]["args"] == {"to": "Vinish Kumar", "text": "bro can u merge these",
+                                        "to_group": False}
+    assert any("Scheduled message sent" in m for m in told)
+
+
+def test_an_unapproved_one_or_one_to_his_manager_waits_for_his_yes(monkeypatch, told, above):
+    from app import reminders
+
+    async def run(op):
+        raise AssertionError("sent without his yes")
+
+    monkeypatch.setattr(ops, "run", run)
+    store.kv_set("wa_conversation", _conv()["id"])
+    reminders.schedule_send("Praveen Kumar", "status: both PRs merged", time.time() - 5, approved=True)
+    asyncio.run(reminders.fire_due())
+    staged = loop.awaiting(answers.phone_conversation())
+    assert staged and staged["to"] == "Praveen Kumar"
+
+
+def test_the_tool_schedules_and_says_whether_it_needs_his_yes(monkeypatch):
+    from app import agent
+    cid = _conv()["id"]
+    monkeypatch.setattr(tasks, "current_conversation", lambda: cid)
+    monkeypatch.setattr(capabilities, "said_this_turn",
+                        lambda: "keep reminder and notify vinish on monday to get merged")
+    out = asyncio.run(agent.send_later("Vinish Kumar", "bro can u merge these",
+                                             "2099-10-05T09:00"))
+    assert out.startswith("Scheduled #") and "sends by itself" in out
+    assert "Not scheduled" in asyncio.run(agent.send_later("Vinish Kumar", "x", "2001-01-01T09:00"))
+
+
+def test_a_claim_that_something_was_scheduled_is_checked():
+    t0 = time.time()
+    lie = "Scheduled — the merge-nudge to Vinish goes out at 14:32 today, no further confirmation needed."
+    assert main.unproven_schedule(lie, t0)
+    assert not main.unproven_schedule("I'll check the logs and come back.", t0)
+    store.create_reminder("SEND: {}", t0 + 3600, "")
+    assert not main.unproven_schedule(lie, t0), "a reminder was created this turn"
+
+
+def test_every_turn_starts_from_his_open_work(monkeypatch):
+    from app import copilot_cli, prname
+    monkeypatch.setattr(prname, "his_open_prs", lambda limit=15: (
+        "• booking PR 1429 — fail RFP on missing mandatory fields\n• AP PR 1252 — Derive ATA/ATD"))
+    store.create_reminder('SEND: {"to": "Vinish Kumar", "text": "bro merge both", "approved": true}',
+                          time.time() + 3600, "")
+    work = copilot_cli.open_work()
+    assert "AP PR 1252" in work and "never a colleague's PR" in work
+    assert "message to Vinish Kumar (sends by itself)" in work
+    assert "send_later" in " ".join(__import__("app.tool_index", fromlist=["x"]).required_for(
+        "notify vinish on monday to get both merged"))

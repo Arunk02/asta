@@ -21,6 +21,8 @@ CHECK_SECONDS = 30
 VALID_REPEATS = ("", "daily", "weekdays", "weekly")
 #: A reminder whose text starts with this is work to carry out when it fires.
 DO_PREFIX = "DO:"
+#: …and this one is a message to send when it fires: JSON {to, text, to_group, approved}.
+SEND_PREFIX = "SEND:"
 
 #: When a fact he asked to remember is about doing something LATER.
 _LATER = re.compile(
@@ -88,6 +90,72 @@ def create(text: str, due_iso: str, repeat: str = "") -> dict:
     return store.create_reminder(text.strip(), due, repeat)
 
 
+def schedule_send(to: str, text: str, due: float, to_group: bool = False,
+                  approved: bool = True) -> dict:
+    """A message that GOES OUT when it is due — not a ping asking him to send it.
+
+    1 Oct: "notify Vinish on Monday to get both merged" became three reminders,
+    each of which would only have pinged him, and "goes out at 14:32, no further
+    confirmation needed" had been said that afternoon with no reminder stored at
+    all. One message per person per time: a newer one replaces what it updates."""
+    import json
+    if not (to or "").strip() or not (text or "").strip():
+        raise ValueError("a scheduled message needs who and what")
+    for r in store.list_reminders():
+        if r["status"] == "pending" and abs(float(r["due_at"]) - due) < 3600 \
+                and (r["text"].startswith(SEND_PREFIX) and _send_of(r).get("to", "").lower() == to.strip().lower()
+                     or _first(to) and _first(to) in r["text"].lower() and not r["text"].startswith(DO_PREFIX)):
+            store.update_reminder(r["id"], status="cancelled")
+    body = json.dumps({"to": to.strip(), "text": text.strip(), "to_group": bool(to_group),
+                       "approved": bool(approved)})
+    return store.create_reminder(f"{SEND_PREFIX} {body}", due, "")
+
+
+def _first(name: str) -> str:
+    parts = (name or "").strip().lower().split()
+    return parts[0] if parts and len(parts[0]) > 2 else ""
+
+
+def _send_of(r: dict) -> dict:
+    import json
+    try:
+        return json.loads(r["text"][len(SEND_PREFIX):])
+    except (ValueError, KeyError, TypeError):
+        return {}
+
+
+def describe(r: dict) -> str:
+    """How a reminder reads to him: a scheduled message says what goes to whom."""
+    if r["text"].startswith(SEND_PREFIX):
+        s = _send_of(r)
+        how = "sends by itself" if s.get("approved") else "asks your yes first"
+        return f"message to {s.get('to', '?')} ({how}): “{(s.get('text') or '')[:160]}”"
+    return r["text"]
+
+
+async def _send_due(r: dict, late_note: str) -> None:
+    """Send it now — or, if he never said so, or they are manager and above,
+    put it in front of him for his yes."""
+    from . import answers, notify, ops, senior
+    s = _send_of(r)
+    to, text = s.get("to", ""), s.get("text", "")
+    if not s.get("approved") or (not s.get("to_group") and senior.is_senior(to)):
+        await answers.present(who=to, need="scheduled message", chat=to,
+                              group=bool(s.get("to_group")), analysis=f"⏰ Scheduled for now{late_note}.",
+                              reply=text)
+        return
+    try:
+        line = await ops.run({"name": "teams_send", "args": {
+            "to": to, "text": text, "to_group": bool(s.get("to_group"))}})
+        await notify.notify(f"⏰ Scheduled message sent{late_note}: {line}\n> {text[:300]}",
+                            "reminder", asked=True)
+    except Exception as exc:                                    # noqa: BLE001
+        await notify.notify(f"⚠️ Scheduled message to {to} not sent — {exc}. "
+                            f"Staging it for your send.", "reminder", asked=True)
+        await answers.present(who=to, need="scheduled message", chat=to,
+                              group=bool(s.get("to_group")), analysis="", reply=text)
+
+
 def cancel(reminder_id: int) -> None:
     r = store.get_reminder(reminder_id)
     if not r or r["status"] != "pending":
@@ -120,6 +188,13 @@ async def fire_due() -> int:
             store.update_reminder(r["id"], status="done", fired_at=time.time())
         late = time.time() - r["due_at"]
         late_note = f" (was due {int(late // 60)} min ago)" if late > 120 else ""
+        if r["text"].startswith(SEND_PREFIX):
+            try:
+                await _send_due(r, late_note)
+            except Exception:                                  # noqa: BLE001
+                pass
+            fired += 1
+            continue
         # His own ask coming back to him: it rings through his quiet time too.
         await notify.notify(f"⏰ Reminder: {r['text']}{late_note}", "reminder", asked=True)
         if r["text"].startswith(DO_PREFIX):

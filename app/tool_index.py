@@ -224,6 +224,13 @@ _ABOUT_SHIPPING = re.compile(
     r"(?:the\s+|a\s+)?(?:same\s+)?(?:pr|pull\s+request)\b", re.I)
 
 
+_ABOUT_LATER = re.compile(
+    r"\b(?:remind\w*|reminder|schedule\w*|later|tomorrow|tmrw|tonight|eod|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|mrng|morning|"
+    r"follow\s*up|after\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?|at\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm))\b",
+    re.I)
+
+
 def required_for(query: str) -> list[str]:
     """Capabilities this message names outright, whatever the ranker thinks."""
     from . import consent
@@ -242,6 +249,12 @@ def required_for(query: str) -> list[str]:
         out.append("do_in_app")
     if _ABOUT_PRODUCTION.search(query or ""):
         out.append("grafana_logs")
+    # "notify him on Monday", "follow up after 2:30", "remind me": the whole
+    # reminders group. With only set_reminder offered, a brain told him it had
+    # "no delete tool for reminders" and set three for one thing (1 Oct).
+    if _ABOUT_LATER.search(query or ""):
+        from . import capabilities
+        out += [n for n, c in capabilities.registry().items() if c.group == "reminders"]
     if _ABOUT_WORKFLOWS.search(query or ""):
         out += ["temporal_workflows", "temporal_workflow"]
     # "commit and update in the same PR": the tools that move a task's work.

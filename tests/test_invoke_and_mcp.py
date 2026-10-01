@@ -415,3 +415,17 @@ def test_the_binding_does_not_outlive_the_call(client):
             assert "No active conversation" in r.json()["result"]
         assert tasks.current_conversation() is None
     asyncio.run(go())
+
+
+def test_send_later_works_across_the_mcp_hop(client):
+    """It reads the conversation to tell whether he asked for it himself."""
+    async def go():
+        async with client as c:
+            r = await c.post("/api/_invoke", json={
+                "tool": "send_later",
+                "args": {"to": "Vinish Kumar", "text": "bro can u merge these",
+                         "due_iso": "2099-10-05T09:00"},
+                "conv_id": "conv-abc"})
+            assert r.status_code == 200
+            assert r.json()["result"].startswith("Scheduled #")
+    asyncio.run(go())

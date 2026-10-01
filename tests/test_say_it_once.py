@@ -1278,3 +1278,58 @@ def test_ship_pushes_the_existing_pr_branch_the_task_committed_to(monkeypatch, t
     urls = asyncio.run(tasks._push_named_branches(t["id"], store.get_task(t["id"])))
     assert urls == ["telikos-booking-service: https://github.com/acme/booking/pull/1429"]
     assert ("git", "push", "origin", "feature/rfp-mandatory-field-validation") in ran
+
+
+# --- 1 Oct, later: the group call, the morning task, the PR in the wrong repo -----
+
+def test_a_bare_pr_number_resolves_to_the_repo_people_linked():
+    from app import review
+    store.save_teams_messages([{"chat": "Fake Internal Team", "sender": "Komal Jayswal",
+        "text": "Please review - https://github.com/Maersk-Global/telikos-booking-service/pull/1459",
+        "sent_at": time.time() - 3600, "key": "k1459", "stamp": ""}])
+    number, where, _cwd = review._where("1459", "empv3")
+    assert number == "1459" and where == ["-R", "Maersk-Global/telikos-booking-service"]
+
+
+def test_remember_to_do_it_tomorrow_morning_schedules_the_work():
+    from app import reminders
+    import datetime as dt
+    now = dt.datetime(2026, 9, 30, 20, 13).timestamp()
+    r = reminders.schedule_work("check Komal's PR 1459 tomorrow morning and give review comments", now)
+    assert r and r["text"].startswith("DO:")
+    assert dt.datetime.fromtimestamp(r["due_at"]).strftime("%d %H:%M") == "01 10:00"
+    assert reminders.schedule_work("remember Komal prefers short comments", now) is None
+    late = reminders.schedule_work("review it by eod", now)
+    assert late["due_at"] > now, "EOD said at 8pm is tomorrow's"
+
+
+def test_scheduled_work_is_done_when_it_fires(monkeypatch):
+    from app import reminders, notify as notify_mod
+    ran: list[str] = []
+
+    async def notify(msg, kind="", **k):
+        pass
+
+    async def run_on_phone(text):
+        ran.append(text)
+
+    monkeypatch.setattr(notify_mod, "notify", notify)
+    monkeypatch.setattr(main, "run_on_phone", run_on_phone)
+    store.create_reminder("DO: review Komal's PR 1459 and post comments", time.time() - 5, "")
+    asyncio.run(reminders.fire_due())
+    assert ran and ran[0].startswith("review Komal's PR 1459")
+
+
+def test_a_list_of_people_is_not_called_as_one_person_and_a_named_group_is(monkeypatch):
+    from app import agent, meetings
+    with pytest.raises(RuntimeError, match="more than one person"):
+        asyncio.run(meetings.call_person("Vinish Kumar, Komal Jayswal"))
+    assert agent._names_the_group("Fake Internal Team",
+                                  "connect fake internal team call with Vinish and Komal")
+    assert not agent._names_the_group("Prod Support", "call vinish")
+
+
+def test_waiting_for_a_call_outcome_is_not_a_step():
+    assert main._WAITS_ON_A_TASK.search(
+        "Wait for the discuss_in_call outcome with Vinish and Komal, then report back")
+    assert not main._WAITS_ON_A_TASK.search("Run the mapper tests and report the failures")

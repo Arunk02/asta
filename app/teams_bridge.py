@@ -216,9 +216,17 @@ POOL_MAX_AGE = float(os.environ.get("TEAMS_POOL_MAX_AGE", "1800"))
 
 
 #: Recycled past this much memory as well. Teams grows: 3-4 GB on 1 Oct, on a Mac
-#: whose swap was full — memory pressure is what made it hot.
-POOL_MAX_MB = 3000
-_SIZE: dict = {"at": 0.0, "mb": 0.0}
+#: whose swap was full — memory pressure is what made it hot. But a FRESH Teams is
+#: already ~3.2 GB (2 Oct: the tab alone 1.7 GB, 28 s after launch), so the old
+#: 3000 MB limit relaunched Chrome on nearly every check — constant reloads, more
+#: heat, and the chats re-read instead of read. The limit is now growth: well past
+#: what this browser settled at, and never below this floor.
+POOL_MAX_MB = 6000
+#: How much past its settled size a browser may grow before it is recycled.
+POOL_GROWTH = 1.6
+#: A browser this young is still loading Teams — its size means nothing yet.
+POOL_SETTLE_SECONDS = 120
+_SIZE: dict = {"at": 0.0, "mb": 0.0, "base": 0.0, "born": 0.0}
 
 
 def profile_mb() -> float:
@@ -238,8 +246,13 @@ def _too_big() -> bool:
     """Checked once a minute at most; never while a call holds the browser."""
     if in_a_call() or time.time() - _SIZE["at"] < 60:
         return False
+    born = _POOL.get("born", 0.0)
+    if time.time() - born < POOL_SETTLE_SECONDS:
+        return False
     _SIZE.update(at=time.time(), mb=profile_mb())
-    return _SIZE["mb"] > POOL_MAX_MB
+    if _SIZE["born"] != born:
+        _SIZE.update(born=born, base=_SIZE["mb"])      # what this browser settled at
+    return _SIZE["mb"] > max(POOL_MAX_MB, _SIZE["base"] * POOL_GROWTH)
 
 
 async def _pool_alive() -> bool:
@@ -1074,7 +1087,7 @@ def _one_of(matches: list[dict], asked: str, noun: str,
 def _refuse_blank(chat: str) -> None:
     """No name, no search: an empty search matches Teams' own filter buttons.
     Who asked is recorded, so a caller passing '' is found, not guessed at."""
-    if (chat or "").strip():
+    if re.search(r"\w", chat or ""):
         return
     import traceback
     caller = " < ".join(f"{f.name}" for f in traceback.extract_stack(limit=8)[:-2][::-1])

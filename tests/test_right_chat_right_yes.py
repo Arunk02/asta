@@ -827,13 +827,41 @@ def test_the_watcher_reports_chats_not_channels_and_says_who_is_unread():
 
 
 def test_a_browser_grown_past_its_limit_is_recycled(monkeypatch):
-    monkeypatch.setattr(tb, "profile_mb", lambda: 3500.0)
+    import time as _t
+    size = {"mb": 3200.0}
+    monkeypatch.setattr(tb, "profile_mb", lambda: size["mb"])
     monkeypatch.setattr(tb, "in_a_call", lambda: False)
-    tb._SIZE.update(at=0.0, mb=0.0)
-    assert tb._too_big()
-    tb._SIZE.update(at=0.0, mb=0.0)
+    monkeypatch.setitem(tb._POOL, "born", _t.time() - 600)
+    tb._SIZE.update(at=0.0, mb=0.0, base=0.0, born=0.0)
+    # 2 Oct: a fresh Teams is ~3.2 GB — that is its normal size, not a reason to relaunch.
+    assert not tb._too_big()
+    for mb, want in ((5900.0, False), (6500.0, True)):
+        size["mb"] = mb
+        tb._SIZE["at"] = 0.0
+        assert tb._too_big() is want, mb
+    tb._SIZE.update(at=0.0, mb=0.0, base=0.0, born=0.0)
     monkeypatch.setattr(tb, "in_a_call", lambda: True)
     assert not tb._too_big(), "never in the middle of a call"
+
+
+def test_a_browser_still_loading_is_never_judged_by_size(monkeypatch):
+    import time as _t
+    monkeypatch.setattr(tb, "profile_mb", lambda: 9000.0)
+    monkeypatch.setattr(tb, "in_a_call", lambda: False)
+    monkeypatch.setitem(tb._POOL, "born", _t.time() - 20)
+    tb._SIZE.update(at=0.0, mb=0.0, base=0.0, born=0.0)
+    assert not tb._too_big()
+
+
+def test_placeholder_rows_with_no_name_are_never_read():
+    chat_watch._RAIL.update(order=[], unread=set(), at=0.0)
+    chat_watch._HOT.clear()
+    hot = chat_watch.on_rail(["*\u200b", "* ", "*BEP_Telikos : Defect Triage"], now=1000.0)
+    assert set(hot) == {"BEP_Telikos : Defect Triage"}
+    with pytest.raises(tb.NotFound):
+        tb._refuse_blank("\u200b")
+    chat_watch._RAIL.update(order=[], unread=set(), at=0.0)
+    chat_watch._HOT.clear()
 
 
 def test_every_script_asta_puts_into_a_page_compiles(tmp_path):

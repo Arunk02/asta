@@ -282,12 +282,26 @@ _ONE_WORD = re.compile(r"^\W*(?:send|yes|yeah|yep|no|nope|approve|approved|ok|ok
                        r"done|sure|go|skip|drop|retry)\W*$", re.I)
 
 
+#: Scripts he speaks: Latin (English, romanised Hindi) and Devanagari.
+_HIS_SCRIPTS = re.compile(r"[A-Za-z\u0900-\u097F]")
+_MUSIC = re.compile(r"\b(?:music|♪|♫)\b|[♪♫]|موسيقى", re.I)
+
+
 def is_noise(text: str) -> bool:
-    """Nothing to act on: a filler, Whisper's silence hallucination, or one stray
-    word that is not an answer."""
+    """Nothing to act on: a filler, Whisper's silence hallucination, music, a
+    script he does not speak, or one stray word that is not an answer.
+
+    2 Oct: a song in the room came through as "موسيقى موسيقى موسيقى موسيقى" —
+    Whisper writing "music", in Arabic, four times."""
     t = " ".join((text or "").split())
-    if len(t) < 2 or _NOISE.match(t):
+    if len(t) < 2 or _NOISE.match(t) or _MUSIC.search(t):
         return True
+    letters = [c for c in t if c.isalpha()]
+    if letters and sum(1 for c in letters if _HIS_SCRIPTS.match(c)) < len(letters) * 0.6:
+        return True
+    words = t.lower().split()
+    if len(words) >= 3 and len(set(words)) == 1:
+        return True                                 # one word, over and over
     return len(t.split()) < 2 and not _ONE_WORD.match(t) and "asta" not in t.lower()
 
 

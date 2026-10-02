@@ -188,14 +188,29 @@ final class Ears {
     private var preroll: [Int16] = []
     private let queue = DispatchQueue(label: "asta.ears")
 
+    // What the mic is actually delivering, logged every few seconds while open —
+    // 2 Oct: hotkeys worked, the mic "opened", and not one sentence arrived.
+    private var peakDb: Float = -120
+    private var lastReport = Date()
+    private var openedAt = Date()
+    var useVoiceProcessing = true
+
     func start() {
         guard !running else { return }
         let input = engine.inputNode
-        try? input.setVoiceProcessingEnabled(true)        // echo cancelling
+        try? input.setVoiceProcessingEnabled(useVoiceProcessing)   // echo cancelling
         let inFormat = input.outputFormat(forBus: 0)
-        converter = AVAudioConverter(from: inFormat, to: outFormat)
+        log("mic format: \(inFormat.sampleRate) Hz, \(inFormat.channelCount) ch, voice processing \(useVoiceProcessing)")
+        openedAt = Date()
+        peakDb = -120
+        // Echo cancelling hands over 9 channels on a Mac; the first is the
+        // cleaned voice. One channel goes to the converter — a 9-to-1 convert
+        // produced nothing at all (2 Oct).
+        monoFormat = AVAudioFormat(standardFormatWithSampleRate: inFormat.sampleRate, channels: 1)
+        converter = AVAudioConverter(from: monoFormat!, to: outFormat)
         input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { [weak self] buf, _ in
-            self?.queue.async { self?.take(buf) }
+            guard let mono = self?.firstChannel(buf) else { return }
+            self?.queue.async { self?.take(mono) }
         }
         do {
             try engine.start()
@@ -204,7 +219,25 @@ final class Ears {
         } catch {
             input.removeTap(onBus: 0)
             log("mic failed: \(error)")
+            if useVoiceProcessing {
+                log("reopening the mic without echo cancelling")
+                engine.reset()
+                useVoiceProcessing = false
+                start()
+            }
         }
+    }
+
+    private var monoFormat: AVAudioFormat?
+
+    /// Channel one of whatever the input delivers, as a mono float buffer.
+    private func firstChannel(_ buf: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let mono = monoFormat, let src = buf.floatChannelData,
+              let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buf.frameLength),
+              let dst = out.floatChannelData else { return nil }
+        out.frameLength = buf.frameLength
+        dst[0].update(from: src[0], count: Int(buf.frameLength))
+        return out
     }
 
     func stop() {
@@ -240,6 +273,22 @@ final class Ears {
         let rms = sqrt(sum / Float(max(frames.count, 1)))
         let db = 20 * log10(max(rms, 1e-6))
         let ms = Double(frames.count) / rate * 1000
+        peakDb = max(peakDb, db)
+        if Date().timeIntervalSince(lastReport) > 3 {
+            log(String(format: "level: peak %.0f dB, room %.0f dB%@", peakDb, floorDb, inSpeech ? ", hearing speech" : ""))
+            // Echo-cancelled input that delivers nothing at all: reopen plain.
+            if peakDb < -90 && useVoiceProcessing && Date().timeIntervalSince(openedAt) > 5 {
+                DispatchQueue.main.async {
+                    log("voice processing gives silence — reopening the mic without it")
+                    self.stop()
+                    self.engine.reset()
+                    self.useVoiceProcessing = false
+                    self.start()
+                }
+            }
+            peakDb = -120
+            lastReport = Date()
+        }
         if mouth?.speaking == true {
             // Barge-in. Echo cancelling removes most of Asta's own voice; what
             // is left is far quieter than him talking, so the bar is high:

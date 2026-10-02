@@ -357,7 +357,9 @@ def test_the_menu_bar_helper_builds(tmp_path):
     assert "NSMicrophoneUsageDescription" in plist and "<key>LSUIElement</key><true/>" in plist
     src = (root / "deploy" / "voice" / "AstaVoice.swift").read_text()
     assert "kVK_ANSI_A" in src and "kVK_ANSI_M" in src, "⌃⌥A and ⌃⌥M"
-    assert "setVoiceProcessingEnabled(true)" in src, "echo cancelling on the input"
+    assert "setVoiceProcessingEnabled(useVoiceProcessing)" in src, "echo cancelling on the input"
+    assert "firstChannel" in src, "the 9-channel echo-cancelled input is reduced to its first channel"
+    assert "reopening the mic without echo cancelling" in src, "and falls back when it cannot start"
     assert "AVSpeechSynthesizer" in src, "the Mac's voice when Asta's is down"
 
 
@@ -463,3 +465,15 @@ def test_a_voice_turn_answers_even_when_no_brain_can_be_chosen(helper, monkeypat
     vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
     assert run(vm.handle("what is pending?"))["did"] == "answered"
     assert helper.said() == ["Nothing pending right now."]
+
+
+@pytest.mark.parametrize("heard", ["موسيقى موسيقى موسيقى موسيقى", "[Music]", "♪ la la la ♪",
+                                   "okay okay okay okay", "谢谢大家"])
+def test_music_and_other_rooms_noise_are_not_turns(heard):
+    assert vm.is_noise(heard)
+
+
+@pytest.mark.parametrize("heard", ["मेरे pull request का क्या हाल है?", "Asta, check UAT please",
+                                   "booking PR 1429 status"])
+def test_his_english_and_hindi_still_are(heard):
+    assert not vm.is_noise(heard)

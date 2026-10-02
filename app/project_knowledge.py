@@ -240,6 +240,8 @@ def _docs(words: list[str], limit: int) -> list[dict]:
             pass
     question = " ".join(words)
     hits = knowledge.search(question, limit=limit * 2)
+    # The authoritative flow document first when it matched: it is the last word.
+    hits.sort(key=lambda h: 0 if FLOW_DOC.split(".")[0] in (h.get("path") or h.get("document") or "") else 1)
     # A third of what he named, not knowledge.relevant's half: "explain the
     # booking service, what it does" names three words, and one is generic.
     keep = [h for h in hits if knowledge.coverage(question, h) >= 0.34]
@@ -248,6 +250,37 @@ def _docs(words: list[str], limit: int) -> list[dict]:
 
 
 # --- one lookup ----------------------------------------------------------------------
+
+#: The authoritative flow document in his knowledge folder: his corrections are
+#: written into it (its "Facts from Arun" section), not kept in a side list — his
+#: call, 2 Oct: "don't keep corrections, correct the docs themselves".
+FLOW_DOC = "telikos-system-flow.md"
+_FACTS = "## Facts from Arun"
+
+
+def learn(said: str, restated: str = "", where: str = "voice") -> bool:
+    """His correction or addition of a domain fact, written into the flow
+    document, read again at once, and ranked first by every channel."""
+    from . import knowledge
+    said = " ".join((said or "").split())
+    if len(said) < 12:
+        return False
+    path = knowledge.folder() / FLOW_DOC
+    try:
+        text = path.read_text() if path.exists() else (
+            "# Telikos system flow\n\n> Authoritative: wins over every other document.\n")
+        if _FACTS not in text:
+            text = text.rstrip() + f"\n\n{_FACTS}\n\nCorrections Arun gives are added here and win "\
+                   "over anything above them.\n"
+        line = f"\n- {time.strftime('%Y-%m-%d')} ({where}): {restated.strip() or said}"
+        if restated.strip():
+            line += f"  — in his words: \"{said[:300]}\""
+        path.write_text(text.rstrip() + line + "\n")
+        _STATE["reindexed"] = 0.0          # read again on the next lookup
+        return True
+    except OSError:
+        return False
+
 
 def default_workspace() -> str:
     try:
@@ -327,7 +360,8 @@ def lookup(question: str, workspace: str = "", budget: int = BUDGET_CHARS, chann
 
 #: Questions the knowledge answers: what something is, how it works, why.
 KNOWLEDGE_ASK = re.compile(
-    r"\b(?:what(?:'s| is| are| does)|explain|how does|how do|how is|tell me about|walk me through|"
+    r"\b(?:what(?:'s| is| are| does)|explain|how does|how do|how is|tell (?:me |us )?(?:about|abt)|"
+    r"walk me through|know about|brief (?:me|on|about)|"
     r"which (?:system|service|team)|who owns|what happens|meaning of|describe|overview|flow)\b", re.I)
 
 

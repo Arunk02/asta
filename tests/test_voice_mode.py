@@ -204,7 +204,8 @@ def test_without_the_asta_voice_the_mac_voice_reads_the_text(helper, monkeypatch
 
 # --- what is heard ----------------------------------------------------------------------
 
-@pytest.mark.parametrize("said", ["Thank you.", "you", "Hmm", "uh", "", "the"])
+@pytest.mark.parametrize("said", ["Thank you.", "you", "Hmm", "uh", "", "the", "Yeah.", "okay",
+                                  "Go Go Go Go Go Go", "Продолжение следует..."])
 def test_noise_and_silence_are_never_turns(said):
     assert vm.is_noise(said)
 

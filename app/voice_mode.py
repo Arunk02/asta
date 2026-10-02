@@ -278,8 +278,9 @@ _QUIET = re.compile(r"\b(?:voice\s+off|stop\s+talking|be\s+quiet|shut\s+up)\b", 
 #: Fillers, and what Whisper writes for a cough or a silence ("Thank you.", "you").
 _NOISE = re.compile(r"^\W*(?:um+|uh+|hmm+|ah+|oh+|thank you|thanks|you|bye)\W*$", re.I)
 #: One word that IS an answer — to a draft waiting for "send", or a question.
-_ONE_WORD = re.compile(r"^\W*(?:send|yes|yeah|yep|no|nope|approve|approved|ok|okay|stop|cancel|"
-                       r"done|sure|go|skip|drop|retry)\W*$", re.I)
+#: Only words that cannot be mistaken for the room: "Yeah." and "Go go go" were
+#: background audio, live on 2 Oct, and each started a brain turn.
+_ONE_WORD = re.compile(r"^\W*(?:send|yes|no|approve|approved|stop|cancel|retry)\W*$", re.I)
 
 
 #: Scripts he speaks: Latin (English, romanised Hindi) and Devanagari.

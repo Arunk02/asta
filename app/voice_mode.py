@@ -387,7 +387,7 @@ _NOISE = re.compile(r"^\W*(?:um+|uh+|hmm+|ah+|oh+|thank you|thanks|you|bye)\W*$"
 #: One word that IS an answer — to a draft waiting for "send", or a question.
 #: Only words that cannot be mistaken for the room: "Yeah." and "Go go go" were
 #: background audio, live on 2 Oct, and each started a brain turn.
-_ONE_WORD = re.compile(r"^\W*(?:send|yes|no|approve|approved|stop|cancel|retry)\W*$", re.I)
+_ONE_WORD = re.compile(r"^\W*(?:send|yes|no|approve|approved|stop|cancel|retry|hello|hi|hey)\W*$", re.I)
 
 
 #: Scripts he speaks: Latin (English, romanised Hindi) and Devanagari.
@@ -451,6 +451,11 @@ def mac_words(said: str, confidence: float) -> str:
     """The Mac's transcription when it can be trusted, else ''."""
     said = " ".join((said or "").split())
     if not said or foreign(said) or confidence < EARS_CONFIDENCE:
+        return ""
+    if len(_tokens(said)) < 3:
+        # Short is where it fails while sure of itself: "Hello Asta", said again
+        # and again on 2 Oct, came back as "Hello" at 98-100% — the name gone,
+        # and a lone "Hello" thrown away. Whisper hears short clips too.
         return ""
     return said
 

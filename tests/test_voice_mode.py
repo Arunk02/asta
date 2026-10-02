@@ -1381,3 +1381,15 @@ def test_half_a_thought_is_not_a_job(helper, decide, talker, monkeypatch):
     vm._JOBS.clear()
     vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
     assert run(vm.handle("Then also add"))["did"] == "answered" and vm._JOBS == {}
+
+
+def test_a_short_mac_result_is_checked_by_whisper(whisper):
+    # 2 Oct 13:41: "Hello Asta" x3 came back from the Mac as "Hello", 98-100% sure.
+    whisper["text"] = "Hello Asta"
+    assert run(vm.heard(b"RIFF", dry=True, said="Hello", confidence=1.0))["text"] == "Hello Asta"
+    assert whisper["calls"] == 1
+
+
+def test_a_lone_hello_is_him_calling_not_noise():
+    for word in ("Hello", "Hello.", "hi", "Hey"):
+        assert not vm.is_noise(word), word

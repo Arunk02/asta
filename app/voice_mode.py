@@ -311,6 +311,12 @@ _HIS_SCRIPTS = re.compile(r"[A-Za-z\u0900-\u097F]")
 _MUSIC = re.compile(r"\b(?:music|♪|♫)\b|[♪♫]|موسيقى", re.I)
 
 
+def foreign(text: str) -> bool:
+    """Written in letters he never uses: not plain English, not Devanagari."""
+    return any(c.isalpha() and not ("a" <= c.lower() <= "z" or "\u0900" <= c <= "\u097f")
+               for c in text or "")
+
+
 def is_noise(text: str) -> bool:
     """Nothing to act on: a filler, Whisper's silence hallucination, music, a
     script he does not speak, or one stray word that is not an answer.
@@ -356,6 +362,11 @@ async def heard(wav: bytes, dry: bool = False) -> dict:
     from . import voice
     try:
         text = (await voice.transcribe(wav, filename="speech.wav")).strip()
+        if foreign(text):
+            # Whisper guessed a language he does not speak — "Hey Asta, are you
+            # there?" came back as "Hérsta er þú der." (Icelandic), 2 Oct. Short
+            # clips are where its guess goes wrong; English is what he means.
+            text = (await voice.transcribe(wav, filename="speech.wav", language="en")).strip()
     except Exception as exc:                                    # noqa: BLE001
         store.record_outcome("voice", "stt_failed", detail=str(exc)[:200])
         await _to_helper({"type": "error", "text": "I could not hear that — speech-to-text is down."})

@@ -749,3 +749,29 @@ def test_his_prs_are_answered_from_what_asta_holds(monkeypatch):
     assert "You have 2 open PRs." in said and "booking PR 1429" in said
     assert vm.pr_answer("what's pending with my PRs?").startswith("You have 2 open PRs.")
     assert vm.pr_answer("check booking H69 in UAT") == ""
+
+
+def test_a_wrong_language_guess_is_transcribed_again_as_english(monkeypatch):
+    from app import voice
+    calls: list[str] = []
+
+    async def transcribe(data, filename="", language=""):
+        calls.append(language)
+        return "Hérsta er þú der." if not language else "Hey Asta, are you there?"
+
+    monkeypatch.setattr(voice, "transcribe", transcribe)
+    out = run(vm.heard(b"RIFF", dry=True))
+    assert out["text"] == "Hey Asta, are you there?" and calls == ["", "en"]
+
+
+def test_hindi_and_english_are_kept_as_heard(monkeypatch):
+    from app import voice
+    calls: list[str] = []
+
+    async def transcribe(data, filename="", language=""):
+        calls.append(language)
+        return "मेरे pull request का क्या हाल है?"
+
+    monkeypatch.setattr(voice, "transcribe", transcribe)
+    assert run(vm.heard(b"RIFF", dry=True))["text"] == "मेरे pull request का क्या हाल है?"
+    assert calls == [""]

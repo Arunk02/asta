@@ -1084,6 +1084,21 @@ def _one_of(matches: list[dict], asked: str, noun: str,
         f"Refusing to guess: ask Arun which one he means and use the full name.")
 
 
+def one_to_one(chat: str, rows: list[dict] | None = None) -> bool:
+    """A person's own chat, not a group: named like a person (no separators,
+    a few words), and everyone else who wrote in it is that person."""
+    n = (chat or "").strip()
+    if not n or _is_member_list(n) or re.search(r"[:,|&@/#()\[\]]|\+\d|\band\b", n, re.I) \
+            or len(n.split()) > 4:
+        return False
+    from . import chat_watch
+    others = {(r.get("sender") or "").strip().lower() for r in rows or []
+              if r.get("sender") and not chat_watch.is_from_him(r.get("sender", ""))}
+    if others:
+        return others == {n.lower()}
+    return chat_watch._looks_one_to_one(n)
+
+
 def _refuse_blank(chat: str) -> None:
     """No name, no search: an empty search matches Teams' own filter buttons.
     Who asked is recorded, so a caller passing '' is found, not guessed at."""
@@ -1601,14 +1616,17 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
 
         await _photograph_images(page, title, raw)
         store.kv_set("teams_session_ok", "1")
-        # Never left open (see `park`), and given back to him unread if it was.
+        rows = _capture(title, raw)
+        # Never left open (see `park`). A 1:1 that was unread for him is given
+        # back unread — a person wrote to HIM. A group is left read: anything in
+        # it for him is caught and brought to him, and an unread mark he never
+        # acts on only keeps Asta re-opening it (his call, 2 Oct).
         await park(page)
-        if was_unread and await mark_unread(page, chat):
+        if was_unread and one_to_one(chat, rows) and await mark_unread(page, chat):
             with contextlib.suppress(Exception):
                 from . import chat_watch
                 chat_watch.note_restored(chat)
 
-    rows = _capture(title, raw)
     if since is not None:
         rows = [r for r in rows if r["sent_at"] is not None and r["sent_at"] >= since]
     return rows[-limit:] if limit > 0 else rows

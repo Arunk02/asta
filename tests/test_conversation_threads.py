@@ -524,3 +524,23 @@ def test_the_model_reads_both_sides_so_it_sees_he_already_took_it_over(rail):
 def test_ok_arun_is_a_goodbye_to_the_rules_too():
     from app import understand
     assert understand.rules(_item(new=["Ok Arun"]))["state"] == "closing"
+
+
+def test_vinish_answering_your_question_reaches_you_at_once(rail):
+    """2 Oct 16:38: "Bro, tomorrow morning, 10 to 11 Am" — his answer to Arun's
+    "bro when ru free for the call" — was read in 33 s and filed as status."""
+    now = time.time()
+    store.save_teams_messages([{"key": "a1", "chat": "Vinish Kumar", "sender": "Arunkumar K",
+                                "text": "bro when ru free for the call", "sent_at": now - 3600,
+                                "stamp": ""},
+                               {"key": "v1", "chat": "Vinish Kumar", "sender": "Vinish Kumar",
+                                "text": "Bro, tomorrow morning, 10 to 11 Am", "sent_at": now - 30,
+                                "stamp": ""}])
+    rail.rows["Vinish Kumar"] = [_msg("Vinish Kumar", "Bro, tomorrow morning, 10 to 11 Am", now - 30)]
+    rail.script["teams:Vinish Kumar"] = {"state": "status", "need": "", "closing_confidence": 0.4,
+                                         "summary": "Vinish is free tomorrow 10-11", "entities": []}
+    rail.sweep()
+    direct = [p for p in rail.pushes if p["urgency"] == "direct"]
+    assert direct and "Vinish replied to you" in direct[0]["text"]
+    assert "10 to 11" in direct[0]["text"] and "when ru free" in direct[0]["text"]
+    assert rail.sent == [], "a time agreed is his to agree — Asta does not answer it"

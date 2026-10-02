@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1125,3 +1126,25 @@ def test_woken_for_a_re_read_that_is_not_due_is_not_a_full_sweep(rail, monkeypat
     _restore("BEP_Telikos : Defect Triage", rows, t0)
     # Due in a minute: the loop wakes then, finds nothing due yet (clock not moved).
     assert asyncio.run(chat_watch._wait_for_work(300)) == "idle"
+
+
+def test_a_group_is_left_read_and_a_persons_chat_given_back_unread():
+    vin = [{"sender": "Vinish Kumar", "text": "Bro, tomorrow 10"},
+           {"sender": "Arunkumar K", "text": "ok"}]
+    room = [{"sender": "Sonal Pathak", "text": "ready"}, {"sender": "Roshan Kumar Thakur", "text": "fyi"}]
+    assert tb.one_to_one("Vinish Kumar", vin)
+    assert not tb.one_to_one("BEP_Telikos : Defect Triage", room)
+    assert not tb.one_to_one("Fake Internal Team", room)
+    assert not tb.one_to_one("Shabda Anubhav, Vinish, +2", vin)
+    src = (Path(tb.__file__)).read_text()
+    assert "if was_unread and one_to_one(chat, rows) and await mark_unread(page, chat):" in src
+
+
+def test_teams_painting_its_icon_bar_is_not_six_chats_moving(rail):
+    names = ["Arunkumar K (You)", "Vinish Kumar", "*BEP_Telikos : Defect Triage", "Daily deployment slot",
+             "Team Booking and Execution", "AP Changes Related to Soft Closure", "Nakka Harika",
+             "Fake Internal Team", "Palikala Divya Maheswari", "ATA/ATD changes with Billing"]
+    chat_watch.on_rail(names)
+    chat_watch.take_hot()
+    assert chat_watch.on_rail(["", "", "", "", ""]) == []
+    assert chat_watch.on_rail(names) == [], "the real list again: nothing moved"

@@ -31,12 +31,15 @@ QUIET = "[QUIET]"
 DO = "[DO]"
 
 #: The talker's model. Speed first: anything that needs depth is the worker's.
-MODEL = "sonnet"
+#: Haiku judged every quiet/answer/hand-off case right in the 2 Oct bench, and
+#: opens with short sentences, which the voice speaks in ~0.5 s instead of 1.5 s.
+MODEL = "haiku"
 
 PERSONA = """You are Asta, Arun's assistant, talking with him OUT LOUD — like JARVIS:
 quick, warm, precise, never chatty. He works on the Telikos booking platform at Maersk.
 
-Reply with ONLY the words you say: one or two short sentences, plain words. No
+Reply with ONLY the words you say: one or two short sentences, plain words. The
+FIRST sentence under eight words — it is spoken while you write the rest. No
 markdown, lists, links, code, emoji.
 
 Decide every time:
@@ -51,6 +54,16 @@ Decide every time:
    fixing, anything the briefing does not answer: say exactly ONE of these, then
    [DO] — "On it.", "Checking now.", "Let me look." (they are pre-recorded, so
    they play instantly). Never say it is done; never guess the answer.
+
+If he just calls you or asks you to listen ("Asta", "listen to me", "are you there"),
+say "I'm listening." and nothing more.
+[Working on now: …] lists work already running: ONLY if he asks for the very same
+thing again, say "Still on that." — no [DO]. A different question is answered on its
+own. If he adds to running work ("also check pre-prod"), that is new work: [DO].
+Questions the briefing answers (his PRs, what is pending, what is scheduled) are
+answered from it — never handed on as work.
+
+Do not ask him questions back unless you truly cannot act without the answer.
 
 When a message starts with [RESULT], it is what the work you handed on found:
 tell him the outcome in one or two sentences — the answer, not the process.
@@ -143,6 +156,10 @@ def _message(text: str, kind: str = "said") -> str:
         if brief and brief != _TALKER["briefed"]:
             _TALKER["briefed"] = brief
             head = f"[Briefing, {time.strftime('%a %H:%M')}]\n{brief}\n\n"
+    from . import voice_mode
+    working = voice_mode.jobs_line()
+    if working:
+        head += working + "\n"
     if kind == "result":
         return head + text
     if kind == "update":
@@ -210,3 +227,65 @@ async def _read_whole(m, message: str, timeout: float, out: asyncio.Queue, end) 
         await out.put(exc)
     finally:
         await out.put(end)
+
+
+# --- the instant decision, on his Mac --------------------------------------------------
+#
+# Measured 2 Oct on a Mac at load 18: the warm Claude took 4-20 s to its first
+# words; the local model (Gemma 4 E4B, shown four examples) decided in 0.6-0.8 s
+# and got every quiet / listening / hand-off case right — but could not answer a
+# status question (it thought for 20-30 s and said nothing). So it DECIDES, and
+# only "needs an answer" goes to Claude.
+
+LISTEN = "[LISTEN]"
+ANSWER = "[ANSWER]"
+
+ROUTER = """You decide what Arun's voice assistant does with one sentence he said out loud.
+Reply with exactly one of:
+[QUIET]            not meant for the assistant: talking to someone else, on a call,
+                   a casual remark, filler, a fragment, background noise
+I'm listening.     he only called the assistant ("Asta", "listen to me", "are you there")
+On it. [DO]        work: check, look up, send, draft, review, investigate, schedule, fix
+[ANSWER]           a question about his own work that needs an answer (PRs, pending,
+                   tasks, who is waiting) — or anything you are unsure about
+Nothing else. Never explain."""
+
+_SHOTS = [("yeah", "[QUIET]"), ("haha no I told him already", "[QUIET]"),
+          ("Asta, are you there?", "I'm listening."),
+          ("check the logs for booking ABC123 in prod", "On it. [DO]"),
+          ("send Vinish a reminder about the PR", "On it. [DO]"),
+          ("how many PRs do I have open?", "[ANSWER]"),
+          ("what's pending today?", "[ANSWER]")]
+
+#: How long the local decision may take before Claude decides instead.
+ROUTE_SECONDS = 4.0
+
+
+async def route(text: str) -> str | None:
+    """QUIET, LISTEN, DO or ANSWER for this sentence — or None when the local
+    model is not there (or too slow), and the Claude talker decides instead."""
+    import httpx
+    from . import memory
+    model = await asyncio.to_thread(memory.local_llm_model)
+    if not model or "embed" in model:
+        return None
+    msgs = [{"role": "system", "content": ROUTER}]
+    for said, reply in _SHOTS:
+        msgs += [{"role": "user", "content": f'He said: "{said}"'},
+                 {"role": "assistant", "content": reply}]
+    msgs.append({"role": "user", "content": f'He said: "{text}"'})
+    try:
+        async with httpx.AsyncClient(timeout=ROUTE_SECONDS) as c:
+            r = await c.post(f"{memory.local_llm_base()}/chat/completions", json={
+                "model": model, "messages": msgs, "max_tokens": 24, "temperature": 0})
+            out = ((r.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    except Exception:                                           # noqa: BLE001
+        return None
+    out = out.strip()
+    if QUIET in out:
+        return QUIET
+    if DO in out:
+        return DO
+    if "listening" in out.lower():
+        return LISTEN
+    return ANSWER

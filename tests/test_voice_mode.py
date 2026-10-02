@@ -523,7 +523,6 @@ def test_a_status_question_is_answered_by_the_talker_without_the_worker(helper, 
 def test_work_is_acknowledged_once_and_the_outcome_said_once(helper, talker, monkeypatch):
     replies, asked = talker
     replies.append(["Checking now.", "[DO]"])
-    replies.append(["No H69 booking in UAT either — it never arrived."])
     dispatched: list[str] = []
 
     async def dispatch(conv, text, sink, channel):
@@ -542,8 +541,8 @@ def test_work_is_acknowledged_once_and_the_outcome_said_once(helper, talker, mon
 
     assert run(go())["did"] == "handed_on"
     assert dispatched == ["check if booking H69LMCN6KZY reached UAT"], "his words, unchanged, to the worker"
-    assert helper.said() == ["Checking now.", "No H69 booking in UAT either — it never arrived."]
-    assert asked[-1][1] == "result" and "no hits in 72h" in asked[-1][0]
+    assert helper.said() == ["Checking now.", "Checked Loki in UAT for H69LMCN6KZY: no hits in 72h."], \
+        "the worker's own words, no second pass through Claude"
 
 
 def test_talking_over_the_talker_stops_it(helper, talker):
@@ -606,3 +605,147 @@ def test_the_talker_brief_keeps_its_promises():
     assert "[QUIET]" in p and "[DO]" in p and "[RESULT]" in p
     for phrase in ("On it.", "Checking now.", "Let me look."):
         assert phrase in p and phrase in vm.ACKS.values(), "acknowledgements are pre-recorded"
+
+
+# --- the instant local decision -----------------------------------------------------------
+
+@pytest.fixture
+def decide(monkeypatch):
+    from app import voice_talker
+    box = {"next": None}
+
+    async def route(text):
+        return box["next"]
+
+    monkeypatch.setattr(voice_talker, "route", route)
+    return box
+
+
+def test_quiet_decided_locally_never_reaches_claude(helper, decide, talker):
+    from app import voice_talker
+    decide["next"] = voice_talker.QUIET
+    replies, asked = talker
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    assert run(vm.handle("one sec, I'm on a call"))["did"] == "not_for_asta"
+    assert asked == [] and helper.said() == []
+
+
+def test_being_called_is_answered_at_once(helper, decide):
+    from app import voice_talker
+    decide["next"] = voice_talker.LISTEN
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    assert run(vm.handle("Asta, listen to me"))["did"] == "listening"
+    assert helper.said() == ["I'm listening."]
+
+
+def test_work_decided_locally_starts_one_job_and_a_repeat_starts_none(helper, decide, monkeypatch):
+    from app import voice_talker
+    decide["next"] = voice_talker.DO
+    started: list[str] = []
+
+    async def dispatch(conv, text, sink, channel):
+        started.append(text)
+
+        async def work():
+            await asyncio.sleep(0.3)
+            await sink.send({"type": "delta", "text": "done"})
+        return asyncio.ensure_future(work())
+
+    async def no_result(*a, **k):
+        if False:
+            yield ""
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    monkeypatch.setattr(voice_talker, "sentences", no_result)
+    vm._JOBS.clear()
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+
+    async def go():
+        a = await vm.handle("check if booking H69LMCN6KZY reached UAT")
+        await asyncio.sleep(0.05)
+        b = await vm.handle("check booking H69LMCN6KZY reached UAT")
+        await asyncio.sleep(0.5)
+        return a, b
+
+    a, b = run(go())
+    assert a["did"] == "handed_on" and b["did"] == "already_on_it"
+    assert started == ["check if booking H69LMCN6KZY reached UAT"]
+    assert helper.said()[:2] == ["On it.", "Still on that — I'll tell you."]
+    vm._JOBS.clear()
+
+
+def test_two_different_jobs_run_side_by_side(helper, decide, monkeypatch):
+    from app import voice_talker
+    decide["next"] = voice_talker.DO
+    running_now: list[int] = []
+    peak = {"n": 0}
+
+    async def dispatch(conv, text, sink, channel):
+        async def work():
+            running_now.append(1)
+            peak["n"] = max(peak["n"], len(running_now))
+            await asyncio.sleep(0.2)
+            running_now.pop()
+            await sink.send({"type": "delta", "text": f"result for {text}"})
+        return asyncio.ensure_future(work())
+
+    async def no_result(*a, **k):
+        if False:
+            yield ""
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    monkeypatch.setattr(voice_talker, "sentences", no_result)
+    vm._JOBS.clear()
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+
+    async def go():
+        await vm.handle("check H69LMCN6KZY in UAT")
+        await vm.handle("draft a reminder to Vinish about booking PR 1429")
+        await asyncio.sleep(0.5)
+
+    run(go())
+    assert peak["n"] == 2, "the second did not wait for the first"
+    assert len({j["cid"] for j in vm._JOBS.values()}) == 2, "each in its own conversation"
+    vm._JOBS.clear()
+
+
+def test_a_question_gets_one_ready_line_then_claudes_answer(helper, decide, talker, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.ANSWER
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    replies, asked = talker
+    replies.append(["Just booking PR 1429."])
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.handle("which of my PRs is waiting on Vinish?"))
+    assert asked and helper.said() == ["Let me see.", "Just booking PR 1429."]
+
+
+def test_what_asta_already_knows_is_answered_without_a_brain(helper, decide, talker, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.ANSWER
+    monkeypatch.setattr(frontdesk, "answer_from_state",
+                        lambda text: "Waiting on you:\n• #201 Fix Contract Test failure on email PR 675 — plan")
+    replies, asked = talker
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    assert run(vm.handle("what's pending"))["did"] == "answered_from_state"
+    assert asked == [] and helper.said() and "201" in helper.said()[0]
+
+
+def test_the_same_request_in_other_words_is_still_the_same():
+    assert vm.same_request("check if booking H69LMCN6KZY reached UAT",
+                           "Asta check booking H69LMCN6KZY in UAT again")
+    assert not vm.same_request("check booking H69LMCN6KZY in UAT",
+                               "check booking H69LMCN6KZY in pre-prod")
+
+
+def test_his_prs_are_answered_from_what_asta_holds(monkeypatch):
+    from app import prname, reminders
+    monkeypatch.setattr(prname, "his_open_prs", lambda limit=15: (
+        "• booking PR 1429 — feat: fail RFP on missing mandatory downstream fields\n"
+        "• AP PR 1252 — Derive ATA/ATD order-level references from TMS execution events"))
+    reminders.schedule_send("Vinish Kumar", "bro can u merge these", time.time() + 3600)
+    said = vm.pr_answer("which of my PRs is waiting on Vinish?")
+    assert said.startswith("Your message to Vinish about them goes out"), "the part he asked about first"
+    assert "You have 2 open PRs." in said and "booking PR 1429" in said
+    assert vm.pr_answer("what's pending with my PRs?").startswith("You have 2 open PRs.")
+    assert vm.pr_answer("check booking H69 in UAT") == ""

@@ -56,19 +56,17 @@ def test_real_content_is_not_trivial(txt):
     assert not router.is_trivial(txt)
 
 
-# --- reply: local model when up, canned when not ----------------------------
+# --- reply: ready-made, never a model ---------------------------------------
 
-def test_reply_prefers_the_local_model(monkeypatch):
+def test_a_pleasantry_never_reaches_a_model_that_could_leak_its_thinking(monkeypatch):
+    """2 Oct: "okay" got back the local model's own reasoning as the reply."""
     from app import memory
-    monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: "Hello there!")
-    assert asyncio.run(router.reply("hi")) == "Hello there!"
-
-
-def test_reply_falls_back_to_canned_when_local_is_down(monkeypatch):
-    from app import memory
-    monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: None)
+    leak = "The user has provided the input \"okay\" and instructed me to reply... Sounds good!"
+    monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: leak)
+    assert asyncio.run(router.reply("okay")) == "👍"
     assert asyncio.run(router.reply("thanks")) == "Anytime! 👍"
     assert asyncio.run(router.reply("bye")) == "Catch you later! 👋"
+    assert asyncio.run(router.reply("hi")) == "Hey! What can I do for you?"
 
 
 def test_disabled_router_is_a_no_op(monkeypatch):

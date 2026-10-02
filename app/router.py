@@ -55,10 +55,10 @@ def _canned(text: str) -> str:
 
 
 async def reply(user_text: str) -> str:
-    """A one-line answer for a trivial turn — the local model if it's up, else a
-    canned line. Never spawns a paid brain, never calls a tool."""
-    from . import memory
-    prompt = ("You are Arun's assistant. Reply to this in ONE short, warm sentence. "
-              "Do not ask questions or use tools.\n\n" + (user_text or "").strip())
-    out = await asyncio.to_thread(memory.local_llm_complete, prompt, 60)
-    return (out or "").strip() or _canned(user_text)
+    """A one-line answer for a trivial turn: "okay" → 👍, "thanks" → "Anytime!".
+
+    Ready-made, never a model. 2 Oct: the local model, asked for "one short,
+    warm sentence", sent him its own thinking — "The user has provided the
+    input 'okay' and instructed me to reply in one short, warm sentence…
+    Sounds good!" A pleasantry needs no model, and none can leak."""
+    return _canned(user_text)

@@ -13,7 +13,7 @@ refuses outright any send to them that does not carry his approval.
 
 Switching it off: delete the section from guardrails.md — no restart. Taking it
 out of the code for good: delete this file and every line that says `senior.`
-(`grep -rn "senior\." app/`), plus its tests at the end of
+(`grep -rn "senior[.]" app/`), plus its tests at the end of
 tests/test_right_chat_right_yes.py.
 """
 

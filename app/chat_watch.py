@@ -716,8 +716,8 @@ async def candidates() -> list[str]:
         if r["name"].strip().lower().startswith(("see more", "see all")):
             rail = rail[:i]
             break
-    rail = [r for r in rail if r["name"].lower() not in teams_bridge._NOT_A_CHAT
-            and not is_furniture(r["name"])]
+    rail = [r for r in rail if re.search(r"\w", r["name"] or "")
+            and r["name"].lower() not in teams_bridge._NOT_A_CHAT and not is_furniture(r["name"])]
     current = [r["name"] for r in rail]
     # Read BEFORE it is overwritten: the comparison is the whole activity signal.
     try:
@@ -1812,7 +1812,10 @@ def on_rail(rows: list[str], now: float | None = None) -> list[str]:
     for c in list(_RESTORED):
         if c not in unread and now - _RESTORED[c] > 30:
             _RESTORED.pop(c, None)              # he has read it himself
-    hot = {c for c in hot if c and c.lower() not in teams_bridge._NOT_A_CHAT
+    # A row with no letters is not a chat: while Teams loads, its list is
+    # placeholder rows with invisible names, and ten of them were "read" every
+    # five minutes (81 s each time, 2 Oct).
+    hot = {c for c in hot if re.search(r"\w", c or "") and c.lower() not in teams_bridge._NOT_A_CHAT
            and not is_furniture(c) and not c.lower().endswith("(you)")}
     for c in hot:
         _HOT.setdefault(c, now)

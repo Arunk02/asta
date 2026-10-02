@@ -322,7 +322,7 @@ final class Ears {
         speech += frames
         quietMs = (db < floorDb + 6) ? quietMs + ms : 0
         let seconds = Double(speech.count) / rate
-        if quietMs >= 900 || seconds >= 30 {
+        if quietMs >= 700 || seconds >= 30 {
             let take = speech
             reset()
             if seconds >= 0.5 {

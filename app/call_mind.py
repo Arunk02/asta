@@ -290,34 +290,39 @@ def persona(who: str, topic: str, agenda: str = "", minutes: float = 0,
                 if minutes else "")) + (_AS_HIM if as_him else "")
 
 
-async def start(who: str, topic: str, agenda: str = "", minutes: float = 0,
-                as_him: bool = False) -> Mind:
-    """Spawn the call's brain and prime it while the phone rings."""
+async def spawn(system: str, model: str = "") -> Mind:
+    """A warm Claude with only this brief — no tools, no settings, no MCP — primed
+    so its first real answer is not the slow one. Calls and voice mode share it."""
     # The same environment every CLI brain gets: his refused API key stripped
     # (left in, the CLI tries it instead of his subscription and stalls), and
     # Claude Code's private memory off.
     from .claude_cli import _subprocess_env
     env = _subprocess_env()
-    # Only the call's own brief. Claude Code's default system prompt, his user
-    # settings (hooks) and the MCP servers they bring (Grafana's 43 tools) all
-    # ride along otherwise — measured on 22 Sep: first words in 1.9-4.4 s with
-    # them, 0.9-1.2 s without. A call brain has nothing to look up anyway.
+    # Only the brief. Claude Code's default system prompt, his user settings
+    # (hooks) and the MCP servers they bring (Grafana's 43 tools) all ride along
+    # otherwise — measured on 22 Sep: first words in 1.9-4.4 s with them,
+    # 0.9-1.2 s without.
     proc = await asyncio.create_subprocess_exec(
         CLAUDE, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-        "--verbose", "--include-partial-messages", "--model", MODEL, "--tools", "",
+        "--verbose", "--include-partial-messages", "--model", model or MODEL, "--tools", "",
         "--setting-sources", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-        "--system-prompt", persona(who, topic, agenda, minutes, as_him),
+        "--system-prompt", system,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, cwd=tempfile.gettempdir(), env=env)
     mind = Mind(proc)
-    # The first answer of any session is the slow one; pay it now, not in front
-    # of the person. A brain that is out of its usage window says so here —
-    # before anybody's phone rings — rather than in the middle of the call.
+    # The first answer of any session is the slow one; pay it now. A brain out of
+    # its usage window says so here, not in the middle of a conversation.
     try:
-        await mind._ask("The call is ringing. Reply with just: ready", 40)
+        await mind._ask("Reply with just: ready", 40)
     except Unavailable:
         await mind.close()
         raise
     except Exception:                                          # noqa: BLE001
         pass
     return mind
+
+
+async def start(who: str, topic: str, agenda: str = "", minutes: float = 0,
+                as_him: bool = False) -> Mind:
+    """Spawn the call's brain and prime it while the phone rings."""
+    return await spawn(persona(who, topic, agenda, minutes, as_him))

@@ -47,9 +47,7 @@ FOLLOW_WINDOW_SECONDS = 120.0
 #: takes 20-35 s. Silence that long reads as "it didn't hear me".
 ACK_SECONDS = 1.2
 #: Prepared when the voice comes on, so they play with no synthesis wait.
-ACKS = {"question": "Let me check.", "do": "On it.", "long": "Still on it."}
-#: A turn still working after this says "Still on it" once.
-STILL_SECONDS = 25.0
+ACKS = {"question": "Let me check.", "do": "On it.", "now": "Checking now.", "look": "Let me look."}
 #: How long a voice turn may run before its answer goes to the chat instead.
 TURN_SECONDS = 600.0
 #: The levels of `notify` that are worth saying out loud, when they are addressed to him.
@@ -111,8 +109,12 @@ async def set_mode(speaker: bool | None = None, mic: bool | None = None,
     # that pays for it.
     with contextlib.suppress(Exception):
         from . import voice
+        from . import voice_talker
         if mic:
             asyncio.ensure_future(voice.warm_the_ears())
+            asyncio.ensure_future(voice_talker.warm())
+        elif mic is False:
+            asyncio.ensure_future(voice_talker.close())
         if speaker:
             asyncio.ensure_future(voice.warm_the_voice())
             asyncio.ensure_future(warm_acks())
@@ -354,13 +356,81 @@ async def handle(text: str) -> dict:
         await say("Okay, going quiet.", kind="answer")
         await set_mode(speaker=False, why="he said so")
         return {"text": text, "did": "speaker_off"}
-    if not await meant_for_asta(text):
-        store.record_outcome("voice", "not_for_asta", detail=text[:200])
-        return {"text": text, "did": "not_for_asta"}
+    return await converse(text)
+
+
+async def converse(text: str) -> dict:
+    """The talker answers, stays quiet, or hands the work on — in about a second.
+
+    Falls back to the slow path (addressee check, then a full turn) only when the
+    talker cannot be had at all."""
+    from . import voice_talker
+    started = time.time()
+    spoken = 0
+    handed = False
+    try:
+        async for line in voice_talker.sentences(text):
+            if line == voice_talker.QUIET:
+                store.record_outcome("voice", "not_for_asta", detail=text[:200])
+                return {"text": text, "did": "not_for_asta"}
+            if line == voice_talker.DO:
+                handed = True
+                continue
+            if _STATE["barged_at"] > started:
+                break
+            if spoken == 0:
+                store.record_outcome("voice", "first_words", detail=f"{time.time() - started:.1f}s")
+            await say(line, kind="answer")
+            spoken += 1
+    except Exception as exc:                                    # noqa: BLE001
+        if spoken or handed:
+            store.record_outcome("voice", "talker_broke", detail=str(exc)[:200])
+        else:
+            if not await meant_for_asta(text):
+                store.record_outcome("voice", "not_for_asta", detail=text[:200])
+                return {"text": text, "did": "not_for_asta"}
+            _STATE["last_heard"] = time.time()
+            reply = await turn(text)
+            return {"text": text, "did": "answered", "reply": reply}
     _STATE["last_heard"] = time.time()
     store.record_outcome("voice", "heard", detail=text[:200])
-    reply = await turn(text)
-    return {"text": text, "did": "answered", "reply": reply}
+    if handed:
+        asyncio.ensure_future(_work(text))
+        return {"text": text, "did": "handed_on"}
+    return {"text": text, "did": "answered"}
+
+
+async def _work(text: str) -> None:
+    """The real work, behind the talker; the outcome is said once when it is done."""
+    from . import main, voice_talker
+    started = time.time()
+    try:
+        cid = store.kv_get("wa_conversation") or ""
+        conv = store.get_conversation(cid) if cid else None
+        if conv is None:
+            conv = store.create_conversation(model="claude_cli", workspace=None)
+            store.kv_set("wa_conversation", conv["id"])
+        with contextlib.suppress(Exception):
+            conv["model"] = main._channel_model(conv)
+        sink = _WorkSink()
+        job = await main._dispatch(conv, text, sink, "voice")
+        if job is not None:
+            await asyncio.wait({job}, timeout=TURN_SECONDS)
+        reply = sink.text()
+        store.record_outcome("voice", "work_done", detail=f"{time.time() - started:.1f}s · {text[:120]}")
+        if not reply:
+            return
+        try:
+            async for line in voice_talker.sentences(
+                    f'[RESULT] He asked: "{text}". What the work found:\n{reply[:2500]}', kind="result"):
+                if line in (voice_talker.QUIET, voice_talker.DO):
+                    continue
+                await say(line, kind="answer")
+        except Exception:                                       # noqa: BLE001
+            await say(speakable(reply), kind="answer")
+    except Exception as exc:                                    # noqa: BLE001
+        from . import quiet
+        quiet.note("voice.work", exc)
 
 
 class VoiceSink:
@@ -396,6 +466,19 @@ class VoiceSink:
 
     async def close(self) -> None:
         return None
+
+
+class _WorkSink(VoiceSink):
+    """The worker's words, collected and never spoken raw: the talker says the outcome."""
+
+    async def send(self, payload: dict) -> None:
+        typ = payload.get("type")
+        if typ == "delta":
+            self._parts.append(payload.get("text", ""))
+        elif typ == "note":
+            self._parts.append("\n" + payload.get("text", "") + "\n")
+        elif typ == "error":
+            self._parts.append(f"\nSomething went wrong: {payload.get('message', 'error')}\n")
 
 
 def _kind_of(text: str) -> str:

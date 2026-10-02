@@ -478,3 +478,131 @@ def test_music_and_other_rooms_noise_are_not_turns(heard):
                                    "booking PR 1429 status"])
 def test_his_english_and_hindi_still_are(heard):
     assert not vm.is_noise(heard)
+
+
+# --- the talker in front, the worker behind ----------------------------------------------
+
+@pytest.fixture
+def talker(monkeypatch):
+    """A scripted talker: each call to `sentences` plays the next reply."""
+    from app import voice_talker
+    replies: list[list[str]] = []
+    asked: list[tuple] = []
+
+    async def sentences(text, kind="said", timeout=30):
+        asked.append((text, kind))
+        for line in (replies.pop(0) if replies else []):
+            yield line
+
+    monkeypatch.setattr(voice_talker, "sentences", sentences)
+    return replies, asked
+
+
+def test_casual_words_and_the_room_get_silence(helper, talker):
+    replies, _ = talker
+    replies.append([QUIET := "[QUIET]"])
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    assert run(vm.handle("haha okay cool, I'll send you the deck after lunch"))["did"] == "not_for_asta"
+    assert helper.said() == [] and QUIET
+
+
+def test_a_status_question_is_answered_by_the_talker_without_the_worker(helper, talker, monkeypatch):
+    async def dispatch(*a, **k):
+        raise AssertionError("the worker was not needed")
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    replies, _ = talker
+    replies.append(["Booking PR 1429 — the RFP mandatory validations one.",
+                    "You've a message queued to Vinish Monday 9am."])
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    assert run(vm.handle("which of my PRs is waiting on Vinish?"))["did"] == "answered"
+    assert helper.said() == ["Booking PR 1429 — the RFP mandatory validations one.",
+                             "You've a message queued to Vinish Monday 9am."]
+
+
+def test_work_is_acknowledged_once_and_the_outcome_said_once(helper, talker, monkeypatch):
+    replies, asked = talker
+    replies.append(["Checking now.", "[DO]"])
+    replies.append(["No H69 booking in UAT either — it never arrived."])
+    dispatched: list[str] = []
+
+    async def dispatch(conv, text, sink, channel):
+        dispatched.append(text)
+        await sink.send({"type": "delta", "text": "Checked Loki in UAT for H69LMCN6KZY: no hits in 72h."})
+        return None
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+
+    async def go():
+        out = await vm.handle("check if booking H69LMCN6KZY reached UAT")
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        return out
+
+    assert run(go())["did"] == "handed_on"
+    assert dispatched == ["check if booking H69LMCN6KZY reached UAT"], "his words, unchanged, to the worker"
+    assert helper.said() == ["Checking now.", "No H69 booking in UAT either — it never arrived."]
+    assert asked[-1][1] == "result" and "no hits in 72h" in asked[-1][0]
+
+
+def test_talking_over_the_talker_stops_it(helper, talker):
+    replies, _ = talker
+    replies.append(["Booking PR 1429 is waiting on Vinish.", "AP PR 1252 is mergeable."])
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time(), barged_at=time.time() + 5)
+    run(vm.handle("status of my PRs?"))
+    assert helper.said() == []
+
+
+def test_without_a_talker_the_old_path_still_answers(helper, monkeypatch):
+    from app import voice_talker
+
+    async def none(text, kind="said", timeout=30):
+        raise RuntimeError("no talker")
+        yield ""                                                # pragma: no cover
+
+    async def dispatch(conv, text, sink, channel):
+        await sink.send({"type": "delta", "text": "Nothing pending."})
+        return None
+
+    monkeypatch.setattr(voice_talker, "sentences", none)
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    assert run(vm.handle("what is pending?"))["did"] == "answered"
+    assert helper.said() == ["Nothing pending."]
+
+
+def test_the_talker_reads_every_reply_to_its_end(monkeypatch):
+    """Stopping at [QUIET] once left the rest in the pipe; the next question got it."""
+    from app import call_mind, voice_talker
+
+    class Mind:
+        def __init__(self):
+            self.proc = type("P", (), {"returncode": None})()
+            self.reads = 0
+
+        async def _stream(self, message, timeout):
+            for piece in ["[QUIET]", " (and some", " trailing text)"]:
+                self.reads += 1
+                yield piece
+            yield call_mind._COMPLETE
+
+    m = Mind()
+    voice_talker._TALKER.update(mind=m, briefed_at=time.time())
+
+    async def go():
+        got = [s async for s in voice_talker.sentences("yeah")]
+        await asyncio.sleep(0.01)
+        return got
+
+    assert run(go()) == ["[QUIET]"]
+    assert m.reads == 3, "the whole reply was consumed, so the next answer starts clean"
+    voice_talker._TALKER.update(mind=None)
+
+
+def test_the_talker_brief_keeps_its_promises():
+    from app import voice_talker
+    p = voice_talker.PERSONA
+    assert "[QUIET]" in p and "[DO]" in p and "[RESULT]" in p
+    for phrase in ("On it.", "Checking now.", "Let me look."):
+        assert phrase in p and phrase in vm.ACKS.values(), "acknowledgements are pre-recorded"

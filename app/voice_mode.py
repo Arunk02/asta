@@ -92,6 +92,12 @@ ECHO_SECONDS = 150.0
 #: Within this long, a line sent recently counts as echo on most of its words;
 #: beyond it, only a near-whole repeat does (he may echo Asta's words himself).
 ECHO_CLOSE_SECONDS = 30.0
+#: Misheard echo is looked for in what Asta said this recently...
+ECHO_FUZZY_SECONDS = 120.0
+#: ...at this likeness, window by window (his own lines scored at most 0.54).
+ECHO_FUZZY = 0.66
+#: Most of the words Asta just said, AND this much of its sound.
+ECHO_WORDS_AND_SOUND = 0.7
 #: The same thing is not said twice within this long ("Got it — only booking PR
 #: 1429 and AP PR 1252" three times in a minute, 2 Oct).
 REPEAT_SECONDS = 90.0
@@ -320,6 +326,27 @@ async def say(text: str, kind: str = "answer", since: float = 0.0) -> bool:
     return sent
 
 
+def sounds_like(text: str, lines: list[str]) -> float:
+    """How closely `text` matches some stretch of Asta's own lines, by sound-
+    alike spelling: the best ratio over windows of the same length."""
+    import difflib
+    def norm(t: str) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", (t or "").lower()))
+    h = norm(text)
+    if len(h) < 5:
+        return 0.0
+    best = 0.0
+    for line in lines:
+        a = norm(line)
+        n = len(h)
+        windows = [a] if len(a) <= n else [a[i:i + n] for i in range(0, len(a) - n + 1, 2)]
+        for w in windows:
+            best = max(best, difflib.SequenceMatcher(None, h, w, autojunk=False).ratio())
+            if best >= 0.99:
+                return best
+    return best
+
+
 def said_lately(words: str, now: float | None = None) -> bool:
     """Asta said this — or nearly this — in the last REPEAT_SECONDS."""
     now = time.time() if now is None else now
@@ -358,12 +385,14 @@ def echo(text: str, while_speaking: bool = False, now: float | None = None) -> s
     if not his:
         return text
     near = sum(1 for w in his if w in close) / len(his)
-    far = sum(1 for w in his if w in ours) / len(his)
-    # Mostly Asta's words: echo. A short one only counts while Asta was talking —
-    # otherwise his "Send." after "Send it?" would be thrown away.
-    if near >= 0.7 and (len(his) >= 3 or while_speaking):
-        return ""
-    if far >= 0.85 and len(his) >= 6:
+    recent = [w for at, w in _SPOKEN if now - at < ECHO_FUZZY_SECONDS]
+    like = sounds_like(text, recent) if recent else 0.0
+    # Echo is Asta's own PHRASING coming back, not its vocabulary: 2 Oct 17:54
+    # his "use my workspace knowledge, not Teams" shared Asta's words and was
+    # dropped as echo. Words in common count only with the sound to match.
+    if (len(his) >= 3 or while_speaking) and like >= ECHO_FUZZY:
+        return ""               # misheard echo too: "Telecos Dark Space Copa"
+    if near >= 0.7 and like >= ECHO_WORDS_AND_SOUND and (len(his) >= 3 or while_speaking):
         return ""
     # Asta's tail glued to the front of what he said.
     if not while_speaking:
@@ -478,11 +507,18 @@ async def meant_for_asta(text: str, now: float | None = None) -> bool:
 #: are. Below it (Hindi through an English recognizer comes back as confident-
 #: sounding English with low scores) Whisper hears the clip instead.
 EARS_CONFIDENCE = 0.4
+#: The Mac's words are trusted at a lower bar when they hold her name.
+NAME_CONFIDENCE = 0.25
 
 
 def mac_words(said: str, confidence: float) -> str:
     """The Mac's transcription when it can be trusted, else ''."""
     said = " ".join((said or "").split())
+    if said and named(said) and not foreign(said) and confidence >= NAME_CONFIDENCE:
+        # Her name, as the Mac heard it, beats Whisper's guess. 2 Oct 17:46: the
+        # Mac had "Aastha" / "Hey Aastha" right (33-52% sure) and Whisper made
+        # them "y hasta y hasta", "Yeah, stop.", "He hasta" — three calls ignored.
+        return said
     if not said or foreign(said) or confidence < EARS_CONFIDENCE:
         return ""
     if len(_tokens(said)) < 3:
@@ -493,7 +529,8 @@ def mac_words(said: str, confidence: float) -> str:
     return said
 
 
-async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float = 0.0) -> dict:
+async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float = 0.0,
+                asta: bool | None = None) -> dict:
     """One utterance from the helper: transcribe, decide, act. Returns what happened.
 
     `said` is the helper's own on-device transcription, made while he talked —
@@ -524,7 +561,15 @@ async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float
     if dry:
         return {"text": text, "did": "dry"}
     barge = time.time() - _STATE["barge_heard"] < 20
-    mine = echo(text, while_speaking=barge)
+    # The helper knows whether Asta was audible while this was recorded. If it
+    # was not, this cannot be Asta's echo, however much it sounds like Asta's
+    # words: "Can you explain the booking service?", said in silence, was
+    # dropped as echo of an earlier answer (2 Oct 17:55).
+    mine = text if asta is False else echo(text, while_speaking=barge)
+    if barge and mine.strip() and is_noise(mine):
+        # A cough or the room over Asta comes back as Whisper's "Thank you." —
+        # 2 Oct 17:47 it stopped an answer mid-sentence. Not him: carry on.
+        mine = ""
     if not mine.strip():
         store.record_outcome("voice", "echo", detail=text[:200])
         if barge:
@@ -667,7 +712,9 @@ def recent(now: float | None = None, before: float | None = None) -> list[str]:
 
 
 #: Asta's name as the recognizers write it: "Aastha", "Asta", "Astha", "Aasta".
-_NAME = re.compile(r"\b(?:a+s+t+h?a+|ashta|asthaa?)\b", re.I)
+#: Live, 2 Oct 17:46: "Aastha", "Sastha", "He hasta", "y hasta", "Hasta" — the
+#: recognizers' spellings of her name.
+_NAME = re.compile(r"\b(?:s?h?a+s+t+h?a+|ashta|asthaa?)\b", re.I)
 
 
 def named(text: str) -> bool:
@@ -752,6 +799,27 @@ async def converse(text: str) -> dict:
         _STATE["last_heard"] = time.time()
         await say("Still on that — I'll tell you.", kind="answer")
         return {"text": text, "did": "already_on_it", "job": same["id"]}
+    kb = ""
+    if decided == voice_talker.ANSWER:
+        # What Asta's own records answer, instantly, comes first: its jobs, his
+        # PRs, what is pending.
+        with contextlib.suppress(Exception):
+            from . import frontdesk
+            known = jobs_answer(text) or pr_answer(text) or frontdesk.answer_from_state(text)
+            if known:
+                _STATE["last_heard"] = time.time()
+                await say_lines(known)
+                return {"text": text, "did": "answered_from_state"}
+    if decided in (voice_talker.ANSWER, voice_talker.DO) and knows_about(text):
+        # "What is Telikos Inland Booking?" — his documents and the repo
+        # summaries answer it in seconds; a job took 20-60 s and, with no
+        # workspace, found nothing (2 Oct).
+        with contextlib.suppress(Exception):
+            from . import project_knowledge
+            kb = project_knowledge.lookup(text, budget=2000)
+        if kb:
+            decided = voice_talker.ANSWER
+            store.record_outcome("voice", "knowledge", detail=f"{len(kb)} chars · {text[:100]}")
     if decided == voice_talker.LISTEN:
         _STATE["last_heard"] = time.time()
         await say("I'm listening.", kind="answer")
@@ -761,29 +829,27 @@ async def converse(text: str) -> dict:
         await say("On it.", kind="answer")
         asyncio.ensure_future(_work(text, context))
         return {"text": text, "did": "handed_on"}
-    if decided == voice_talker.ANSWER:
-        # What Asta's own records answer, instantly: its own jobs, his PRs, what
-        # is pending. Only the rest goes to Claude.
-        with contextlib.suppress(Exception):
-            from . import frontdesk
-            known = jobs_answer(text) or pr_answer(text) or frontdesk.answer_from_state(text)
-            if known:
-                _STATE["last_heard"] = time.time()
-                await say_lines(known)
-                return {"text": text, "did": "answered_from_state"}
     spoken = 0
     handed = False
     filler = asyncio.ensure_future(_filler(started))
     try:
         # Routed as a question for Asta: the talker answers it, never silence.
         kind = "to_you" if decided == voice_talker.ANSWER else "said"
-        async for line in voice_talker.sentences(text, kind):
+        async for line in voice_talker.sentences(text, kind, **({"context": kb} if kb else {})):
             filler.cancel()
             if line == voice_talker.QUIET:
                 store.record_outcome("voice", "not_for_asta", detail=text[:200])
                 return {"text": text, "did": "not_for_asta"}
             if line == voice_talker.DO:
                 handed = True
+                continue
+            if line.lower().startswith("still on that") and not running():
+                # Nothing is running: "still on that" is a promise about no work
+                # at all (2 Oct 17:50, asked to read the project knowledge). It
+                # becomes the work.
+                handed = True
+                await say("On it.", kind="answer")
+                spoken += 1
                 continue
             if _STATE["barged_at"] > started:
                 break
@@ -820,6 +886,18 @@ async def converse(text: str) -> dict:
     return {"text": text, "did": "answered"}
 
 
+#: Work, not a question about how things are: a booking id, "check", "debug"...
+_WORK_WORDS = re.compile(r"\b(?:check|debug|logs?|send|message|ping|fix|investigate|review|merge|deploy|"
+                         r"draft|remind|schedule|call|book\s+a|create)\b|(?-i:\b(?=[A-Z0-9]*\d)[A-Z0-9]{8,}\b)", re.I)
+
+
+def knows_about(text: str) -> bool:
+    """A question about what something is or how it works — the knowledge
+    answers it — rather than work to do."""
+    from . import project_knowledge
+    return project_knowledge.is_knowledge_question(text) and not _WORK_WORDS.search(text or "")
+
+
 async def _filler(started: float) -> None:
     """One "One moment." when the answer is slow to start — and only then."""
     await asyncio.sleep(FILLER_SECONDS)
@@ -830,9 +908,12 @@ async def _filler(started: float) -> None:
 #: "What are you working on?", "any update?", "which booking did you check?"
 _STATUS = re.compile(
     r"\b(?:what(?:'s| is| are)?\s+(?:you|u)\s+(?:working|doing|checking|up\s+to|on)|any\s+updates?|"
-    r"(?:the|an?)\s+update|status\s+of\s+(?:it|that|the\s+task)|how\s+far|"
+    r"(?:the|an?)\s+update|status\s+of\s+(?:it|that|the\s+task)|how\s+far|how\s+long\s+(?:it|will|does|is)|"
     r"did\s+(?:you|u)\s+(?:check|find|send|do|ask)|which\s+(?:\w+\s+)?(?:are\s+|did\s+)?(?:you|u)\s+"
     r"(?:are\s+)?(?:taking|checking|working|looking|check))\b", re.I)
+#: A question about progress itself, which "nothing is running" answers truly.
+_PROGRESS = re.compile(r"\bhow\s+(?:long|far)\b|\bany\s+updates?\b|"
+                       r"\bwhat(?:'s| is| are)?\s+(?:you|u)\s+(?:working|doing)\b", re.I)
 _ASK_LEAD = re.compile(r"^(?:(?:hey|hi|hello|ok(?:ay)?|so)[,\s]+)*(?:asta[,\s]+)?"
                        r"(?:(?:can|could|would)\s+(?:you|u)\s+(?:please\s+)?|i\s+want\s+(?:you\s+)?to\s+)"
                        r"|^please\s+", re.I)
@@ -870,6 +951,10 @@ def jobs_answer(text: str, now: float | None = None) -> str:
         j = done[-1]
         found = speakable(j["result"], sentences=1) or "it came back empty"
         return f"Nothing running. Last one was: {_gist(j['text'])}. {found}"
+    # Nothing running and nothing done, asked about progress: say so — never
+    # "shouldn't be much longer" about work that does not exist (2 Oct 17:51).
+    if _PROGRESS.search(text or ""):
+        return "Nothing's running right now — tell me what to pick up."
     return ""
 
 
@@ -937,11 +1022,18 @@ def answered_before(text: str, now: float | None = None) -> dict | None:
     hear it. 2 Oct: the Rajendra booking was asked four times; each time a new
     job, an answer cut off, and "still not shared once"."""
     now = time.time() if now is None else now
-    if _AFRESH.search(text or ""):
-        return None
+    if _AFRESH.search(text or "") or len(_words(text)) < 2:
+        return None             # "Hello?" is not the question asked again (17:52)
     done = [j for j in _JOBS.values() if j["done_at"] and now - j["done_at"] < DUPLICATE_WINDOW_SECONDS
-            and (j["result"] or "").strip() and _about(text, j["text"])]
+            and (j["result"] or "").strip() and _about(text, j["text"])
+            # Just said: replaying it is how its own echo became a loop (17:56).
+            and not _just_said(j["result"], now)]
     return max(done, key=lambda j: j["done_at"]) if done else None
+
+
+def _just_said(result: str, now: float, within: float = 120.0) -> bool:
+    first = " ".join(_tokens(speakable(result, sentences=1)))[:60]
+    return bool(first) and any(now - at < within and first in " ".join(_tokens(w)) for at, w in _SPOKEN)
 
 
 def _about(asked: str, job_text: str) -> bool:
@@ -951,8 +1043,15 @@ def _about(asked: str, job_text: str) -> bool:
         return True
     generic = {"update", "status", "booking", "pr", "what", "any", "done", "investigated",
                "investigate", "yet", "not", "or", "did", "that", "this", "on", "how", "long", "will", "take"}
+    generic |= {"know", "do", "you", "get", "give", "tell", "explain", "about", "me", "can", "could",
+                "what", "why", "brief", "hello", "hey", "properly", "want", "like"}
     mine = _words(asked) - generic
-    return len(mine & (_words(job_text) - generic)) >= 1 and len(mine) <= 6
+    shared = mine & (_words(job_text) - generic)
+    # Two real words in common, half of what he asked: "do you know how to get a
+    # book?" matched a booking job on "know" alone and got its answer (17:57).
+    # ...or one distinctive one: a name or an id ("Rajendra", "H69LMCN6KZY").
+    distinctive = {w for w in shared if len(w) >= 6 or any(c.isdigit() for c in w)}
+    return bool(distinctive) or (len(shared) >= 2 and len(shared) >= len(mine) / 2)
 
 
 def duplicate_of(text: str, now: float | None = None) -> dict | None:
@@ -994,8 +1093,22 @@ def _job_conversation(text: str) -> dict:
     phone = store.get_conversation(store.kv_get("wa_conversation") or "") or conv
     with contextlib.suppress(Exception):
         conv["model"] = main._channel_model(phone)
-    if phone.get("workspace"):
-        conv["workspace"] = phone["workspace"]
+    ws = phone.get("workspace") or ""
+    if not ws:
+        # The project he is talking about, else his stated default. 2 Oct: every
+        # voice job ran with NO workspace — "what is Telikos Inland Booking" had
+        # no project knowledge to read, and was asked about four times.
+        with contextlib.suppress(Exception):
+            from .workspace import registry
+            ws = registry.infer(text) or ""
+        if not ws:
+            with contextlib.suppress(Exception):
+                from . import policy
+                ws = policy.prefer("workspace") or ""
+    if ws:
+        conv["workspace"] = ws
+        with contextlib.suppress(Exception):
+            store.update_conversation(conv["id"], workspace=ws)
     return conv
 
 
@@ -1106,7 +1219,7 @@ _ABOUT_MY_PRS = re.compile(
 #: A question about something specific — a booking, a person's chat, one PR —
 #: is not "my PRs". 2 Oct 13:49: "check that Rajendra booking… pre-prod" got
 #: "You have 15 open PRs".
-_SPECIFIC = re.compile(r"\bbooking|\b[A-Z0-9]{8,}\b|\bPR\s*#?\d+|\bdebug|\bcheck\b", re.I)
+_SPECIFIC = re.compile(r"\bbooking|(?-i:\b(?=[A-Z0-9]*\d)[A-Z0-9]{8,}\b)|\bPR\s*#?\d+|\bdebug|\bcheck\b", re.I)
 
 
 def pr_answer(text: str) -> str:
@@ -1209,9 +1322,10 @@ async def idle_loop() -> None:
                                     "voice", urgency="direct", considered=True)
 
 
-async def _heard_quietly(wav: bytes, said: str = "", confidence: float = 0.0) -> None:
+async def _heard_quietly(wav: bytes, said: str = "", confidence: float = 0.0,
+                         asta: bool | None = None) -> None:
     try:
-        await heard(wav, said=said, confidence=confidence)
+        await heard(wav, said=said, confidence=confidence, asta=asta)
     except Exception as exc:                                    # noqa: BLE001
         from . import quiet
         quiet.note("voice.heard", exc)
@@ -1250,7 +1364,9 @@ async def serve(ws) -> None:
                 else:
                     # In the background: a turn can take minutes, and the hotkeys
                     # must keep working while it does.
-                    asyncio.ensure_future(_heard_quietly(wav, said, confidence))
+                    asta = msg.get("asta")
+                    asyncio.ensure_future(_heard_quietly(
+                        wav, said, confidence, asta if isinstance(asta, bool) else None))
             elif kind == "transcript":
                 transcript(msg)
             elif kind == "barge":

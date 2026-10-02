@@ -494,8 +494,8 @@ def talker(monkeypatch):
     replies: list[list[str]] = []
     asked: list[tuple] = []
 
-    async def sentences(text, kind="said", timeout=30):
-        asked.append((text, kind))
+    async def sentences(text, kind="said", timeout=30, context=""):
+        asked.append((text, kind) if not context else (text, kind, context))
         for line in (replies.pop(0) if replies else []):
             yield line
 
@@ -907,6 +907,7 @@ def test_what_are_you_working_on_is_answered_from_the_jobs(helper, decide, talke
     assert "Sent to Vinish Kumar" in vm.jobs_answer("any update?")
     assert "Sent to Vinish Kumar" in vm.jobs_line()
     assert vm.jobs_answer("what is the weather") == ""
+    assert vm.jobs_answer("How long it will take?")
     assert vm.jobs_answer("Which booking you are taking on?"), "live 2 Oct wording"
     vm._JOBS.clear()
 
@@ -947,7 +948,7 @@ def test_a_slow_answer_gets_one_moment_and_a_fast_one_nothing(helper, decide, mo
     monkeypatch.setattr(vm, "FILLER_SECONDS", 0.1)
     delay = {"s": 0.3}
 
-    async def sentences(text, kind="said", timeout=30):
+    async def sentences(text, kind="said", timeout=30, context=""):
         await asyncio.sleep(delay["s"])
         yield "Booking PR 1429."
 
@@ -1459,3 +1460,157 @@ def test_room_sound_holds_a_piece_at_most_a_few_seconds(helper, decided, monkeyp
     run(vm.assemble("Is there anything for me to look at today."))
     assert decided and time.time() - started < 1.5
     vm._TURN["speaking"] = False
+
+
+def test_her_name_as_the_mac_heard_it_beats_whispers_guess(whisper):
+    # 2 Oct 17:46, live: Mac right, Whisper wrong, three calls ignored.
+    for mac, conf, wrong in (("Aastha", 0.33, "y hasta y hasta"), ("Hey Aastha", 0.52, "Yeah, stop."),
+                             ("Sastha", 0.40, "He hasta.")):
+        whisper["text"] = wrong
+        assert run(vm.heard(b"RIFF", dry=True, said=mac, confidence=conf))["text"] == mac
+    assert whisper["calls"] == 0
+
+
+def test_every_spelling_heard_live_is_her_name():
+    for heard in ("Aastha", "Hey Aastha", "Sastha", "He hasta.", "y hasta", "Hasta.", "Asta", "Astha"):
+        assert vm.named(heard), heard
+    for other in ("pasta", "master", "last", "fast"):
+        assert not vm.named(other), other
+
+
+def test_a_cough_over_asta_is_not_him_talking(helper, whisper, monkeypatch):
+    # 17:47:41: "Thank you." (Whisper's word for a noise) hushed an answer mid-sentence.
+    got: list[str] = []
+
+    async def assemble(text):
+        got.append(text)
+        return {"did": "decided"}
+
+    monkeypatch.setattr(vm, "assemble", assemble)
+    whisper["text"] = "Thank you."
+    vm._STATE.update(barge_heard=time.time(), barged_at=0.0)
+    out = run(vm.heard(b"RIFF"))
+    assert out["did"] == "echo" and got == [] and {"type": "unduck"} in helper.sent
+    assert {"type": "hush"} not in helper.sent and vm._STATE["barged_at"] == 0.0
+
+
+def test_asta_waits_for_him_but_never_more_than_a_moment():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert "static let holdMax: TimeInterval = 2.5" in src and "self.hold(false)" in src
+
+
+def test_still_on_that_with_nothing_running_becomes_the_work(helper, decide, talker, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.ANSWER
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    started: list[str] = []
+
+    async def dispatch(conv, text, sink, channel):
+        started.append(text)
+        return None
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    replies, _ = talker
+    replies.append(["Still on that."])
+    vm._JOBS.clear()
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+
+    async def go():
+        out = await vm.handle("We have a whole project knowledge base, can't you read it from there?")
+        await asyncio.sleep(0.05)
+        return out
+
+    assert run(go())["did"] == "handed_on" and started
+    assert helper.said() == ["On it."]
+    vm._JOBS.clear()
+
+
+def test_with_nothing_running_asta_says_so():
+    vm._JOBS.clear()
+    assert vm.jobs_answer("How long it will take?").startswith("Nothing's running")
+
+
+def test_misheard_echo_is_still_echo_and_his_own_lines_are_his():
+    # Live, 2 Oct 17:52, echo cancelling off.
+    now = time.time()
+    vm._SPOKEN[:] = [(now - 60, "Found it — there's a telikos-docs-space Copilot Space."),
+                     (now - 20, "I found it though — it's the Telikos Inland Booking API in your docs space."),
+                     (now - 10, "Sorry about that, audio's choppy on my end too."),
+                     (now - 5, "Yes, straight from the project knowledge — the telikos-docs-space Copilot Space."),
+                     (now - 3, "The Teams tools are disconnected right now (MCP server dropped), so I can't pull it.")]
+    for echo_ in ("Telecos Dark Space Copa", "Lycos Dock Space Cobalt", "API in your dark space",
+                  "project knowledge, the Telecos Dark Space co-pilot space.", "audio is choppy on my end too"):
+        assert vm.echo(echo_) == "", echo_
+    for his in ("Why you breaking in between, I wouldn't able to hear you properly",
+                "Is there anything for me?", "How long it will take?",
+                "check the booking Rajendra shared",
+                "Hello, why you keep on talking the same stuff again and again",
+                "You are from my workspace knowledge, not from the teams"):
+        assert vm.echo(his) == his, his
+    vm._SPOKEN.clear()
+
+
+def test_a_greeting_is_never_the_question_asked_again():
+    vm._JOBS.clear()
+    vm._JOBS[2] = {"id": 2, "text": "I gave you a project knowledge, right? Hello? Hello?",
+                   "started": time.time() - 90, "done_at": time.time() - 30, "cid": "c",
+                   "result": "Found it — there's a telikos-docs-space Copilot Space."}
+    assert vm.answered_before("Hello?") is None
+    vm._JOBS.clear()
+
+
+def test_echo_cancelling_is_tried_again_each_time_the_mic_opens():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert "if !useVoiceProcessing && !retriedProcessing { useVoiceProcessing = true }" in src
+
+
+def test_a_voice_job_reads_the_project_he_means(monkeypatch):
+    from app import policy
+    from app.workspace import registry
+    monkeypatch.setattr(registry, "infer", lambda text="", **k: "booking" if "booking" in text.lower() else None)
+    monkeypatch.setattr(policy, "prefer", lambda key: "booking")
+    conv = vm._job_conversation("what is Telikos Inland Booking?")
+    assert conv["workspace"] == "booking"
+    assert store.get_conversation(conv["id"])["workspace"] == "booking"
+
+
+def test_an_answer_just_said_is_never_replayed_its_echo_looped(helper):
+    vm._JOBS.clear()
+    now = time.time()
+    vm._JOBS[4] = {"id": 4, "text": "Telecos docs space copilot space", "started": now - 60, "done_at": now - 40,
+                   "cid": "c", "result": "That confirms it — you're referring to the telikos-docs-space."}
+    vm._SPOKEN[:] = [(now - 5, "That confirms it — you're referring to the telikos-docs-space.")]
+    assert vm.answered_before("Telecos Dark Space co-pilot space.") is None
+    vm._SPOKEN.clear()
+    vm._JOBS.clear()
+
+
+def test_asked_again_needs_the_same_question_not_one_shared_word():
+    vm._JOBS.clear()
+    vm._JOBS[6] = {"id": 6, "text": "I want to know what the booking can you give a brief about it",
+                   "started": time.time() - 90, "done_at": time.time() - 60, "cid": "c",
+                   "result": "Booking is too broad for me to give a brief."}
+    assert vm.answered_before("Do you know how to get a book?") is None
+    vm._JOBS.clear()
+
+
+def test_said_while_asta_was_silent_is_never_echo(helper, whisper, monkeypatch):
+    # 17:55:37: "Can you explain the booking service?" was dropped as echo of an answer
+    # given a minute before — while Asta was silent.
+    got: list[str] = []
+
+    async def assemble(text):
+        got.append(text)
+        return {"did": "decided"}
+
+    monkeypatch.setattr(vm, "assemble", assemble)
+    vm._SPOKEN[:] = [(time.time() - 50, "telikos-booking-service is the core booking service")]
+    whisper["text"] = "Can you explain the booking service?"
+    run(vm.heard(b"RIFF", asta=False))
+    assert got == ["Can you explain the booking service?"]
+    vm._SPOKEN.clear()
+
+
+def test_the_helper_stamps_whether_asta_was_audible():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert '"asta": audible' in src and "astaAudible = astaNow()" in src

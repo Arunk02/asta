@@ -187,6 +187,18 @@ class IndexedProvider(ContextProvider):
         rc, out = await _run(["node", str(script), str(self.root), task],
                              self.root, _RESOLVE_TIMEOUT, self.ctx.name)
         body = out[:_RESOLVE_CHARS] or "(resolver returned nothing)"
+        # The passages themselves — his documents and the repo summaries — not
+        # only pointers to files: "what is Telikos Inland Booking?" was answered
+        # "I have nothing on that" with both on disk (2 Oct).
+        passages = ""
+        try:
+            from ... import project_knowledge as knowledge
+            name = knowledge.workspace_for_root(self.root)
+            passages = knowledge.lookup(task, name) if name else ""
+        except Exception:                                      # noqa: BLE001
+            passages = ""
+        if passages:
+            body += "\n\n## Project knowledge (most relevant passages)\n" + passages
         return f"{await self.freshness()}\n\n{body}"
 
     async def freshness(self) -> str:

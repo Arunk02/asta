@@ -114,11 +114,28 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     /// mid-sentence — Asta talked over him, and its words were recorded as his,
     /// came back as a request, and were answered again.
     private(set) var held = false
+    /// When Asta last fell silent: echo can only be in a recording made while,
+    /// or just after, Asta was audible.
+    private(set) var silentSince = Date.distantPast
+
+    /// Waiting is capped: room sound reads as "him talking" too — with echo
+    /// cancelling off, an answer ready at 17:50:39 waited 10 s while he said
+    /// "Hello? Hello?" because nothing came (2 Oct). After this long Asta speaks.
+    static let holdMax: TimeInterval = 2.5
+    private var heldAt = Date.distantPast
 
     func hold(_ on: Bool) {
         guard on != held else { return }
         held = on
-        if !on && !speaking && !waiting.isEmpty {
+        if on {
+            heldAt = Date()
+            let mine = heldAt
+            DispatchQueue.main.asyncAfter(deadline: .now() + Mouth.holdMax) {
+                if self.held && self.heldAt == mine { self.hold(false) }
+            }
+            return
+        }
+        if !speaking && !waiting.isEmpty {
             let (t, a, c) = waiting.removeFirst()
             play(text: t, audio: a, chime: c)
         }
@@ -150,6 +167,7 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     /// He started talking: Asta stops at once and forgets what it was about to say.
     func interrupt() {
         ducked = false
+        silentSince = Date()
         waiting.removeAll()
         player?.stop()
         synth.stopSpeaking(at: .immediate)
@@ -165,7 +183,7 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
                 p.delegate = self
                 p.volume = self.ducked ? 0.15 : 1.0
                 p.play()
-                log("saying: \(text.prefix(60))")
+                log("saying: \(text.prefix(400))")
             } else {
                 // No Asta voice (Voicebox down): the Mac's own, never silence.
                 self.synth.speak(AVSpeechUtterance(string: text))
@@ -203,6 +221,7 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
         // A short tail: the room's echo of the last word is not him talking.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             self.speaking = false
+            self.silentSince = Date()
             self.onDone?()
         }
     }
@@ -351,7 +370,15 @@ final class Ears {
     let engine = AVAudioEngine()
     var running = false
     var mouth: Mouth?
-    var onUtterance: ((Data, String, Float) -> Void)?
+    var onUtterance: ((Data, String, Float, Bool) -> Void)?
+    /// Was Asta audible at any point while this recording was made? If not, it
+    /// cannot be Asta's echo — 2 Oct: "Can you explain the booking service?",
+    /// said in silence, was dropped as echo of an earlier answer.
+    private var astaAudible = false
+    private func astaNow() -> Bool {
+        guard let m = mouth else { return false }
+        return m.speaking || Date().timeIntervalSince(m.silentSince) < 0.8
+    }
     lazy var recognizer = Recognizer(queue: queue)
     var onBargeIn: (() -> Void)?
     /// He started talking (true), or a sound too short to be speech ended (false).
@@ -380,9 +407,15 @@ final class Ears {
     private var lastReport = Date()
     private var openedAt = Date()
     var useVoiceProcessing = true
+    private var retriedProcessing = false
 
     func start() {
         guard !running else { return }
+        // Echo cancelling is tried again every time the mic opens: once it gave
+        // silence it stayed off for the session, and Asta heard itself (2 Oct
+        // 17:49) — its own lines came back as requests and cut it off.
+        if !useVoiceProcessing && !retriedProcessing { useVoiceProcessing = true }
+        retriedProcessing = false
         let input = engine.inputNode
         try? input.setVoiceProcessingEnabled(useVoiceProcessing)   // echo cancelling
         let inFormat = input.outputFormat(forBus: 0)
@@ -471,6 +504,7 @@ final class Ears {
                     self.stop()
                     self.engine.reset()
                     self.useVoiceProcessing = false
+                    self.retriedProcessing = true      // this reopen stays without it
                     self.start()
                 }
             }
@@ -493,6 +527,7 @@ final class Ears {
                 inSpeech = true
                 speech = preroll + frames
                 quietMs = 0
+                astaAudible = true
                 recognizer.begin(speech)
                 DispatchQueue.main.async { self.onBargeIn?() }
             } else {
@@ -512,6 +547,7 @@ final class Ears {
                 inSpeech = true
                 speech = preroll
                 quietMs = 0
+                astaAudible = astaNow()
                 recognizer.begin(speech)
                 DispatchQueue.main.async { self.mouth?.hold(true); self.onSpeaking?(true) }
             }
@@ -519,6 +555,7 @@ final class Ears {
         }
         speech += frames
         recognizer.feed(frames)
+        if !astaAudible && astaNow() { astaAudible = true }
         quietMs = (db < floorDb + 6) ? quietMs + ms : 0
         let seconds = Double(speech.count) / rate
         if quietMs >= 700 || seconds >= 30 {
@@ -526,8 +563,9 @@ final class Ears {
             inSpeech = false; loudFrames = 0; quietMs = 0; speech = []; preroll = []
             if seconds >= 0.5 {
                 let wav = Ears.wav(take, rate: Int(rate))
+                let audible = astaAudible
                 recognizer.finish { text, conf in
-                    DispatchQueue.main.async { self.onUtterance?(wav, text, conf) }
+                    DispatchQueue.main.async { self.onUtterance?(wav, text, conf, audible) }
                 }
                 // Asta may speak again once his answer is in: a moment's grace
                 // in case he goes on.
@@ -587,9 +625,9 @@ final class App: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         ears.mouth = mouth
-        ears.onUtterance = { [weak self] wav, text, conf in
+        ears.onUtterance = { [weak self] wav, text, conf, audible in
             self?.link.send(["type": "utterance", "wav": wav.base64EncodedString(),
-                             "text": text, "confidence": Double(conf)])
+                             "text": text, "confidence": Double(conf), "asta": audible])
         }
         ears.onSpeaking = { [weak self] now in
             if !now { self?.mouth.unduck() }       // too short to be him

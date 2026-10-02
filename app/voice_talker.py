@@ -58,6 +58,8 @@ Decide every time:
 
 If he just calls you or asks you to listen ("Asta", "listen to me", "are you there"),
 say "I'm listening." and nothing more.
+Never say work is under way, nearly done or "still on that" unless [Working on now: …]
+lists it — with no such line, nothing is running.
 [Working on now: …] lists work already running: ONLY if he asks for the very same
 thing again, say "Still on that." — no [DO]. A different question is answered on its
 own. If he adds to running work ("also check pre-prod"), that is new work: [DO].
@@ -65,6 +67,11 @@ Questions the briefing answers (his PRs, what is pending, what is scheduled) are
 answered from it — never handed on as work.
 
 Do not ask him questions back unless you truly cannot act without the answer.
+
+When [Project knowledge for this question] comes with a line, answer from it in two or
+three spoken sentences — the gist, plainly, as you would explain it to a colleague. Never
+say you have nothing on it when it is there. If it truly does not cover the question, say
+so in one sentence and hand on with [DO].
 
 A line that starts "He said to you:" IS meant for you — never [QUIET]. If it is about
 something you just said or did, answer from the conversation. If you cannot make
@@ -212,7 +219,7 @@ def _message(text: str, kind: str = "said") -> str:
     return head + f'He said: "{text}"'
 
 
-async def sentences(text: str, kind: str = "said", timeout: float = 30):
+async def sentences(text: str, kind: str = "said", timeout: float = 30, context: str = ""):
     """The talker's reply, a sentence at a time, as fast as it is written.
 
     Yields QUIET alone when it chose silence, DO last when it handed work on.
@@ -229,7 +236,13 @@ async def sentences(text: str, kind: str = "said", timeout: float = 30):
     _TALKER["turns"] += 1
     if _TALKER["turns"] >= REFRESH_TURNS:
         asyncio.ensure_future(_refresh())
-    asyncio.ensure_future(_read_whole(m, _message(text, kind), timeout, out, end))
+    message = _message(text, kind)
+    if context:
+        # His documents and the repo summaries, for this question only — a few
+        # hundred tokens, not the files.
+        message = ("[Project knowledge for this question — answer from it, in your own words]\n"
+                   f"{context}\n\n{message}")
+    asyncio.ensure_future(_read_whole(m, message, timeout, out, end))
     while True:
         item = await out.get()
         if item is end:

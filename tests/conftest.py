@@ -414,3 +414,16 @@ def _no_outward_moves(monkeypatch):
     monkeypatch.setattr(teams_bridge, "_launch", _no_browser)
     monkeypatch.setattr(meetings, "SWITCH_AUDIO",
                         "/nonexistent/SwitchAudioSource-blocked-in-tests")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_project_knowledge(monkeypatch, tmp_path):
+    """Tests never read the live workspace's repo summaries: the project
+    knowledge starts empty; a test that needs some brings its own."""
+    from app import project_knowledge
+    monkeypatch.setattr(project_knowledge, "_repo_files", lambda workspace: [])
+    project_knowledge._REPOS.clear()
+    project_knowledge._VOCAB.update(words=None, at=0.0)
+    yield
+    project_knowledge._REPOS.clear()
+    project_knowledge._VOCAB.update(words=None, at=0.0)

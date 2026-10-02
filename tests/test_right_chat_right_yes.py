@@ -733,6 +733,7 @@ def rail(monkeypatch):
     chat_watch._HOT.clear()
     chat_watch._RESTORED.clear()
     chat_watch._CHECKED.clear()
+    chat_watch._BACKOFF.clear()
     chat_watch._EVENT["ev"] = None
     tb.MENTIONED["ev"] = None
     yield
@@ -1059,3 +1060,68 @@ def test_what_the_page_last_reported_is_kept_for_a_look():
     assert seen["rows"] == ["*Muted group one", "Vinish Kumar"]
     chat_watch._RAIL.update(order=[], unread=set(), at=0.0)
     chat_watch._HOT.clear()
+
+
+
+# --- 2 Oct: a chat left unread was re-opened every minute, forever ----------------------
+
+LIST = ["Arunkumar K (You)", "BEP_Telikos : Defect Triage", "Vinish Kumar", "Team Booking",
+        "AP Changes Related to Soft Closure", "Rajendra Kumar"]
+
+
+def _restore(chat, unread_list, at):
+    chat_watch.on_rail(unread_list)
+    chat_watch.take_hot()
+    chat_watch._RESTORED[chat] = at
+    chat_watch._CHECKED[chat] = at
+
+
+def test_two_days_unread_at_the_top_is_three_re_reads_not_three_thousand(rail):
+    t0 = time.time()
+    rows = ["*" + c if c == "BEP_Telikos : Defect Triage" else c for c in LIST]
+    _restore("BEP_Telikos : Defect Triage", rows, t0)
+    opens = 0
+    for minute in range(1, 2 * 24 * 60):
+        now = t0 + minute * 60
+        due = chat_watch._restored_due(now)
+        if due:
+            opens += 1
+            for c in due:
+                chat_watch._BACKOFF[c] = chat_watch._BACKOFF.get(c, 0) + 1
+                chat_watch._CHECKED[c] = now
+    assert opens == 3, "1, 2 and 4 minutes after — then the full sweep's look at the top"
+
+
+def test_a_restored_chat_lower_down_is_not_re_read_a_new_message_moves_it_up(rail):
+    t0 = time.time() - 300
+    rows = ["*" + c if c == "Rajendra Kumar" else c for c in LIST]
+    _restore("Rajendra Kumar", rows, t0)
+    assert chat_watch._restored_due(t0 + 3600) == []
+    # His next message moves the chat to the top: the watcher reports it at once.
+    moved = ["*Rajendra Kumar"] + [c for c in LIST if c != "Rajendra Kumar"]
+    assert "Rajendra Kumar" in chat_watch.on_rail(moved)
+
+
+def test_news_in_a_restored_chat_starts_the_re_reads_again(rail):
+    t0 = time.time()
+    rows = ["*" + c if c == "BEP_Telikos : Defect Triage" else c for c in LIST]
+    _restore("BEP_Telikos : Defect Triage", rows, t0)
+    chat_watch._BACKOFF["BEP_Telikos : Defect Triage"] = 3
+    assert chat_watch._restored_due(t0 + 3600) == []
+    chat_watch.news_in("BEP_Telikos : Defect Triage")
+    assert chat_watch._restored_due(t0 + 61) == ["BEP_Telikos : Defect Triage"]
+
+
+def test_woken_for_a_re_read_that_is_not_due_is_not_a_full_sweep(rail, monkeypatch):
+    from app import wake
+
+    async def sleep(seconds):
+        await asyncio.sleep(0.01)
+        return False
+
+    monkeypatch.setattr(wake, "sleep", sleep)
+    t0 = time.time()
+    rows = ["*" + c if c == "BEP_Telikos : Defect Triage" else c for c in LIST]
+    _restore("BEP_Telikos : Defect Triage", rows, t0)
+    # Due in a minute: the loop wakes then, finds nothing due yet (clock not moved).
+    assert asyncio.run(chat_watch._wait_for_work(300)) == "idle"

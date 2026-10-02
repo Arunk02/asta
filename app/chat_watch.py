@@ -848,6 +848,8 @@ async def new_in(chat: str, advance: bool = True) -> list[dict]:
     from . import teams_bridge
     rows = await teams_bridge.read_history(chat, limit=READ_LIMIT, max_scrolls=0)
     fresh = unseen(chat, rows or [])
+    if fresh:
+        news_in(chat)
     # A message already processed is never new again, whatever happened to its
     # key. A reaction changes the text a key is made from; Team Booking's "Hi
     # Everyone — can we connect please" came back as "Vinish wants to connect"
@@ -1690,7 +1692,7 @@ async def watch_loop() -> None:
             due = max(MIN_GAP_SECONDS, every - (_time.monotonic() - last_full))
             why = await _wait_for_work(due)
         hot = [] if why == "full" else take_hot()
-        if why == "hot" and not hot:
+        if why in ("hot", "idle") and not hot:
             continue                    # nothing worth opening after all
         # A call OWNS the browser. Chromium tolerates one writer per profile, so
         # a sweep during a call is not a slow read — it is a second instance
@@ -1750,14 +1752,24 @@ STARTUP_SECONDS = 20.0
 HOT_DEBOUNCE_SECONDS = 2.0
 #: The watcher reports at least once a minute; quiet longer than this, it is down.
 RAIL_SILENT_SECONDS = 180.0
-#: A chat Asta gave back to him unread is re-read this often while it stays
-#: unread: a new message in an already-bold chat changes nothing on the rail.
+#: A chat Asta gave back to him unread can only be re-read to see more news in
+#: it: a new message in an already-bold chat changes nothing about its bold.
+#: But it MOVES the chat to the top, which the watcher sees — so only a chat
+#: that cannot move up (already among the top few, or pinned there) is re-read,
+#: at 1, 2 and 4 minutes; after that the full sweep, which always reads the top
+#: of the list, covers it. 2 Oct: re-read every minute while he left it unread —
+#: 28 opens of one group in an hour, ~2,900 over two days, all "0 new".
 RESTORED_RECHECK_SECONDS = 60.0
+RESTORED_RECHECK_STEPS = 3
+#: The chats at the head of the list: a new message cannot move them up.
+RESTORED_TOP = 3
 
 _RAIL: dict = {"order": [], "unread": set(), "at": 0.0}
 _HOT: dict[str, float] = {}
 _RESTORED: dict[str, float] = {}
 _CHECKED: dict[str, float] = {}
+#: How many re-reads each restored chat has had since its last news.
+_BACKOFF: dict[str, int] = {}
 _EVENT: dict = {"ev": None}
 
 
@@ -1812,6 +1824,7 @@ def on_rail(rows: list[str], now: float | None = None) -> list[str]:
     for c in list(_RESTORED):
         if c not in unread and now - _RESTORED[c] > 30:
             _RESTORED.pop(c, None)              # he has read it himself
+            _BACKOFF.pop(c, None)
     # A row with no letters is not a chat: while Teams loads, its list is
     # placeholder rows with invisible names, and ten of them were "read" every
     # five minutes (81 s each time, 2 Oct).
@@ -1824,9 +1837,46 @@ def on_rail(rows: list[str], now: float | None = None) -> list[str]:
     return sorted(hot)
 
 
+def _at_the_top(chat: str) -> bool:
+    """Among the first few real chats: a new message cannot move it up."""
+    from . import teams_bridge
+    real = [c for c in _RAIL["order"] if re.search(r"\w", c or "") and not is_furniture(c)
+            and c.lower() not in teams_bridge._NOT_A_CHAT and not c.lower().endswith("(you)")]
+    return chat in real[:RESTORED_TOP]
+
+
+def _restored_wait(chat: str) -> float | None:
+    """How long after its last read this restored chat is re-read — None: not
+    again (it can announce news by moving, or the sweep covers it)."""
+    if chat not in _RAIL["unread"] or not _at_the_top(chat):
+        return None
+    n = _BACKOFF.get(chat, 0)
+    return None if n >= RESTORED_RECHECK_STEPS else RESTORED_RECHECK_SECONDS * (2 ** n)
+
+
 def _restored_due(now: float) -> list[str]:
-    return [c for c, at in _RESTORED.items()
-            if c in _RAIL["unread"] and now - _CHECKED.get(c, at) >= RESTORED_RECHECK_SECONDS]
+    due = []
+    for c, at in _RESTORED.items():
+        wait = _restored_wait(c)
+        if wait is not None and now - _CHECKED.get(c, at) >= wait:
+            due.append(c)
+    return due
+
+
+def _next_restored(now: float) -> float | None:
+    """Seconds until the next restored chat is due, if any is."""
+    waits = []
+    for c, at in _RESTORED.items():
+        wait = _restored_wait(c)
+        if wait is not None:
+            waits.append(max(0.0, wait - (now - _CHECKED.get(c, at))))
+    return min(waits) if waits else None
+
+
+def news_in(chat: str) -> None:
+    """New messages were found in this chat: people are talking there, so a
+    restored chat goes back to being re-read soon."""
+    _BACKOFF.pop(chat, None)
 
 
 def take_hot() -> list[str]:
@@ -1834,6 +1884,8 @@ def take_hot() -> list[str]:
     import time as _t
     now = _t.time()
     due = _restored_due(now)
+    for c in due:
+        _BACKOFF[c] = _BACKOFF.get(c, 0) + 1
     chats = sorted(_HOT, key=_HOT.get) + [c for c in due if c not in _HOT]
     _HOT.clear()
     _hot_event().clear()
@@ -1847,8 +1899,10 @@ async def _wait_for_work(timeout: float) -> str:
     import time as _t
     from . import wake
     ev = _hot_event()
-    if _RESTORED:
-        timeout = min(timeout, RESTORED_RECHECK_SECONDS)
+    full = timeout
+    nxt = _next_restored(_t.time())
+    if nxt is not None:
+        timeout = min(timeout, max(1.0, nxt))
     sleeper = asyncio.ensure_future(wake.sleep(timeout))
     waiter = asyncio.ensure_future(ev.wait())
     try:
@@ -1862,7 +1916,11 @@ async def _wait_for_work(timeout: float) -> str:
         return "hot"
     if sleeper.result():
         return "full"                           # the Mac woke: read everything
-    return "hot" if _restored_due(_t.time()) else "full"
+    if _restored_due(_t.time()):
+        return "hot"
+    # Woken early for a re-read that is not due after all: NOT a full sweep.
+    # (A full sweep every minute was the old fall-through.)
+    return "idle" if timeout < full else "full"
 
 
 async def attach_rail(ctx, page) -> None:

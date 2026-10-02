@@ -97,7 +97,7 @@ ECHO_FUZZY_SECONDS = 120.0
 #: ...at this likeness, window by window (his own lines scored at most 0.54).
 ECHO_FUZZY = 0.66
 #: Most of the words Asta just said, AND this much of its sound.
-ECHO_WORDS_AND_SOUND = 0.6
+ECHO_WORDS_AND_SOUND = 0.7
 #: The same thing is not said twice within this long ("Got it — only booking PR
 #: 1429 and AP PR 1252" three times in a minute, 2 Oct).
 REPEAT_SECONDS = 90.0
@@ -529,7 +529,8 @@ def mac_words(said: str, confidence: float) -> str:
     return said
 
 
-async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float = 0.0) -> dict:
+async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float = 0.0,
+                asta: bool | None = None) -> dict:
     """One utterance from the helper: transcribe, decide, act. Returns what happened.
 
     `said` is the helper's own on-device transcription, made while he talked —
@@ -560,7 +561,11 @@ async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float
     if dry:
         return {"text": text, "did": "dry"}
     barge = time.time() - _STATE["barge_heard"] < 20
-    mine = echo(text, while_speaking=barge)
+    # The helper knows whether Asta was audible while this was recorded. If it
+    # was not, this cannot be Asta's echo, however much it sounds like Asta's
+    # words: "Can you explain the booking service?", said in silence, was
+    # dropped as echo of an earlier answer (2 Oct 17:55).
+    mine = text if asta is False else echo(text, while_speaking=barge)
     if barge and mine.strip() and is_noise(mine):
         # A cough or the room over Asta comes back as Whisper's "Thank you." —
         # 2 Oct 17:47 it stopped an answer mid-sentence. Not him: carry on.
@@ -794,6 +799,27 @@ async def converse(text: str) -> dict:
         _STATE["last_heard"] = time.time()
         await say("Still on that — I'll tell you.", kind="answer")
         return {"text": text, "did": "already_on_it", "job": same["id"]}
+    kb = ""
+    if decided == voice_talker.ANSWER:
+        # What Asta's own records answer, instantly, comes first: its jobs, his
+        # PRs, what is pending.
+        with contextlib.suppress(Exception):
+            from . import frontdesk
+            known = jobs_answer(text) or pr_answer(text) or frontdesk.answer_from_state(text)
+            if known:
+                _STATE["last_heard"] = time.time()
+                await say_lines(known)
+                return {"text": text, "did": "answered_from_state"}
+    if decided in (voice_talker.ANSWER, voice_talker.DO) and knows_about(text):
+        # "What is Telikos Inland Booking?" — his documents and the repo
+        # summaries answer it in seconds; a job took 20-60 s and, with no
+        # workspace, found nothing (2 Oct).
+        with contextlib.suppress(Exception):
+            from . import project_knowledge
+            kb = project_knowledge.lookup(text, budget=2000)
+        if kb:
+            decided = voice_talker.ANSWER
+            store.record_outcome("voice", "knowledge", detail=f"{len(kb)} chars · {text[:100]}")
     if decided == voice_talker.LISTEN:
         _STATE["last_heard"] = time.time()
         await say("I'm listening.", kind="answer")
@@ -803,23 +829,13 @@ async def converse(text: str) -> dict:
         await say("On it.", kind="answer")
         asyncio.ensure_future(_work(text, context))
         return {"text": text, "did": "handed_on"}
-    if decided == voice_talker.ANSWER:
-        # What Asta's own records answer, instantly: its own jobs, his PRs, what
-        # is pending. Only the rest goes to Claude.
-        with contextlib.suppress(Exception):
-            from . import frontdesk
-            known = jobs_answer(text) or pr_answer(text) or frontdesk.answer_from_state(text)
-            if known:
-                _STATE["last_heard"] = time.time()
-                await say_lines(known)
-                return {"text": text, "did": "answered_from_state"}
     spoken = 0
     handed = False
     filler = asyncio.ensure_future(_filler(started))
     try:
         # Routed as a question for Asta: the talker answers it, never silence.
         kind = "to_you" if decided == voice_talker.ANSWER else "said"
-        async for line in voice_talker.sentences(text, kind):
+        async for line in voice_talker.sentences(text, kind, **({"context": kb} if kb else {})):
             filler.cancel()
             if line == voice_talker.QUIET:
                 store.record_outcome("voice", "not_for_asta", detail=text[:200])
@@ -868,6 +884,18 @@ async def converse(text: str) -> dict:
         asyncio.ensure_future(_work(text, context))
         return {"text": text, "did": "handed_on"}
     return {"text": text, "did": "answered"}
+
+
+#: Work, not a question about how things are: a booking id, "check", "debug"...
+_WORK_WORDS = re.compile(r"\b(?:check|debug|logs?|send|message|ping|fix|investigate|review|merge|deploy|"
+                         r"draft|remind|schedule|call|book\s+a|create)\b|(?-i:\b(?=[A-Z0-9]*\d)[A-Z0-9]{8,}\b)", re.I)
+
+
+def knows_about(text: str) -> bool:
+    """A question about what something is or how it works — the knowledge
+    answers it — rather than work to do."""
+    from . import project_knowledge
+    return project_knowledge.is_knowledge_question(text) and not _WORK_WORDS.search(text or "")
 
 
 async def _filler(started: float) -> None:
@@ -1191,7 +1219,7 @@ _ABOUT_MY_PRS = re.compile(
 #: A question about something specific — a booking, a person's chat, one PR —
 #: is not "my PRs". 2 Oct 13:49: "check that Rajendra booking… pre-prod" got
 #: "You have 15 open PRs".
-_SPECIFIC = re.compile(r"\bbooking|\b[A-Z0-9]{8,}\b|\bPR\s*#?\d+|\bdebug|\bcheck\b", re.I)
+_SPECIFIC = re.compile(r"\bbooking|(?-i:\b(?=[A-Z0-9]*\d)[A-Z0-9]{8,}\b)|\bPR\s*#?\d+|\bdebug|\bcheck\b", re.I)
 
 
 def pr_answer(text: str) -> str:
@@ -1294,9 +1322,10 @@ async def idle_loop() -> None:
                                     "voice", urgency="direct", considered=True)
 
 
-async def _heard_quietly(wav: bytes, said: str = "", confidence: float = 0.0) -> None:
+async def _heard_quietly(wav: bytes, said: str = "", confidence: float = 0.0,
+                         asta: bool | None = None) -> None:
     try:
-        await heard(wav, said=said, confidence=confidence)
+        await heard(wav, said=said, confidence=confidence, asta=asta)
     except Exception as exc:                                    # noqa: BLE001
         from . import quiet
         quiet.note("voice.heard", exc)
@@ -1335,7 +1364,9 @@ async def serve(ws) -> None:
                 else:
                     # In the background: a turn can take minutes, and the hotkeys
                     # must keep working while it does.
-                    asyncio.ensure_future(_heard_quietly(wav, said, confidence))
+                    asta = msg.get("asta")
+                    asyncio.ensure_future(_heard_quietly(
+                        wav, said, confidence, asta if isinstance(asta, bool) else None))
             elif kind == "transcript":
                 transcript(msg)
             elif kind == "barge":

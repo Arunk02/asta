@@ -494,8 +494,8 @@ def talker(monkeypatch):
     replies: list[list[str]] = []
     asked: list[tuple] = []
 
-    async def sentences(text, kind="said", timeout=30):
-        asked.append((text, kind))
+    async def sentences(text, kind="said", timeout=30, context=""):
+        asked.append((text, kind) if not context else (text, kind, context))
         for line in (replies.pop(0) if replies else []):
             yield line
 
@@ -948,7 +948,7 @@ def test_a_slow_answer_gets_one_moment_and_a_fast_one_nothing(helper, decide, mo
     monkeypatch.setattr(vm, "FILLER_SECONDS", 0.1)
     delay = {"s": 0.3}
 
-    async def sentences(text, kind="said", timeout=30):
+    async def sentences(text, kind="said", timeout=30, context=""):
         await asyncio.sleep(delay["s"])
         yield "Booking PR 1429."
 
@@ -1592,3 +1592,25 @@ def test_asked_again_needs_the_same_question_not_one_shared_word():
                    "result": "Booking is too broad for me to give a brief."}
     assert vm.answered_before("Do you know how to get a book?") is None
     vm._JOBS.clear()
+
+
+def test_said_while_asta_was_silent_is_never_echo(helper, whisper, monkeypatch):
+    # 17:55:37: "Can you explain the booking service?" was dropped as echo of an answer
+    # given a minute before — while Asta was silent.
+    got: list[str] = []
+
+    async def assemble(text):
+        got.append(text)
+        return {"did": "decided"}
+
+    monkeypatch.setattr(vm, "assemble", assemble)
+    vm._SPOKEN[:] = [(time.time() - 50, "telikos-booking-service is the core booking service")]
+    whisper["text"] = "Can you explain the booking service?"
+    run(vm.heard(b"RIFF", asta=False))
+    assert got == ["Can you explain the booking service?"]
+    vm._SPOKEN.clear()
+
+
+def test_the_helper_stamps_whether_asta_was_audible():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert '"asta": audible' in src and "astaAudible = astaNow()" in src

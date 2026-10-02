@@ -55,6 +55,9 @@ ACKS = {"question": "Let me check.", "do": "On it.", "now": "Checking now.", "lo
 #: answered the half while he was still saying the rest).
 HOLD_SECONDS = 0.25
 HOLD_UNFINISHED_SECONDS = 3.0
+#: A piece waits at most this long for him to go on. Room sound reads as "he is
+#: talking" too, and once held "Yeah, Aastha" for 14 s (2 Oct 13:42).
+HOLD_MAX_SECONDS = 4.0
 #: A turn still being spoken is decided after this long, whatever happens.
 TURN_MAX_SECONDS = 20.0
 #: What was said this recently is "the conversation": the decision and the work see it.
@@ -600,15 +603,17 @@ async def assemble(text: str) -> dict:
     _TURN["parts"].append(text)
     _TURN["gen"] += 1
     gen = _TURN["gen"]
-    hold = HOLD_UNFINISHED_SECONDS if unfinished(text) else HOLD_SECONDS
-    deadline = time.time() + hold
+    calling = len(_tokens(text)) <= 4 and (named(text) or _ONE_WORD.match(text))
+    hold = 0.0 if calling else HOLD_UNFINISHED_SECONDS if unfinished(text) else HOLD_SECONDS
+    arrived = time.time()
+    deadline = arrived + hold
     while True:
         await asyncio.sleep(0.05)
         if _TURN["gen"] != gen:
             return {"text": text, "did": "joined"}  # more came: the newest piece decides
-        if time.time() - _TURN["first_at"] > TURN_MAX_SECONDS:
+        if time.time() - _TURN["first_at"] > TURN_MAX_SECONDS or time.time() - arrived > HOLD_MAX_SECONDS:
             break
-        if time.time() < deadline or _TURN["speaking"] or _TURN["pending"]:
+        if time.time() < deadline or (not calling and (_TURN["speaking"] or _TURN["pending"])):
             continue
         break
     whole = " ".join(_TURN["parts"])
@@ -647,11 +652,12 @@ async def handle(text: str) -> dict:
     """What he said, already as text."""
     if not listening() or is_noise(text):
         return {"text": text, "did": "ignored"}
-    if _GO_OFF.search(text):
+    command = len(_tokens(text)) <= 7     # a switch is said on its own, not inside a long sentence
+    if command and _GO_OFF.search(text):
         await set_mode(mic=False, why="he said so")
         await say("Okay, mic off.", kind="answer")
         return {"text": text, "did": "mic_off"}
-    if _QUIET.search(text):
+    if command and _QUIET.search(text):
         await say("Okay, going quiet.", kind="answer")
         await set_mode(speaker=False, why="he said so")
         return {"text": text, "did": "speaker_off"}
@@ -1057,7 +1063,13 @@ class VoiceSink:
 
 
 #: "what's pending with my PRs", "which PRs are waiting on Vinish", "my open PRs".
-_ABOUT_MY_PRS = re.compile(r"\b(?:prs?|pull\s+requests?)\b", re.I)
+_ABOUT_MY_PRS = re.compile(
+    r"\b(?:my|open|pending|all)\s+(?:prs?|pull\s+requests?)\b|\b(?:prs?|pull\s+requests?)\s+(?:status|pending)\b|"
+    r"pull\s+request\s+का", re.I)
+#: A question about something specific — a booking, a person's chat, one PR —
+#: is not "my PRs". 2 Oct 13:49: "check that Rajendra booking… pre-prod" got
+#: "You have 15 open PRs".
+_SPECIFIC = re.compile(r"\bbooking|\b[A-Z0-9]{8,}\b|\bPR\s*#?\d+|\bdebug|\bcheck\b", re.I)
 
 
 def pr_answer(text: str) -> str:
@@ -1065,7 +1077,7 @@ def pr_answer(text: str) -> str:
 
     The talker once sent "what's pending with my PRs?" off as work and told the
     next two questions "still on that" (bench, 2 Oct)."""
-    if not _ABOUT_MY_PRS.search(text or ""):
+    if not _ABOUT_MY_PRS.search(text or "") or _SPECIFIC.search(text or "") or len((text or "").split()) > 16:
         return ""
     from . import prname, reminders
     lines = [ln.lstrip("• ").strip() for ln in prname.his_open_prs().splitlines() if ln.strip()]

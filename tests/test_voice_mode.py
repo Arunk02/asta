@@ -1393,3 +1393,39 @@ def test_a_short_mac_result_is_checked_by_whisper(whisper):
 def test_a_lone_hello_is_him_calling_not_noise():
     for word in ("Hello", "Hello.", "hi", "Hey"):
         assert not vm.is_noise(word), word
+
+
+def test_a_command_inside_a_long_sentence_is_not_a_command(helper, decide, talker):
+    from app import voice_talker
+    decide["next"] = voice_talker.QUIET
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.handle("That set up is not on me right, we said whenever he brings you be quiet in meetings"))
+    assert vm._STATE["speaker"] is True and vm._STATE["mic"] is True
+    run(vm.handle("Asta, be quiet"))
+    assert vm._STATE["speaker"] is False
+
+
+def test_the_pr_shortcut_is_only_for_his_prs_as_a_whole(monkeypatch):
+    from app import prname
+    monkeypatch.setattr(prname, "his_open_prs", lambda: "• booking PR 1429 — RFP validations")
+    assert vm.pr_answer("what's pending with my PRs?")
+    assert vm.pr_answer("मेरे pull request का क्या हाल है?")
+    assert vm.pr_answer("check that Rajendra booking, debug it in pre-prod, any PR for it?") == ""
+    assert vm.pr_answer("what about PR 1252?") == ""
+
+
+def test_a_call_by_name_is_answered_at_once_even_with_the_room_noisy(helper, decided):
+    vm._TURN["speaking"] = True                     # the room, read as talking
+    started = time.time()
+    run(vm.assemble("Hello Asta"))
+    assert decided == ["Hello Asta"] and time.time() - started < 1.0
+    vm._TURN["speaking"] = False
+
+
+def test_room_sound_holds_a_piece_at_most_a_few_seconds(helper, decided, monkeypatch):
+    monkeypatch.setattr(vm, "HOLD_MAX_SECONDS", 0.5)
+    vm._TURN["speaking"] = True
+    started = time.time()
+    run(vm.assemble("Is there anything for me to look at today."))
+    assert decided and time.time() - started < 1.5
+    vm._TURN["speaking"] = False

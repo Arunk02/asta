@@ -431,9 +431,8 @@ async def turn(text: str) -> str:
         if not done and sink.spoken == 0 and not sink.cut():
             await say(ACKS[_kind_of(text)], kind="answer")
         if not done:
-            done, _ = await asyncio.wait({job}, timeout=max(0.0, STILL_SECONDS - (time.time() - started)))
-        if not done and sink.spoken == 0 and not sink.cut():
-            await say(ACKS["long"], kind="answer")
+            # No timed "still on it": he called that nagging (2 Oct). He heard
+            # the acknowledgement; the answer comes when it comes.
             await asyncio.wait({job}, timeout=TURN_SECONDS)
     reply = sink.text()
     rest = "" if sink.cut() else speakable(reply, skip=sink.spoken)

@@ -1014,6 +1014,18 @@ def their_last(chat: str, hours: float = 12) -> float | None:
     return max(times) if times else None
 
 
+def his_last_words(chat: str, before: float | None, hours: float = 24) -> str:
+    """What he last said in this chat before `before` — what is being answered."""
+    import time as _t
+    try:
+        rows = store.teams_messages(chat=chat, since=_t.time() - hours * 3600, limit=400)
+    except Exception:                                          # noqa: BLE001
+        return ""
+    mine = [r for r in rows if is_from_him(r.get("sender", "")) and r.get("sent_at")
+            and (before is None or float(r["sent_at"]) < float(before))]
+    return " ".join((max(mine, key=lambda r: float(r["sent_at"]))["text"] or "").split()) if mine else ""
+
+
 def answering_him(chat: str, sent_at: float | None, hours: float = 24) -> bool:
     """Was the last message before theirs his? Then what they sent is a reply."""
     if not sent_at:
@@ -1374,6 +1386,24 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         with contextlib.suppress(Exception):
             from . import answers as _answers
             await _answers.note_followup(tid, who, "\n".join(as_read(x) for x in c["new"]))
+
+        if state == "status" and c["one_to_one"] \
+                and answering_him(c["chat"], c.get("first_at") or c.get("sent_at")):
+            # An answer to HIS message is never a line for later. 2 Oct: Vinish's
+            # "Bro, tomorrow morning, 10 to 11 Am" — his answer to "bro when ru
+            # free for the call" — was read in 33 s and filed as status: no word
+            # to him. He hears it now; Asta does not answer it for him (a time
+            # agreed is his to agree).
+            for k in c["keys"]:
+                attention.mark_dropped(k)
+            line = f"💬 {who.split()[0]} replied to you: " \
+                   f"{summarise(' / '.join(c['new']), limit=200)}"
+            asked = his_last_words(c["chat"], before=c.get("first_at") or c.get("sent_at"))
+            if asked:
+                line += f"\n(to your: “{asked[:120]}”)"
+            if _worth_telling(tid, line, fyi=False, group=False, now=now):
+                red.append(line)
+            continue
 
         if state == "status":
             # Nothing is needed from him: a line to read later, never a buzz.
@@ -1797,7 +1827,13 @@ def on_rail(rows: list[str], now: float | None = None) -> list[str]:
     from . import teams_bridge
     now = _t.time() if now is None else now
     marks = [r for r in rows or [] if r.lstrip("*").startswith("!")]
-    rows = [r for r in rows or [] if r not in marks]
+    rows = [r for r in rows or [] if r not in marks and re.search(r"\w", r.lstrip("*"))]
+    if _RAIL["order"] and len(rows) < len(_RAIL["order"]) // 2:
+        # Not the chat list: mid-navigation Teams paints its app bar's icon
+        # glyphs ("\uebe2"…) as the tree. Taken as the list, the real one coming
+        # back looked like six chats moving — six needless reads after every
+        # sweep (2 Oct). The picture is ignored.
+        return []
     # "Mentions" bold: a channel @mention — the Activity feed reads it now.
     if any(m.startswith("*") for m in marks) and not _RAIL.get("mentioned"):
         with contextlib.suppress(Exception):

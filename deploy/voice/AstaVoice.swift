@@ -115,10 +115,24 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     /// came back as a request, and were answered again.
     private(set) var held = false
 
+    /// Waiting is capped: room sound reads as "him talking" too — with echo
+    /// cancelling off, an answer ready at 17:50:39 waited 10 s while he said
+    /// "Hello? Hello?" because nothing came (2 Oct). After this long Asta speaks.
+    static let holdMax: TimeInterval = 2.5
+    private var heldAt = Date.distantPast
+
     func hold(_ on: Bool) {
         guard on != held else { return }
         held = on
-        if !on && !speaking && !waiting.isEmpty {
+        if on {
+            heldAt = Date()
+            let mine = heldAt
+            DispatchQueue.main.asyncAfter(deadline: .now() + Mouth.holdMax) {
+                if self.held && self.heldAt == mine { self.hold(false) }
+            }
+            return
+        }
+        if !speaking && !waiting.isEmpty {
             let (t, a, c) = waiting.removeFirst()
             play(text: t, audio: a, chime: c)
         }
@@ -380,9 +394,15 @@ final class Ears {
     private var lastReport = Date()
     private var openedAt = Date()
     var useVoiceProcessing = true
+    private var retriedProcessing = false
 
     func start() {
         guard !running else { return }
+        // Echo cancelling is tried again every time the mic opens: once it gave
+        // silence it stayed off for the session, and Asta heard itself (2 Oct
+        // 17:49) — its own lines came back as requests and cut it off.
+        if !useVoiceProcessing && !retriedProcessing { useVoiceProcessing = true }
+        retriedProcessing = false
         let input = engine.inputNode
         try? input.setVoiceProcessingEnabled(useVoiceProcessing)   // echo cancelling
         let inFormat = input.outputFormat(forBus: 0)
@@ -471,6 +491,7 @@ final class Ears {
                     self.stop()
                     self.engine.reset()
                     self.useVoiceProcessing = false
+                    self.retriedProcessing = true      // this reopen stays without it
                     self.start()
                 }
             }

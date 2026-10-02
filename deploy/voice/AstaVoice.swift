@@ -108,8 +108,32 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
         play(text: text, audio: audio, chime: chime)
     }
 
+    /// Sound while Asta talks: turned down, not off — it may be Asta's own voice
+    /// coming back through the mic (2 Oct: on speakers, it cut itself off every
+    /// answer). Asta checks the words and then says "hush" (him) or "unduck" (echo).
+    private(set) var ducked = false
+    private var duckedAt = Date.distantPast
+
+    func duck() {
+        ducked = true
+        duckedAt = Date()
+        player?.volume = 0.15
+        log("ducked")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            if self.ducked && Date().timeIntervalSince(self.duckedAt) >= 10 { self.unduck() }
+        }
+    }
+
+    func unduck() {
+        guard ducked else { return }
+        ducked = false
+        player?.volume = 1.0
+        log("unducked")
+    }
+
     /// He started talking: Asta stops at once and forgets what it was about to say.
     func interrupt() {
+        ducked = false
         waiting.removeAll()
         player?.stop()
         synth.stopSpeaking(at: .immediate)
@@ -123,7 +147,9 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
             if let audio = audio, let p = try? AVAudioPlayer(data: audio) {
                 self.player = p
                 p.delegate = self
+                p.volume = self.ducked ? 0.15 : 1.0
                 p.play()
+                log("saying: \(text.prefix(60))")
             } else {
                 // No Asta voice (Voicebox down): the Mac's own, never silence.
                 self.synth.speak(AVSpeechUtterance(string: text))
@@ -432,7 +458,9 @@ final class Ears {
             peakDb = -120
             lastReport = Date()
         }
-        if mouth?.speaking == true {
+        // Once he is heard over Asta, Asta is only turned down — his words are
+        // gathered below as usual, not taken for more of Asta's own sound.
+        if mouth?.speaking == true && !inSpeech {
             // Barge-in. Echo cancelling removes most of Asta's own voice; what
             // is left is far quieter than him talking, so the bar is high:
             // 18 dB over the room for about a third of a second.
@@ -535,10 +563,11 @@ final class App: NSObject, NSApplicationDelegate {
                              "text": text, "confidence": Double(conf)])
         }
         ears.onSpeaking = { [weak self] now in
+            if !now { self?.mouth.unduck() }       // too short to be him
             self?.link.send(["type": "speaking", "value": now])
         }
         ears.onBargeIn = { [weak self] in
-            self?.mouth.interrupt()
+            self?.mouth.duck()
             self?.link.send(["type": "barge"])
         }
         link.onState = { [weak self] _ in self?.redraw() }
@@ -570,6 +599,11 @@ final class App: NSObject, NSApplicationDelegate {
             let audio = (msg["audio"] as? String).flatMap { Data(base64Encoded: $0) }
             mouth.say(text: msg["text"] as? String ?? "", audio: (audio?.isEmpty ?? true) ? nil : audio,
                       chime: msg["chime"] as? Bool ?? false)
+        case "hush":
+            log("hushed — he is talking")
+            mouth.interrupt()
+        case "unduck":
+            mouth.unduck()
         case "vocab":
             let words = (msg["words"] as? [String]) ?? []
             ears.recognizer.vocab = words

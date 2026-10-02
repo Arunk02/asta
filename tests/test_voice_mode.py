@@ -42,6 +42,8 @@ def helper(monkeypatch):
                      last_spoke=0.0, barged_at=0.0, helper=h)
     vm._QUEUE.clear()
     vm._HEARD.clear()
+    vm._SPOKEN.clear()
+    vm._STATE["barge_heard"] = 0.0
     vm._TURN.update(parts=[], gen=0, first_at=0.0, speaking=False, pending=0)
 
     async def speak(text, **k):
@@ -1124,3 +1126,70 @@ def test_a_fresh_talker_is_swapped_in_after_many_turns_and_told_the_conversation
     assert "[Conversation so far]" in told_second, "the swapped-in talker is told too"
     run(voice_talker.close())
     vm._HEARD.clear()
+
+
+# --- Asta's own voice, heard back (2 Oct 13:05, on speakers) ------------------------------
+
+def test_asta_hearing_its_own_answer_is_echo_not_him():
+    vm._SPOKEN[:] = [(time.time(), "You have fifteen open PRs. Booking PR 1429 is waiting on Vinish.")]
+    assert vm.echo("Booking PR 1429 is waiting on Vinish.") == ""
+    assert vm.echo("you have fifteen open PRs") == ""
+    assert vm.echo("Did Vinish respond to my message?") == "Did Vinish respond to my message?"
+    vm._SPOKEN.clear()
+
+
+def test_a_short_answer_is_his_unless_asta_was_talking_over_it():
+    vm._SPOKEN[:] = [(time.time(), "Send it?")]
+    assert vm.echo("Send it.") == "Send it.", "his yes to Asta's question"
+    assert vm.echo("Send it.", while_speaking=True) == ""
+    vm._SPOKEN.clear()
+
+
+def test_his_words_after_astas_tail_are_kept():
+    vm._SPOKEN[:] = [(time.time(), "Booking PR 1429 is waiting on Vinish.")]
+    assert vm.echo("waiting on Vinish stop, check the AP one instead", while_speaking=True) == \
+        "stop, check the AP one instead"
+    assert vm.echo("waiting on Vinish, which one?", while_speaking=True) == "which one?"
+    vm._SPOKEN.clear()
+
+
+def test_old_lines_are_not_echo():
+    vm._SPOKEN[:] = [(time.time() - 120, "Booking PR 1429 is waiting on Vinish.")]
+    assert vm.echo("Booking PR 1429 is waiting on Vinish.") != ""
+    vm._SPOKEN.clear()
+
+
+def test_sound_over_asta_that_was_its_own_echo_turns_it_back_up(helper, whisper, monkeypatch):
+    got: list[str] = []
+
+    async def assemble(text):
+        got.append(text)
+        return {"did": "decided"}
+
+    monkeypatch.setattr(vm, "assemble", assemble)
+    vm._SPOKEN[:] = [(time.time(), "You have fifteen open PRs, most recent is the topic refresh one.")]
+    vm._STATE.update(barge_heard=time.time(), barged_at=0.0)
+    out = run(vm.heard(b"RIFF", said="You have fifteen open PRs, most recent is", confidence=0.98))
+    assert out["did"] == "echo" and got == []
+    assert {"type": "unduck"} in helper.sent and vm._STATE["barged_at"] == 0.0
+
+
+def test_sound_over_asta_that_is_him_stops_asta_and_is_his_turn(helper, whisper, monkeypatch):
+    got: list[str] = []
+
+    async def assemble(text):
+        got.append(text)
+        return {"did": "decided"}
+
+    monkeypatch.setattr(vm, "assemble", assemble)
+    vm._SPOKEN[:] = [(time.time(), "You have fifteen open PRs.")]
+    vm._STATE.update(barge_heard=time.time(), barged_at=0.0)
+    run(vm.heard(b"RIFF", said="Stop, did Vinish reply?", confidence=0.9))
+    assert got == ["Stop, did Vinish reply?"] and {"type": "hush"} in helper.sent
+    assert vm._STATE["barged_at"] > 0
+
+
+def test_the_helper_turns_asta_down_first_and_stops_on_hush():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert "self?.mouth.duck()" in src and 'case "hush":' in src and 'case "unduck":' in src
+    assert "mouth?.speaking == true && !inSpeech" in src, "his words over Asta are gathered"

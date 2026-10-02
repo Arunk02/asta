@@ -73,7 +73,14 @@ SPOKEN_SENTENCES = 2
 QUEUE_MAX = 10
 
 _STATE: dict = {"speaker": False, "mic": False, "busy": False, "mic_on_at": 0.0,
-                "last_heard": 0.0, "last_spoke": 0.0, "barged_at": 0.0, "helper": None}
+                "last_heard": 0.0, "last_spoke": 0.0, "barged_at": 0.0, "helper": None,
+                "barge_heard": 0.0}
+#: What Asta said lately, every line (updates too): its own voice, heard back
+#: through the mic, is not him. (when, words)
+_SPOKEN: list[tuple[float, str]] = []
+#: Asta's own lines are recognised as echo for this long after they are sent —
+#: they queue, and play after the ones before them.
+ECHO_SECONDS = 30.0
 _QUEUE: list[str] = []
 #: The turn being assembled: his pieces so far, a counter that moves when more
 #: comes, whether he is talking right now, and transcriptions still in flight.
@@ -278,9 +285,46 @@ async def say(text: str, kind: str = "answer", since: float = 0.0) -> bool:
                              "chime": kind == "update"})
     if sent:
         _STATE["last_spoke"] = time.time()
+        _SPOKEN.append((time.time(), words))
+        del _SPOKEN[:-20]
         if kind != "update":
             remember("Asta", words)
     return sent
+
+
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9\u0900-\u097f']+", (text or "").lower())
+
+
+def echo(text: str, while_speaking: bool = False, now: float | None = None) -> str:
+    """What is left of `text` once Asta's own recent words are taken out —
+    '' when it was all Asta, heard back through the mic.
+
+    2 Oct, 13:05: on speakers, Asta's answers came back through the mic as
+    clean sentences (the Mac's recognizer was 98% sure of them), counted as
+    him talking over it, and cut Asta off — "no response"."""
+    now = time.time() if now is None else now
+    lines = [w for at, w in _SPOKEN if now - at < ECHO_SECONDS]
+    if not lines:
+        return text
+    from .call_rtc import strip_echo
+    ours = set(_tokens(" ".join(lines)))
+    his = _tokens(text)
+    if not his:
+        return text
+    inside = sum(1 for w in his if w in ours)
+    # Mostly Asta's words: echo. A short one only counts while Asta was talking —
+    # otherwise his "Send." after "Send it?" would be thrown away.
+    if inside / len(his) >= 0.7 and (len(his) >= 3 or while_speaking):
+        return ""
+    # Asta's tail glued to the front of what he said.
+    if not while_speaking:
+        return text
+    rest = strip_echo(text, " ".join(lines[-2:]))
+    if not _tokens(rest) or _tokens(rest) == his:
+        return text
+    end = re.search(r"[.!?।]+$", text.strip())
+    return rest + (end.group(0) if end else "")
 
 
 def worth_saying(text: str, level: str, urgency: str) -> bool:
@@ -403,7 +447,7 @@ async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float
     try:
         text = mac_words(said, confidence)
         if text:
-            store.record_outcome("voice", "ears", detail=f"mac {confidence:.2f}")
+            store.record_outcome("voice", "ears", detail=f"mac {confidence:.2f}: {text[:80]}")
         else:
             text = (await voice.transcribe(wav, filename="speech.wav")).strip()
             if foreign(text):
@@ -423,7 +467,21 @@ async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float
         _TURN["pending"] = max(0, _TURN["pending"] - 1)
     if dry:
         return {"text": text, "did": "dry"}
-    return await assemble(text)
+    barge = time.time() - _STATE["barge_heard"] < 20
+    mine = echo(text, while_speaking=barge)
+    if not mine.strip():
+        store.record_outcome("voice", "echo", detail=text[:200])
+        if barge:
+            _STATE["barge_heard"] = 0.0
+            await _to_helper({"type": "unduck"})        # it was Asta: carry on as you were
+        return {"text": text, "did": "echo"}
+    if barge:
+        # Confirmed: it is him. What Asta was saying stops, and is in the chat.
+        _STATE["barge_heard"] = 0.0
+        _STATE["barged_at"] = time.time()
+        store.record_outcome("voice", "barge", detail=mine[:120])
+        await _to_helper({"type": "hush"})
+    return await assemble(mine)
 
 
 # --- his words, for the Mac's recognizer --------------------------------------------------
@@ -1025,9 +1083,10 @@ async def serve(ws) -> None:
             elif kind == "transcript":
                 transcript(msg)
             elif kind == "barge":
-                # He talked over Asta: what it was saying is dropped — it is in
-                # the chat — and what he says next is the turn.
-                _STATE["barged_at"] = time.time()
+                # Sound while Asta talks. The helper has turned Asta DOWN, not
+                # off: it may be Asta's own voice coming back. What he says is
+                # checked when it arrives — him: "hush"; Asta's echo: "unduck".
+                _STATE["barge_heard"] = time.time()
                 _TURN["speaking"] = True
             elif kind == "busy":
                 await set_busy(bool(msg.get("value")))

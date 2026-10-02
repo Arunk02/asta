@@ -993,3 +993,41 @@ def test_the_bridge_shows_working_without_a_message():
     if node:
         path = pathlib.Path(main.__file__).resolve().parents[1] / "whatsapp" / "bridge.js"
         assert subprocess.run([node, "--check", str(path)], capture_output=True).returncode == 0
+
+
+# --- 2 Oct: a blank chat name threw the browser away 500 times ---------------------------
+
+def test_a_blank_chat_name_is_refused_without_touching_the_browser(monkeypatch):
+    def no_page():
+        raise AssertionError("the browser was opened for a blank name")
+
+    monkeypatch.setattr(tb, "teams_page", no_page)
+    for blank in ("", "   "):
+        with pytest.raises(tb.NotFound):
+            asyncio.run(tb.read_history(blank))
+
+
+def test_an_ambiguous_name_is_a_clean_refusal_not_a_broken_browser():
+    assert issubclass(tb.Ambiguous, tb.NotFound) and issubclass(tb.Ambiguous, RuntimeError)
+    matches = [{"aria": "Group chat Alpha", "text": "Alpha one", "i": 0},
+               {"aria": "Group chat Alpha", "text": "Alpha two", "i": 1}]
+    with pytest.raises(tb.Ambiguous, match="Refusing to guess"):
+        tb._one_of(matches, "Alpha", "groups", set())
+
+
+def test_a_muted_chat_row_starting_with_an_empty_line_still_has_its_name():
+    # The row's first text line can be empty (the muted icon); its name is the
+    # first line with words, in every script that reads the rail.
+    for js in (tb.RAIL_WATCH_JS, tb._ROW_UNREAD_JS, tb._MARK_RAIL_ROW, tb._CHAT_ROWS):
+        assert "find(Boolean)" in js
+    assert "const name = (n.innerText || '').split('\\n').map(t => t.trim()).find(Boolean)" in tb.RAIL_WATCH_JS
+
+
+def test_what_the_page_last_reported_is_kept_for_a_look():
+    import json as _json
+    chat_watch._RAIL.update(order=[], unread=set(), at=0.0)
+    chat_watch.on_rail(["*Muted group one", "Vinish Kumar"], now=1000.0)
+    seen = _json.loads(store.kv_get("rail_last"))
+    assert seen["rows"] == ["*Muted group one", "Vinish Kumar"]
+    chat_watch._RAIL.update(order=[], unread=set(), at=0.0)
+    chat_watch._HOT.clear()

@@ -1706,16 +1706,24 @@ async def watch_loop() -> None:
         if not (enabled() and teams_bridge.enabled() and teams_bridge.logged_in_once()
                 and store.kv_get("teams_session_ok") != "0"):
             continue
+        began = _time.monotonic()
         try:
             if hot:
-                await sweep(notify.notify, only=hot)
+                found = await sweep(notify.notify, only=hot)
             else:
                 last_full = _time.monotonic()
                 take_hot()                  # a full sweep reads them all anyway
-                await sweep(notify.notify)
+                found = await sweep(notify.notify)
+            # One line per read: "is it reading?" is answered from the log, not
+            # guessed (2 Oct: hours of failed reads looked like a quiet day).
+            store.record_outcome("chatwatch", "read", detail=(
+                f"{'hot' if hot else 'full'} · {len(found or [])} new · "
+                f"{_time.monotonic() - began:.0f}s · {', '.join(hot)}")[:200])
         except Exception as exc:                               # noqa: BLE001
             from . import quiet
             quiet.note("chatwatch.sweep", exc)
+            store.record_outcome("chatwatch", "read_failed", detail=(
+                f"{'hot' if hot else 'full'} · {type(exc).__name__}: {exc}")[:200])
         # Conversations that are over give their context back — "once the convo
         # resolved automatically dissolve the thread context and make it free".
         from . import threads
@@ -1787,6 +1795,8 @@ def on_rail(rows: list[str], now: float | None = None) -> list[str]:
     unread = {r[1:] for r in rows if r.startswith("*")}
     prev_order, prev_unread = _RAIL["order"], _RAIL["unread"]
     _RAIL.update(order=order, unread=unread, at=now)
+    with contextlib.suppress(Exception):
+        store.kv_set("rail_last", json.dumps({"at": now, "rows": list(rows or [])[:40]}))
     if not prev_order:
         hot = set(unread)                       # first look: catch up on all of it
         with contextlib.suppress(Exception):

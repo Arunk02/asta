@@ -340,6 +340,12 @@ class NotFound(RuntimeError):
     anything was typed. The browser is fine; only the page needs to go home."""
 
 
+class Ambiguous(NotFound):
+    """The name matches more than one chat — refused before anything was typed.
+    A browser problem it is not: 2 Oct, one such refusal every 12 s threw the
+    whole browser away 500 times in a day, and nothing else got read."""
+
+
 #: When the Teams lock was last taken — 0 when free. The watchdog reads it.
 _HELD: dict = {"since": 0.0}
 #: Launching Chrome and loading Teams, at most this long.
@@ -737,7 +743,7 @@ def _matches(o: dict, wanted: str) -> bool:
 _CHAT_ROWS = """
     () => Array.from(document.querySelectorAll('[role="treeitem"]'))
         .filter(n => !n.querySelector('[role="treeitem"]'))
-        .map(n => (n.innerText || '').split('\\n')[0].trim())
+        .map(n => (n.innerText || '').split('\\n').map(t => t.trim()).find(Boolean) || '')
         .filter(t => t && t.length < 80)
 """
 
@@ -850,7 +856,9 @@ RAIL_WATCH_JS = """
     for (const n of rows) {
       const sec = n.parentElement && n.parentElement.closest('[role="treeitem"][aria-level="1"]');
       const section = sec ? (sec.innerText || '').split('\\n')[0].trim() : '';
-      const name = (n.innerText || '').split('\\n')[0].trim();
+      // The first line that has words: a muted chat's row can begin with an
+      // empty line (the muted icon), and the row was skipped as nameless.
+      const name = (n.innerText || '').split('\\n').map(t => t.trim()).find(Boolean) || '';
       const mentions = /^quick views$/i.test(section) && /^mentions$/i.test(name);
       if (SKIP.test(section) && !mentions) continue;
       if (!name || /^see (more|all)/i.test(name) || n.querySelector('[role="treeitem"]')) continue;
@@ -890,7 +898,7 @@ RAIL_WATCH_JS = """
 _ROW_UNREAD_JS = """
 (wanted) => {
   for (const n of document.querySelectorAll('[role="treeitem"][aria-level="2"]')) {
-    if ((n.innerText || '').split('\\n')[0].trim().toLowerCase() !== wanted) continue;
+    if (((n.innerText || '').split('\\n').map(t => t.trim()).find(Boolean) || '').toLowerCase() !== wanted) continue;
     for (const e of n.querySelectorAll('span, div, p')) {
       if (e.childElementCount === 0 && (e.textContent || '').trim().toLowerCase() === wanted
           && (parseInt(getComputedStyle(e).fontWeight) || 400) >= 600) return true;
@@ -1058,9 +1066,21 @@ def _one_of(matches: list[dict], asked: str, noun: str,
     pool = known or top or matches
     names = ", ".join(sorted(_display_name(m) or "?" for m in pool))
     talks = " (you have open chats with both)" if len(known) > 1 else ""
-    raise RuntimeError(
+    raise Ambiguous(
         f"'{asked}' matches {len(pool)} {noun} in Teams{talks} — {names}. "
         f"Refusing to guess: ask Arun which one he means and use the full name.")
+
+
+def _refuse_blank(chat: str) -> None:
+    """No name, no search: an empty search matches Teams' own filter buttons.
+    Who asked is recorded, so a caller passing '' is found, not guessed at."""
+    if (chat or "").strip():
+        return
+    import traceback
+    caller = " < ".join(f"{f.name}" for f in traceback.extract_stack(limit=8)[:-2][::-1])
+    with contextlib.suppress(Exception):
+        store.record_outcome("browser", "blank_chat", detail=caller[:200])
+    raise NotFound("no chat name given — nothing opened")
 
 
 async def _find_chat(page, chat: str, allow_group: bool = False,
@@ -1077,6 +1097,7 @@ async def _find_chat(page, chat: str, allow_group: bool = False,
     Person (1:1 DM) always wins. Groups/channels are only considered when the
     caller explicitly asked for one.
     """
+    _refuse_blank(chat)
     # Read the rail BEFORE opening search — once search takes over, the list of
     # his real conversations is no longer on screen to read.
     chats = await recent_chats(page)
@@ -1191,7 +1212,7 @@ _MARK_RAIL_ROW = """
         document.querySelectorAll('[data-asta-row]').forEach(e => e.removeAttribute('data-asta-row'));
         const rows = Array.from(document.querySelectorAll('[role="treeitem"]'))
             .filter(n => !n.querySelector('[role="treeitem"]'))
-            .filter(n => ((n.innerText || '').split('\\n')[0].trim().toLowerCase()) === wanted);
+            .filter(n => (((n.innerText || '').split('\\n').map(t => t.trim()).find(Boolean) || '').toLowerCase()) === wanted);
         if (rows.length !== 1) return rows.length;
         rows[0].setAttribute('data-asta-row', '1');
         return 1;
@@ -1508,6 +1529,7 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
     next question about the same thread can often be answered without opening a
     browser at all.
     """
+    _refuse_blank(chat)
     async with teams_page() as page:
         # Whether HE had read it, before Asta opening it says he has.
         was_unread = await row_unread(page, chat)

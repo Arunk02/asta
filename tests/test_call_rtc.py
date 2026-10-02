@@ -1086,3 +1086,29 @@ def test_asta_does_not_apologise_twice_for_the_same_silence():
     already = "That came through a bit garbled, could you say that again?"
     assert conversation.ask_again(already) == ""
     assert conversation.ask_again("So, how is the migration going?") == conversation._SAY_AGAIN
+
+
+def test_a_turn_whisper_heard_nothing_in_gets_the_macs_second_ear(monkeypatch):
+    import io
+    import wave
+
+    from app import voice_mode
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\x00\x00" * 16000)
+    clip = buf.getvalue()
+
+    async def listen(wav, filename="", **kw):
+        return ""
+
+    async def second_ear(wav, timeout=4.0):
+        return "I wanted to check on the PR he had submitted."
+
+    call_rtc.speaking("en")
+    monkeypatch.setattr(voice_mode, "second_ear", second_ear)
+    assert asyncio.run(call_rtc._quietly(listen, clip)) == "I wanted to check on the PR he had submitted."
+    # A blip too short to be speech is not sent for a second opinion.
+    assert asyncio.run(call_rtc._quietly(listen, b"RIFF")) == ""

@@ -11,7 +11,7 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 mkdir -p "$APP/Contents/MacOS"
 swiftc -O "$HERE/AstaVoice.swift" -o "$APP/Contents/MacOS/AstaVoice" \
-  -framework AppKit -framework AVFoundation -framework Carbon -framework CoreAudio
+  -framework AppKit -framework AVFoundation -framework Carbon -framework CoreAudio -framework Speech
 cat > "$APP/Contents/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -23,6 +23,7 @@ cat > "$APP/Contents/Info.plist" <<PL
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Asta listens only while you have its mic switched on (⌃⌥M).</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Asta turns what you say to it into words on this Mac — nothing leaves it.</string>
 </dict></plist>
 PL
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true

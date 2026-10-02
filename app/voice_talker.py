@@ -79,7 +79,13 @@ English; Hindi (in Devanagari) only when he spoke Hindi."""
 
 _SENTENCE = re.compile(r"[.!?।]+[\"')\]]*\s+")
 
-_TALKER: dict = {"mind": None, "starting": None, "failed_at": 0.0, "briefed": "", "briefed_at": 0.0}
+_TALKER: dict = {"mind": None, "starting": None, "failed_at": 0.0, "briefed": "", "briefed_at": 0.0,
+                 "turns": 0, "fresh": True, "refreshing": False}
+#: A talker's session grows with every line, and each reply re-reads all of it
+#: through the CLI: the 232k-token chat session took 48 s to its first word
+#: (Sep). After this many turns a fresh one is warmed in the background and
+#: swapped in, carrying the last few minutes of the conversation.
+REFRESH_TURNS = 30
 #: The briefing travels with a message at most this often: 4 KB on every line
 #: made the first answer 7 s (measured 2 Oct).
 BRIEF_EVERY_SECONDS = 300.0
@@ -128,15 +134,41 @@ async def _start():
         _TALKER["failed_at"] = time.time()
         store.record_outcome("voice", "talker_failed", detail=str(exc)[:200])
         return None
-    _TALKER.update(mind=m, briefed="", briefed_at=0.0)
-    # The briefing goes in now, while nobody is waiting on an answer.
+    brief = await _brief(m)
+    _TALKER.update(mind=m, briefed=brief, briefed_at=time.time() if brief else 0.0, turns=0, fresh=True)
+    store.record_outcome("voice", "talker", detail="warm")
+    return m
+
+
+async def _brief(m) -> str:
+    """The briefing goes in while nobody is waiting on an answer."""
     with contextlib.suppress(Exception):
         brief = briefing()
         if brief:
             await m._ask(f"[Briefing, {time.strftime('%a %H:%M')}]\n{brief}\n\nReply with just: ok", 60)
-            _TALKER.update(briefed=brief, briefed_at=time.time())
-    store.record_outcome("voice", "talker", detail="warm")
-    return m
+            return brief
+    return ""
+
+
+async def _refresh() -> None:
+    """A fresh talker, warmed and briefed off to the side, then swapped in."""
+    if _TALKER["refreshing"]:
+        return
+    _TALKER["refreshing"] = True
+    try:
+        from . import call_mind
+        new = await call_mind.spawn(PERSONA, MODEL)
+        brief = await _brief(new)
+        old = _TALKER["mind"]
+        _TALKER.update(mind=new, briefed=brief, briefed_at=time.time() if brief else 0.0, turns=0, fresh=True)
+        store.record_outcome("voice", "talker", detail="refreshed")
+        if old is not None:
+            with contextlib.suppress(Exception):
+                await old.close()
+    except Exception as exc:                                    # noqa: BLE001
+        store.record_outcome("voice", "talker_failed", detail=f"refresh: {exc}"[:200])
+    finally:
+        _TALKER["refreshing"] = False
 
 
 async def warm() -> None:
@@ -162,6 +194,12 @@ def _message(text: str, kind: str = "said") -> str:
             _TALKER["briefed"] = brief
             head = f"[Briefing, {time.strftime('%a %H:%M')}]\n{brief}\n\n"
     from . import voice_mode
+    if _TALKER["fresh"]:
+        # A new talker knows nothing of the last few minutes; tell it once.
+        _TALKER["fresh"] = False
+        before = voice_mode.recent()
+        if before:
+            head += "[Conversation so far]\n" + "\n".join(before[-8:]) + "\n\n"
     working = voice_mode.jobs_line()
     if working:
         head += working + "\n"
@@ -188,6 +226,9 @@ async def sentences(text: str, kind: str = "said", timeout: float = 30):
         raise RuntimeError("no talker")
     out: asyncio.Queue = asyncio.Queue()
     end = object()
+    _TALKER["turns"] += 1
+    if _TALKER["turns"] >= REFRESH_TURNS:
+        asyncio.ensure_future(_refresh())
     asyncio.ensure_future(_read_whole(m, _message(text, kind), timeout, out, end))
     while True:
         item = await out.get()

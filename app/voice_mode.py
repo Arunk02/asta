@@ -379,17 +379,42 @@ async def meant_for_asta(text: str, now: float | None = None) -> bool:
     return (verdict or "").strip().upper().startswith("ASSISTANT")
 
 
-async def heard(wav: bytes, dry: bool = False) -> dict:
-    """One utterance from the helper: transcribe, decide, act. Returns what happened."""
+#: How sure the Mac's own recognizer must be for its words to be used as they
+#: are. Below it (Hindi through an English recognizer comes back as confident-
+#: sounding English with low scores) Whisper hears the clip instead.
+EARS_CONFIDENCE = 0.4
+
+
+def mac_words(said: str, confidence: float) -> str:
+    """The Mac's transcription when it can be trusted, else ''."""
+    said = " ".join((said or "").split())
+    if not said or foreign(said) or confidence < EARS_CONFIDENCE:
+        return ""
+    return said
+
+
+async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float = 0.0) -> dict:
+    """One utterance from the helper: transcribe, decide, act. Returns what happened.
+
+    `said` is the helper's own on-device transcription, made while he talked —
+    used when it is sure, so the 1.4 s Whisper pass is skipped."""
     from . import voice
     _TURN["pending"] += 1
     try:
-        text = (await voice.transcribe(wav, filename="speech.wav")).strip()
-        if foreign(text):
-            # Whisper guessed a language he does not speak — "Hey Asta, are you
-            # there?" came back as "Hérsta er þú der." (Icelandic), 2 Oct. Short
-            # clips are where its guess goes wrong; English is what he means.
-            text = (await voice.transcribe(wav, filename="speech.wav", language="en")).strip()
+        text = mac_words(said, confidence)
+        if text:
+            store.record_outcome("voice", "ears", detail=f"mac {confidence:.2f}")
+        else:
+            text = (await voice.transcribe(wav, filename="speech.wav")).strip()
+            if foreign(text):
+                # Whisper guessed a language he does not speak — "Hey Asta, are you
+                # there?" came back as "Hérsta er þú der." (Icelandic), 2 Oct. Short
+                # clips are where its guess goes wrong; English is what he means.
+                text = (await voice.transcribe(wav, filename="speech.wav", language="en")).strip()
+            if not text and said.strip():
+                text = said.strip()             # Whisper heard nothing; the Mac did
+            if said:
+                store.record_outcome("voice", "ears", detail=f"whisper (mac {confidence:.2f}: {said[:60]})")
     except Exception as exc:                                    # noqa: BLE001
         store.record_outcome("voice", "stt_failed", detail=str(exc)[:200])
         await _to_helper({"type": "error", "text": "I could not hear that — speech-to-text is down."})
@@ -399,6 +424,70 @@ async def heard(wav: bytes, dry: bool = False) -> dict:
     if dry:
         return {"text": text, "did": "dry"}
     return await assemble(text)
+
+
+# --- his words, for the Mac's recognizer --------------------------------------------------
+
+#: Words his speech is full of and a general recognizer gets wrong.
+_TERMS = ["Asta", "Arun", "Telikos", "Maersk", "booking", "booking ID", "UAT", "pre-prod", "prod",
+          "ATA", "ATD", "ETA", "ETD", "RFP", "PR", "Jira", "Temporal", "Grafana", "Loki", "Copilot",
+          "Claude", "Teams", "WhatsApp", "activity plan", "service plan", "topic refresh", "CI",
+          "merge", "rebase", "Kafka", "contract test", "facility city code", "Vault", "workflow"]
+
+
+def vocabulary(limit: int = 100) -> list[str]:
+    """The people he talks to most and the words of his work — for the Mac's
+    recognizer, which takes up to about a hundred such phrases."""
+    words: list[str] = list(_TERMS)
+    with contextlib.suppress(Exception):
+        from . import prname
+        for alias in prname.aliases().values():
+            words += [alias, f"{alias} PR"]
+    with contextlib.suppress(Exception):
+        for row in store.teams_senders_known(40):
+            name = row["sender"]
+            words.append(name)
+            first = name.split()[0]
+            if len(first) > 2:
+                words.append(first)
+    with contextlib.suppress(Exception):
+        from . import senior
+        words += senior.people()
+    seen: set[str] = set()
+    out = [w for w in words if w and not (w.lower() in seen or seen.add(w.lower()))]
+    return out[:limit]
+
+
+# --- a second ear, for calls ------------------------------------------------------------
+
+_EARS: dict[int, asyncio.Future] = {}
+
+
+async def second_ear(wav: bytes, timeout: float = 4.0) -> str:
+    """The Mac's recognizer on a clip — for a call turn Whisper heard nothing in
+    (1 Oct, Vinish: two of his sentences came back empty). '' without a helper."""
+    if _STATE["helper"] is None or not wav:
+        return ""
+    rid = max(_EARS, default=0) + 1
+    fut = asyncio.get_event_loop().create_future()
+    _EARS[rid] = fut
+    try:
+        if not await _to_helper({"type": "transcribe", "id": rid,
+                                 "wav": base64.b64encode(wav).decode()}):
+            return ""
+        text, confidence = await asyncio.wait_for(fut, timeout)
+        return text if confidence >= EARS_CONFIDENCE or (text and confidence == 0) else ""
+    except Exception:                                          # noqa: BLE001
+        return ""
+    finally:
+        _EARS.pop(rid, None)
+
+
+def transcript(msg: dict) -> None:
+    """The helper's answer to `second_ear`."""
+    fut = _EARS.get(int(msg.get("id") or 0))
+    if fut is not None and not fut.done():
+        fut.set_result((" ".join(str(msg.get("text") or "").split()), float(msg.get("confidence") or 0)))
 
 
 #: The words a sentence that is not finished ends on.
@@ -891,9 +980,9 @@ async def idle_loop() -> None:
                                     "voice", urgency="direct", considered=True)
 
 
-async def _heard_quietly(wav: bytes) -> None:
+async def _heard_quietly(wav: bytes, said: str = "", confidence: float = 0.0) -> None:
     try:
-        await heard(wav)
+        await heard(wav, said=said, confidence=confidence)
     except Exception as exc:                                    # noqa: BLE001
         from . import quiet
         quiet.note("voice.heard", exc)
@@ -910,6 +999,7 @@ async def serve(ws) -> None:
             await old.close()
     store.record_outcome("voice", "helper", detail="connected")
     await _to_helper({"type": "state", **state(), "why": "connected"})
+    await _to_helper({"type": "vocab", "words": vocabulary()})
     try:
         while True:
             msg = json.loads(await ws.receive_text())
@@ -923,13 +1013,17 @@ async def serve(ws) -> None:
             elif kind == "utterance":
                 _TURN["speaking"] = False
                 wav = base64.b64decode(msg.get("wav") or "")
+                said = str(msg.get("text") or "")
+                confidence = float(msg.get("confidence") or 0)
                 if msg.get("dry"):
-                    result = await heard(wav, dry=True)
+                    result = await heard(wav, dry=True, said=said, confidence=confidence)
                     await _to_helper({"type": "heard", **result})
                 else:
                     # In the background: a turn can take minutes, and the hotkeys
                     # must keep working while it does.
-                    asyncio.ensure_future(_heard_quietly(wav))
+                    asyncio.ensure_future(_heard_quietly(wav, said, confidence))
+            elif kind == "transcript":
+                transcript(msg)
             elif kind == "barge":
                 # He talked over Asta: what it was saying is dropped — it is in
                 # the chat — and what he says next is the turn.

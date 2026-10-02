@@ -16,6 +16,7 @@ import AppKit
 import AVFoundation
 import Carbon.HIToolbox
 import CoreAudio
+import Speech
 
 // MARK: - settings
 
@@ -165,13 +166,151 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     }
 }
 
+// MARK: - understanding words, on this Mac
+
+/// Apple's on-device speech recognition, fed while he talks — so the words are
+/// ready about a fifth of a second after he stops, instead of after a 1.4 s
+/// Whisper pass over the whole clip. Primed with his vocabulary (the people he
+/// talks to, his services, ATA/ATD...) so names come out right — 2 Oct:
+/// "Rajendra shared" came back from Whisper as "Raja Shad". Runs on the Neural
+/// Engine. When it is not allowed or not there, Asta's Whisper does the hearing:
+/// the clip is always sent too.
+final class Recognizer {
+    var vocab: [String] = []
+    private let queue: DispatchQueue
+    private var recognizer: SFSpeechRecognizer?
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var task: SFSpeechRecognitionTask?
+    private var best: SFSpeechRecognitionResult?
+    private var failed = false
+    private var waiting: ((String, Float) -> Void)?
+    private var gen = 0
+    private let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
+    private var asked = false
+
+    init(queue: DispatchQueue) { self.queue = queue }
+
+    func authorize() {
+        guard !asked else { return }
+        asked = true
+        SFSpeechRecognizer.requestAuthorization { status in
+            guard status == .authorized else {
+                log("speech recognition not allowed (\(status.rawValue)) — Whisper does the hearing")
+                return
+            }
+            for id in ["en-IN", "en-US"] {
+                if let r = SFSpeechRecognizer(locale: Locale(identifier: id)), r.supportsOnDeviceRecognition {
+                    self.queue.async { self.recognizer = r }
+                    log("on-device speech recognition: \(id)")
+                    return
+                }
+            }
+            log("no on-device speech recognition here — Whisper does the hearing")
+        }
+    }
+
+    /// Speech started: a new request, with what came just before it.
+    func begin(_ samples: [Int16]) {
+        cancel()
+        guard let r = recognizer, r.isAvailable else { return }
+        let req = SFSpeechAudioBufferRecognitionRequest()
+        req.requiresOnDeviceRecognition = true
+        req.shouldReportPartialResults = false
+        req.contextualStrings = vocab
+        req.addsPunctuation = true
+        req.taskHint = .dictation
+        request = req
+        let g = gen
+        task = r.recognitionTask(with: req) { [weak self] result, error in
+            self?.queue.async {
+                guard let self = self, self.gen == g else { return }
+                if let result = result { self.best = result }
+                if error != nil && result == nil { self.failed = true }
+                if result?.isFinal == true || error != nil { self.complete() }
+            }
+        }
+        feed(samples)
+    }
+
+    func feed(_ samples: [Int16]) {
+        guard let req = request, !samples.isEmpty,
+              let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)),
+              let ch = buf.floatChannelData else { return }
+        buf.frameLength = AVAudioFrameCount(samples.count)
+        for i in 0..<samples.count { ch[0][i] = Float(samples[i]) / 32768 }
+        req.append(buf)
+    }
+
+    /// He stopped: the words, and how sure the recognizer is (0 when unknown).
+    func finish(_ then: @escaping (String, Float) -> Void) {
+        guard let req = request, !failed else { cancel(); then("", 0); return }
+        waiting = then
+        req.endAudio()
+        let g = gen
+        queue.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self = self, self.gen == g else { return }
+            self.complete()
+        }
+    }
+
+    private func complete() {
+        guard let then = waiting else { return }
+        let words = Recognizer.words(best)
+        cancel()
+        then(words.0, words.1)
+    }
+
+    func cancel() {
+        task?.cancel()
+        request = nil; task = nil; best = nil; waiting = nil; failed = false
+        gen += 1
+    }
+
+    static func words(_ result: SFSpeechRecognitionResult?) -> (String, Float) {
+        guard let t = result?.bestTranscription else { return ("", 0) }
+        let segs = t.segments
+        let conf = segs.isEmpty ? 0 : segs.map { $0.confidence }.reduce(0, +) / Float(segs.count)
+        return (t.formattedString, conf)
+    }
+
+    /// A whole clip, for Asta's calls: a second ear when Whisper heard nothing.
+    func transcribe(_ wav: Data, then: @escaping (String, Float) -> Void) {
+        guard let r = recognizer, r.isAvailable else { then("", 0); return }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("asta-\(UUID().uuidString).wav")
+        guard (try? wav.write(to: url)) != nil else { then("", 0); return }
+        let req = SFSpeechURLRecognitionRequest(url: url)
+        req.requiresOnDeviceRecognition = true
+        req.contextualStrings = vocab
+        req.addsPunctuation = true
+        var sent = false
+        let done: (String, Float) -> Void = { text, conf in
+            DispatchQueue.main.async {
+                guard !sent else { return }
+                sent = true
+                try? FileManager.default.removeItem(at: url)
+                then(text, conf)
+            }
+        }
+        r.recognitionTask(with: req) { result, error in
+            if let result = result, result.isFinal {
+                let w = Recognizer.words(result)
+                done(w.0, w.1)
+            } else if error != nil {
+                done("", 0)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { done("", 0) }
+    }
+}
+
 // MARK: - hearing things
 
 final class Ears {
     let engine = AVAudioEngine()
     var running = false
     var mouth: Mouth?
-    var onUtterance: ((Data) -> Void)?
+    var onUtterance: ((Data, String, Float) -> Void)?
+    lazy var recognizer = Recognizer(queue: queue)
     var onBargeIn: (() -> Void)?
     /// He started talking (true), or a sound too short to be speech ended (false).
     /// Asta holds a half-said turn while he talks instead of answering the half.
@@ -254,6 +393,7 @@ final class Ears {
 
     private func reset() {
         inSpeech = false; loudFrames = 0; quietMs = 0; speech = []; preroll = []
+        recognizer.cancel()
     }
 
     private func take(_ buf: AVAudioPCMBuffer) {
@@ -302,6 +442,7 @@ final class Ears {
                 inSpeech = true
                 speech = preroll + frames
                 quietMs = 0
+                recognizer.begin(speech)
                 DispatchQueue.main.async { self.onBargeIn?() }
             } else {
                 preroll += frames
@@ -319,20 +460,25 @@ final class Ears {
                 inSpeech = true
                 speech = preroll
                 quietMs = 0
+                recognizer.begin(speech)
                 DispatchQueue.main.async { self.onSpeaking?(true) }
             }
             return
         }
         speech += frames
+        recognizer.feed(frames)
         quietMs = (db < floorDb + 6) ? quietMs + ms : 0
         let seconds = Double(speech.count) / rate
         if quietMs >= 700 || seconds >= 30 {
             let take = speech
-            reset()
+            inSpeech = false; loudFrames = 0; quietMs = 0; speech = []; preroll = []
             if seconds >= 0.5 {
                 let wav = Ears.wav(take, rate: Int(rate))
-                DispatchQueue.main.async { self.onUtterance?(wav) }
+                recognizer.finish { text, conf in
+                    DispatchQueue.main.async { self.onUtterance?(wav, text, conf) }
+                }
             } else {
+                recognizer.cancel()
                 DispatchQueue.main.async { self.onSpeaking?(false) }
             }
         }
@@ -384,8 +530,9 @@ final class App: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         ears.mouth = mouth
-        ears.onUtterance = { [weak self] wav in
-            self?.link.send(["type": "utterance", "wav": wav.base64EncodedString()])
+        ears.onUtterance = { [weak self] wav, text, conf in
+            self?.link.send(["type": "utterance", "wav": wav.base64EncodedString(),
+                             "text": text, "confidence": Double(conf)])
         }
         ears.onSpeaking = { [weak self] now in
             self?.link.send(["type": "speaking", "value": now])
@@ -423,6 +570,17 @@ final class App: NSObject, NSApplicationDelegate {
             let audio = (msg["audio"] as? String).flatMap { Data(base64Encoded: $0) }
             mouth.say(text: msg["text"] as? String ?? "", audio: (audio?.isEmpty ?? true) ? nil : audio,
                       chime: msg["chime"] as? Bool ?? false)
+        case "vocab":
+            let words = (msg["words"] as? [String]) ?? []
+            ears.recognizer.vocab = words
+            ears.recognizer.authorize()
+        case "transcribe":
+            // A call's clip Whisper heard nothing in: a second ear.
+            let id = msg["id"] as? Int ?? 0
+            let wav = (msg["wav"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data()
+            ears.recognizer.transcribe(wav) { [weak self] text, conf in
+                self?.link.send(["type": "transcript", "id": id, "text": text, "confidence": Double(conf)])
+            }
         case "error":
             log("asta: \(msg["text"] as? String ?? "")")
         default:

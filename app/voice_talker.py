@@ -31,9 +31,10 @@ QUIET = "[QUIET]"
 DO = "[DO]"
 
 #: The talker's model. Speed first: anything that needs depth is the worker's.
-#: Haiku judged every quiet/answer/hand-off case right in the 2 Oct bench, and
-#: opens with short sentences, which the voice speaks in ~0.5 s instead of 1.5 s.
-MODEL = "haiku"
+#: Measured 2 Oct 12:10, warm, with the real brief and briefing: Sonnet's first
+#: words in 1.3-2.2 s, Haiku's in 4.5-8.5 s (and 10-14 s live) — Haiku is the
+#: smaller model, not the faster one through the CLI.
+MODEL = "sonnet"
 
 PERSONA = """You are Asta, Arun's assistant, talking with him OUT LOUD — like JARVIS:
 quick, warm, precise, never chatty. He works on the Telikos booking platform at Maersk.
@@ -65,12 +66,16 @@ answered from it — never handed on as work.
 
 Do not ask him questions back unless you truly cannot act without the answer.
 
+A line that starts "He said to you:" IS meant for you — never [QUIET]. If it is about
+something you just said or did, answer from the conversation. If you cannot make
+sense of it, say "Sorry, say that again?".
+
 When a message starts with [RESULT], it is what the work you handed on found:
 tell him the outcome in one or two sentences — the answer, not the process.
 When a message starts with [UPDATE], it is news for him: say it in one sentence.
 
-Never invent facts. Speak his language — English, Hindi, or the mix he uses; write
-Hindi in Devanagari."""
+Never invent facts. Answer in the language of HIS sentence: English when he spoke
+English; Hindi (in Devanagari) only when he spoke Hindi."""
 
 _SENTENCE = re.compile(r"[.!?।]+[\"')\]]*\s+")
 
@@ -164,6 +169,8 @@ def _message(text: str, kind: str = "said") -> str:
         return head + text
     if kind == "update":
         return head + f"[UPDATE] {text}"
+    if kind == "to_you":
+        return head + f'He said to you: "{text}"'
     return head + f'He said: "{text}"'
 
 
@@ -248,6 +255,8 @@ I'm listening.     he only called the assistant ("Asta", "listen to me", "are yo
 On it. [DO]        work: check, look up, send, draft, review, investigate, schedule, fix
 [ANSWER]           a question about his own work that needs an answer (PRs, pending,
                    tasks, who is waiting) — or anything you are unsure about
+When the conversation so far is shown, use it: a follow-up to it — a question about
+what the assistant is doing or found, a correction, more detail — is for the assistant.
 Nothing else. Never explain."""
 
 _SHOTS = [("yeah", "[QUIET]"), ("haha no I told him already", "[QUIET]"),
@@ -255,15 +264,22 @@ _SHOTS = [("yeah", "[QUIET]"), ("haha no I told him already", "[QUIET]"),
           ("check the logs for booking ABC123 in prod", "On it. [DO]"),
           ("send Vinish a reminder about the PR", "On it. [DO]"),
           ("how many PRs do I have open?", "[ANSWER]"),
-          ("what's pending today?", "[ANSWER]")]
+          ("what's pending today?", "[ANSWER]"),
+          ("Conversation so far:\nArun: check the booking Rajendra shared\nAsta: On it.\n\n"
+           'He said: "which booking did you check, the one from yesterday?"', "[ANSWER]"),
+          ("Conversation so far:\nArun: Asta, are you there?\nAsta: I'm listening.\n\n"
+           'He said: "yesterday Rajendra shared a booking in Teams, debug it"', "On it. [DO]")]
 
 #: How long the local decision may take before Claude decides instead.
 ROUTE_SECONDS = 4.0
 
 
-async def route(text: str) -> str | None:
+async def route(text: str, context: list[str] | None = None) -> str | None:
     """QUIET, LISTEN, DO or ANSWER for this sentence — or None when the local
-    model is not there (or too slow), and the Claude talker decides instead."""
+    model is not there (or too slow), and the Claude talker decides instead.
+
+    `context` is the conversation so far: "which booking did you check?" is room
+    talk on its own and plainly for Asta after "check the booking" (2 Oct)."""
     import httpx
     from . import memory
     model = await asyncio.to_thread(memory.local_llm_model)
@@ -271,9 +287,10 @@ async def route(text: str) -> str | None:
         return None
     msgs = [{"role": "system", "content": ROUTER}]
     for said, reply in _SHOTS:
-        msgs += [{"role": "user", "content": f'He said: "{said}"'},
+        msgs += [{"role": "user", "content": said if said.startswith("Conversation") else f'He said: "{said}"'},
                  {"role": "assistant", "content": reply}]
-    msgs.append({"role": "user", "content": f'He said: "{text}"'})
+    head = ("Conversation so far:\n" + "\n".join(context[-6:]) + "\n\n") if context else ""
+    msgs.append({"role": "user", "content": f'{head}He said: "{text}"'})
     try:
         async with httpx.AsyncClient(timeout=ROUTE_SECONDS) as c:
             r = await c.post(f"{memory.local_llm_base()}/chat/completions", json={

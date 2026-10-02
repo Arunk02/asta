@@ -47,7 +47,8 @@ started_jobs: list[str] = []
 
 async def fake_dispatch(conv, text, sink, channel):
     started_jobs.append(text)
-    key = next((k for k in WORK if k in text.lower()), "")
+    asked = text.split("\n\n(Said out loud")[0].lower()        # his words, not the context
+    key = next((k for k in WORK if k in asked), "")
     delay, finding = WORK.get(key, (3.0, f"Looked into it: {text}. Nothing unusual."))
 
     async def work():
@@ -118,6 +119,32 @@ async def main_bench():
     pre = [l for l in everything if "09:12" in l]
     row("results: UAT and pre-prod, each said once", None, uat[:1] + pre[:1],
         len(uat) == 1 and len(pre) == 1, "each finding said exactly once")
+
+    # His real session, 2 Oct 11:52-11:58: a sentence cut at a pause, then
+    # follow-up questions that were taken for room talk or met with silence.
+    vm._HEARD.clear()
+    n0, n = len(started_jobs), len(ear.lines)
+    t0 = time.time()
+    first_half = asyncio.ensure_future(vm.assemble("So I want to do debug on booking like a"))
+    await asyncio.sleep(0.4)
+    await vm.assemble("the one Rajendra shared yesterday in Teams.")
+    await first_half
+    await asyncio.sleep(0.3)
+    said = [l for _, l in ear.lines[n:]]
+    first = (ear.lines[n][0] - t0) if len(ear.lines) > n else None
+    row("live: a sentence cut at a pause", first, said,
+        len(started_jobs) == n0 + 1 and "Rajendra" in started_jobs[-1] and "like a the one" in started_jobs[-1],
+        "one job, both halves")
+    for q in ["Which booking you are taking on?", "Did you check the Rajendra booking or like which booking you checked?",
+              "Do you talk anything apart from On it?"]:
+        n1 = len(started_jobs)
+        out, first, said = await say_to(ear, q, wait=0.5)
+        row(f"live: {q[:34]}", first, said,
+            bool(said) and first is not None and first <= 4.0 and len(started_jobs) == n1
+            and not any("let me see" in s.lower() for s in said), "answered ≤4s, no job, no filler")
+    out, first, said = await say_to(ear, "Go Go Go Go Go Thank you.")
+    row("live: Go Go Go Go Go Thank you.", first, said, not said, "silent")
+    await asyncio.sleep(4)
 
     # He talks over the answer: barge arrives once the first line is out.
     vm._STATE["barged_at"] = 0.0

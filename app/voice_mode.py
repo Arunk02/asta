@@ -48,7 +48,20 @@ FOLLOW_WINDOW_SECONDS = 120.0
 ACK_SECONDS = 1.2
 #: Prepared when the voice comes on, so they play with no synthesis wait.
 ACKS = {"question": "Let me check.", "do": "On it.", "now": "Checking now.", "look": "Let me look.",
-        "see": "Let me see.", "listening": "I'm listening.", "still": "Still on that — I'll tell you."}
+        "listening": "I'm listening.", "still": "Still on that — I'll tell you.", "moment": "One moment."}
+#: He pauses mid-sentence. What he said is held this long for more before it is
+#: acted on: a breath after a finished sentence, longer after one that is not
+#: ("So I want to do debug on booking like a" went in alone, 2 Oct, and Asta
+#: answered the half while he was still saying the rest).
+HOLD_SECONDS = 0.25
+HOLD_UNFINISHED_SECONDS = 2.0
+#: A turn still being spoken is decided after this long, whatever happens.
+TURN_MAX_SECONDS = 20.0
+#: What was said this recently is "the conversation": the decision and the work see it.
+CONVERSATION_SECONDS = 180.0
+#: A question with no first words by now gets one short "One moment." — never
+#: before ("Let me see." before every answer, then nothing, 2 Oct).
+FILLER_SECONDS = 4.5
 #: How long a voice turn may run before its answer goes to the chat instead.
 TURN_SECONDS = 600.0
 #: The levels of `notify` that are worth saying out loud, when they are addressed to him.
@@ -62,6 +75,11 @@ QUEUE_MAX = 10
 _STATE: dict = {"speaker": False, "mic": False, "busy": False, "mic_on_at": 0.0,
                 "last_heard": 0.0, "last_spoke": 0.0, "barged_at": 0.0, "helper": None}
 _QUEUE: list[str] = []
+#: The turn being assembled: his pieces so far, a counter that moves when more
+#: comes, whether he is talking right now, and transcriptions still in flight.
+_TURN: dict = {"parts": [], "gen": 0, "first_at": 0.0, "speaking": False, "pending": 0}
+#: The conversation, newest last: (when, "Arun" | "Asta", words).
+_HEARD: list[tuple[float, str, str]] = []
 _KV = "voice_mode"
 #: Ready-made audio for the acknowledgements: phrase -> base64 wav.
 _CACHE: dict[str, str] = {}
@@ -105,6 +123,8 @@ async def set_mode(speaker: bool | None = None, mic: bool | None = None,
             _STATE["mic_on_at"] = now
             _STATE["last_heard"] = now
         _STATE["mic"] = bool(mic)
+        if not mic:
+            _TURN["speaking"] = False
     store.kv_set(_KV, json.dumps({"speaker": _STATE["speaker"], "mic": _STATE["mic"], "at": now}))
     # Warm what is about to be used. The first transcription loads the model —
     # 9.8 s measured, then 1.4 s — and his first sentence must not be the one
@@ -258,6 +278,8 @@ async def say(text: str, kind: str = "answer", since: float = 0.0) -> bool:
                              "chime": kind == "update"})
     if sent:
         _STATE["last_spoke"] = time.time()
+        if kind != "update":
+            remember("Asta", words)
     return sent
 
 
@@ -311,6 +333,12 @@ _HIS_SCRIPTS = re.compile(r"[A-Za-z\u0900-\u097F]")
 _MUSIC = re.compile(r"\b(?:music|♪|♫)\b|[♪♫]|موسيقى", re.I)
 
 
+def foreign(text: str) -> bool:
+    """Written in letters he never uses: not plain English, not Devanagari."""
+    return any(c.isalpha() and not ("a" <= c.lower() <= "z" or "\u0900" <= c <= "\u097f")
+               for c in text or "")
+
+
 def is_noise(text: str) -> bool:
     """Nothing to act on: a filler, Whisper's silence hallucination, music, a
     script he does not speak, or one stray word that is not an answer.
@@ -323,9 +351,9 @@ def is_noise(text: str) -> bool:
     letters = [c for c in t if c.isalpha()]
     if letters and sum(1 for c in letters if _HIS_SCRIPTS.match(c)) < len(letters) * 0.6:
         return True
-    words = t.lower().split()
-    if len(words) >= 3 and len(set(words)) == 1:
-        return True                                 # one word, over and over
+    words = re.findall(r"\w+", t.lower())
+    if len(words) >= 3 and max(words.count(w) for w in words) >= max(3, len(words) * 0.5):
+        return True                                 # one word, over and over ("Go Go Go Go Go Thank you.")
     return len(t.split()) < 2 and not _ONE_WORD.match(t) and "asta" not in t.lower()
 
 
@@ -354,15 +382,86 @@ async def meant_for_asta(text: str, now: float | None = None) -> bool:
 async def heard(wav: bytes, dry: bool = False) -> dict:
     """One utterance from the helper: transcribe, decide, act. Returns what happened."""
     from . import voice
+    _TURN["pending"] += 1
     try:
         text = (await voice.transcribe(wav, filename="speech.wav")).strip()
+        if foreign(text):
+            # Whisper guessed a language he does not speak — "Hey Asta, are you
+            # there?" came back as "Hérsta er þú der." (Icelandic), 2 Oct. Short
+            # clips are where its guess goes wrong; English is what he means.
+            text = (await voice.transcribe(wav, filename="speech.wav", language="en")).strip()
     except Exception as exc:                                    # noqa: BLE001
         store.record_outcome("voice", "stt_failed", detail=str(exc)[:200])
         await _to_helper({"type": "error", "text": "I could not hear that — speech-to-text is down."})
         return {"text": "", "did": "stt_failed"}
+    finally:
+        _TURN["pending"] = max(0, _TURN["pending"] - 1)
     if dry:
         return {"text": text, "did": "dry"}
-    return await handle(text)
+    return await assemble(text)
+
+
+#: The words a sentence that is not finished ends on.
+_TRAILING = re.compile(
+    r"(?:\b(?:and|or|but|so|like|a|an|the|to|of|for|on|in|at|with|that|which|who|is|are|was|"
+    r"i|we|my|your|this|about|because|if|then|also|um+|uh+)|[,\-–—…:]|\.\.\.)\W*$", re.I)
+
+
+def unfinished(text: str) -> bool:
+    """Reads as cut off: no closing mark, or it ends on "and", "like a", a comma."""
+    t = (text or "").strip()
+    if re.search(r"[?!]$", t):
+        return False                    # "what are you working on?" is finished
+    return not re.search(r"[.।]$", t) or bool(_TRAILING.search(t))
+
+
+async def assemble(text: str) -> dict:
+    """His pieces joined into one turn, decided once he has finished.
+
+    The helper ends a piece at a short pause; people pause mid-sentence. So a
+    piece waits a moment for the next — longer when it reads unfinished, for as
+    long as he is still talking, and while another piece is being transcribed —
+    and the turn is decided once, whole."""
+    if is_noise(text):
+        return {"text": text, "did": "ignored"}     # a waiting turn goes on waiting
+    if not _TURN["parts"]:
+        _TURN["first_at"] = time.time()
+    _TURN["parts"].append(text)
+    _TURN["gen"] += 1
+    gen = _TURN["gen"]
+    hold = HOLD_UNFINISHED_SECONDS if unfinished(text) else HOLD_SECONDS
+    deadline = time.time() + hold
+    while True:
+        await asyncio.sleep(0.05)
+        if _TURN["gen"] != gen:
+            return {"text": text, "did": "joined"}  # more came: the newest piece decides
+        if time.time() - _TURN["first_at"] > TURN_MAX_SECONDS:
+            break
+        if time.time() < deadline or _TURN["speaking"] or _TURN["pending"]:
+            continue
+        break
+    whole = " ".join(_TURN["parts"])
+    _TURN["parts"] = []
+    return await handle(whole)
+
+
+def remember(who: str, words: str, now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    _HEARD.append((now, who, " ".join((words or "").split())[:300]))
+    del _HEARD[:-12]
+
+
+def recent(now: float | None = None, before: float | None = None) -> list[str]:
+    """The conversation of the last few minutes, as "Arun: ..." / "Asta: ..." lines."""
+    now = time.time() if now is None else now
+    return [f"{who}: {words}" for at, who, words in _HEARD
+            if now - at < CONVERSATION_SECONDS and (before is None or at < before)]
+
+
+def in_conversation(now: float | None = None) -> bool:
+    """He and Asta are mid-exchange: Asta spoke, or he called it, a moment ago."""
+    now = time.time() if now is None else now
+    return now - max(_STATE["last_spoke"], _STATE["last_heard"]) < 60
 
 
 async def handle(text: str) -> dict:
@@ -387,42 +486,54 @@ async def converse(text: str) -> dict:
     talker cannot be had at all."""
     from . import voice_talker
     if await answer_draft(text):
+        remember("Arun", text)
         return {"text": text, "did": "answered_draft"}
     started = time.time()
-    decided = await voice_talker.route(text)
+    context = recent(started)
+    decided = await voice_talker.route(text, context)
+    if decided == voice_talker.QUIET and in_conversation(started) and "?" in text:
+        # Mid-exchange, a question is a follow-up: "which booking did you check?"
+        # was taken for room talk, 2 Oct, and he got silence.
+        decided = voice_talker.ANSWER
     if decided is not None:
         store.record_outcome("voice", "routed", detail=f"{decided} {time.time() - started:.1f}s · {text[:100]}")
     if decided == voice_talker.QUIET:
         store.record_outcome("voice", "not_for_asta", detail=text[:200])
         return {"text": text, "did": "not_for_asta"}
+    remember("Arun", text, started)
+    same = duplicate_of(text) if decided != voice_talker.LISTEN else None
+    if same is not None:
+        # Asked again while it runs: no second job and no brain — at once.
+        _STATE["last_heard"] = time.time()
+        await say("Still on that — I'll tell you.", kind="answer")
+        return {"text": text, "did": "already_on_it", "job": same["id"]}
     if decided == voice_talker.LISTEN:
         _STATE["last_heard"] = time.time()
         await say("I'm listening.", kind="answer")
         return {"text": text, "did": "listening"}
     if decided == voice_talker.DO:
         _STATE["last_heard"] = time.time()
-        same = duplicate_of(text)
-        if same is not None:
-            await say("Still on that — I'll tell you.", kind="answer")
-            return {"text": text, "did": "already_on_it", "job": same["id"]}
         await say("On it.", kind="answer")
-        asyncio.ensure_future(_work(text))
+        asyncio.ensure_future(_work(text, context))
         return {"text": text, "did": "handed_on"}
     if decided == voice_talker.ANSWER:
-        # What Asta's own records answer, instantly; otherwise one ready-made
-        # "Let me see." while Claude writes the answer.
+        # What Asta's own records answer, instantly: its own jobs, his PRs, what
+        # is pending. Only the rest goes to Claude.
         with contextlib.suppress(Exception):
             from . import frontdesk
-            known = pr_answer(text) or frontdesk.answer_from_state(text)
+            known = jobs_answer(text) or pr_answer(text) or frontdesk.answer_from_state(text)
             if known:
                 _STATE["last_heard"] = time.time()
                 await say_lines(known)
                 return {"text": text, "did": "answered_from_state"}
-        await say("Let me see.", kind="answer")
     spoken = 0
     handed = False
+    filler = asyncio.ensure_future(_filler(started))
     try:
-        async for line in voice_talker.sentences(text):
+        # Routed as a question for Asta: the talker answers it, never silence.
+        kind = "to_you" if decided == voice_talker.ANSWER else "said"
+        async for line in voice_talker.sentences(text, kind):
+            filler.cancel()
             if line == voice_talker.QUIET:
                 store.record_outcome("voice", "not_for_asta", detail=text[:200])
                 return {"text": text, "did": "not_for_asta"}
@@ -436,15 +547,18 @@ async def converse(text: str) -> dict:
             await say(line, kind="answer")
             spoken += 1
     except Exception as exc:                                    # noqa: BLE001
+        filler.cancel()
         if spoken or handed:
             store.record_outcome("voice", "talker_broke", detail=str(exc)[:200])
         else:
-            if not await meant_for_asta(text):
+            if decided is None and not await meant_for_asta(text):
                 store.record_outcome("voice", "not_for_asta", detail=text[:200])
                 return {"text": text, "did": "not_for_asta"}
             _STATE["last_heard"] = time.time()
             reply = await turn(text)
             return {"text": text, "did": "answered", "reply": reply}
+    finally:
+        filler.cancel()
     _STATE["last_heard"] = time.time()
     store.record_outcome("voice", "heard", detail=text[:200])
     if handed:
@@ -456,9 +570,56 @@ async def converse(text: str) -> dict:
             if spoken == 0:
                 await say("Still on that — I'll tell you.", kind="answer")
             return {"text": text, "did": "already_on_it", "job": same["id"]}
-        asyncio.ensure_future(_work(text))
+        asyncio.ensure_future(_work(text, context))
         return {"text": text, "did": "handed_on"}
     return {"text": text, "did": "answered"}
+
+
+async def _filler(started: float) -> None:
+    """One "One moment." when the answer is slow to start — and only then."""
+    await asyncio.sleep(FILLER_SECONDS)
+    if _STATE["barged_at"] < started:
+        await say(ACKS["moment"], kind="answer")
+
+
+#: "What are you working on?", "any update?", "which booking did you check?"
+_STATUS = re.compile(
+    r"\b(?:what(?:'s| is| are)?\s+(?:you|u)\s+(?:working|doing|checking|up\s+to|on)|any\s+updates?|"
+    r"(?:the|an?)\s+update|status\s+of\s+(?:it|that|the\s+task)|how\s+far|"
+    r"did\s+(?:you|u)\s+(?:check|find|send|do|ask)|which\s+(?:\w+\s+)?(?:are\s+|did\s+)?(?:you|u)\s+"
+    r"(?:are\s+)?(?:taking|checking|working|looking|check))\b", re.I)
+_ASK_LEAD = re.compile(r"^(?:(?:hey|hi|hello|ok(?:ay)?|so)[,\s]+)*(?:asta[,\s]+)?"
+                       r"(?:(?:can|could|would)\s+(?:you|u)\s+(?:please\s+)?|i\s+want\s+(?:you\s+)?to\s+)"
+                       r"|^please\s+", re.I)
+
+
+def _gist(text: str) -> str:
+    """His request, short enough to say back: "ask Vinish when he will be free"."""
+    t = _ASK_LEAD.sub("", " ".join((text or "").split())).rstrip(" .?!")
+    return t if len(t) <= 70 else t[:70].rsplit(" ", 1)[0]
+
+
+def jobs_answer(text: str, now: float | None = None) -> str:
+    """"What are you working on?" — answered from Asta's own jobs, at once.
+
+    The worker was asked it once (2 Oct) and, with no idea of the voice jobs,
+    said "no active task matches"."""
+    if not _STATUS.search(text or ""):
+        return ""
+    now = time.time() if now is None else now
+    live = sorted(running(), key=lambda j: j["started"])
+    done = sorted((j for j in _JOBS.values() if j["done_at"] and now - j["done_at"] < 900),
+                  key=lambda j: j["done_at"])
+    if live:
+        said = "; and ".join(f"{_gist(j['text'])} — " + (
+            f"{int(now - j['started'])} seconds in" if now - j["started"] >= 5 else "just started")
+            for j in live[-3:])
+        return f"I'm on: {said}. I'll tell you when it's done."
+    if done:
+        j = done[-1]
+        found = speakable(j["result"], sentences=1) or "it came back empty"
+        return f"Nothing running. Last one was: {_gist(j['text'])}. {found}"
+    return ""
 
 
 # --- the work behind the talker: parallel, one job per request -----------------------
@@ -501,10 +662,16 @@ def jobs_line(now: float | None = None) -> str:
     """What the talker is told is in progress, so it never starts it twice."""
     now = time.time() if now is None else now
     live = running()
-    if not live:
-        return ""
-    return "[Working on now: " + "; ".join(
-        f"#{j['id']} {j['text'][:70]} ({int(now - j['started'])}s)" for j in live) + "]"
+    done = [j for j in _JOBS.values() if j["done_at"] and now - j["done_at"] < 900]
+    out = ""
+    if live:
+        out = "[Working on now: " + "; ".join(
+            f"#{j['id']} {j['text'][:70]} ({int(now - j['started'])}s)" for j in live) + "]"
+    if done:
+        out += ("\n" if out else "") + "[Just finished: " + "; ".join(
+            f"#{j['id']} {j['text'][:60]} → {speakable(j['result'], sentences=1)[:140] or 'nothing'}"
+            for j in sorted(done, key=lambda j: j["done_at"])[-3:]) + "]"
+    return out
 
 
 def _job_conversation(text: str) -> dict:
@@ -521,7 +688,17 @@ def _job_conversation(text: str) -> dict:
     return conv
 
 
-async def _work(text: str) -> None:
+def with_context(text: str, context: list[str]) -> str:
+    """His request, with what was said just before it — the worker starts each
+    job fresh, and "the booking Rajendra shared" is only clear with the rest."""
+    before = [ln for ln in context if ln != f"Arun: {' '.join(text.split())[:300]}"][-6:]
+    if not before:
+        return text
+    return text + "\n\n(Said out loud to Asta. Just before, in this conversation:\n" + \
+        "\n".join(f"  {ln}" for ln in before) + ")"
+
+
+async def _work(text: str, context: list[str] | None = None) -> None:
     """The real work, behind the talker; the outcome is said once when it is done."""
     from . import loop, main, voice_talker
     started = time.time()
@@ -532,7 +709,7 @@ async def _work(text: str) -> None:
         conv = _job_conversation(text)
         job["cid"] = conv["id"]
         sink = _WorkSink()
-        handle_ = await main._dispatch(conv, text, sink, "voice")
+        handle_ = await main._dispatch(conv, with_context(text, context or []), sink, "voice")
         if handle_ is not None:
             await asyncio.wait({handle_}, timeout=TURN_SECONDS)
         reply = sink.text()
@@ -739,7 +916,12 @@ async def serve(ws) -> None:
             kind = msg.get("type")
             if kind == "toggle":
                 await toggle("mic" if msg.get("what") == "mic" else "speaker", why="hotkey")
+            elif kind == "speaking":
+                # He started (or a too-short sound ended): a turn being held
+                # waits while he talks.
+                _TURN["speaking"] = bool(msg.get("value"))
             elif kind == "utterance":
+                _TURN["speaking"] = False
                 wav = base64.b64decode(msg.get("wav") or "")
                 if msg.get("dry"):
                     result = await heard(wav, dry=True)
@@ -752,6 +934,7 @@ async def serve(ws) -> None:
                 # He talked over Asta: what it was saying is dropped — it is in
                 # the chat — and what he says next is the turn.
                 _STATE["barged_at"] = time.time()
+                _TURN["speaking"] = True
             elif kind == "busy":
                 await set_busy(bool(msg.get("value")))
             elif kind == "locked":

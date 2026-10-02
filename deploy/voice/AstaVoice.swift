@@ -342,6 +342,7 @@ final class Ears {
     /// Asta holds a half-said turn while he talks instead of answering the half.
     var onSpeaking: ((Bool) -> Void)?
     private var bargeFrames = 0
+    private var bargeWindow: [Bool] = []
 
     // Voice activity, on 16 kHz mono frames.
     private let rate: Double = 16000
@@ -461,11 +462,15 @@ final class Ears {
         // Once he is heard over Asta, Asta is only turned down — his words are
         // gathered below as usual, not taken for more of Asta's own sound.
         if mouth?.speaking == true && !inSpeech {
-            // Barge-in. Echo cancelling removes most of Asta's own voice; what
-            // is left is far quieter than him talking, so the bar is high:
-            // 18 dB over the room for about a third of a second.
-            bargeFrames = (db > floorDb + 18 && db > -38) ? bargeFrames + 1 : 0
-            if bargeFrames >= 14 {
+            // Barge-in. A wrong guess only turns Asta down until its words are
+            // checked, so the bar can be low enough to catch him: 12 dB over the
+            // room in 10 of the last 16 frames (speech has gaps — 2 Oct, the old
+            // 14-in-a-row bar let Asta talk straight over him).
+            bargeWindow.append(db > floorDb + 12 && db > -42)
+            if bargeWindow.count > 16 { bargeWindow.removeFirst() }
+            bargeFrames = bargeWindow.filter { $0 }.count
+            if bargeFrames >= 10 {
+                bargeWindow.removeAll()
                 bargeFrames = 0
                 inSpeech = true
                 speech = preroll + frames
@@ -479,6 +484,7 @@ final class Ears {
             return
         }
         bargeFrames = 0
+        bargeWindow.removeAll()
         if !inSpeech {
             floorDb = min(-30, max(-75, floorDb * 0.97 + db * 0.03))
             preroll += frames

@@ -54,7 +54,7 @@ ACKS = {"question": "Let me check.", "do": "On it.", "now": "Checking now.", "lo
 #: ("So I want to do debug on booking like a" went in alone, 2 Oct, and Asta
 #: answered the half while he was still saying the rest).
 HOLD_SECONDS = 0.25
-HOLD_UNFINISHED_SECONDS = 2.0
+HOLD_UNFINISHED_SECONDS = 3.0
 #: A turn still being spoken is decided after this long, whatever happens.
 TURN_MAX_SECONDS = 20.0
 #: What was said this recently is "the conversation": the decision and the work see it.
@@ -66,7 +66,11 @@ FILLER_SECONDS = 4.5
 TURN_SECONDS = 600.0
 #: The levels of `notify` that are worth saying out loud, when they are addressed to him.
 #: Only these four (2 Oct: reminders and "message sent" read aloud were chatter).
-SPOKEN_LEVELS = {"task", "ci", "answer", "calls"}
+SPOKEN_LEVELS = {"task", "ci", "answer", "calls", "action"}
+#: What `speakable` adds when it had to leave something out. Wherever it is
+#: said, the whole text really is put in his chat (2 Oct: "it keeps telling me
+#: it's in the chat, and nothing came").
+IN_CHAT = "The details are in the chat."
 #: Sentences spoken of one answer; the rest is in the chat.
 SPOKEN_SENTENCES = 2
 #: Updates waiting while another app has the mic (he is on a call).
@@ -228,7 +232,7 @@ def speakable(text: str, sentences: int = SPOKEN_SENTENCES, skip: int = 0) -> st
     said = " ".join(parts[skip:sentences]).strip()
     more = len(parts) > sentences or extra
     if more and (said or skip):
-        said = (said + " The details are in the chat.").strip()
+        said = (said + " " + IN_CHAT).strip()
     return said[:600]
 
 
@@ -244,12 +248,21 @@ async def _to_helper(msg: dict) -> bool:
         return False
 
 
+async def to_chat(text: str) -> None:
+    """The whole answer, in his WhatsApp — what "the details are in the chat" promises."""
+    with contextlib.suppress(Exception):
+        from . import notify
+        await notify.wa_send("🎙 " + text.strip())
+
+
 async def say_lines(text: str) -> bool:
     """A written answer, said a sentence at a time: the first plays while the
     next is being made. One block of two sentences took 2.6-3.5 s to start."""
     words = speakable(text)
     if not words:
         return False
+    if IN_CHAT in words:
+        asyncio.ensure_future(to_chat(text))
     parts = [p for p in re.split(r"(?<=[.!?।])\s+", words) if p.strip()]
     started = time.time()
     ok = False
@@ -270,6 +283,8 @@ async def say(text: str, kind: str = "answer", since: float = 0.0) -> bool:
     words = speakable(text)
     if not words:
         return False
+    if IN_CHAT in words and IN_CHAT not in (text or "") and kind == "answer":
+        asyncio.ensure_future(to_chat(text))        # cut short here: the rest goes to the chat
     if _STATE["busy"] and kind == "update":
         _QUEUE.append(words)
         del _QUEUE[:-QUEUE_MAX]
@@ -346,7 +361,10 @@ async def update(text: str, level: str, urgency: str) -> bool:
         return False
     if not await say(text, kind="update"):
         return False
-    return listening() or not asks_him(text)
+    # Said in full, and wants nothing back: the phone stays quiet. A question
+    # goes to the phone too (answerable either way), and so does anything that
+    # was cut short — "the details are in the chat" must be true.
+    return not asks_him(text) and IN_CHAT not in speakable(text)
 
 
 async def set_busy(busy: bool) -> None:
@@ -408,7 +426,7 @@ async def meant_for_asta(text: str, now: float | None = None) -> bool:
     check; when that cannot be had, no — a missed sentence costs him repeating
     it, a wrong one costs Asta butting into his conversation."""
     now = time.time() if now is None else now
-    if re.search(r"\basta\b", text or "", re.I):
+    if named(text):
         return True
     last = max(_STATE["last_spoke"], _STATE["mic_on_at"], _STATE["last_heard"])
     if now - last < FOLLOW_WINDOW_SECONDS:
@@ -490,7 +508,8 @@ async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float
 _TERMS = ["Asta", "Arun", "Telikos", "Maersk", "booking", "booking ID", "UAT", "pre-prod", "prod",
           "ATA", "ATD", "ETA", "ETD", "RFP", "PR", "Jira", "Temporal", "Grafana", "Loki", "Copilot",
           "Claude", "Teams", "WhatsApp", "activity plan", "service plan", "topic refresh", "CI",
-          "merge", "rebase", "Kafka", "contract test", "facility city code", "Vault", "workflow"]
+          "merge", "rebase", "Kafka", "contract test", "facility city code", "Vault", "workflow",
+          "debug", "debugging", "shared a booking", "consumed", "review comments", "investigate"]
 
 
 def vocabulary(limit: int = 100) -> list[str]:
@@ -605,10 +624,18 @@ def recent(now: float | None = None, before: float | None = None) -> list[str]:
             if now - at < CONVERSATION_SECONDS and (before is None or at < before)]
 
 
+#: Asta's name as the recognizers write it: "Aastha", "Asta", "Astha", "Aasta".
+_NAME = re.compile(r"\b(?:a+s+t+h?a+|ashta|asthaa?)\b", re.I)
+
+
+def named(text: str) -> bool:
+    return bool(_NAME.search(text or ""))
+
+
 def in_conversation(now: float | None = None) -> bool:
-    """He and Asta are mid-exchange: Asta spoke, or he called it, a moment ago."""
+    """He and Asta are mid-exchange: Asta spoke, or he called it, lately."""
     now = time.time() if now is None else now
-    return now - max(_STATE["last_spoke"], _STATE["last_heard"]) < 60
+    return now - max(_STATE["last_spoke"], _STATE["last_heard"]) < FOLLOW_WINDOW_SECONDS
 
 
 async def handle(text: str) -> dict:
@@ -638,9 +665,14 @@ async def converse(text: str) -> dict:
     started = time.time()
     context = recent(started)
     decided = await voice_talker.route(text, context)
-    if decided == voice_talker.QUIET and in_conversation(started) and "?" in text:
-        # Mid-exchange, a question is a follow-up: "which booking did you check?"
-        # was taken for room talk, 2 Oct, and he got silence.
+    if decided == voice_talker.QUIET and (named(text) or (
+            in_conversation(started) and ("?" in text or len(text.split()) >= 5))):
+        # Called by name, or mid-exchange and more than "okay, fine": it was for
+        # Asta. 2 Oct: "Hello Aastha, are you responding?" and "I haven't
+        # received anything in the chat" were both taken for room talk.
+        decided = voice_talker.ANSWER
+    if decided == voice_talker.DO and len(_tokens(text)) < 4:
+        # "Then also add" is not a job — it is half a thought. Asta asks.
         decided = voice_talker.ANSWER
     if decided is not None:
         store.record_outcome("voice", "routed", detail=f"{decided} {time.time() - started:.1f}s · {text[:100]}")
@@ -648,6 +680,24 @@ async def converse(text: str) -> dict:
         store.record_outcome("voice", "not_for_asta", detail=text[:200])
         return {"text": text, "did": "not_for_asta"}
     remember("Arun", text, started)
+    if decided in (voice_talker.ANSWER, voice_talker.DO, None):
+        if await answer_question(text):
+            return {"text": text, "did": "answered_question"}
+        asked = asking_job(started)
+        if asked is not None:
+            # The job asked him something; this is his reply, in that job's own
+            # conversation — not a fresh job that knows nothing (2 Oct, #9).
+            asked["followed"] = True
+            _STATE["last_heard"] = time.time()
+            await say("Got it.", kind="answer")
+            asyncio.ensure_future(_work(text, context, cid=asked["cid"]))
+            return {"text": text, "did": "followed_up", "job": asked["id"]}
+    before = answered_before(text, started) if decided in (voice_talker.DO, voice_talker.ANSWER) else None
+    if before is not None:
+        _STATE["last_heard"] = time.time()
+        store.record_outcome("voice", "said_again", detail=f"#{before['id']} {text[:100]}")
+        await say_lines(before["result"])
+        return {"text": text, "did": "said_again", "job": before["id"]}
     same = duplicate_of(text) if decided != voice_talker.LISTEN else None
     if same is not None:
         # Asked again while it runs: no second job and no brain — at once.
@@ -757,6 +807,12 @@ def jobs_answer(text: str, now: float | None = None) -> str:
     live = sorted(running(), key=lambda j: j["started"])
     done = sorted((j for j in _JOBS.values() if j["done_at"] and now - j["done_at"] < 900),
                   key=lambda j: j["done_at"])
+    about = [j for j in live + done if _about(text, j["text"])]
+    if about:
+        j = max(about, key=lambda j: j["done_at"] or j["started"])
+        if not j["done_at"]:
+            return f"Still on it — {_gist(j['text'])}, {int(now - j['started'])} seconds in."
+        return speakable(j["result"]) or "That one came back empty."
     if live:
         said = "; and ".join(f"{_gist(j['text'])} — " + (
             f"{int(now - j['started'])} seconds in" if now - j["started"] >= 5 else "just started")
@@ -767,6 +823,39 @@ def jobs_answer(text: str, now: float | None = None) -> str:
         found = speakable(j["result"], sentences=1) or "it came back empty"
         return f"Nothing running. Last one was: {_gist(j['text'])}. {found}"
     return ""
+
+
+async def answer_question(text: str) -> bool:
+    """His spoken reply to a question Asta asked him OUT LOUD — handed to what
+    asked it, as his words alone.
+
+    2 Oct: a job's question went to WhatsApp only; his next spoken line, with
+    the conversation appended, was filed as the answer to it, and he heard
+    "Answered #12 — passed back to chat"."""
+    from . import asking
+    q = asking.pending_for_reply(text)
+    if q is None or not _was_said(q.get("text", ""), since=q.get("created_at", 0)):
+        return False
+    if not asking.answer(q["id"], text):
+        return False
+    _STATE["last_heard"] = time.time()
+    store.record_outcome("voice", "answered_question", detail=f"#{q['id']} {text[:120]}")
+    await say("Got it.", kind="answer")
+    return True
+
+
+def _was_said(text: str, since: float) -> bool:
+    """Did Asta say (the start of) this out loud since then?"""
+    head = " ".join(_tokens(speakable(text, sentences=1)))[:60]
+    return bool(head) and any(at >= since - 1 and head in " ".join(_tokens(w)) for at, w in _SPOKEN)
+
+
+def asking_job(now: float | None = None) -> dict | None:
+    """A voice job that finished lately by asking him something, not yet answered."""
+    now = time.time() if now is None else now
+    asked = [j for j in _JOBS.values() if j["done_at"] and now - j["done_at"] < 300 and j["cid"]
+             and not j.get("followed") and (j["result"] or "").rstrip().endswith("?")]
+    return max(asked, key=lambda j: j["done_at"]) if asked else None
 
 
 # --- the work behind the talker: parallel, one job per request -----------------------
@@ -789,6 +878,33 @@ def same_request(a: str, b: str) -> bool:
     if not wa or not wb:
         return False
     return len(wa & wb) / len(wa | wb) >= 0.6 or wa <= wb or wb <= wa
+
+
+#: "Check again", "once more", "re-check": he wants it done afresh, not repeated.
+_AFRESH = re.compile(r"\b(?:again|once\s+more|re-?check|re-?run|fresh|latest|now\s+check)\b", re.I)
+
+
+def answered_before(text: str, now: float | None = None) -> dict | None:
+    """The same thing, asked again after it was answered lately — he did not
+    hear it. 2 Oct: the Rajendra booking was asked four times; each time a new
+    job, an answer cut off, and "still not shared once"."""
+    now = time.time() if now is None else now
+    if _AFRESH.search(text or ""):
+        return None
+    done = [j for j in _JOBS.values() if j["done_at"] and now - j["done_at"] < DUPLICATE_WINDOW_SECONDS
+            and (j["result"] or "").strip() and _about(text, j["text"])]
+    return max(done, key=lambda j: j["done_at"]) if done else None
+
+
+def _about(asked: str, job_text: str) -> bool:
+    """Is this question about that job — the same request, or its distinctive
+    words (a booking id, a name)?"""
+    if same_request(asked, job_text):
+        return True
+    generic = {"update", "status", "booking", "pr", "what", "any", "done", "investigated",
+               "investigate", "yet", "not", "or", "did", "that", "this", "on", "how", "long", "will", "take"}
+    mine = _words(asked) - generic
+    return len(mine & (_words(job_text) - generic)) >= 1 and len(mine) <= 6
 
 
 def duplicate_of(text: str, now: float | None = None) -> dict | None:
@@ -845,18 +961,19 @@ def with_context(text: str, context: list[str]) -> str:
         "\n".join(f"  {ln}" for ln in before) + ")"
 
 
-async def _work(text: str, context: list[str] | None = None) -> None:
-    """The real work, behind the talker; the outcome is said once when it is done."""
+async def _work(text: str, context: list[str] | None = None, cid: str = "") -> None:
+    """The real work, behind the talker; the outcome is said once when it is done.
+    `cid` continues a job's own conversation (his reply to what it asked)."""
     from . import loop, main, voice_talker
     started = time.time()
     job = {"id": max(_JOBS, default=0) + 1, "text": text, "started": started, "done_at": 0.0,
            "cid": "", "result": ""}
     _JOBS[job["id"]] = job
     try:
-        conv = _job_conversation(text)
+        conv = (store.get_conversation(cid) if cid else None) or _job_conversation(text)
         job["cid"] = conv["id"]
         sink = _WorkSink()
-        handle_ = await main._dispatch(conv, with_context(text, context or []), sink, "voice")
+        handle_ = await main._dispatch(conv, text if cid else with_context(text, context or []), sink, "voice")
         if handle_ is not None:
             await asyncio.wait({handle_}, timeout=TURN_SECONDS)
         reply = sink.text()

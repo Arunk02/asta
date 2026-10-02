@@ -41,6 +41,8 @@ def helper(monkeypatch):
     vm._STATE.update(speaker=False, mic=False, busy=False, mic_on_at=0.0, last_heard=0.0,
                      last_spoke=0.0, barged_at=0.0, helper=h)
     vm._QUEUE.clear()
+    vm._HEARD.clear()
+    vm._TURN.update(parts=[], gen=0, first_at=0.0, speaking=False, pending=0)
 
     async def speak(text, **k):
         return b"RIFFfake"
@@ -614,7 +616,8 @@ def decide(monkeypatch):
     from app import voice_talker
     box = {"next": None}
 
-    async def route(text):
+    async def route(text, context=None):
+        box.setdefault("contexts", []).append(context)
         return box["next"]
 
     monkeypatch.setattr(voice_talker, "route", route)
@@ -709,7 +712,7 @@ def test_two_different_jobs_run_side_by_side(helper, decide, monkeypatch):
     vm._JOBS.clear()
 
 
-def test_a_question_gets_one_ready_line_then_claudes_answer(helper, decide, talker, monkeypatch):
+def test_a_question_gets_claudes_answer_with_no_filler_before_it(helper, decide, talker, monkeypatch):
     from app import frontdesk, voice_talker
     decide["next"] = voice_talker.ANSWER
     monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
@@ -717,7 +720,9 @@ def test_a_question_gets_one_ready_line_then_claudes_answer(helper, decide, talk
     replies.append(["Just booking PR 1429."])
     vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
     run(vm.handle("which of my PRs is waiting on Vinish?"))
-    assert asked and helper.said() == ["Let me see.", "Just booking PR 1429."]
+    # 2 Oct: "Let me see." before every answer — then, often, nothing.
+    assert helper.said() == ["Just booking PR 1429."]
+    assert asked[0][1] == "to_you", "routed as a question for Asta: answered, never silence"
 
 
 def test_what_asta_already_knows_is_answered_without_a_brain(helper, decide, talker, monkeypatch):
@@ -775,3 +780,210 @@ def test_hindi_and_english_are_kept_as_heard(monkeypatch):
     monkeypatch.setattr(voice, "transcribe", transcribe)
     assert run(vm.heard(b"RIFF", dry=True))["text"] == "मेरे pull request का क्या हाल है?"
     assert calls == [""]
+
+
+# --- a turn is what he said, whole (2 Oct, 11:52-11:58 live) ----------------------------
+
+@pytest.fixture
+def decided(monkeypatch):
+    """What reaches the decision, instead of deciding."""
+    got: list[str] = []
+
+    async def handle(text):
+        got.append(text)
+        return {"text": text, "did": "decided"}
+
+    monkeypatch.setattr(vm, "handle", handle)
+    monkeypatch.setattr(vm, "HOLD_SECONDS", 0.1)
+    monkeypatch.setattr(vm, "HOLD_UNFINISHED_SECONDS", 0.4)
+    return got
+
+
+def test_a_sentence_cut_at_a_pause_is_joined_with_the_rest(helper, decided):
+    async def go():
+        first = asyncio.ensure_future(vm.assemble("So I want to do debug on booking like a"))
+        await asyncio.sleep(0.2)                    # he goes on, inside the hold
+        second = await vm.assemble("the one Rajendra shared yesterday.")
+        return await first, second
+
+    first, second = run(go())
+    assert first["did"] == "joined" and second["did"] == "decided"
+    assert decided == ["So I want to do debug on booking like a the one Rajendra shared yesterday."]
+
+
+def test_a_turn_waits_while_he_is_still_talking(helper, decided):
+    async def go():
+        vm._TURN["speaking"] = True
+        task = asyncio.ensure_future(vm.assemble("Check the booking."))
+        await asyncio.sleep(0.5)
+        held = list(decided)
+        vm._TURN["speaking"] = False
+        await task
+        return held
+
+    assert run(go()) == [] and decided == ["Check the booking."]
+
+
+def test_a_turn_waits_for_a_piece_still_being_transcribed(helper, decided):
+    async def go():
+        vm._TURN["pending"] = 1
+        task = asyncio.ensure_future(vm.assemble("Check the booking."))
+        await asyncio.sleep(0.4)
+        held = list(decided)
+        vm._TURN["pending"] = 0
+        await task
+        return held
+
+    assert run(go()) == [] and decided == ["Check the booking."]
+
+
+def test_a_finished_sentence_is_decided_at_once(helper, decided, monkeypatch):
+    monkeypatch.setattr(vm, "HOLD_UNFINISHED_SECONDS", 3.0)
+    started = time.time()
+    run(vm.assemble("What are you working on?"))
+    assert decided == ["What are you working on?"] and time.time() - started < 2.0
+
+
+def test_room_noise_does_not_join_or_break_a_turn(helper, decided):
+    assert run(vm.assemble("Go Go Go Go Go Thank you."))["did"] == "ignored"
+    assert decided == [] and vm._TURN["parts"] == []
+
+
+def test_what_reads_unfinished():
+    assert vm.unfinished("So I want to do debug on booking like a")
+    assert vm.unfinished("Check the booking and")
+    assert vm.unfinished("Rajendra shared a booking,")
+    assert not vm.unfinished("Did you check the Rajendra booking?")
+    assert not vm.unfinished("Can you ask Vinish when he will be free?")
+    assert not vm.unfinished("What are you working on?")
+    assert vm.unfinished("I asked Rajendra to share the.")
+
+
+def test_a_repeated_word_with_a_tail_is_still_noise():
+    assert vm.is_noise("Go Go Go Go Go Thank you.")
+    assert not vm.is_noise("no no, I meant the pre-prod one")
+
+
+def test_the_decision_sees_the_conversation(helper, decide, talker):
+    from app import voice_talker
+    decide["next"] = voice_talker.LISTEN
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.handle("Hey Asta, are you there?"))
+    run(vm.handle("Did you check it?"))
+    last = decide["contexts"][-1]
+    assert "Arun: Hey Asta, are you there?" in last and "Asta: I'm listening." in last
+
+
+def test_mid_exchange_a_question_is_never_taken_for_room_talk(helper, decide, talker, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.QUIET
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    replies, asked = talker
+    replies.append(["The H69 one, in UAT."])
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=0.0, last_heard=0.0, last_spoke=time.time() - 10)
+    out = run(vm.handle("Did you check the Rajendra booking or like which booking you checked?"))
+    assert out["did"] == "answered" and helper.said() == ["The H69 one, in UAT."]
+    # Not mid-exchange, room talk stays room talk.
+    vm._STATE.update(last_spoke=0.0, last_heard=0.0)
+    assert run(vm.handle("did you see the match yesterday?"))["did"] == "not_for_asta"
+
+
+def test_what_are_you_working_on_is_answered_from_the_jobs(helper, decide, talker):
+    from app import voice_talker
+    decide["next"] = voice_talker.ANSWER
+    replies, asked = talker
+    vm._JOBS.clear()
+    now = time.time()
+    vm._JOBS[1] = {"id": 1, "text": "Can you ask Vinish when he will be free?", "started": now - 20,
+                   "done_at": 0.0, "cid": "", "result": ""}
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=now)
+    out = run(vm.handle("What are you working on?"))
+    assert out["did"] == "answered_from_state" and asked == []
+    assert "ask Vinish when he will be free" in helper.said()[0]
+    vm._JOBS[1].update(done_at=time.time(), result="✅ Sent to Vinish Kumar. Waiting for his reply.")
+    assert "Sent to Vinish Kumar" in vm.jobs_answer("any update?")
+    assert "Sent to Vinish Kumar" in vm.jobs_line()
+    assert vm.jobs_answer("what is the weather") == ""
+    assert vm.jobs_answer("Which booking you are taking on?"), "live 2 Oct wording"
+    vm._JOBS.clear()
+
+
+def test_a_job_carries_what_was_said_just_before(helper, decide, talker, monkeypatch):
+    from app import voice_talker
+    seen: list[str] = []
+
+    async def dispatch(conv, text, sink, channel):
+        seen.append(text)
+        return None
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._JOBS.clear()
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    decide["next"] = voice_talker.ANSWER
+    replies, _ = talker
+    replies.append(["Which booking?"])
+    run(vm.handle("Yesterday, Rajendra shared a booking in Teams."))
+    decide["next"] = voice_talker.DO
+
+    async def go():
+        await vm.handle("Debug it, check whether we received it.")
+        await asyncio.sleep(0.1)
+
+    run(go())
+    assert seen and seen[0].startswith("Debug it, check whether we received it.")
+    assert "Arun: Yesterday, Rajendra shared a booking in Teams." in seen[0]
+    assert "Asta: Which booking?" in seen[0]
+    assert vm._JOBS[1]["text"] == "Debug it, check whether we received it.", "duplicates compare his words"
+    vm._JOBS.clear()
+
+
+def test_a_slow_answer_gets_one_moment_and_a_fast_one_nothing(helper, decide, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.ANSWER
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    monkeypatch.setattr(vm, "FILLER_SECONDS", 0.1)
+    delay = {"s": 0.3}
+
+    async def sentences(text, kind="said", timeout=30):
+        await asyncio.sleep(delay["s"])
+        yield "Booking PR 1429."
+
+    monkeypatch.setattr(voice_talker, "sentences", sentences)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.handle("which PR is waiting on Vinish?"))
+    assert helper.said() == ["One moment.", "Booking PR 1429."]
+    helper.sent.clear()
+    delay["s"] = 0.0
+    run(vm.handle("which PR is waiting on Komal?"))
+    assert helper.said() == ["Booking PR 1429."]
+
+
+def test_the_router_is_shown_the_conversation(monkeypatch):
+    from app import memory, voice_talker
+    sent: list[dict] = []
+
+    class Resp:
+        def json(self):
+            return {"choices": [{"message": {"content": "[ANSWER]"}}]}
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json):
+            sent.append(json)
+            return Resp()
+
+    import httpx
+    monkeypatch.setattr(memory, "local_llm_model", lambda: "gemma")
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    out = run(voice_talker.route("which one did you check?", ["Arun: check the booking", "Asta: On it."]))
+    assert out == voice_talker.ANSWER
+    last = sent[0]["messages"][-1]["content"]
+    assert "Asta: On it." in last and last.endswith('He said: "which one did you check?"')

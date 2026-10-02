@@ -173,6 +173,9 @@ final class Ears {
     var mouth: Mouth?
     var onUtterance: ((Data) -> Void)?
     var onBargeIn: (() -> Void)?
+    /// He started talking (true), or a sound too short to be speech ended (false).
+    /// Asta holds a half-said turn while he talks instead of answering the half.
+    var onSpeaking: ((Bool) -> Void)?
     private var bargeFrames = 0
 
     // Voice activity, on 16 kHz mono frames.
@@ -316,6 +319,7 @@ final class Ears {
                 inSpeech = true
                 speech = preroll
                 quietMs = 0
+                DispatchQueue.main.async { self.onSpeaking?(true) }
             }
             return
         }
@@ -328,6 +332,8 @@ final class Ears {
             if seconds >= 0.5 {
                 let wav = Ears.wav(take, rate: Int(rate))
                 DispatchQueue.main.async { self.onUtterance?(wav) }
+            } else {
+                DispatchQueue.main.async { self.onSpeaking?(false) }
             }
         }
     }
@@ -380,6 +386,9 @@ final class App: NSObject, NSApplicationDelegate {
         ears.mouth = mouth
         ears.onUtterance = { [weak self] wav in
             self?.link.send(["type": "utterance", "wav": wav.base64EncodedString()])
+        }
+        ears.onSpeaking = { [weak self] now in
+            self?.link.send(["type": "speaking", "value": now])
         }
         ears.onBargeIn = { [weak self] in
             self?.mouth.interrupt()

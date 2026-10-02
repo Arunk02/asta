@@ -125,6 +125,23 @@ def note_unopenable(name: str) -> None:
     store.kv_set(_UNOPENABLE_KEY + name.strip().lower()[:80], str(_time.time()))
 
 
+def _he_had_the_last_word(chat: str, since: float) -> bool:
+    """Did he write in this chat after `since` — read there, or sent by Asta for him?"""
+    try:
+        from . import teams_bridge
+        if any(at > since and (sent or "").strip().lower() == (chat or "").strip().lower()
+               for at, sent in teams_bridge.SENT):
+            return True
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
+        rows = store.teams_messages(chat=chat, since=since, limit=50)
+    except Exception:                                          # noqa: BLE001
+        return False
+    rows = [r for r in rows if r.get("sent_at") and float(r["sent_at"]) > since]
+    return bool(rows) and is_from_him(max(rows, key=lambda r: float(r["sent_at"])).get("sender", ""))
+
+
 def open_with_him(now: float | None = None, hours: float = 12) -> list[str]:
     """Today's conversations that are not closed, newest first, one line each —
     and any chat on his rail that could not be opened, said plainly."""
@@ -134,13 +151,18 @@ def open_with_him(now: float | None = None, hours: float = 12) -> list[str]:
     try:
         with store._connect() as c:
             rows = c.execute(
-                "SELECT counterpart, status, need, summary, last_activity FROM conv_threads "
+                "SELECT counterpart, status, need, summary, last_activity, chat FROM conv_threads "
                 "WHERE closed_at IS NULL AND last_activity > ? ORDER BY last_activity DESC LIMIT 12",
                 (now - hours * 3600,)).fetchall()
     except Exception:                                          # noqa: BLE001
         rows = []
     for r in rows:
         who, status, need, summary, at = r[0], r[1], (r[2] or "").strip(), (r[3] or "").strip(), r[4]
+        if _he_had_the_last_word(r[5] or who, float(at or 0)):
+            # He (or Asta in his name) answered after it — 2 Oct: "Vinish suggested
+            # tomorrow 10-11" was still in the briefing an hour after "bro I'm going
+            # out tmrw" went to Vinish.
+            continue
         when = _time.strftime("%H:%M", _time.localtime(float(at or now)))
         what = (f"waiting on you: {need}" if status == "awaiting_arun" and need
                 else need or summary[:160] or "open")

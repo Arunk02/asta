@@ -816,7 +816,7 @@ async def converse(text: str) -> dict:
         # workspace, found nothing (2 Oct).
         with contextlib.suppress(Exception):
             from . import project_knowledge
-            kb = project_knowledge.lookup(text, budget=2000)
+            kb = project_knowledge.lookup(text, budget=2000, channel="voice")
         if kb:
             decided = voice_talker.ANSWER
             store.record_outcome("voice", "knowledge", detail=f"{len(kb)} chars · {text[:100]}")
@@ -843,6 +843,8 @@ async def converse(text: str) -> dict:
             if line == voice_talker.DO:
                 handed = True
                 continue
+            if _STATE.get("filler_at", 0) > started and _JUST_ACK.match(line):
+                continue        # "One moment." then "Let me look." — said once (2 Oct 17:49)
             if line.lower().startswith("still on that") and not running():
                 # Nothing is running: "still on that" is a promise about no work
                 # at all (2 Oct 17:50, asked to read the project knowledge). It
@@ -902,7 +904,13 @@ async def _filler(started: float) -> None:
     """One "One moment." when the answer is slow to start — and only then."""
     await asyncio.sleep(FILLER_SECONDS)
     if _STATE["barged_at"] < started:
+        _STATE["filler_at"] = time.time()
         await say(ACKS["moment"], kind="answer")
+
+
+#: A line that only acknowledges: after "One moment." it is a second filler.
+_JUST_ACK = re.compile(r"^\W*(?:on it|let me (?:look|check|see)|checking(?: it)? now|got it|sure|"
+                       r"one (?:moment|sec))\W*$", re.I)
 
 
 #: "What are you working on?", "any update?", "which booking did you check?"
@@ -983,11 +991,20 @@ def _was_said(text: str, since: float) -> bool:
     return bool(head) and any(at >= since - 1 and head in " ".join(_tokens(w)) for at, w in _SPOKEN)
 
 
+def _ends_by_asking(result: str) -> bool:
+    """The job's answer closes on a question to him — in its last two
+    sentences, not only the last character: "…where you saw this term — a
+    ticket, email, or chat? I'll look there." asked, and his reply went to a
+    fresh job that knew nothing (2 Oct 17:50)."""
+    parts, _ = _sentences(result)
+    return any(p.rstrip().endswith("?") for p in parts[-2:])
+
+
 def asking_job(now: float | None = None) -> dict | None:
     """A voice job that finished lately by asking him something, not yet answered."""
     now = time.time() if now is None else now
     asked = [j for j in _JOBS.values() if j["done_at"] and now - j["done_at"] < 300 and j["cid"]
-             and not j.get("followed") and (j["result"] or "").rstrip().endswith("?")]
+             and not j.get("followed") and _ends_by_asking(j["result"] or "")]
     return max(asked, key=lambda j: j["done_at"]) if asked else None
 
 

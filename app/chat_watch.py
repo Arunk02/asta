@@ -999,6 +999,15 @@ async def _say(chat: str, line: str, *, group: bool = False,
         quiet.note("chatwatch.say", exc)
         return False
     store.record_outcome("thread", "said", subject=chat[:80], detail=line[:200])
+    if not group:
+        # He sees Asta answered someone: the 1:1 is marked unread for him, as
+        # if they had just written (his ask, 2 Oct). Never in the way of the ack.
+        try:
+            if await _bridge.give_back_unread(chat):
+                note_restored(chat)
+        except Exception as exc:                               # noqa: BLE001
+            from . import quiet
+            quiet.note("chatwatch.unread_after_ack", exc)
     return True
 
 

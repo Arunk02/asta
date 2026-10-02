@@ -92,8 +92,9 @@ async def _rail(page) -> list[str]:
     with _q():
         return await page.evaluate(
             """() => Array.from(document.querySelectorAll('[role="treeitem"]'))
-                   .map(n => (n.innerText || '').split('\n')[0].trim())
-                   .filter(Boolean).slice(0, 25)""")
+                   .filter(n => !n.querySelector('[role="treeitem"]'))
+                   .map(n => (n.innerText || '').split('\\n').map(t => t.trim()).find(Boolean) || '')
+                   .filter(t => /\\w/.test(t)).slice(0, 25)""")
     return []
 
 

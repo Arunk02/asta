@@ -965,6 +965,15 @@ async def mark_unread(page, chat: str) -> bool:
         return False
 
 
+async def give_back_unread(chat: str) -> bool:
+    """Mark a chat unread for him, from the list — after Asta answered someone
+    in it on its own, so he sees there is a conversation (his ask, 2 Oct)."""
+    _refuse_blank(chat)
+    async with teams_page() as page:
+        await park(page)
+        return await mark_unread(page, chat)
+
+
 #: Rail entries that are furniture rather than conversations.
 _NOT_A_CHAT = {"copilot", "mentions", "discover", "drafts", "saved", "chats",
                "favorites", "quick views", "new chat", "unread"}

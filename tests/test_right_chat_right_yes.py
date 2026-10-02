@@ -1148,3 +1148,65 @@ def test_teams_painting_its_icon_bar_is_not_six_chats_moving(rail):
     chat_watch.take_hot()
     assert chat_watch.on_rail(["", "", "", "", ""]) == []
     assert chat_watch.on_rail(names) == [], "the real list again: nothing moved"
+
+
+def test_an_ack_in_a_1to1_is_marked_unread_for_him_and_a_group_is_not(monkeypatch):
+    sent: list[str] = []
+    marked: list[str] = []
+
+    async def send(chat, text, allow_group=False):
+        sent.append(chat)
+        return chat
+
+    async def give_back(chat):
+        marked.append(chat)
+        return True
+
+    async def not_yet(chat, since):
+        return False
+
+    monkeypatch.setattr(tb, "send_message", send)
+    monkeypatch.setattr(tb, "give_back_unread", give_back)
+    monkeypatch.setattr(chat_watch, "he_replied_since", not_yet)
+    chat_watch._RESTORED.clear()
+    assert asyncio.run(chat_watch._say("Vinish Kumar", "hi Vinish, yes tell me")) is True
+    assert marked == ["Vinish Kumar"] and "Vinish Kumar" in chat_watch._RESTORED
+    monkeypatch.setenv("ASTA_GROUP_SILENT", "0")
+    asyncio.run(chat_watch._say("Team Booking and Execution", "noted", group=True))
+    assert marked == ["Vinish Kumar"], "a group is never marked by Asta"
+    chat_watch._RESTORED.clear()
+
+
+def test_every_inline_page_script_compiles_too(tmp_path):
+    """2 Oct: the selector check's own rail script had the same line break where
+    "\\n" belonged — written inline in `page.evaluate(...)`, so the test above
+    never saw it, and the check silently skipped four of its seven selectors."""
+    import ast
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    root = Path(__file__).resolve().parents[1] / "app"
+    bad: list[str] = []
+    checked = 0
+    for py in sorted(root.rglob("*.py")):
+        tree = ast.parse(py.read_text(), filename=str(py))
+        for node_ in ast.walk(tree):
+            if not (isinstance(node_, ast.Call) and isinstance(node_.func, ast.Attribute)
+                    and node_.func.attr in ("evaluate", "evaluate_handle", "add_init_script",
+                                            "wait_for_function")
+                    and node_.args and isinstance(node_.args[0], ast.Constant)
+                    and isinstance(node_.args[0].value, str)):
+                continue
+            src = node_.args[0].value.strip()
+            if not src.startswith(("(", "async", "function")):
+                continue
+            f = tmp_path / f"{py.stem}_{node_.lineno}.js"
+            f.write_text("const f = (" + src.rstrip(";") + ");\n")
+            out = subprocess.run([node, "--check", str(f)], capture_output=True, text=True)
+            checked += 1
+            if out.returncode:
+                bad.append(f"{py.relative_to(root.parent)}:{node_.lineno}: {out.stderr.strip().splitlines()[-1][:120]}")
+    assert checked >= 20
+    assert not bad, "page scripts that do not compile:\n" + "\n".join(bad)

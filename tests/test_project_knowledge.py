@@ -145,3 +145,27 @@ def test_the_workspace_lookup_carries_the_passages(world, monkeypatch):
 def test_the_existing_document_search_is_untouched():
     assert knowledge.DEFAULT_DIR == "~/Asta knowledge" and callable(knowledge.relevant)
     assert store is not None
+
+
+# --- every channel, one lookup -------------------------------------------------------
+
+def test_a_whatsapp_question_carries_docs_and_code_summaries(world):
+    from app import copilot_cli
+    ctx = copilot_cli.turn_context("how does the send to TMS workflow guard work?")
+    assert "From his project knowledge" in ctx and "SEND_TO_TMS" in ctx
+    plain = copilot_cli.turn_context("send Vinish the PR link")
+    assert "project knowledge" not in plain, "only questions carry passages"
+
+
+def test_a_misheard_question_on_whatsapp_still_finds_the_document(world):
+    from app import copilot_cli
+    ctx = copilot_cli.turn_context("what is telecos inland booking?")
+    assert "From his project knowledge" in ctx and "inland" in ctx.lower()
+
+
+def test_every_lookup_is_logged_with_what_it_found(world):
+    pk.lookup("which system provides pricing", channel="chat")
+    with store._connect() as c:
+        row = c.execute("SELECT subject, detail FROM outcomes WHERE kind='knowledge' "
+                        "ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["subject"] == "chat" and "doc" in row["detail"] and "pricing" in row["detail"]

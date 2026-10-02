@@ -1614,3 +1614,43 @@ def test_said_while_asta_was_silent_is_never_echo(helper, whisper, monkeypatch):
 def test_the_helper_stamps_whether_asta_was_audible():
     src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
     assert '"asta": audible' in src and "astaAudible = astaNow()" in src
+
+
+def test_one_moment_then_let_me_look_is_said_once(helper, decide, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.ANSWER
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    monkeypatch.setattr(vm, "FILLER_SECONDS", 0.05)
+
+    async def sentences(text, kind="said", timeout=30, context=""):
+        await asyncio.sleep(0.2)
+        yield "Let me look."
+        yield voice_talker.DO
+
+    async def dispatch(conv, text, sink, channel):
+        return None
+
+    monkeypatch.setattr(voice_talker, "sentences", sentences)
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._JOBS.clear()
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time(), filler_at=0.0)
+
+    async def go():
+        await vm.handle("tell me something about the rate card job please")
+        await asyncio.sleep(0.05)
+
+    run(go())
+    assert helper.said() == ["One moment."]
+    vm._JOBS.clear()
+
+
+def test_a_job_that_asked_then_said_more_still_takes_his_reply():
+    vm._JOBS.clear()
+    now = time.time()
+    vm._JOBS[1] = {"id": 1, "text": "what is telikos inland booking", "started": now - 30, "done_at": now - 5,
+                   "cid": "c1", "result": "I don't have that term. Could you tell me where you saw it — a "
+                                          "ticket, email, or chat? I'll look there."}
+    assert vm.asking_job(now) is vm._JOBS[1]
+    vm._JOBS[1]["result"] = "Done. All three PRs are green."
+    assert vm.asking_job(now) is None
+    vm._JOBS.clear()

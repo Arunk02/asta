@@ -408,14 +408,16 @@ def turn_context(user_text: str) -> str:
                 parts.append(voice)
     if _SEEKING.search(user_text or ""):
         with contextlib.suppress(Exception):
-            from . import knowledge
-            hits = knowledge.relevant(user_text, limit=3, at_least=0.6)
-            if hits:
-                lines = [f"[{h['document']} — {h['where']}]\n{h['text'][:600]}" for h in hits]
+            # The same lookup every channel uses: his documents AND the repo
+            # summaries, misheard words corrected, ~500 tokens. Docs-only at 60%
+            # word overlap answered on voice what WhatsApp could not (2 Oct).
+            from . import project_knowledge
+            passages = project_knowledge.lookup(user_text, channel="chat")
+            if passages:
                 parts.append(
-                    "From his indexed documents. Answer from these and name the "
-                    "document when you do; if they do not cover the question, say "
-                    "so rather than guess:\n\n" + "\n\n".join(lines))
+                    "From his project knowledge (his documents and the repo summaries). "
+                    "Answer from these and name the source when you do; if they do not "
+                    "cover the question, say so rather than guess:\n\n" + passages)
     return "\n\n".join(parts)
 
 

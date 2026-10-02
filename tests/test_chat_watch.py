@@ -679,3 +679,18 @@ def test_an_unanswered_ask_is_still_picked_up(monkeypatch):
 def test_an_untimed_message_is_not_guessed_about(monkeypatch):
     """A row with no timestamp cannot honestly be said to come after anything."""
     assert not chat_watch.answered_by_him(CHAT, {"sent_at": None})
+
+
+def test_a_thread_he_answered_is_not_in_the_briefing(monkeypatch):
+    """2 Oct: 'Vinish suggested tomorrow 10-11' was still briefed an hour after
+    Asta sent 'bro I'm going out tmrw' to Vinish for him."""
+    import time as _t
+    from app import teams_bridge
+    now = _t.time()
+    with store._connect() as c:
+        c.execute("INSERT INTO conv_threads (id, channel, counterpart, chat, status, need, summary, "
+                  "opened_at, last_activity) VALUES ('teams:Vinish Kumar', 'teams', 'Vinish Kumar', "
+                  "'Vinish Kumar', 'open', 'call tomorrow 10-11', '', ?, ?)", (now - 3700, now - 3600))
+    assert any("Vinish" in ln for ln in chat_watch.open_with_him(now))
+    monkeypatch.setattr(teams_bridge, "SENT", [(now - 600, "Vinish Kumar")])
+    assert not any("Vinish" in ln for ln in chat_watch.open_with_him(now))

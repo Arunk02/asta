@@ -785,14 +785,13 @@ def _waiting_brief(who: str, text: str, context: str, need: str = "",
                      "ask again for anything already given):\n" + context.strip())
     parts.append(_said_is_not_proof(who))
     try:
-        from . import knowledge
-        hits = knowledge.relevant(text, limit=3, at_least=0.5)
+        from . import project_knowledge
+        passages = project_knowledge.lookup(text, channel="teams")
     except Exception:                                          # noqa: BLE001
-        hits = []
-    if hits:
-        parts.append("\n\nFrom Arun's indexed project documents — use them and name the "
-                     "document when you do:\n" + "\n\n".join(
-                         f"[{h['document']} — {h['where']}]\n{h['text'][:700]}" for h in hits))
+        passages = ""
+    if passages:
+        parts.append("\n\nFrom Arun's project knowledge (his documents and the repo "
+                     "summaries) — use them and name the source when you do:\n" + passages)
     parts.append(playbook(text))
     from . import chat_watch
     shots = chat_watch.image_paths(f"{context}\n{text}")

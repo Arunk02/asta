@@ -308,9 +308,21 @@ def render(hits: list[dict], budget: int = BUDGET_CHARS) -> str:
     return "\n\n".join(out)
 
 
-def lookup(question: str, workspace: str = "", budget: int = BUDGET_CHARS) -> str:
-    """The best few passages for this question, or ''."""
-    return render(search(question, workspace), budget)
+def lookup(question: str, workspace: str = "", budget: int = BUDGET_CHARS, channel: str = "") -> str:
+    """The best few passages for this question, or ''. Every lookup is logged —
+    question, what was found, how much went out — so a question it misses is
+    seen, not guessed at."""
+    hits = search(question, workspace)
+    out = render(hits, budget)
+    try:
+        from . import store
+        docs = sum(1 for h in hits if h["source"] == "doc")
+        store.record_outcome("knowledge", "lookup", subject=channel or "",
+                             detail=f"{docs} doc + {len(hits) - docs} code · {len(out)} chars · "
+                                    f"{(question or '')[:120]}")
+    except Exception:                                          # noqa: BLE001
+        pass
+    return out
 
 
 #: Questions the knowledge answers: what something is, how it works, why.

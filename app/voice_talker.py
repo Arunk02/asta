@@ -302,6 +302,7 @@ Nothing else. Never explain."""
 
 _SHOTS = [("yeah", "[QUIET]"), ("haha no I told him already", "[QUIET]"),
           ("Asta, are you there?", "I'm listening."),
+          ("Hello", "I'm listening."),
           ("check the logs for booking ABC123 in prod", "On it. [DO]"),
           ("send Vinish a reminder about the PR", "On it. [DO]"),
           ("how many PRs do I have open?", "[ANSWER]"),

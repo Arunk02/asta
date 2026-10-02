@@ -35,8 +35,10 @@ let serverURL: URL = {
     return parts.url!
 }()
 
+let logClock: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f }()
+
 func log(_ s: String) {
-    FileHandle.standardError.write(("[asta-voice] " + s + "\n").data(using: .utf8)!)
+    FileHandle.standardError.write(("[asta-voice \(logClock.string(from: Date()))] " + s + "\n").data(using: .utf8)!)
 }
 
 // MARK: - the link to Asta
@@ -101,11 +103,25 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     private var waiting: [(String, Data?, Bool)] = []
 
     func say(text: String, audio: Data?, chime: Bool) {
-        if speaking {
+        if speaking || held {
             waiting.append((text, audio, chime))
             return
         }
         play(text: text, audio: audio, chime: chime)
+    }
+
+    /// He is talking: Asta waits. 2 Oct 13:46: an answer started while he was
+    /// mid-sentence — Asta talked over him, and its words were recorded as his,
+    /// came back as a request, and were answered again.
+    private(set) var held = false
+
+    func hold(_ on: Bool) {
+        guard on != held else { return }
+        held = on
+        if !on && !speaking && !waiting.isEmpty {
+            let (t, a, c) = waiting.removeFirst()
+            play(text: t, audio: a, chime: c)
+        }
     }
 
     /// Sound while Asta talks: turned down, not off — it may be Asta's own voice
@@ -179,7 +195,7 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
 
     private func finished() {
         guard speaking else { return }
-        if !waiting.isEmpty {
+        if !waiting.isEmpty && !held {
             let (t, a, c) = waiting.removeFirst()
             play(text: t, audio: a, chime: c)
             return
@@ -273,7 +289,7 @@ final class Recognizer {
         waiting = then
         req.endAudio()
         let g = gen
-        queue.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+        queue.asyncAfter(deadline: .now() + 0.7) { [weak self] in
             guard let self = self, self.gen == g else { return }
             self.complete()
         }
@@ -353,6 +369,7 @@ final class Ears {
     private var loudFrames = 0
     private var quietMs: Double = 0
     private var inSpeech = false
+    var inSpeechNow: Bool { queue.sync { inSpeech } }
     private var speech: [Int16] = []
     private var preroll: [Int16] = []
     private let queue = DispatchQueue(label: "asta.ears")
@@ -411,6 +428,7 @@ final class Ears {
 
     func stop() {
         guard running else { return }
+        mouth?.hold(false)
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         running = false
@@ -495,7 +513,7 @@ final class Ears {
                 speech = preroll
                 quietMs = 0
                 recognizer.begin(speech)
-                DispatchQueue.main.async { self.onSpeaking?(true) }
+                DispatchQueue.main.async { self.mouth?.hold(true); self.onSpeaking?(true) }
             }
             return
         }
@@ -511,9 +529,14 @@ final class Ears {
                 recognizer.finish { text, conf in
                     DispatchQueue.main.async { self.onUtterance?(wav, text, conf) }
                 }
+                // Asta may speak again once his answer is in: a moment's grace
+                // in case he goes on.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    if !self.inSpeechNow { self.mouth?.hold(false) }
+                }
             } else {
                 recognizer.cancel()
-                DispatchQueue.main.async { self.onSpeaking?(false) }
+                DispatchQueue.main.async { self.mouth?.hold(false); self.onSpeaking?(false) }
             }
         }
     }

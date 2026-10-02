@@ -704,7 +704,20 @@ async def _quietly(listen, wav: bytes) -> str:
         text = best[1]
     else:
         _, text = await _heard_as(listen, wav, language_for(wav))
-    return "" if garbled(text) else text
+    if garbled(text):
+        text = ""
+    if not text.strip() and _wav_ms(wav) >= SECOND_EAR_AFTER_MS:
+        # Whisper heard nothing in a real stretch of speech — 1 Oct, Vinish: two
+        # of his sentences came back empty and he was asked to repeat them. The
+        # Mac's own recognizer (through the voice helper) gets a turn.
+        with contextlib.suppress(Exception):
+            from . import voice_mode
+            text = await voice_mode.second_ear(wav)
+    return text
+
+
+#: A clip at least this long that Whisper heard nothing in is tried again.
+SECOND_EAR_AFTER_MS = 700
 
 
 #: A person answers with a word or two and waits. A recorded greeting talks on.

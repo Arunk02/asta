@@ -721,7 +721,9 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
                 break
 
         if not ended:
-            await _say("That's all I needed. Thanks for your time.", said, lines, rtc)
+            # Not "That's all I needed" — wrong when THEY wanted the call (1 Oct,
+            # Vinish). Passing it on is true whichever side asked for it.
+            await _say("Alright, I'll pass this on to Arun. Thanks, bye.", said, lines, rtc)
         transcript = meetings.transcript_text(lines) if lines else ""
     finally:
         with contextlib.suppress(Exception):

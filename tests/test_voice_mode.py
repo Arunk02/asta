@@ -335,6 +335,7 @@ def test_the_websocket_wants_the_token_and_speaks_the_protocol(monkeypatch):
     with client.websocket_connect("/ws/voice-mode?token=t0k") as ws:
         first = json.loads(ws.receive_text())
         assert first["type"] == "state" and first["speaker"] is False and first["helper"] is True
+        assert json.loads(ws.receive_text())["type"] == "vocab", "the Mac's recognizer is primed"
         ws.send_text(json.dumps({"type": "toggle", "what": "mic"}))
         assert json.loads(ws.receive_text())["mic"] is True
         ws.send_text(json.dumps({"type": "utterance", "dry": True,
@@ -987,3 +988,139 @@ def test_the_router_is_shown_the_conversation(monkeypatch):
     assert out == voice_talker.ANSWER
     last = sent[0]["messages"][-1]["content"]
     assert "Asta: On it." in last and last.endswith('He said: "which one did you check?"')
+
+
+# --- the Mac's own ears -------------------------------------------------------------------
+
+@pytest.fixture
+def whisper(monkeypatch):
+    from app import voice
+    box = {"text": "from whisper", "calls": 0}
+
+    async def transcribe(wav, filename="", language=""):
+        box["calls"] += 1
+        return box["text"]
+
+    monkeypatch.setattr(voice, "transcribe", transcribe)
+    return box
+
+
+def test_the_macs_words_are_used_when_it_is_sure_and_whisper_is_skipped(whisper):
+    out = run(vm.heard(b"RIFF", dry=True, said="Check the booking Rajendra shared.", confidence=0.86))
+    assert out["text"] == "Check the booking Rajendra shared." and whisper["calls"] == 0
+
+
+def test_an_unsure_mac_hands_the_clip_to_whisper(whisper):
+    out = run(vm.heard(b"RIFF", dry=True, said="Mary pull request car Kia hall hey", confidence=0.21))
+    assert out["text"] == "from whisper" and whisper["calls"] == 1
+
+
+def test_no_mac_words_is_whisper_as_before(whisper):
+    assert run(vm.heard(b"RIFF", dry=True))["text"] == "from whisper"
+
+
+def test_when_whisper_hears_nothing_the_macs_words_still_count(whisper):
+    whisper["text"] = ""
+    out = run(vm.heard(b"RIFF", dry=True, said="Asta are you there", confidence=0.3))
+    assert out["text"] == "Asta are you there"
+
+
+def test_the_vocabulary_is_his_people_and_his_work():
+    store.save_teams_messages([
+        {"key": f"k{i}", "chat": "c", "sender": "Rajendra Kumar", "text": "hi"} for i in range(3)] + [
+        {"key": "v1", "chat": "c", "sender": "Vinish Kumar", "text": "hi"}])
+    words = vm.vocabulary()
+    for w in ("Rajendra Kumar", "Rajendra", "Vinish", "ATA", "ATD", "UAT", "booking PR", "AP PR"):
+        assert w in words, w
+    assert len(words) <= 100 and len({w.lower() for w in words}) == len(words)
+
+
+def test_the_helper_is_given_the_vocabulary_when_it_connects():
+    class WS:
+        def __init__(self):
+            self.sent: list[dict] = []
+
+        async def send_text(self, text):
+            self.sent.append(json.loads(text))
+
+        async def receive_text(self):
+            raise RuntimeError("closed")
+
+    ws = WS()
+    run(vm.serve(ws))
+    kinds = [m["type"] for m in ws.sent]
+    assert "vocab" in kinds and "Asta" in next(m for m in ws.sent if m["type"] == "vocab")["words"]
+
+
+def test_a_second_ear_asks_the_helper_and_waits_for_its_words(helper):
+    async def go():
+        async def answer():
+            while not [m for m in helper.sent if m.get("type") == "transcribe"]:
+                await asyncio.sleep(0.01)
+            ask = [m for m in helper.sent if m["type"] == "transcribe"][0]
+            vm.transcript({"type": "transcript", "id": ask["id"], "text": "No, the activity plan one.",
+                           "confidence": 0.8})
+        asyncio.ensure_future(answer())
+        return await vm.second_ear(b"RIFFwav")
+
+    assert run(go()) == "No, the activity plan one."
+
+
+def test_a_second_ear_without_a_helper_or_an_answer_is_empty(helper, monkeypatch):
+    vm._STATE["helper"] = None
+    assert run(vm.second_ear(b"RIFF")) == ""
+    vm._STATE["helper"] = helper
+    assert run(vm.second_ear(b"RIFF", timeout=0.1)) == ""
+
+
+def test_a_fresh_talker_is_swapped_in_after_many_turns_and_told_the_conversation(monkeypatch):
+    from app import call_mind, voice_talker
+
+    class FakeMind:
+        def __init__(self, name):
+            self.name, self.asked, self.closed = name, [], False
+            self.proc = type("P", (), {"returncode": None})()
+
+        async def _ask(self, text, timeout):
+            self.asked.append(text)
+            return "ok"
+
+        async def _stream(self, text, timeout):
+            self.asked.append(text)
+            yield "Sure."
+            yield call_mind._COMPLETE
+
+        async def close(self):
+            self.closed = True
+
+    made: list[FakeMind] = []
+
+    async def spawn(system, model=""):
+        made.append(FakeMind(f"m{len(made)}"))
+        return made[-1]
+
+    monkeypatch.setattr(call_mind, "spawn", spawn)
+    monkeypatch.setattr(voice_talker, "briefing", lambda: "")
+    monkeypatch.setattr(voice_talker, "REFRESH_TURNS", 3)
+    vm._HEARD.clear()
+    vm.remember("Arun", "check the booking Rajendra shared")
+
+    async def go():
+        await voice_talker.close()
+        voice_talker._TALKER.update(failed_at=0.0)
+        for i in range(3):
+            async for _ in voice_talker.sentences(f"question {i}"):
+                pass
+        await asyncio.sleep(0.05)
+        async for _ in voice_talker.sentences("question 3"):
+            pass
+
+    run(go())
+    first, second = made[0], made[1]
+    assert first.closed and voice_talker._TALKER["mind"] is second
+    told_first = [t for t in first.asked if "question 0" in t][0]
+    assert "[Conversation so far]" in told_first and "Rajendra" in told_first
+    told_second = [t for t in second.asked if "question 3" in t][0]
+    assert "[Conversation so far]" in told_second, "the swapped-in talker is told too"
+    run(voice_talker.close())
+    vm._HEARD.clear()

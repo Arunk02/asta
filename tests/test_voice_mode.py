@@ -42,6 +42,8 @@ def helper(monkeypatch):
                      last_spoke=0.0, barged_at=0.0, helper=h)
     vm._QUEUE.clear()
     vm._HEARD.clear()
+    vm._SPOKEN.clear()
+    vm._STATE["barge_heard"] = 0.0
     vm._TURN.update(parts=[], gen=0, first_at=0.0, speaking=False, pending=0)
 
     async def speak(text, **k):
@@ -1124,3 +1126,258 @@ def test_a_fresh_talker_is_swapped_in_after_many_turns_and_told_the_conversation
     assert "[Conversation so far]" in told_second, "the swapped-in talker is told too"
     run(voice_talker.close())
     vm._HEARD.clear()
+
+
+# --- Asta's own voice, heard back (2 Oct 13:05, on speakers) ------------------------------
+
+def test_asta_hearing_its_own_answer_is_echo_not_him():
+    vm._SPOKEN[:] = [(time.time(), "You have fifteen open PRs. Booking PR 1429 is waiting on Vinish.")]
+    assert vm.echo("Booking PR 1429 is waiting on Vinish.") == ""
+    assert vm.echo("you have fifteen open PRs") == ""
+    assert vm.echo("Did Vinish respond to my message?") == "Did Vinish respond to my message?"
+    vm._SPOKEN.clear()
+
+
+def test_a_short_answer_is_his_unless_asta_was_talking_over_it():
+    vm._SPOKEN[:] = [(time.time(), "Send it?")]
+    assert vm.echo("Send it.") == "Send it.", "his yes to Asta's question"
+    assert vm.echo("Send it.", while_speaking=True) == ""
+    vm._SPOKEN.clear()
+
+
+def test_his_words_after_astas_tail_are_kept():
+    vm._SPOKEN[:] = [(time.time(), "Booking PR 1429 is waiting on Vinish.")]
+    assert vm.echo("waiting on Vinish stop, check the AP one instead", while_speaking=True) == \
+        "stop, check the AP one instead"
+    assert vm.echo("waiting on Vinish, which one?", while_speaking=True) == "which one?"
+    vm._SPOKEN.clear()
+
+
+def test_old_lines_are_not_echo():
+    vm._SPOKEN[:] = [(time.time() - 120, "Booking PR 1429 is waiting on Vinish.")]
+    assert vm.echo("Booking PR 1429 is waiting on Vinish.") != ""
+    vm._SPOKEN.clear()
+
+
+def test_sound_over_asta_that_was_its_own_echo_turns_it_back_up(helper, whisper, monkeypatch):
+    got: list[str] = []
+
+    async def assemble(text):
+        got.append(text)
+        return {"did": "decided"}
+
+    monkeypatch.setattr(vm, "assemble", assemble)
+    vm._SPOKEN[:] = [(time.time(), "You have fifteen open PRs, most recent is the topic refresh one.")]
+    vm._STATE.update(barge_heard=time.time(), barged_at=0.0)
+    out = run(vm.heard(b"RIFF", said="You have fifteen open PRs, most recent is", confidence=0.98))
+    assert out["did"] == "echo" and got == []
+    assert {"type": "unduck"} in helper.sent and vm._STATE["barged_at"] == 0.0
+
+
+def test_sound_over_asta_that_is_him_stops_asta_and_is_his_turn(helper, whisper, monkeypatch):
+    got: list[str] = []
+
+    async def assemble(text):
+        got.append(text)
+        return {"did": "decided"}
+
+    monkeypatch.setattr(vm, "assemble", assemble)
+    vm._SPOKEN[:] = [(time.time(), "You have fifteen open PRs.")]
+    vm._STATE.update(barge_heard=time.time(), barged_at=0.0)
+    run(vm.heard(b"RIFF", said="Stop, did Vinish reply?", confidence=0.9))
+    assert got == ["Stop, did Vinish reply?"] and {"type": "hush"} in helper.sent
+    assert vm._STATE["barged_at"] > 0
+
+
+def test_the_helper_turns_asta_down_first_and_stops_on_hush():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert "self?.mouth.duck()" in src and 'case "hush":' in src and 'case "unduck":' in src
+    assert "mouth?.speaking == true && !inSpeech" in src, "his words over Asta are gathered"
+
+
+# --- the 2 Oct 13:04-13:20 session -------------------------------------------------------
+
+@pytest.fixture
+def chat(monkeypatch):
+    from app import notify
+    pushed: list[str] = []
+
+    async def wa_send(text, done=False):
+        pushed.append(text)
+        return True
+
+    monkeypatch.setattr(notify, "wa_send", wa_send)
+    return pushed
+
+
+LONG = ("PR 1459 (booking): Komal replied to four of your six blocking comments. "
+        "Line 463 still needs the actual change. The migration is not planned. "
+        "Two comments have no reply at all.")
+
+
+def test_said_to_be_in_the_chat_means_it_is_in_the_chat(helper, chat):
+    vm._STATE.update(speaker=True)
+
+    async def go():
+        await vm.say_lines(LONG)
+        await asyncio.sleep(0.05)
+
+    run(go())
+    assert helper.said()[-1] == vm.IN_CHAT and chat == ["🎙 " + LONG]
+
+
+def test_a_short_answer_is_not_also_pushed(helper, chat):
+    vm._STATE.update(speaker=True)
+
+    async def go():
+        await vm.say_lines("Booking PR 1429 is waiting on Vinish.")
+        await asyncio.sleep(0.05)
+
+    run(go())
+    assert chat == []
+
+
+def test_a_question_is_asked_out_loud_and_on_the_phone(helper):
+    vm._STATE.update(speaker=True, mic=True)
+    q = "Could you give me the booking ID, or confirm you mean H69LMCN6KZY?"
+    assert run(vm.update(q, "action", "direct")) is False, "pushed as well"
+    assert helper.said() and "booking ID" in helper.said()[0]
+
+
+def test_a_long_update_is_pushed_as_well_as_said(helper):
+    vm._STATE.update(speaker=True, mic=True)
+    assert run(vm.update(LONG, "task", "direct")) is False
+    assert run(vm.update("Task 201 is done.", "task", "direct")) is True
+
+
+def test_his_spoken_reply_answers_the_question_asta_asked_out_loud(helper, decide):
+    from app import asking, voice_talker
+    decide["next"] = voice_talker.DO
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    q = store.create_question("Could you give me the booking ID, or confirm you mean H69LMCN6KZY?", "chat")
+    run(vm.say(q["text"], kind="update"))
+    got: dict = {}
+
+    def answer(qid, text):
+        got.update(id=qid, text=text)
+        return True
+
+    import pytest as _p
+    mp = _p.MonkeyPatch()
+    mp.setattr(asking, "answer", answer)
+    try:
+        out = run(vm.handle("Check the yesterday booking, the H69 one."))
+    finally:
+        mp.undo()
+    assert out["did"] == "answered_question"
+    assert got == {"id": q["id"], "text": "Check the yesterday booking, the H69 one."}, "his words alone"
+    assert helper.said()[-1] == "Got it."
+    store.close_question(q["id"], "x")
+
+
+def test_a_question_only_on_the_phone_is_not_answered_by_voice(helper, decide, monkeypatch):
+    from app import voice_talker
+    decide["next"] = voice_talker.DO
+    q = store.create_question("Which booking?", "chat")
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    assert run(vm.answer_question("the H69 one please")) is False
+    store.close_question(q["id"], "x")
+
+
+def test_his_reply_to_a_job_that_asked_goes_back_into_that_job(helper, decide, monkeypatch):
+    from app import voice_talker
+    seen: list[tuple[str, str]] = []
+
+    async def dispatch(conv, text, sink, channel):
+        seen.append((conv["id"], text))
+        return None
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    conv = store.create_conversation(model="claude_cli", workspace=None)
+    vm._JOBS.clear()
+    vm._JOBS[1] = {"id": 1, "text": "do we consume it", "started": time.time() - 30, "done_at": time.time() - 5,
+                   "cid": conv["id"], "result": "What's the booking, and which event are we checking?"}
+    decide["next"] = voice_talker.ANSWER
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+
+    async def go():
+        out = await vm.handle("The H69LMCN6KZY booking, the ATD event")
+        await asyncio.sleep(0.1)
+        return out
+
+    assert run(go())["did"] == "followed_up"
+    assert seen == [(conv["id"], "The H69LMCN6KZY booking, the ATD event")]
+    vm._JOBS.clear()
+
+
+def test_asked_again_after_the_answer_it_is_said_again_not_redone(helper, decide, monkeypatch):
+    from app import voice_talker
+    started: list[str] = []
+
+    async def dispatch(conv, text, sink, channel):
+        started.append(text)
+        return None
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._JOBS.clear()
+    vm._JOBS[1] = {"id": 1, "text": "Ask the update on the Rajendra booking, investigated or not yet",
+                   "started": time.time() - 60, "done_at": time.time() - 30, "cid": "c",
+                   "result": "H69LMCN6KZY was stuck: Kafka had too few in-sync replicas. A restart fixes it."}
+    decide["next"] = voice_talker.DO
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    out = run(vm.handle("What is the update on the Rajendra booking?"))
+    assert out["did"] == "said_again" and started == []
+    assert "Kafka" in " ".join(helper.said())
+
+    async def again():
+        o = await vm.handle("Check the Rajendra booking again")
+        await asyncio.sleep(0.05)
+        return o
+
+    assert run(again())["did"] == "handed_on" and started, "'again' is a fresh check"
+    vm._JOBS.clear()
+
+
+def test_a_status_question_picks_the_job_it_is_about():
+    vm._JOBS.clear()
+    now = time.time()
+    vm._JOBS[1] = {"id": 1, "text": "check the Rajendra booking", "started": now - 100, "done_at": now - 60,
+                   "cid": "", "result": "H69LMCN6KZY: Kafka replicas were too few."}
+    vm._JOBS[2] = {"id": 2, "text": "review comments on PR 1459", "started": now - 50, "done_at": now - 10,
+                   "cid": "", "result": "Komal replied to four of six."}
+    assert "Kafka" in vm.jobs_answer("any update on the Rajendra booking?")
+    vm._JOBS.clear()
+
+
+def test_called_by_any_spelling_of_her_name_is_never_room_talk(helper, decide, talker, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.QUIET
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    replies, _ = talker
+    replies.append(["Yes, I'm here."])
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=0.0, last_heard=0.0, last_spoke=0.0)
+    assert run(vm.handle("Hello Aastha, are you responding?"))["did"] == "answered"
+    for spelling in ("Asta", "Aastha", "Astha", "Aasta"):
+        assert vm.named(f"hey {spelling} listen"), spelling
+
+
+def test_mid_exchange_a_real_sentence_is_for_asta_and_okay_fine_is_not(helper, decide, talker, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.QUIET
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    replies, _ = talker
+    replies.append(["Sending it now."])
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=0.0, last_heard=0.0, last_spoke=time.time() - 50)
+    assert run(vm.handle("I haven't received anything in the chat"))["did"] == "answered"
+    assert run(vm.handle("Okay, then, fine"))["did"] == "not_for_asta"
+
+
+def test_half_a_thought_is_not_a_job(helper, decide, talker, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.DO
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    replies, asked = talker
+    replies.append(["Add what?"])
+    vm._JOBS.clear()
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    assert run(vm.handle("Then also add"))["did"] == "answered" and vm._JOBS == {}

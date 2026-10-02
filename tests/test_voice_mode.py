@@ -1154,9 +1154,36 @@ def test_his_words_after_astas_tail_are_kept():
 
 
 def test_old_lines_are_not_echo():
-    vm._SPOKEN[:] = [(time.time() - 120, "Booking PR 1429 is waiting on Vinish.")]
+    vm._SPOKEN[:] = [(time.time() - 300, "Booking PR 1429 is waiting on Vinish.")]
     assert vm.echo("Booking PR 1429 is waiting on Vinish.") != ""
     vm._SPOKEN.clear()
+
+
+def test_a_line_heard_back_late_is_still_echo_but_his_own_use_of_its_words_is_his():
+    # 13:46:56: Asta's own line came back 68 s after it was sent, as a request.
+    vm._SPOKEN[:] = [(time.time() - 68, "AP PR 1252 derived ATA ATD service plan refs open. "
+                                        "Both already have the Monday 0900 reminder queued, no CI red flags.")]
+    assert vm.echo("PPR 1252 derived ATA ATD service plan refs open both already have the Monday 0900") == ""
+    assert vm.echo("only track AP PR 1252 and booking PR 1429 from now") != ""
+    vm._SPOKEN.clear()
+
+
+def test_the_same_thing_is_not_said_twice_in_a_minute(helper):
+    vm._STATE.update(speaker=True)
+    run(vm.say("Got it — only booking PR 1429 and AP PR 1252 stay tracked.", kind="answer"))
+    run(vm.say("Got it, tracking only booking PR 1429 and AP PR 1252.", kind="answer"))
+    run(vm.say("I'm listening.", kind="answer"))
+    run(vm.say("I'm listening.", kind="answer"))
+    assert helper.said() == ["Got it — only booking PR 1429 and AP PR 1252 stay tracked.",
+                             "I'm listening.", "I'm listening."]
+    vm.remember("Arun", "what did you say about the PRs?")
+    run(vm.say("Got it, tracking only booking PR 1429 and AP PR 1252.", kind="answer"))
+    assert len(helper.said()) == 4, "asked again: said again"
+
+
+def test_the_helper_waits_while_he_talks():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert "if speaking || held {" in src and "self.mouth?.hold(true)" in src and "mouth?.hold(false)" in src
 
 
 def test_sound_over_asta_that_was_its_own_echo_turns_it_back_up(helper, whisper, monkeypatch):
@@ -1365,10 +1392,13 @@ def test_mid_exchange_a_real_sentence_is_for_asta_and_okay_fine_is_not(helper, d
     from app import frontdesk, voice_talker
     decide["next"] = voice_talker.QUIET
     monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
-    replies, _ = talker
+    replies, asked = talker
     replies.append(["Sending it now."])
+    replies.append(["[QUIET]"])
     vm._STATE.update(speaker=True, mic=True, mic_on_at=0.0, last_heard=0.0, last_spoke=time.time() - 50)
     assert run(vm.handle("I haven't received anything in the chat"))["did"] == "answered"
+    assert asked[-1][1] == "said", "a second look: the talker may still stay quiet"
+    assert run(vm.handle("haha okay cool, I'll send you the deck after lunch"))["did"] == "not_for_asta"
     assert run(vm.handle("Okay, then, fine"))["did"] == "not_for_asta"
 
 

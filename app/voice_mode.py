@@ -86,8 +86,15 @@ _STATE: dict = {"speaker": False, "mic": False, "busy": False, "mic_on_at": 0.0,
 #: through the mic, is not him. (when, words)
 _SPOKEN: list[tuple[float, str]] = []
 #: Asta's own lines are recognised as echo for this long after they are sent —
-#: they queue, and play after the ones before them.
-ECHO_SECONDS = 30.0
+#: they queue (and now wait while he talks), so they can play well after.
+#: 2 Oct 13:46: a line heard back 68 s after it was sent became a request.
+ECHO_SECONDS = 150.0
+#: Within this long, a line sent recently counts as echo on most of its words;
+#: beyond it, only a near-whole repeat does (he may echo Asta's words himself).
+ECHO_CLOSE_SECONDS = 30.0
+#: The same thing is not said twice within this long ("Got it — only booking PR
+#: 1429 and AP PR 1252" three times in a minute, 2 Oct).
+REPEAT_SECONDS = 90.0
 _QUEUE: list[str] = []
 #: The turn being assembled: his pieces so far, a counter that moves when more
 #: comes, whether he is talking right now, and transcriptions still in flight.
@@ -288,6 +295,9 @@ async def say(text: str, kind: str = "answer", since: float = 0.0) -> bool:
         return False
     if IN_CHAT in words and IN_CHAT not in (text or "") and kind == "answer":
         asyncio.ensure_future(to_chat(text))        # cut short here: the rest goes to the chat
+    if kind == "answer" and words not in ACKS.values() and said_lately(words):
+        store.record_outcome("voice", "not_repeated", detail=words[:120])
+        return True                             # already said: once is enough
     if _STATE["busy"] and kind == "update":
         _QUEUE.append(words)
         del _QUEUE[:-QUEUE_MAX]
@@ -310,6 +320,22 @@ async def say(text: str, kind: str = "answer", since: float = 0.0) -> bool:
     return sent
 
 
+def said_lately(words: str, now: float | None = None) -> bool:
+    """Asta said this — or nearly this — in the last REPEAT_SECONDS."""
+    now = time.time() if now is None else now
+    mine = set(_tokens(words))
+    if len(mine) < 4:
+        return False
+    for at, w in _SPOKEN:
+        # Asked again, it is said again: only a repeat with no word from him
+        # in between is dropped.
+        if now - at < REPEAT_SECONDS and at > _STATE.get("his_turn_at", 0.0):
+            theirs = set(_tokens(w))
+            if theirs and len(mine & theirs) / len(mine | theirs) >= 0.75:
+                return True
+    return False
+
+
 def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9\u0900-\u097f']+", (text or "").lower())
 
@@ -326,14 +352,18 @@ def echo(text: str, while_speaking: bool = False, now: float | None = None) -> s
     if not lines:
         return text
     from .call_rtc import strip_echo
+    close = set(_tokens(" ".join(w for at, w in _SPOKEN if now - at < ECHO_CLOSE_SECONDS)))
     ours = set(_tokens(" ".join(lines)))
     his = _tokens(text)
     if not his:
         return text
-    inside = sum(1 for w in his if w in ours)
+    near = sum(1 for w in his if w in close) / len(his)
+    far = sum(1 for w in his if w in ours) / len(his)
     # Mostly Asta's words: echo. A short one only counts while Asta was talking —
     # otherwise his "Send." after "Send it?" would be thrown away.
-    if inside / len(his) >= 0.7 and (len(his) >= 3 or while_speaking):
+    if near >= 0.7 and (len(his) >= 3 or while_speaking):
+        return ""
+    if far >= 0.85 and len(his) >= 6:
         return ""
     # Asta's tail glued to the front of what he said.
     if not while_speaking:
@@ -623,6 +653,8 @@ async def assemble(text: str) -> dict:
 
 def remember(who: str, words: str, now: float | None = None) -> None:
     now = time.time() if now is None else now
+    if who == "Arun":
+        _STATE["his_turn_at"] = now
     _HEARD.append((now, who, " ".join((words or "").split())[:300]))
     del _HEARD[:-12]
 
@@ -676,17 +708,22 @@ async def converse(text: str) -> dict:
     started = time.time()
     context = recent(started)
     decided = await voice_talker.route(text, context)
-    if decided == voice_talker.QUIET and (named(text) or (
-            in_conversation(started) and ("?" in text or len(text.split()) >= 5))):
-        # Called by name, or mid-exchange and more than "okay, fine": it was for
-        # Asta. 2 Oct: "Hello Aastha, are you responding?" and "I haven't
-        # received anything in the chat" were both taken for room talk.
+    second_look = False
+    if decided == voice_talker.QUIET and (named(text) or (in_conversation(started) and "?" in text)):
+        # Called by name, or a question mid-exchange: it was for Asta. 2 Oct:
+        # "Hello Aastha, are you responding?" was taken for room talk.
         decided = voice_talker.ANSWER
+    elif decided == voice_talker.QUIET and in_conversation(started) and len(text.split()) >= 5:
+        # Mid-exchange and more than "okay, fine" — "I haven't received anything
+        # in the chat" was silenced. The talker, which sees the conversation,
+        # takes a second look and may still stay quiet ("I'll send you the deck").
+        decided, second_look = None, True
     if decided == voice_talker.DO and len(_tokens(text)) < 4:
         # "Then also add" is not a job — it is half a thought. Asta asks.
         decided = voice_talker.ANSWER
-    if decided is not None:
-        store.record_outcome("voice", "routed", detail=f"{decided} {time.time() - started:.1f}s · {text[:100]}")
+    if decided is not None or second_look:
+        store.record_outcome("voice", "routed", detail=f"{decided or '[SECOND LOOK]'} "
+                                                      f"{time.time() - started:.1f}s · {text[:100]}")
     if decided == voice_talker.QUIET:
         store.record_outcome("voice", "not_for_asta", detail=text[:200])
         return {"text": text, "did": "not_for_asta"}
@@ -759,7 +796,7 @@ async def converse(text: str) -> dict:
         if spoken or handed:
             store.record_outcome("voice", "talker_broke", detail=str(exc)[:200])
         else:
-            if decided is None and not await meant_for_asta(text):
+            if decided is None and not second_look and not await meant_for_asta(text):
                 store.record_outcome("voice", "not_for_asta", detail=text[:200])
                 return {"text": text, "did": "not_for_asta"}
             _STATE["last_heard"] = time.time()

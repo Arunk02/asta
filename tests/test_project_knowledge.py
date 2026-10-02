@@ -85,6 +85,7 @@ def test_it_is_fast(world):
 def test_what_is_a_question_for_the_knowledge_and_check_is_work():
     assert vm.knows_about("Can you explain to me what is Telecos Inland Booking it is?")
     assert vm.knows_about("Which system provides the pricing on the offer?")
+    assert vm.knows_about("Okay, can you tell about a tele booking service?")
     assert not vm.knows_about("check booking H69LMCN6KZY in UAT")
     assert not vm.knows_about("what is the H6FP98C8LK7 issue")
 
@@ -169,3 +170,13 @@ def test_every_lookup_is_logged_with_what_it_found(world):
         row = c.execute("SELECT subject, detail FROM outcomes WHERE kind='knowledge' "
                         "ORDER BY id DESC LIMIT 1").fetchone()
     assert row["subject"] == "chat" and "doc" in row["detail"] and "pricing" in row["detail"]
+
+
+def test_his_correction_goes_into_the_flow_document_and_ranks_first(world):
+    assert pk.learn("Email only goes on booking confirmation and send to execution, not every milestone",
+                    "Emails go only on booking confirmation and send to execution.")
+    doc = (knowledge.folder() / pk.FLOW_DOC).read_text()
+    assert "## Facts from Arun" in doc and "only on booking confirmation" in doc
+    assert not (knowledge.folder() / "arun-corrections.md").exists(), "no side list"
+    hits = pk.search("when does email service send email milestone")
+    assert hits and pk.FLOW_DOC.split(".")[0] in hits[0]["where"]

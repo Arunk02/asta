@@ -65,6 +65,8 @@ CONVERSATION_SECONDS = 180.0
 #: A question with no first words by now gets one short "One moment." — never
 #: before ("Let me see." before every answer, then nothing, 2 Oct).
 FILLER_SECONDS = 4.5
+#: A job answering after this long, when he has spoken since, is not read out.
+LATE_SECONDS = 20.0
 #: How long a voice turn may run before its answer goes to the chat instead.
 TURN_SECONDS = 600.0
 #: The levels of `notify` that are worth saying out loud, when they are addressed to him.
@@ -550,6 +552,10 @@ async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float
                 text = (await voice.transcribe(wav, filename="speech.wav", language="en")).strip()
             if not text and said.strip():
                 text = said.strip()             # Whisper heard nothing; the Mac did
+            elif said.strip() and named(said) and not named(text) and not foreign(said):
+                # The Mac heard her name and Whisper did not — the Mac wins, at any
+                # confidence: "Yeah, Astha" (0.00) became "Yeah, stop." (19:33).
+                text = said.strip()
             if said:
                 store.record_outcome("voice", "ears", detail=f"whisper (mac {confidence:.2f}: {said[:60]})")
     except Exception as exc:                                    # noqa: BLE001
@@ -592,7 +598,13 @@ _TERMS = ["Asta", "Arun", "Telikos", "Maersk", "booking", "booking ID", "UAT", "
           "ATA", "ATD", "ETA", "ETD", "RFP", "PR", "Jira", "Temporal", "Grafana", "Loki", "Copilot",
           "Claude", "Teams", "WhatsApp", "activity plan", "service plan", "topic refresh", "CI",
           "merge", "rebase", "Kafka", "contract test", "facility city code", "Vault", "workflow",
-          "debug", "debugging", "shared a booking", "consumed", "review comments", "investigate"]
+          "debug", "debugging", "shared a booking", "consumed", "review comments", "investigate",
+          # His domain, which the recognizers turned into "Evans API", "I am service",
+          # "absent system" (2 Oct 19:40) — and Asta called his explanation unclear.
+          "IOM", "service plan", "service plan event", "Solar", "TMS", "SAP TMS", "FACT", "NFTP", "CMD",
+          "CCD", "mEPC", "Athena Lite", "VTS", "IDOC", "FinOps", "SendGrid", "Temporal",
+          "send to execution", "booking confirmed", "ready for planning", "ready for invoicing",
+          "transport order", "activity plan service", "email service", "booking service"]
 
 
 def vocabulary(limit: int = 100) -> list[str]:
@@ -714,7 +726,7 @@ def recent(now: float | None = None, before: float | None = None) -> list[str]:
 #: Asta's name as the recognizers write it: "Aastha", "Asta", "Astha", "Aasta".
 #: Live, 2 Oct 17:46: "Aastha", "Sastha", "He hasta", "y hasta", "Hasta" — the
 #: recognizers' spellings of her name.
-_NAME = re.compile(r"\b(?:s?h?a+s+t+h?a+|ashta|asthaa?)\b", re.I)
+_NAME = re.compile(r"\b(?:s?h?a+s+t+h?a+o?|ashta|asthaa?)\b", re.I)
 
 
 def named(text: str) -> bool:
@@ -760,11 +772,22 @@ async def converse(text: str) -> dict:
         # Called by name, or a question mid-exchange: it was for Asta. 2 Oct:
         # "Hello Aastha, are you responding?" was taken for room talk.
         decided = voice_talker.ANSWER
+    elif decided == voice_talker.QUIET and in_conversation(started) and len(text.split()) >= 14:
+        # Mid-exchange and a whole explanation: that is him talking TO Asta —
+        # "the trigger once, then we process each milestone one by one… very
+        # lacking" got silence (19:39).
+        decided = voice_talker.ANSWER
     elif decided == voice_talker.QUIET and in_conversation(started) and len(text.split()) >= 5:
         # Mid-exchange and more than "okay, fine" — "I haven't received anything
         # in the chat" was silenced. The talker, which sees the conversation,
         # takes a second look and may still stay quiet ("I'll send you the deck").
         decided, second_look = None, True
+    correcting = in_conversation(started) and bool(_CORRECTION.search(text))
+    if decided == voice_talker.DO and correcting:
+        # Correcting what Asta just said is not work: "Email only in booking
+        # confirmation and execution… not on it, you have to correct it" got
+        # "On it." twice and two jobs (19:37). The talker takes the correction.
+        decided = voice_talker.ANSWER
     if decided == voice_talker.DO and len(_tokens(text)) < 4:
         # "Then also add" is not a job — it is half a thought. Asta asks.
         decided = voice_talker.ANSWER
@@ -775,10 +798,14 @@ async def converse(text: str) -> dict:
         store.record_outcome("voice", "not_for_asta", detail=text[:200])
         return {"text": text, "did": "not_for_asta"}
     remember("Arun", text, started)
+    # He has moved on: lines still queued from earlier answers are dropped, so
+    # this one is answered now — 2 Oct 19:4x, "it's still telling the old convo
+    # and not acking the new message".
+    await _to_helper({"type": "flush"})
     if decided in (voice_talker.ANSWER, voice_talker.DO, None):
         if await answer_question(text):
             return {"text": text, "did": "answered_question"}
-        asked = asking_job(started)
+        asked = asking_job(started) if not knows_about(text) else None
         if asked is not None:
             # The job asked him something; this is his reply, in that job's own
             # conversation — not a fresh job that knows nothing (2 Oct, #9).
@@ -874,6 +901,14 @@ async def converse(text: str) -> dict:
         filler.cancel()
     _STATE["last_heard"] = time.time()
     store.record_outcome("voice", "heard", detail=text[:200])
+    if correcting and not handed:
+        # He corrected a domain fact: kept, so it is right from now on — on
+        # every channel, not only in this conversation.
+        with contextlib.suppress(Exception):
+            from . import project_knowledge
+            restated = " ".join(w for at, w in _SPOKEN if at >= started)[:300]
+            if project_knowledge.learn(text, restated, where="voice"):
+                store.record_outcome("voice", "learned", detail=text[:160])
     if handed:
         same = duplicate_of(text)
         if same is not None:
@@ -907,6 +942,11 @@ async def _filler(started: float) -> None:
         _STATE["filler_at"] = time.time()
         await say(ACKS["moment"], kind="answer")
 
+
+#: He is correcting what Asta said.
+_CORRECTION = re.compile(r"\b(?:you have to correct|correct (?:it|that|yourself)|that'?s (?:wrong|not right|"
+                         r"incorrect)|not correct|it'?s wrong|you(?:'re| are) wrong|not on it|"
+                         r"only (?:in|on|for|when)|no,? (?:it|that)(?:'s| is))\b", re.I)
 
 #: A line that only acknowledges: after "One moment." it is a second filler.
 _JUST_ACK = re.compile(r"^\W*(?:on it|let me (?:look|check|see)|checking(?: it)? now|got it|sure|"
@@ -997,7 +1037,13 @@ def _ends_by_asking(result: str) -> bool:
     ticket, email, or chat? I'll look there." asked, and his reply went to a
     fresh job that knew nothing (2 Oct 17:50)."""
     parts, _ = _sentences(result)
-    return any(p.rstrip().endswith("?") for p in parts[-2:])
+    # An offer ("Want me to go deeper?") is not a question waiting on him: his
+    # next, new question went into that job and got "Got it." (19:34).
+    return any(p.rstrip().endswith("?") and not _OFFER.match(p.strip()) for p in parts[-2:])
+
+
+_OFFER = re.compile(r"^(?:\W*)(?:want me to|should i|shall i|do you want|would you like|"
+                    r"need me to|anything else|let me know)\b", re.I)
 
 
 def asking_job(now: float | None = None) -> dict | None:
@@ -1135,7 +1181,8 @@ def with_context(text: str, context: list[str]) -> str:
     before = [ln for ln in context if ln != f"Arun: {' '.join(text.split())[:300]}"][-6:]
     if not before:
         return text
-    return text + "\n\n(Said out loud to Asta. Just before, in this conversation:\n" + \
+    return text + "\n\n(Said out loud to Asta — speech recognition mishears names and terms, so read " \
+        "it charitably and never quote misheard words back. Just before, in this conversation:\n" + \
         "\n".join(f"  {ln}" for ln in before) + ")"
 
 
@@ -1160,6 +1207,13 @@ async def _work(text: str, context: list[str] | None = None, cid: str = "") -> N
         if loop.awaiting(conv["id"]):
             reply += "\n(A draft is waiting for his yes — ask him: send it, or change it?)"
         if not reply:
+            return
+        if _STATE.get("his_turn_at", 0) > started + 1 and time.time() - started > LATE_SECONDS:
+            # He has moved on to something else since he asked: the answer goes to
+            # his chat, and he hears one line — not a paragraph about the old topic
+            # over the new one.
+            await to_chat(reply)
+            await say(f"The answer on {_gist(text)} is in your chat.", kind="answer")
             return
         # The worker's own first sentences — it already leads with the answer.
         # A second Claude pass to "summarise" cost 5-20 s on a loaded Mac.

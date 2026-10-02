@@ -1472,7 +1472,7 @@ def test_her_name_as_the_mac_heard_it_beats_whispers_guess(whisper):
 
 
 def test_every_spelling_heard_live_is_her_name():
-    for heard in ("Aastha", "Hey Aastha", "Sastha", "He hasta.", "y hasta", "Hasta.", "Asta", "Astha"):
+    for heard in ("Aastha", "Hey Aastha", "Sastha", "He hasta.", "y hasta", "Hasta.", "Asta", "Astha", "Hei Astao"):
         assert vm.named(heard), heard
     for other in ("pasta", "master", "last", "fast"):
         assert not vm.named(other), other
@@ -1654,3 +1654,86 @@ def test_a_job_that_asked_then_said_more_still_takes_his_reply():
     vm._JOBS[1]["result"] = "Done. All three PRs are green."
     assert vm.asking_job(now) is None
     vm._JOBS.clear()
+
+
+def test_her_name_from_the_mac_wins_even_at_zero_confidence(whisper):
+    whisper["text"] = "Yeah, stop."
+    assert run(vm.heard(b"RIFF", dry=True, said="Yeah, Astha", confidence=0.0))["text"] == "Yeah, Astha"
+    whisper["text"] = "Hey Asta, what is pending?"
+    assert run(vm.heard(b"RIFF", dry=True, said="Hey Astha what", confidence=0.0))["text"] == \
+        "Hey Asta, what is pending?", "Whisper heard the name too: its fuller sentence stays"
+
+
+def test_an_offer_at_the_end_of_a_job_is_not_a_question_waiting_on_him():
+    vm._JOBS.clear()
+    now = time.time()
+    vm._JOBS[1] = {"id": 1, "text": "tell about the booking service", "started": now - 30, "done_at": now - 5,
+                   "cid": "c1", "result": "It owns booking and RFP. Want me to go deeper on the RFP flow?"}
+    assert vm.asking_job(now) is None
+    vm._JOBS.clear()
+
+
+def test_correcting_asta_is_taken_not_turned_into_work(helper, decide, talker, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.DO
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    replies, asked = talker
+    replies.append(["Right — emails go only on booking confirmation and execution."])
+    vm._JOBS.clear()
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=0.0, last_heard=0.0, last_spoke=time.time() - 5)
+    learned: list = []
+    from app import project_knowledge
+    monkeypatch.setattr(project_knowledge, "learn", lambda said, restated="", where="": learned.append(
+        (said, restated)) or True)
+    out = run(vm.handle("Not on it. It's an issue. You have to correct it."))
+    assert out["did"] == "answered" and vm._JOBS == {}
+    assert "On it." not in helper.said()
+    assert learned and "emails go only on booking confirmation" in learned[0][1]
+
+
+def test_a_whole_explanation_mid_exchange_is_always_answered(helper, decide, talker, monkeypatch):
+    from app import frontdesk, voice_talker
+    decide["next"] = voice_talker.QUIET
+    monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
+    replies, asked = talker
+    replies.append(["Got it — one trigger, then each milestone in turn."])
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=0.0, last_heard=0.0, last_spoke=time.time() - 8)
+    out = run(vm.handle("The trigger once, and then we process everything each milestone one by one, "
+                        "if it's not completed, I think it's very lacking"))
+    assert out["did"] == "answered" and asked[-1][1] == "to_you"
+
+
+def test_a_new_turn_drops_what_was_still_queued(helper, decide, talker):
+    from app import voice_talker
+    decide["next"] = voice_talker.LISTEN
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.handle("Asta, listen"))
+    kinds = [m["type"] for m in helper.sent]
+    assert "flush" in kinds and kinds.index("flush") < kinds.index("say")
+
+
+def test_a_late_answer_after_he_moved_on_is_one_line_and_the_chat(helper, monkeypatch, chat):
+    async def dispatch(conv, text, sink, channel):
+        async def work():
+            vm._STATE["his_turn_at"] = time.time() + 5        # he spoke about something else
+            await sink.send({"type": "delta", "text": "Booking-service consumes IOM service-plan events."})
+        return asyncio.ensure_future(work())
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    monkeypatch.setattr(vm, "LATE_SECONDS", 0.0)
+    vm._JOBS.clear()
+    vm._STATE.update(speaker=True)
+
+    async def go():
+        await vm._work("how does booking get created")
+        await asyncio.sleep(0.05)
+
+    run(go())
+    assert helper.said() == ["The answer on how does booking get created is in your chat."]
+    assert chat and "IOM" in chat[0]
+    vm._JOBS.clear()
+
+
+def test_the_helper_drops_queued_lines_on_flush():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert 'case "flush":' in src and "func flush()" in src

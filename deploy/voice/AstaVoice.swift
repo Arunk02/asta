@@ -147,6 +147,11 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     private(set) var ducked = false
     private var duckedAt = Date.distantPast
 
+    func flush() {
+        if !waiting.isEmpty { log("dropped \(waiting.count) queued line(s) — he moved on") }
+        waiting.removeAll()
+    }
+
     func duck() {
         ducked = true
         duckedAt = Date()
@@ -669,6 +674,10 @@ final class App: NSObject, NSApplicationDelegate {
         case "hush":
             log("hushed — he is talking")
             mouth.interrupt()
+        case "flush":
+            // He has moved on: what was still queued from earlier answers is
+            // dropped; the line playing now finishes.
+            mouth.flush()
         case "unduck":
             mouth.unduck()
         case "vocab":

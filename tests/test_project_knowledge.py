@@ -181,3 +181,60 @@ def test_his_correction_goes_into_the_flow_document_and_ranks_first(world):
     assert not (knowledge.folder() / "arun-corrections.md").exists(), "no side list"
     hits = pk.search("when does email service send email milestone")
     assert hits and pk.FLOW_DOC.split(".")[0] in hits[0]["where"]
+
+
+# --- calls: the same knowledge, per question ------------------------------------------
+
+class _CallMind:
+    """A call brain that records what it is sent."""
+
+    def __init__(self):
+        from app import call_mind
+        self.sent: list[str] = []
+        self.mind = call_mind.Mind.__new__(call_mind.Mind)
+
+        async def stream(text, timeout):
+            self.sent.append(text)
+            yield "Got it."
+            yield " Athena Lite provides the pricing."
+            yield call_mind._COMPLETE
+
+        self.mind._stream = stream
+
+
+def test_a_callers_project_question_carries_the_passages(world):
+    cm = _CallMind()
+
+    async def go():
+        return [s async for s in cm.mind.sentences("Which system provides the pricing on the offer?")]
+
+    said = asyncio.run(go())
+    assert said and "[Project knowledge" in cm.sent[0] and "Athena Lite" in cm.sent[0]
+    assert cm.sent[0].rstrip().endswith('"Which system provides the pricing on the offer?"')
+    assert len(cm.sent[0]) < 2200, "a few passages, not the files"
+
+
+def test_small_talk_on_a_call_carries_nothing(world):
+    cm = _CallMind()
+
+    async def go():
+        return [s async for s in cm.mind.sentences("Yeah sure, I am free now.")]
+
+    asyncio.run(go())
+    assert "[Project knowledge" not in cm.sent[0]
+
+
+def test_the_call_brain_is_told_to_stay_within_the_knowledge():
+    from app import call_mind
+    p = call_mind.persona("Vinish Kumar", "his PR")
+    assert "come ONLY from the [Project knowledge]" in p and "check with Arun" in p
+
+
+def test_any_project_question_is_a_knowledge_question_and_small_talk_is_not():
+    for q in ("How many transport orders get created for a normal booking?",
+              "Where does the customs feedback come from?",
+              "Does manual customs update reach billing?",
+              "Is the TO updated when a container is added?"):
+        assert pk.is_knowledge_question(q), q
+    for q in ("How are you?", "Hi, yes I'm free now.", "Can you hear me?", "ok thanks"):
+        assert not pk.is_knowledge_question(q), q

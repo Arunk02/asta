@@ -38,9 +38,13 @@ _STOP = set("""a an the and or but if then else of to in on at by for with from 
 being it its this that these those there here what which who whom whose how why when where do does did done
 can could should would will shall may might must i you he she we they me him her us them my your our their
 please tell explain about give know like just also any some all more most into out up down over than too very
-no not yes ok okay hey hello asta want need get got make made one two three it's""".split())
+no not yes ok okay hey hello asta want need get got make made one two three it's
+come comes coming came go goes going went happen happens happening reach reaches reached
+many much does mean means work works""".split())
 
 _STATE: dict = {"reindexed": 0.0}
+#: Words in nearly every heading of this project — they say nothing about which section.
+_EVERYWHERE = {"booking", "service", "telikos", "flow", "system", "event", "events"}
 
 
 def _tokens(text: str) -> list[str]:
@@ -239,7 +243,12 @@ def _docs(words: list[str], limit: int) -> list[dict]:
         except Exception:                                      # noqa: BLE001
             pass
     question = " ".join(words)
-    hits = knowledge.search(question, limit=limit * 2)
+    hits = knowledge.search(question, limit=limit * 4)
+    # A passage whose HEADING names the subject first: "where does the customs
+    # feedback come from?" ranked "Confirm, acks and completion" above the
+    # section headed "Customs" (2 Oct) — the heading is where the subject is.
+    subject = [w for w in words if len(w) > 2 and w not in _EVERYWHERE]
+    hits.sort(key=lambda h: -sum(1 for w in subject if w in (h.get("where") or "").lower()))
     # The code-checked flow document first when it matched.
     hits.sort(key=lambda h: 0 if FLOW_DOC.split(".")[0] in (h.get("path") or h.get("document") or "") else 1)
     # A third of what he named, not knowledge.relevant's half: "explain the
@@ -367,5 +376,22 @@ KNOWLEDGE_ASK = re.compile(
     r"which (?:system|service|team)|who owns|what happens|meaning of|describe|overview|flow)\b", re.I)
 
 
+#: Any question, by its form.
+_QUESTION = re.compile(r"\?\s*$|^\W*(?:what|which|who|where|when|why|how|does|do|did|is|are|was|"
+                       r"were|can|could|will|would|should|has|have)\b", re.I)
+#: A project subject in it — so "how are you?" carries nothing.
+_DOMAIN = re.compile(r"\b(?:booking|tms|customs?|billing|invoic\w*|transport orders?|TOs?|SOs?|iom|"
+                     r"solar|service ?plans?|activity ?plan|AP|email|rfp|ready for planning|execution|"
+                     r"amend\w*|cancel\w*|containers?|reefer|cargo|vts|cams|event history|EH|fact|"
+                     r"s4|united|cip\w*|workflow|temporal|kafka|events?|confirm\w*|routing|legs?|"
+                     r"multi.?stop|multi.?container|feedback|revenue|finance|vendor|truck\w*|driver)\b",
+                     re.I)
+
+
 def is_knowledge_question(text: str) -> bool:
-    return bool(KNOWLEDGE_ASK.search(text or ""))
+    """Asked about how the project works: by its wording ("explain…"), or any
+    question that names a project subject. 2 Oct, a simulated call: "How many
+    TOs for a normal booking?" and "Where does customs feedback come from?" got
+    "I'll check with Arun" with the answer on file — they did not say "what is"."""
+    t = text or ""
+    return bool(KNOWLEDGE_ASK.search(t)) or bool(_QUESTION.search(t.strip()) and _DOMAIN.search(t))

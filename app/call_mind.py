@@ -64,7 +64,12 @@ _PERSONA = (
     "comes out as mangled English.\n"
     "- If what they said came through garbled, say so naturally and ask again.\n"
     "- Never invent facts about Arun's work or plans, and never commit him to "
-    "anything — if something needs him, say you will check with Arun.\n"    "- When they describe a piece of his work, never tell them which one it is "
+    "anything — if something needs him, say you will check with Arun.\n"
+    "- Project facts (how the booking flow works, which system sends what, events, "
+    "TOs, customs, billing) come ONLY from the [Project knowledge] that may come with "
+    "their line. Say what it states, plainly, in a sentence or two — no \"always\" or "
+    "\"every\" it does not say. Where it says a point is unconfirmed, or does not cover "
+    "the question, say you will check with Arun and come back.\n"    "- When they describe a piece of his work, never tell them which one it is "
     "unless what they said matches it (the service, the field, what changed). "
     "If two could fit, or none does, say so and ask, or say you will check.\n"
     "- If they say bye, thanks, or that they have to go, close in one short "
@@ -157,7 +162,12 @@ class Mind:
         buffer = ""
         opened = False
         capital = False                   # the sentence after a split-off reaction
-        async for piece in self._stream(f'They just said: "{theirs}"{clock}', timeout):
+        message = f'They just said: "{theirs}"{clock}'
+        facts = await _knowledge_for(theirs)
+        if facts:
+            message = ("[Project knowledge for their question — answer only from this]\n"
+                       f"{facts}\n\n{message}")
+        async for piece in self._stream(message, timeout):
             if not opened and piece is not _COMPLETE:
                 # A reply that opens with a ready reaction ("Great, glad to…")
                 # sends the reaction the moment it is written; its audio is made.
@@ -276,6 +286,26 @@ _AS_HIM = (
     "to\", \"Certainly\". Do not introduce yourself as an assistant.\n"
     "- If they ask outright whether this is Arun himself, or who is speaking, do "
     "not deny it — tell them shortly and move on. Never state that you are Arun.\n")
+
+
+#: What a call turn carries about the project, at most — the best few passages.
+CALL_KNOWLEDGE_CHARS = 1500
+
+
+async def _knowledge_for(theirs: str) -> str:
+    """The passages that answer a project question a caller asked, or ''. The
+    same lookup voice, WhatsApp and Teams replies use (his documents and the
+    repo summaries); only for a question, so small talk carries nothing — a few
+    milliseconds and ~400 tokens when it does. 2 Oct: the call brain answered
+    from its briefing alone, and could guess at the booking flow."""
+    try:
+        from . import project_knowledge
+        if not project_knowledge.is_knowledge_question(theirs or ""):
+            return ""
+        return await asyncio.to_thread(project_knowledge.lookup, theirs, "",
+                                       CALL_KNOWLEDGE_CHARS, "call")
+    except Exception:                                          # noqa: BLE001
+        return ""
 
 
 def persona(who: str, topic: str, agenda: str = "", minutes: float = 0,

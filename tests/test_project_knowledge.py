@@ -177,6 +177,7 @@ def test_his_correction_goes_into_the_flow_document_and_ranks_first(world):
                     "Emails go only on booking confirmation and send to execution.")
     doc = (knowledge.folder() / pk.FLOW_DOC).read_text()
     assert "## Facts from Arun" in doc and "only on booking confirmation" in doc
+    assert "unverified until checked against the code" in doc
     assert not (knowledge.folder() / "arun-corrections.md").exists(), "no side list"
     hits = pk.search("when does email service send email milestone")
     assert hits and pk.FLOW_DOC.split(".")[0] in hits[0]["where"]

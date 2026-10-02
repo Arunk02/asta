@@ -240,7 +240,7 @@ def _docs(words: list[str], limit: int) -> list[dict]:
             pass
     question = " ".join(words)
     hits = knowledge.search(question, limit=limit * 2)
-    # The authoritative flow document first when it matched: it is the last word.
+    # The code-checked flow document first when it matched.
     hits.sort(key=lambda h: 0 if FLOW_DOC.split(".")[0] in (h.get("path") or h.get("document") or "") else 1)
     # A third of what he named, not knowledge.relevant's half: "explain the
     # booking service, what it does" names three words, and one is generic.
@@ -251,16 +251,17 @@ def _docs(words: list[str], limit: int) -> list[dict]:
 
 # --- one lookup ----------------------------------------------------------------------
 
-#: The authoritative flow document in his knowledge folder: his corrections are
-#: written into it (its "Facts from Arun" section), not kept in a side list — his
-#: call, 2 Oct: "don't keep corrections, correct the docs themselves".
+#: The flow document in his knowledge folder, checked against the code. His
+#: corrections are written into it (its "Facts from Arun" section), not a side list,
+#: and marked UNVERIFIED — his call, 2 Oct: "don't depend blindly on what I wrote
+#: long back; depend on the code and the PDFs, reverify properly".
 FLOW_DOC = "telikos-system-flow.md"
 _FACTS = "## Facts from Arun"
 
 
 def learn(said: str, restated: str = "", where: str = "voice") -> bool:
     """His correction or addition of a domain fact, written into the flow
-    document, read again at once, and ranked first by every channel."""
+    document marked unverified, read again at once."""
     from . import knowledge
     said = " ".join((said or "").split())
     if len(said) < 12:
@@ -272,7 +273,8 @@ def learn(said: str, restated: str = "", where: str = "voice") -> bool:
         if _FACTS not in text:
             text = text.rstrip() + f"\n\n{_FACTS}\n\nCorrections Arun gives are added here and win "\
                    "over anything above them.\n"
-        line = f"\n- {time.strftime('%Y-%m-%d')} ({where}): {restated.strip() or said}"
+        line = (f"\n- {time.strftime('%Y-%m-%d')} ({where}) [Arun — unverified until checked "
+                f"against the code]: {restated.strip() or said}")
         if restated.strip():
             line += f"  — in his words: \"{said[:300]}\""
         path.write_text(text.rstrip() + line + "\n")

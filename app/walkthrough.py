@@ -51,6 +51,13 @@ _DONE = re.compile(r"^\W*(?:done|stop|finish(?:ed)?|end(?:\s+(?:review|session))
                    r"that'?s\s+(?:all|it)|close\s+(?:the\s+)?(?:review|session))\W*$", re.I)
 _APPLY = re.compile(r"^\W*(?:apply(?:\s+(?:them|it|the\s+notes|all))?|yes,?\s+apply|"
                     r"go\s+ahead(?:\s+and\s+apply)?|fix\s+them)\W*$", re.I)
+_NEXT_FILE = re.compile(r"^\W*(?:go\s+to\s+(?:the\s+)?)?next\s+(?:file|class)\W*$", re.I)
+_PREV_FILE = re.compile(r"^\W*(?:go\s+(?:back\s+)?to\s+(?:the\s+)?)?(?:previous|prev|last)\s+"
+                        r"(?:file|class)\W*$", re.I)
+#: "show unit test cases for this", "where are the tests", "open the test".
+_TESTS = re.compile(r"\b(?:unit\s+)?tests?(?:\s+cases?)?\b.{0,30}$|\btest\s*cases?\b", re.I)
+_TESTS_ASK = re.compile(r"^\W*(?:show|open|where|which|any|are\s+there|go\s+to|take\s+me\s+to|"
+                        r"what)\b", re.I)
 _LATER = re.compile(r"^\W*(?:later|not\s+now|keep\s+(?:them|it)|save\s+(?:them|it)|no)\W*$", re.I)
 _QUESTION = re.compile(r"\?\s*$|^\W*(?:why|what|how|where|which|who|when|is|are|does|do|"
                        r"can|could|explain|tell\s+me)\b", re.I)
@@ -164,7 +171,52 @@ def is_command(text: str) -> bool:
     while a colleague's draft is waiting for him."""
     t = (text or "").strip()
     return bool(_NEXT.match(t) or _BACK.match(t) or _AGAIN.match(t) or _DONE.match(t)
+                or _NEXT_FILE.match(t) or _PREV_FILE.match(t) or wants_tests(t)
                 or _VOICE_ON.match(t) or _VOICE_OFF.match(t) or _APPLY.match(t) or _LATER.match(t))
+
+
+def wants_tests(text: str) -> bool:
+    """"show unit test cases for this" — the tests of the step on screen."""
+    t = (text or "").strip()
+    return bool(_TESTS.search(t) and _TESTS_ASK.search(t)) and len(t.split()) <= 12
+
+
+_TEST_METHOD = re.compile(r"@(?:Test|ParameterizedTest)\b[\s\S]{0,300}?\bvoid\s+(\w+)\s*\(")
+
+
+def _tests_in_diff(diff: str) -> dict[str, list[str]]:
+    """{test file: [test methods ADDED by this change]} — read once at start."""
+    out: dict[str, list[str]] = {}
+    for chunk in re.split(r"(?m)^diff --git ", diff or ""):
+        m = re.search(r"(?m)^\+\+\+ b/(\S+)", chunk)
+        if not m or "/test/" not in m.group(1):
+            continue
+        added = "\n".join(ln[1:] for ln in chunk.splitlines() if ln.startswith("+"))
+        out[m.group(1)] = _TEST_METHOD.findall(added)
+    return out
+
+
+def _tests_for(s: dict, st: dict) -> tuple[str, int, list[str], list[str]]:
+    """(test file, line of its first test, all its tests, those added by this change)
+    for the class on this step; ('', 0, [], []) when there is none."""
+    root = Path(s.get("root") or "")
+    cls = Path(st["file"]).stem
+    changed = s.get("tests") or {}
+    pick = next((f for f in changed if Path(f).stem.startswith(cls)), "")
+    if not pick and root.exists():
+        found = sorted(root.glob(f"**/src/test/**/{cls}*Test*.java")) + \
+            sorted(root.glob(f"**/src/test/**/*{cls}*Test*.java"))
+        pick = str(found[0].relative_to(root)) if found else ""
+    if not pick:
+        return "", 0, [], []
+    try:
+        text = (root / pick).read_text(errors="replace")
+    except OSError:
+        return pick, 1, [], changed.get(pick, [])
+    names = _TEST_METHOD.findall(text)
+    at = next((i + 1 for i, ln in enumerate(text.splitlines()) if "@Test" in ln
+               or "@ParameterizedTest" in ln), 1)
+    return pick, at, names, changed.get(pick, [])
 
 
 def notes_for(task_id: int) -> list[dict]:
@@ -202,7 +254,14 @@ async def _change(target: str) -> dict:
         for ws in _workspace_roots(workspace):
             hit = review.resolve_repo(ws, repo)
             if hit:
-                root = str(ws / hit)
+                # The PR's own code, never his checkout: 3 Oct, IntelliJ opened
+                # the shared clone on another feature branch, so every line it
+                # jumped to was somebody else's code.
+                own = Path(tasks.task_cwd(task["id"], workspace)) / hit if task else None
+                if own and own.exists() and own != ws / hit:
+                    root = str(own)                   # the task's own branch, still here
+                else:
+                    root = await review_tree(ws, ws / hit, pr) or ""
                 break
     elif task:
         cwd = Path(tasks.task_cwd(task["id"], workspace))
@@ -211,6 +270,54 @@ async def _change(target: str) -> dict:
         raise WalkError("there is no diff to walk through (no PR and no local change)")
     return {"title": title, "diff": diff, "root": root, "task_id": (task or {}).get("id"),
             "pr": pr, "workspace": workspace}
+
+
+#: Review copies kept at once; the oldest is removed beyond this.
+REVIEW_TREES = 3
+
+
+async def review_tree(ws: Path, repo_dir: Path, pr: str) -> str:
+    """A separate copy of the repo at the PR's head commit — read-only, detached,
+    in the workspace's worktree folder. His own checkout and its branch are never
+    touched. '' when it cannot be made (then nothing is opened at a wrong line)."""
+    from . import repo_ops
+    m = re.search(r"/pull/(\d+)", pr or "")
+    if not m or not (repo_dir / ".git").exists():
+        return ""
+    number = m.group(1)
+    rc, _ = await repo_ops.git(repo_dir, "git", "fetch", "--quiet", "origin",
+                               f"pull/{number}/head", timeout=120)
+    if rc != 0:
+        return ""
+    base = ws / ".asta-worktrees"
+    tree = base / f"review-{repo_dir.name}-{number}"
+    if tree.exists():
+        rc, _ = await repo_ops.git(tree, "git", "checkout", "--quiet", "--detach", "FETCH_HEAD")
+        if rc != 0:
+            rc, _ = await repo_ops.git(tree, "git", "fetch", "--quiet", "origin",
+                                       f"pull/{number}/head")
+            rc, _ = await repo_ops.git(tree, "git", "checkout", "--quiet", "--detach", "FETCH_HEAD")
+    else:
+        base.mkdir(exist_ok=True)
+        rc, _ = await repo_ops.git(repo_dir, "git", "worktree", "add", "--quiet", "--detach",
+                                   str(tree), "FETCH_HEAD")
+    if rc != 0:
+        return ""
+    await _prune_review_trees(repo_dir, base, keep=tree)
+    return str(tree)
+
+
+async def _prune_review_trees(repo_dir: Path, base: Path, keep: Path) -> None:
+    """Only the review copies this module made, oldest first, beyond REVIEW_TREES."""
+    from . import repo_ops
+    mine = sorted((p for p in base.glob("review-*") if p.is_dir() and p != keep),
+                  key=lambda p: p.stat().st_mtime)
+    for old in mine[:max(0, len(mine) - (REVIEW_TREES - 1))]:
+        # Removed from the repo it belongs to, which may not be this one.
+        rc, common = await repo_ops.git(old, "git", "rev-parse", "--path-format=absolute",
+                                        "--git-common-dir")
+        owner = Path(common.strip()).parent if rc == 0 and common.strip() else repo_dir
+        await repo_ops.git(owner, "git", "worktree", "remove", "--force", str(old))
 
 
 def _workspace_roots(preferred: str) -> list[Path]:
@@ -354,7 +461,7 @@ async def _show(cid: str, s: dict, speak_first: str = "") -> str:
     opened = await open_in_idea(s.get("root", ""), st["file"], st["line"])
     where = f"{Path(st['file']).name}:{st['line']}"
     head = f"*{s['cursor'] + 1}/{len(s['steps'])} · {st['title']}* — {where}"
-    tail = [] if opened else ["(Couldn't open it in IntelliJ — the repo isn't cloned here.)"]
+    tail = [] if opened else ["(IntelliJ isn't following — the PR's own code isn't available here.)"]
     mine = [n for n in s["notes"] if n["step"] == s["cursor"]]
     if mine:
         tail.append(f"📝 {len(mine)} note(s) on this step.")
@@ -364,8 +471,17 @@ async def _show(cid: str, s: dict, speak_first: str = "") -> str:
 
 # --- the session ------------------------------------------------------------------
 
+#: "PR 1429", "booking PR 1429" — said, not linked. Resolved to the link from
+#: his own tasks, where Asta raised it.
+_PR_SAID = re.compile(r"\b(?:pr|pull\s*request)\s*(?:number\s*)?#?\s*(\d{2,6})\b", re.I)
+_LAST = re.compile(r"\b(?:last|latest|recent|my)\s+(?:code\s+)?(?:change|task|pr|fix)\b", re.I)
+
+
 def wants_to_start(text: str) -> str:
-    """The target ("task 126" / a PR link) when he asks for a walkthrough, else ''."""
+    """The target ("task 126" / a PR link) when he asks for a walkthrough, else ''.
+
+    By voice he says "walk me through PR 1429" or "my last change" — a link is
+    never spoken — so those resolve through his own code tasks (3 Oct)."""
     t = text or ""
     if not _START.search(t):
         return ""
@@ -373,7 +489,45 @@ def wants_to_start(text: str) -> str:
     if m:
         return f"task {m.group(1) or m.group(2)}"
     pr = _PR.search(t)
-    return pr.group(0) if pr else ""
+    if pr:
+        return pr.group(0)
+    said = _PR_SAID.search(t)
+    if said:
+        return _task_for_pr(said.group(1)) or ""
+    if _LAST.search(t):
+        return _last_code_task()
+    return ""
+
+
+def _task_for_pr(number: str) -> str:
+    """'task N' (or the PR link) for a PR number Asta raised in one of his tasks."""
+    for t in store.list_tasks(limit=200):
+        blob = f"{t.get('pr_urls') or ''} {t.get('result') or ''}"
+        m = re.search(rf"https://github\.com/[\w.-]+/[\w.-]+/pull/{number}\b", blob)
+        if m:
+            return f"task {t['id']}" if t.get("kind") == "code" else m.group(0)
+    return ""
+
+
+def _last_code_task() -> str:
+    for t in store.list_tasks(limit=100):
+        if t.get("kind") == "code" and t.get("status") in ("done", "awaiting_approval", "pr_open",
+                                                           "merged", "shipped"):
+            return f"task {t['id']}"
+    return ""
+
+
+def spoken(cid: str, index: int | None = None) -> str:
+    """A step (the current one by default) as it should be SAID — no markup."""
+    s = get(cid)
+    if not s or not s.get("steps"):
+        return ""
+    i = s["cursor"] if index is None else max(0, min(index, len(s["steps"]) - 1))
+    st = s["steps"][i]
+    s = {**s, "cursor": i}
+    name = Path(st["file"]).stem
+    return (f"Step {s['cursor'] + 1} of {len(s['steps'])}: {st['title']}, in {name}, "
+            f"line {st['line']}. {st.get('explain') or ''}").strip()
 
 
 async def start(cid: str, target: str, voice: bool = False) -> str:
@@ -388,7 +542,7 @@ async def start(cid: str, target: str, voice: bool = False) -> str:
     s = {"target": target, "title": change["title"], "root": change["root"], "started": time.time(),
          "task_id": change["task_id"], "pr": change["pr"], "workspace": change["workspace"],
          "steps": planned["steps"], "cursor": 0, "notes": [], "state": "walking",
-         "voice": bool(voice)}
+         "voice": bool(voice), "tests": _tests_in_diff(change["diff"])}
     _save(cid, s)
     store.record_outcome("walkthrough", "started", subject=target, detail=change["title"][:160])
     intro = f"🧭 *{change['title'] or target}* — {len(s['steps'])} steps, in the order a request runs."
@@ -418,6 +572,33 @@ async def handle(cid: str, text: str) -> str | None:
         return "🔊 Speaking each step." if s["voice"] else "🔇 Voice off — text only."
     if _DONE.match(t):
         return _finish(cid, s)
+    if _NEXT_FILE.match(t) or _PREV_FILE.match(t):
+        here = s["steps"][s["cursor"]]["file"]
+        ahead = range(s["cursor"] + 1, len(s["steps"])) if _NEXT_FILE.match(t) \
+            else range(s["cursor"] - 1, -1, -1)
+        to = next((i for i in ahead if s["steps"][i]["file"] != here), None)
+        if to is None:
+            return ("That's the last file in this change — say *done* to finish."
+                    if _NEXT_FILE.match(t) else "That's the first file in this change.")
+        if _PREV_FILE.match(t):           # the first step of that file, not its last
+            there = s["steps"][to]["file"]
+            while to > 0 and s["steps"][to - 1]["file"] == there:
+                to -= 1
+        s["cursor"] = to
+        _save(cid, s)
+        return await _show(cid, s)
+    if wants_tests(t):
+        st = s["steps"][s["cursor"]]
+        file, line, names, added = _tests_for(s, st)
+        cls = Path(st["file"]).stem
+        if not file:
+            return f"No unit tests for {cls} — none in this change, and none in the repo."
+        await open_in_idea(s.get("root", ""), file, line)
+        new = f" {len(added)} added in this change: {', '.join(added[:5])}." if added else \
+            " None of them were added in this change."
+        listed = "" if added else (f" They include {', '.join(names[:4])}." if names else "")
+        return (f"🧪 Opened {Path(file).stem} — {len(names)} test{'s' if len(names) != 1 else ''}."
+                f"{new}{listed} Say *again* to go back to the step.")
     if _BACK.match(t):
         s["cursor"] = max(0, s["cursor"] - 1)
         _save(cid, s)

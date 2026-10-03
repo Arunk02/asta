@@ -157,13 +157,18 @@ def test_not_being_allowed_to_look_is_not_the_same_as_it_failing(monkeypatch, ma
 
 def test_running_is_read_from_system_events_not_by_asking_the_app(monkeypatch):
     """Asking an app whether it is running LAUNCHES it — the check would then
-    be its own answer."""
+    be its own answer. (The process list is read first since 3 Oct; System
+    Events is the fallback when it cannot be.)"""
     seen = {}
 
     async def osascript(script, args):
         seen["script"] = script
         return "com.apple.safari, com.google.chrome"
 
+    async def no_ps():
+        return None
+
+    monkeypatch.setattr(apps, "_from_process_list", no_ps)
     monkeypatch.setattr(apps, "_osascript", osascript)
     assert "com.google.chrome" in (asyncio.run(apps.running_bundles()) or set())
     assert "System Events" in seen["script"] and "is running" not in seen["script"]

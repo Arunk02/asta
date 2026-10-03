@@ -607,10 +607,15 @@ _TERMS = ["Asta", "Arun", "Telikos", "Maersk", "booking", "booking ID", "UAT", "
           "transport order", "activity plan service", "email service", "booking service"]
 
 
-def vocabulary(limit: int = 100) -> list[str]:
+def vocabulary(limit: int = 110) -> list[str]:
     """The people he talks to most and the words of his work — for the Mac's
     recognizer, which takes up to about a hundred such phrases."""
     words: list[str] = list(_TERMS)
+    with contextlib.suppress(Exception):
+        # The apps he opens by name — "IntelliJ" was heard as "intelligent".
+        from . import apps
+        have = {p.stem.lower() for p in apps.installed_apps()}
+        words += sorted({a for a in apps.ALIASES.values() if a.lower() in have})[:14]
     with contextlib.suppress(Exception):
         from . import prname
         for alias in prname.aliases().values():
@@ -755,6 +760,129 @@ async def handle(text: str) -> dict:
     return await converse(text)
 
 
+# --- done at once, by voice: open an app, walk through a change ----------------------
+#
+# 3 Oct: "open intellij" by voice was "On it." and a 20-60 s job — the wrapper
+# around his words hid the command from the instant door — and a walkthrough lost
+# its place on the next sentence, because every voice job was a new conversation.
+
+#: The one walkthrough session voice keeps, whatever job is running.
+VOICE_WALK = "voice-walkthrough"
+
+
+def _command(text: str) -> str:
+    """His sentence without a leading "hey Asta," — the doors match the command."""
+    t = re.sub(r"^\W*(?:hey|hi|ok(?:ay)?)?[\s,]*", "", text or "", flags=re.I)
+    m = _NAME.match(t)
+    return (t[m.end():] if m else t).lstrip(" ,.!") or (text or "")
+
+
+#: The written walkthrough's prompts — for the eye, not the ear.
+_NAV = re.compile(r"\(?\s*next\s*·[^)\n]*\)?|Say \*?next\*? to go on\.?", re.I)
+
+
+async def _say_all(text: str, at_most: int = 6) -> None:
+    """Every sentence of a short spoken piece — a walkthrough step is read whole,
+    not cut to two with "the rest is in your chat", nor mid-word at a length cap."""
+    started = time.time()
+    raw = _NAV.sub("", text or "")
+    parts = [p for p in re.split(r"(?<=[.!?])\s+|\n+", raw) if p.strip()]
+    for part in parts[:at_most]:
+        line = speakable(part, sentences=1).replace(IN_CHAT, "").strip()
+        if not line:
+            continue
+        if _STATE["barged_at"] > started:
+            break
+        await say(line, kind="answer", since=started)
+
+
+async def _walk_start(target: str) -> None:
+    from . import walkthrough
+    reply = await walkthrough.start(VOICE_WALK, target, voice=False)
+    if not walkthrough.get(VOICE_WALK):
+        await say(speakable(reply) or "I couldn't start that walkthrough.", kind="answer")
+        return
+    overview = (reply.split("\n")[1] if "\n" in reply and not reply.split("\n")[1].startswith("*")
+                else "")
+    steps = len((walkthrough.get(VOICE_WALK) or {}).get("steps") or [])
+    await _say_all(" ".join(x for x in [f"{steps} steps." if steps else "", overview,
+                                        walkthrough.spoken(VOICE_WALK, 0),
+                                        "Say next, back, or ask me anything."] if x), at_most=10)
+
+
+async def walk_turn(text: str) -> str:
+    """A sentence for the open walkthrough: say what it gives back. The step itself
+    when it moved; otherwise its answer or note, short."""
+    from . import walkthrough
+    slow = None
+    if not walkthrough.is_command(text):
+        slow = asyncio.ensure_future(_one_moment(time.time()))
+    try:
+        reply = await walkthrough.handle(VOICE_WALK, text) or ""
+    finally:
+        if slow:
+            slow.cancel()
+    left = walkthrough.get(VOICE_WALK)
+    if left and reply.startswith("*"):
+        await _say_all(walkthrough.spoken(VOICE_WALK))
+    elif left and left.get("state") == "awaiting_apply":
+        n = len(left.get("notes") or [])
+        task = left.get("task_id")
+        await _say_all(f"You made {n} note{'s' if n != 1 else ''}; they're in your chat. "
+                       + (f"Say apply and task {task} makes the changes, or later to keep them."
+                          if task else "Say later to keep them."))
+        asyncio.ensure_future(to_chat(reply))          # the notes, kept in writing
+    elif reply:
+        await _say_all(reply, at_most=4)
+        if not left:
+            asyncio.ensure_future(to_chat(reply))
+    return reply
+
+
+async def _one_moment(started: float) -> None:
+    """A question about a step takes the model a few seconds: one short line, once."""
+    await asyncio.sleep(FILLER_SECONDS)
+    if _STATE["barged_at"] <= started:
+        await say("One moment.", kind="answer")
+
+
+async def instant(text: str) -> dict | None:
+    """What voice does at once, before any brain: open an app (or put a song on,
+    or say it is not installed), and drive a walkthrough. None when it is not one."""
+    from . import apps, walkthrough
+    own = _command(text)
+    if walkthrough.get(VOICE_WALK) and walkthrough.is_command(own):
+        _STATE["last_heard"] = time.time()
+        await walk_turn(own)
+        return {"text": text, "did": "walkthrough"}
+    target = walkthrough.wants_to_start(own)
+    if target:
+        _STATE["last_heard"] = time.time()
+        await say("Reading the change — give me half a minute.", kind="answer")
+        asyncio.ensure_future(_walk_start(target))
+        store.record_outcome("voice", "walkthrough", detail=f"start {target}")
+        return {"text": text, "did": "walkthrough_started"}
+    if walkthrough._START.search(own) and len(own.split()) <= 8:
+        _STATE["last_heard"] = time.time()
+        await say("Which one — a task number, or a PR number?", kind="answer")
+        return {"text": text, "did": "walkthrough_which"}
+    if not apps.enabled():
+        return None
+    wants = apps.open_ask(own)
+    if not wants:
+        return None
+    _STATE["last_heard"] = time.time()
+    kind, what, _browser = wants
+    if kind in ("app", "url"):
+        found, _ = apps.find_app(what) if kind == "app" else (None, [])
+        await say(f"Opening {found.stem if found else what}.", kind="answer")
+    line = await apps.open_it(*wants)
+    store.record_outcome("voice", "opened", detail=f"{kind} {what} → {line[:120]}")
+    if kind not in ("app", "url") or line.startswith("⚠️"):
+        await say(speakable(line) or line.strip("⚠️🖥🎵 "), kind="answer")
+    return {"text": text, "did": "opened", "line": line}
+
+
 async def converse(text: str) -> dict:
     """The talker answers, stays quiet, or hands the work on — in about a second.
 
@@ -764,6 +892,10 @@ async def converse(text: str) -> dict:
     if await answer_draft(text):
         remember("Arun", text)
         return {"text": text, "did": "answered_draft"}
+    done = await instant(text)
+    if done is not None:
+        remember("Arun", text)
+        return done
     started = time.time()
     context = recent(started)
     decided = await voice_talker.route(text, context)
@@ -798,6 +930,14 @@ async def converse(text: str) -> dict:
         store.record_outcome("voice", "not_for_asta", detail=text[:200])
         return {"text": text, "did": "not_for_asta"}
     remember("Arun", text, started)
+    with contextlib.suppress(Exception):
+        from . import walkthrough
+        if walkthrough.get(VOICE_WALK):
+            # A walkthrough is open: a question is about this step's code, and
+            # "this should use the enum" is a note against it — never a job.
+            await _to_helper({"type": "flush"})
+            await walk_turn(_command(text))
+            return {"text": text, "did": "walkthrough"}
     # He has moved on: lines still queued from earlier answers are dropped, so
     # this one is answered now — 2 Oct 19:4x, "it's still telling the old convo
     # and not acking the new message".
@@ -866,7 +1006,11 @@ async def converse(text: str) -> dict:
         return {"text": text, "did": "handed_on"}
     spoken = 0
     handed = False
-    filler = asyncio.ensure_future(_filler(started))
+    # Only once it is known to be for Asta: on a second look the talker may yet
+    # stay quiet, and "One moment." to a remark meant for Vinish is the voice
+    # bench's 3 Oct finding ("one sec, I'm on a call" → "One moment.").
+    filler = asyncio.ensure_future(_filler(started) if decided == voice_talker.ANSWER
+                                   else asyncio.sleep(0))
     try:
         # Routed as a question for Asta: the talker answers it, never silence.
         kind = "to_you" if decided == voice_talker.ANSWER else "said"
@@ -1184,6 +1328,17 @@ def _job_conversation(text: str) -> dict:
         with contextlib.suppress(Exception):
             store.update_conversation(conv["id"], workspace=ws)
     return conv
+
+
+_WRAPPER = re.compile(r"\n+\((?:Said out loud to Asta|The id he spelled)\b", re.S)
+
+
+def his_words(text: str) -> str:
+    """What he said, without what `with_context` wraps around it. The instant
+    doors (open an app, a walkthrough command) match a short command, and the
+    wrapper made every one of them miss by voice (3 Oct)."""
+    m = _WRAPPER.search(text or "")
+    return (text[:m.start()] if m else (text or "")).strip()
 
 
 def with_context(text: str, context: list[str]) -> str:

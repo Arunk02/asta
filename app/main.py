@@ -3521,19 +3521,23 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     # check, which would otherwise read "next" as feedback on a draft. A plain
     # yes/send/no while a colleague's draft is waiting still goes to the draft.
     from . import walkthrough
-    wt_target = walkthrough.wants_to_start(user_text)
+    from .voice_mode import his_words
+    # The instant doors read HIS words: a voice job arrives wrapped in what was
+    # said before it, and "open intellij" + that wrapper matched none of them.
+    own = his_words(user_text)
+    wt_target = walkthrough.wants_to_start(own)
     # A colleague's draft is waiting: it gets everything except the session's
     # own words. His "provide date as well…" (30 Sep) was feedback on the Vinish
     # draft and went to an open walkthrough as a question about a helm file.
-    if walkthrough.takes(cid, user_text or "", draft_waiting=bool(loop.awaiting(cid)),
-                         affirms=bool(_affirmation(user_text)[0] or _DECLINE.match(user_text or ""))):
+    if walkthrough.takes(cid, own, draft_waiting=bool(loop.awaiting(cid)),
+                         affirms=bool(_affirmation(own)[0] or _DECLINE.match(own))):
         if wt_target:
             await sink.send({"type": "note", "text": "🧭 Reading the change…"})
             reply = await walkthrough.start(cid, wt_target,
-                                            voice=walkthrough.wants_voice(user_text))
+                                            voice=walkthrough.wants_voice(own))
         else:
-            reply = (await walkthrough.apply_later(cid, user_text)
-                     or await walkthrough.handle(cid, user_text))
+            reply = (await walkthrough.apply_later(cid, own)
+                     or await walkthrough.handle(cid, own))
         if reply:
             frontdesk.record("walkthrough", (user_text or "")[:60])
             await sink.send({"type": "delta" if channel == "web" else "note", "text": reply})
@@ -3796,7 +3800,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
         # "open excel and add a column Status" — a task inside an app, said as
         # one instruction. Done, checked, and reported; not a window left open.
         from . import app_tasks
-        inside = app_tasks.direct_ask(user_text)
+        inside = app_tasks.direct_ask(his_words(user_text))
         if inside:
             frontdesk.record("app_task", inside[0])
             await sink.send({"type": "delta" if channel == "web" else "note",
@@ -3804,7 +3808,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
             if channel == "web":
                 await sink.send({"type": "done", "tools": []})
             return None
-        wants_open = apps.open_ask(user_text)
+        wants_open = apps.open_ask(his_words(user_text))
         if wants_open:
             frontdesk.record("open", wants_open[0])
             await sink.send({"type": "delta" if channel == "web" else "note",

@@ -471,6 +471,34 @@ def catalogue() -> str:
 APP_FOLDERS = ("/Applications", "/Applications/Utilities",
                "/System/Applications", "/System/Applications/Utilities",
                "~/Applications")
+#: Apps outside those folders that he still names by hand.
+APP_EXTRAS = ("/System/Library/CoreServices/Finder.app",)
+
+#: What he SAYS → the app's real name. 3 Oct: "open VS Code" found nothing beside
+#: an installed Visual Studio Code, and speech hears "IntelliJ" as "intelligent".
+ALIASES = {
+    "vs code": "Visual Studio Code", "vscode": "Visual Studio Code", "code": "Visual Studio Code",
+    "visual studio": "Visual Studio Code",
+    "intellij": "IntelliJ IDEA", "idea": "IntelliJ IDEA", "intelligent": "IntelliJ IDEA",
+    "intelli j": "IntelliJ IDEA", "intel j": "IntelliJ IDEA", "intellij idea": "IntelliJ IDEA",
+    "excel": "Microsoft Excel", "word": "Microsoft Word", "powerpoint": "Microsoft PowerPoint",
+    "power point": "Microsoft PowerPoint", "ppt": "Microsoft PowerPoint",
+    "onenote": "Microsoft OneNote", "one note": "Microsoft OneNote", "edge": "Microsoft Edge",
+    "kafka": "Offset Explorer 2", "offset explorer": "Offset Explorer 2",
+    "kafka tool": "Offset Explorer 2", "mongo": "MongoDB Compass", "mongodb": "MongoDB Compass",
+    "compass": "MongoDB Compass", "pgadmin": "pgAdmin 4", "pg admin": "pgAdmin 4",
+    "postgres": "pgAdmin 4", "rancher": "Rancher Desktop", "drawio": "draw.io",
+    "draw io": "draw.io", "github desktop": "GitHub Desktop", "settings": "System Settings",
+    "system preferences": "System Settings", "slack": "Slack", "postman": "Postman",
+    "whatsapp": "WhatsApp", "zoom": "zoom.us", "firefox": "Firefox",
+}
+
+#: Said when an app he named is not on this Mac — with what IS here for the same
+#: job. Offered, never opened in its place: he asked for that app.
+INSTEAD = {"Microsoft Excel": "Numbers can open .xlsx files — say “open numbers”",
+           "Postman": "Bruno and Reqable are installed — say “open bruno”",
+           "WhatsApp": "say “open web.whatsapp.com” for WhatsApp Web",
+           "Firefox": "Chrome, Edge, Brave and Safari are installed"}
 
 #: Sites by the name he says rather than the address he would type. Deliberately
 #: short and public: anything with a dot in it is opened as typed, so his own
@@ -508,6 +536,7 @@ def installed_apps(refresh: bool = False) -> list[Path]:
             out += [p for p in base.iterdir() if p.suffix == ".app"]
         except OSError:
             continue
+    out += [Path(p) for p in APP_EXTRAS if Path(p).exists()]
     out.sort(key=lambda p: p.name.lower())
     _apps_cache = (time.time(), out)
     return out
@@ -525,10 +554,16 @@ def find_app(name: str) -> tuple[Path | None, list[str]]:
     which is the one people mean — but the alternatives are handed back so the
     answer can say which was chosen and what else was there.
     """
-    want = _norm(name)
+    want = _norm(re.sub(r"\s+(?:app|application)$", "", (name or "").strip(), flags=re.I))
     if not want:
         return None, []
     apps = installed_apps()
+    alias = ALIASES.get(want)
+    if alias:
+        hit = [p for p in apps if p.stem.lower() == alias.lower()]
+        if hit:
+            return hit[0], [p.stem for p in apps if p not in hit and _norm(alias) in _norm(p.stem)][:3]
+        return None, []                     # a known app that is not installed here
     exact = [p for p in apps if _norm(p.stem) == want]
     if exact:
         return exact[0], [p.stem for p in exact[1:]]
@@ -546,6 +581,15 @@ def find_app(name: str) -> tuple[Path | None, list[str]]:
     import difflib
     near = difflib.get_close_matches(want, [_norm(p.stem) for p in apps], n=3, cutoff=0.6)
     return None, [p.stem for p in apps if _norm(p.stem) in near]
+
+
+def missing(name: str) -> str:
+    """The real name of a known app he named that is NOT installed, or ''."""
+    want = _norm(re.sub(r"\s+(?:app|application)$", "", (name or "").strip(), flags=re.I))
+    alias = ALIASES.get(want, "")
+    if alias and not any(p.stem.lower() == alias.lower() for p in installed_apps()):
+        return alias
+    return ""
 
 
 def bundle_id(app: Path) -> str:
@@ -581,6 +625,9 @@ async def running_bundles() -> set[str] | None:
     and reporting that as "it did not open" would call every successful launch
     a failure.
     """
+    seen = await _from_process_list()
+    if seen is not None:
+        return seen
     script = ('on run argv\n  tell application "System Events" to return '
               '(bundle identifier of every process) as text\nend run')
     try:
@@ -588,6 +635,33 @@ async def running_bundles() -> set[str] | None:
     except AppError:
         return None
     return {b.strip() for b in said.split(",") if b.strip()}
+
+
+_BUNDLE_OF: dict[str, str] = {}
+
+
+async def _from_process_list() -> set[str] | None:
+    """Running apps from the process list — no macOS permission needed. 3 Oct:
+    System Events was never allowed on this Mac, so every open ended "I can't
+    confirm it is running", which read as "macOS got it but nothing opened".
+    None when ps itself cannot be read."""
+    try:
+        code, out = await _run("/bin/ps", "-axo", "comm=")
+    except Exception:                                          # noqa: BLE001
+        return None
+    if code != 0 or not out:
+        return None
+    found: set[str] = set()
+    for line in out.splitlines():
+        m = re.match(r"^(/.+?\.app)/Contents/MacOS/", line.strip())
+        if not m:
+            continue
+        root = m.group(1)
+        if root not in _BUNDLE_OF:
+            _BUNDLE_OF[root] = bundle_id(Path(root))
+        if _BUNDLE_OF[root]:
+            found.add(_BUNDLE_OF[root])
+    return found
 
 
 #: How long to wait for an app to appear after asking macOS to open it. A cold
@@ -732,7 +806,7 @@ def search_url(text: str) -> tuple[str, str] | None:
 #: than a brain, because this has to be instant and it has to be predictable.
 _OPEN_ASK = re.compile(
     r"^\W*(?:hey\s+|asta[,\s]+)?(?:can you\s+|could you\s+|please\s+|pls\s+)?"
-    r"(?:open|launch|start|fire up|bring up|show me)\s+"
+    r"(?:open(?:\s+up)?|launch|start|fire up|bring up|show me|switch to)\s+"
     r"(?:the\s+|my\s+)?(?P<what>.{1,60}?)"
     r"(?:\s+(?:in|on|with)\s+(?P<browser>chrome|safari|firefox|edge|brave|arc))?"
     r"(?:\s+(?:for me|please|now))?\W*$", re.I)
@@ -774,7 +848,9 @@ def open_ask(text: str) -> tuple[str, str, str] | None:
     if _ABOUT_CONTENT.search(t):
         return None                      # about content, not about a window
     if find_app(what)[0] is None:
-        return None                      # not installed: let a brain say something useful
+        # A known app that is not on this Mac: say so at once, instead of a slow
+        # brain turn that ends vague ("open excel", 29 Sep).
+        return ("missing", missing(what), "") if missing(what) else None
     return ("app", what, browser)
 
 
@@ -840,6 +916,9 @@ async def open_it(kind: str, what: str, browser: str = "") -> str:
     """One line for him: what was opened, or what happened instead."""
     if kind == "play":
         return await play(what, browser or "chrome")
+    if kind == "missing":
+        instead = INSTEAD.get(what, "")
+        return f"⚠️ {what} isn't installed on this Mac." + (f" {instead}." if instead else "")
     try:
         out = await (open_url(what, browser) if kind == "url" else open_app(what))
     except AppError as exc:

@@ -338,20 +338,87 @@ def test_pure_fyi_still_rides_the_quiet_path(on):
 class _Page:
     """A page that detaches its Activity button the way Teams actually does."""
 
-    def __init__(self, fail_times: int = 0, always_fail: bool = False):
+    def __init__(self, fail_times: int = 0, always_fail: bool = False, shortcut_works: bool = False,
+                 state: dict | None = None, read_result: dict | None = None,
+                 restore_fails: bool = False):
         self.fail_times = fail_times
         self.always_fail = always_fail
+        self.shortcut_works = shortcut_works
+        self.state = {"app": True, **(state or {})}
+        self.read_result = (read_result if read_result is not None else
+                            {"valid": True, "rows": [{"text": "Sam mentioned you", "unread": True}]})
+        self.restore_fails = restore_fails
         self.clicks = 0
+        self.keys: list[str] = []
         self.waited = []
+        self.opened = False
+        self.chat = True
+        self.navigated = []
+        page = self
 
-    async def click(self, selector, timeout=None):
-        self.clicks += 1
-        if self.always_fail or self.clicks <= self.fail_times:
-            raise RuntimeError("ElementHandle.click: Element is not attached to the DOM")
+        class _Loc:
+            def __init__(self, sel):
+                self.sel = sel
+                self.first = self
+
+            async def click(self, timeout=None):
+                if "Activity" not in self.sel:
+                    if page.restore_fails:
+                        raise RuntimeError("Chat button did not respond")
+                    page.chat = True
+                    return
+                page.clicks += 1
+                if page.always_fail or page.clicks <= page.fail_times:
+                    raise RuntimeError("Locator.click: Element is not attached to the DOM")
+                page.opened = True
+                page.chat = False
+
+        class _Keys:
+            async def press(self, key):
+                page.keys.append(key)
+                if key == "Control+Shift+1" and page.shortcut_works:
+                    page.opened = True
+                    page.chat = False
+
+        self._Loc, self.keyboard = _Loc, _Keys()
+
+    def locator(self, sel):
+        return self._Loc(sel)
+
+    def get_by_role(self, role, name=""):
+        page = self
+
+        class _Retry:
+            async def click(self, timeout=None):
+                page.keys.append(f"retry:{name}")
+                page.state.pop("oops", None)
+        return _Retry()
+
+    def is_closed(self):
+        return False
+
+    async def evaluate(self, script, *a):
+        if script == teams_bridge._ACTIVITY_ROWS_JS:
+            return self.read_result
+        if "document.querySelectorAll('[role=\"treeitem\"]')" in script:
+            return 1 if self.chat else 0
+        return dict(self.state)
 
     async def wait_for_selector(self, selector, timeout=None):
         self.waited.append(selector)
+        if "activity-list-container" in selector and not self.opened:
+            raise RuntimeError("Timeout waiting for the activity list")
+        if '[data-tid="chat-list"]' in selector and not self.chat:
+            raise RuntimeError("Timeout waiting for the chat list")
+        if "app-bar" in selector and not self.state.get("app"):
+            raise RuntimeError("Teams app did not reload")
         return object()
+
+    async def goto(self, url, **kwargs):
+        self.navigated.append(url)
+        if self.restore_fails:
+            raise RuntimeError("Teams did not reload")
+        self.chat = bool(self.state.get("app"))
 
 
 def test_opening_activity_survives_teams_re_rendering_under_it(monkeypatch):
@@ -362,7 +429,7 @@ def test_opening_activity_survives_teams_re_rendering_under_it(monkeypatch):
     page = _Page(fail_times=2)
     asyncio.run(teams_bridge._open_activity(page))
     assert page.clicks == 3
-    assert "[data-tid=\"activity-list-container\"]" in page.waited
+    assert any("activity-list-container" in w for w in page.waited)
 
 
 def test_opening_activity_succeeds_first_time_when_the_page_is_settled(monkeypatch):
@@ -384,3 +451,418 @@ def test_a_genuinely_broken_activity_tab_raises_rather_than_returning_empty(monk
 
 async def _instant(seconds):
     return None
+
+
+# --- 3 Oct: the Activity tab when Teams is not in its usual state -----------------
+
+def test_a_covered_activity_button_is_reached_with_teams_own_shortcut(monkeypatch):
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    page = _Page(always_fail=True, shortcut_works=True, state={"dialogs": ["Teams notice"]})
+    asyncio.run(teams_bridge._open_activity(page))
+    assert "Control+Shift+1" in page.keys and "Escape" in page.keys
+
+
+def test_oops_app_failed_to_load_is_retried_not_clicked_through(monkeypatch):
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    page = _Page(state={"oops": True})
+    asyncio.run(teams_bridge._open_activity(page))
+    assert "retry:Retry" in page.keys and page.opened
+
+
+def test_a_sign_in_page_is_reported_and_the_session_flag_left_to_the_session_check(monkeypatch):
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    store.kv_set("teams_session_ok", "1")
+    page = _Page(state={"signin": True, "url": "https://login.microsoftonline.com/x"})
+    with pytest.raises(RuntimeError, match="SESSION_EXPIRED"):
+        asyncio.run(teams_bridge._open_activity(page))
+    assert page.clicks == 0
+    assert store.kv_get("teams_session_ok") == "1", "a guess never stops every Teams read"
+    assert any(r["outcome"] == "activity_unavailable" for r in store.recent_outcomes(5))
+
+
+def test_a_failure_says_what_the_page_showed(monkeypatch):
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    page = _Page(always_fail=True, state={"title": "Chat | Microsoft Teams",
+                                          "covered_by": "DIV What's new in Teams"})
+    with pytest.raises(teams_bridge.ActivityUnavailable) as err:
+        asyncio.run(teams_bridge._open_activity(page))
+    assert "covered by DIV What's new in Teams" in str(err.value)
+    with store._connect() as conn:
+        got = conn.execute("SELECT detail FROM outcomes WHERE outcome='activity_unavailable'").fetchall()
+    assert got and "What's new" in got[-1][0]
+
+
+def test_an_activity_miss_sends_the_page_home_and_keeps_the_browser(monkeypatch):
+    """Every miss used to relaunch Chrome (3 Oct, ~15 times)."""
+    discarded = []
+    page = _Page(always_fail=True)
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+
+    async def pooled():
+        return page
+
+    async def discard(why=""):
+        discarded.append(why)
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    monkeypatch.setattr(teams_bridge, "_discard_pool", discard)
+
+    async def go():
+        async with teams_bridge.teams_page():
+            await teams_bridge._open_activity(page)
+    with pytest.raises(teams_bridge.ActivityUnavailable):
+        asyncio.run(go())
+    assert page.navigated == [teams_bridge.TEAMS_URL] and not discarded
+
+
+def test_after_reading_activity_the_page_goes_back_to_chat():
+    clicked = []
+
+    class P:
+        def locator(self, sel):
+            class L:
+                first = None
+
+                async def click(self, timeout=None):
+                    clicked.append(sel)
+            loc = L()
+            loc.first = loc
+            return loc
+        async def evaluate(self, script):
+            return 1
+    asyncio.run(teams_bridge._back_to_chat(P()))
+    assert clicked == ['button[aria-label^="Chat"]:visible']
+
+
+def test_a_stale_pool_records_why(monkeypatch):
+    import time as _t
+
+    class P:
+        async def evaluate(self, *a):
+            raise RuntimeError("Target page, context or browser has been closed")
+    monkeypatch.setitem(teams_bridge._POOL, "page", P())
+    monkeypatch.setitem(teams_bridge._POOL, "born", _t.time())
+    monkeypatch.setattr(teams_bridge, "_too_big", lambda: False)
+    teams_bridge._WHY["discard"] = ""
+    assert asyncio.run(teams_bridge._pool_alive()) is False
+    assert "has been closed" in teams_bridge._WHY["discard"]
+    teams_bridge._POOL.clear()
+
+
+def test_an_unreadable_feed_does_not_look_like_no_mentions(monkeypatch):
+    page = _Page(read_result={"valid": False, "rows": []})
+    discarded = []
+
+    async def pooled():
+        return page
+
+    async def discard(why=""):
+        discarded.append(why)
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    monkeypatch.setattr(teams_bridge, "_discard_pool", discard)
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    with pytest.raises(teams_bridge.ActivityUnavailable, match="rows could not be read"):
+        asyncio.run(teams_bridge.read_activity_rows())
+    assert store.kv_get("teams_session_ok") != "1"
+    assert page.navigated == [teams_bridge.TEAMS_URL] and not discarded
+
+
+def test_a_confirmed_empty_feed_is_a_success(monkeypatch):
+    page = _Page(read_result={"valid": True, "rows": []})
+
+    async def pooled():
+        return page
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    assert asyncio.run(teams_bridge.read_activity_rows()) == []
+    assert page.chat and store.kv_get("teams_session_ok") == "1"
+
+
+def test_a_failed_return_to_chat_discards_the_page(monkeypatch):
+    page = _Page(restore_fails=True)
+    discarded = []
+
+    async def pooled():
+        return page
+
+    async def discard(why=""):
+        discarded.append(why)
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    monkeypatch.setattr(teams_bridge, "_discard_pool", discard)
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    with pytest.raises(RuntimeError, match="Teams did not reload"):
+        asyncio.run(teams_bridge.read_activity_rows())
+    assert discarded and store.kv_get("teams_session_ok") != "1"
+
+
+def test_a_failed_chat_click_can_reload_without_losing_the_activity_read(monkeypatch):
+    page = _Page()
+    page.restore_fails = True
+    async def pooled():
+        return page
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+
+    async def reloads(url, **kwargs):
+        page.navigated.append(url)
+        page.chat = True
+    page.goto = reloads
+    rows = asyncio.run(teams_bridge.read_activity_rows())
+    assert rows[0]["text"] == "Sam mentioned you"
+    assert page.navigated == [teams_bridge.TEAMS_URL] and page.chat
+
+
+def test_an_offline_page_is_replaced_and_the_next_read_succeeds(monkeypatch):
+    offline = _Page(state={"offline": True})
+    online = _Page()
+    pages = iter((offline, online))
+    discarded = []
+
+    async def pooled():
+        return next(pages)
+
+    async def discard(why=""):
+        discarded.append(why)
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    monkeypatch.setattr(teams_bridge, "_discard_pool", discard)
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    with pytest.raises(RuntimeError, match="Teams is offline"):
+        asyncio.run(teams_bridge.read_activity_rows())
+    assert discarded and store.kv_get("teams_session_ok") != "1"
+    assert asyncio.run(teams_bridge.read_activity_rows())[0]["text"] == "Sam mentioned you"
+    assert online.chat and store.kv_get("teams_session_ok") == "1"
+
+
+def test_a_broken_app_shell_is_not_kept_as_a_healthy_browser(monkeypatch):
+    page = _Page(state={"app": False})
+    discarded = []
+
+    async def pooled():
+        return page
+
+    async def discard(why=""):
+        discarded.append(why)
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    monkeypatch.setattr(teams_bridge, "_discard_pool", discard)
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    with pytest.raises(RuntimeError, match="app shell not ready"):
+        asyncio.run(teams_bridge.read_activity_rows())
+    assert discarded and not page.navigated
+
+
+def test_failed_activity_repair_must_recheck_the_feed_not_just_login(monkeypatch):
+    checked = []
+
+    async def close():
+        return None
+
+    async def unreadable():
+        checked.append("feed")
+        raise teams_bridge.ActivityUnavailable("feed selector changed")
+
+    monkeypatch.setattr(teams_bridge, "close_pool", close)
+    monkeypatch.setattr(teams_bridge, "reap_orphans", lambda: None)
+    monkeypatch.setattr(teams_bridge, "read_activity_rows", unreadable)
+    async def go():
+        for name, attempt in teams_bridge.repair_rungs()[:2]:
+            assert name in ("recycle", "restart")
+            with pytest.raises(teams_bridge.ActivityUnavailable):
+                await attempt()
+    asyncio.run(go())
+    assert checked == ["feed", "feed"]
+
+
+@pytest.mark.parametrize("failure, expected_rungs", [
+    (teams_bridge.ActivityUnavailable("feed selector changed"), ["retry_activity"]),
+    (RuntimeError("Teams is offline"), []),
+    (RuntimeError("Teams app shell not ready"), ["recycle", "restart"]),
+])
+def test_activity_failures_never_trigger_profile_repair(monkeypatch, failure, expected_rungs):
+    from app import recovery
+    calls, attempts = [], []
+
+    class Finished(BaseException):
+        pass
+
+    async def tick(seconds):
+        if len(attempts) == 3:
+            raise Finished
+        attempts.append(seconds)
+
+    async def fail_read():
+        raise failure
+
+    async def ladder(source, rungs, stale_polls, **kwargs):
+        calls.append((stale_polls, [name for name, _ in rungs]))
+        if stale_polls == 3 and isinstance(failure, teams_bridge.ActivityUnavailable):
+            with pytest.raises(teams_bridge.ActivityUnavailable):
+                await rungs[0][1]()
+        return {"healed": False}
+
+    monkeypatch.setattr(teams_bridge, "_activity_wait", tick)
+    monkeypatch.setattr(teams_bridge, "read_activity_rows", fail_read)
+    monkeypatch.setattr(teams_bridge, "reap_orphans", lambda: None)
+    monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
+    monkeypatch.setattr(teams_bridge, "logged_in_once", lambda: True)
+    monkeypatch.setattr(recovery, "ladder", ladder)
+    with pytest.raises(Finished):
+        asyncio.run(teams_bridge.activity_watch_loop())
+    assert calls == [(1, expected_rungs), (2, expected_rungs), (3, expected_rungs)]
+
+
+def test_confirmed_sign_in_stops_polls_and_reports_relogin(monkeypatch):
+    from app import notify, recovery
+    sent, checked = [], []
+
+    class Finished(BaseException):
+        pass
+
+    async def tick(seconds):
+        if checked:
+            raise Finished
+
+    async def fail_read():
+        raise RuntimeError("SESSION_EXPIRED: Teams is showing a sign-in page")
+
+    async def check():
+        checked.append(True)
+        store.kv_set("teams_session_ok", "0")
+        return False
+
+    async def report(text, *args, **kwargs):
+        sent.append(text)
+
+    async def no_repair(*args, **kwargs):
+        pytest.fail("expired SSO should not repair Teams' profile")
+
+    monkeypatch.setattr(teams_bridge, "_activity_wait", tick)
+    monkeypatch.setattr(teams_bridge, "read_activity_rows", fail_read)
+    monkeypatch.setattr(teams_bridge, "check_session", check)
+    monkeypatch.setattr(teams_bridge, "reap_orphans", lambda: None)
+    monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
+    monkeypatch.setattr(teams_bridge, "logged_in_once", lambda: True)
+    monkeypatch.setattr(notify, "notify", report)
+    monkeypatch.setattr(recovery, "ladder", no_repair)
+    with pytest.raises(Finished):
+        asyncio.run(teams_bridge.activity_watch_loop())
+    assert checked == [True] and len(sent) == 1 and "session expired" in sent[0]
+
+
+def test_a_repaired_activity_feed_is_read_again_without_waiting_for_the_next_poll(monkeypatch):
+    from app import recovery
+    reads = []
+
+    class Finished(BaseException):
+        pass
+
+    async def tick(seconds):
+        if len(reads) == 1:
+            assert teams_bridge.mentioned().is_set()
+        if len(reads) == 2:
+            raise Finished
+
+    async def read():
+        reads.append(True)
+        if len(reads) == 1:
+            raise teams_bridge.ActivityUnavailable("transient feed failure")
+        return []
+
+    async def repaired(*args, **kwargs):
+        return {"healed": True}
+
+    monkeypatch.setitem(teams_bridge.MENTIONED, "ev", None)
+    monkeypatch.setattr(teams_bridge, "_activity_wait", tick)
+    monkeypatch.setattr(teams_bridge, "read_activity_rows", read)
+    monkeypatch.setattr(teams_bridge, "reap_orphans", lambda: None)
+    monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
+    monkeypatch.setattr(teams_bridge, "logged_in_once", lambda: True)
+    monkeypatch.setattr(recovery, "ladder", repaired)
+    with pytest.raises(Finished):
+        asyncio.run(teams_bridge.activity_watch_loop())
+    assert len(reads) == 2
+
+
+def test_activity_recovery_never_touches_a_live_call(monkeypatch):
+    ticks = []
+
+    class Finished(BaseException):
+        pass
+
+    async def tick(seconds):
+        if ticks:
+            raise Finished
+        ticks.append(True)
+
+    async def unexpected_read():
+        pytest.fail("the call owns the browser profile")
+
+    monkeypatch.setattr(teams_bridge, "_activity_wait", tick)
+    monkeypatch.setattr(teams_bridge, "read_activity_rows", unexpected_read)
+    monkeypatch.setattr(teams_bridge, "reap_orphans", lambda: None)
+    monkeypatch.setattr(teams_bridge, "in_a_call", lambda: True)
+    with pytest.raises(Finished):
+        asyncio.run(teams_bridge.activity_watch_loop())
+
+
+@pytest.mark.asyncio
+async def test_activity_reader_distinguishes_real_rows_empty_feed_and_broken_markup():
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        pytest.skip("playwright not installed")
+    async with async_playwright() as pw:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"no isolated Chromium available: {exc}")
+        try:
+            page = await browser.new_page()
+            await page.set_content("""<div data-tid="activity-list-container">
+                <div role="listbox"><div role="option" aria-label="Unread">
+                <div>Sam</div><div>mentioned you in a channel</div></div></div></div>""")
+            got = await page.evaluate(teams_bridge._ACTIVITY_ROWS_JS)
+            assert got == {"valid": True, "rows": [
+                {"text": "Sam — mentioned you in a channel", "unread": True}]}
+
+            await page.set_content("""<div data-tid="activity-list-container">
+                You're all caught up</div>""")
+            assert await page.evaluate(teams_bridge._ACTIVITY_ROWS_JS) == {
+                "valid": True, "rows": []}
+
+            await page.set_content('<div data-tid="activity-list-container"></div>')
+            assert (await page.evaluate(teams_bridge._ACTIVITY_ROWS_JS))["valid"] is False
+
+            await page.set_content("""<div data-tid="activity-list-container"></div>
+                <div data-tid="activity-feed-list-item" style="display:none">
+                <div>Old mention</div><div>already gone</div></div>""")
+            assert (await page.evaluate(teams_bridge._ACTIVITY_ROWS_JS))["valid"] is False
+
+            await page.set_content("""<div data-tid="activity-list-container"></div>
+                <div role="listbox"><div role="option"><div>Sam</div>
+                <div>mentioned you in a channel</div></div></div>""")
+            got = await page.evaluate(teams_bridge._ACTIVITY_ROWS_JS)
+            assert got["valid"] and got["rows"][0]["text"].startswith("Sam —")
+
+            await page.set_content("""<div data-tid="activity-feed-list-item">
+                <div>Sam</div><div>mentioned you in a channel</div></div>""")
+            assert (await page.evaluate(teams_bridge._ACTIVITY_ROWS_JS))["valid"]
+
+            await page.set_content("""<div data-tid="app-bar">Welcome to Teams.
+                You can sign in to another app.</div>
+                <button aria-label="Activity (Ctrl Shift 1)">Activity</button>""")
+            state = await teams_bridge._page_state(page)
+            assert state["app"] and state["button"] and not state["signin"]
+
+            await page.set_content("<h1>Pick an account</h1>")
+            state = await teams_bridge._page_state(page)
+            assert state["signin"] and not state["app"]
+
+            await page.set_content("<div>Oops, app failed to load</div>")
+            assert (await teams_bridge._page_state(page))["oops"]
+        finally:
+            await browser.close()

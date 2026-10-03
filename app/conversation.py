@@ -312,7 +312,7 @@ async def _say(text: str, said: list[str], lines: list[dict], rtc: bool) -> None
 
 
 async def _speak_reply(mind, theirs: str, said: list[str], lines: list[dict], rtc: bool,
-                       elapsed: float = 0, limit: float = 0) -> tuple[bool, bool]:
+                       elapsed: float = 0, limit: float = 0, note: str = "") -> tuple[bool, bool]:
     """Say the brain's reply as it is written: (ended, interrupted).
 
     Each sentence's audio is made the moment the sentence exists, so the next
@@ -324,7 +324,8 @@ async def _speak_reply(mind, theirs: str, said: list[str], lines: list[dict], rt
 
     async def produce() -> None:
         try:
-            async for sentence in mind.sentences(theirs, elapsed=elapsed, limit=limit):
+            async for sentence in mind.sentences(theirs, elapsed=elapsed, limit=limit,
+                                                 **({"note": note} if note else {})):
                 text = spoken_form(sentence.replace(call_mind.END, "").strip())
                 made = (asyncio.get_event_loop().create_task(
                     meetings.synth(voice.strip_voice_instruction(text))) if text else None)
@@ -563,6 +564,133 @@ def with_history(who: str, agenda: str) -> str:
             f"check with Arun — never pick the nearest one:\n{known}").strip()
 
 
+# --- a booking asked about on the call: checked in the logs, live ------------
+#
+# Arun, 2 Oct: "even if someone asks in call also check in logs, ask them to wait
+# for couple of mints, check and update". The booking and its environment are
+# asked for when missing (never assumed prod), the same read-only check a Teams
+# ask gets is started, they are asked to hold on, and the finding is said on the
+# call the moment it is in. Too slow, and it goes to their chat via his "send?".
+
+#: Longest a caller is kept waiting on a log check before it goes to chat instead.
+CHECK_WAIT_SECONDS = float(os.environ.get("ASTA_CALL_CHECK_WAIT", "300"))
+#: When to tell them it is still going, once.
+CHECK_STILL_SECONDS = 90.0
+_STILL_CHECKING = "Still checking the logs — nearly there."
+_TO_CHAT = ("This is taking longer than I thought — you'll get the answer on chat. "
+            "Anything else meanwhile?")
+
+
+def _theirs_so_far(lines: list[dict], theirs: str) -> str:
+    said = [ln.get("text", "") for ln in lines[-10:] if ln.get("speaker") != "Asta"]
+    return "\n".join(said) if theirs in said else "\n".join([*said, theirs])
+
+
+def booking_turn(who: str, theirs: str, lines: list[dict], state: dict) -> str:
+    """The note for this turn when it is about one booking, or ''. Starts the
+    log check once the booking and its environment are both known; `state`
+    carries the call's check and whether Asta asked for the missing part."""
+    from . import booking_case, responder
+    if state.get("check") and not state["check"].get("told"):
+        if booking_case.points_at_one(theirs) or booking_case.spoken_ids(theirs):
+            c = state["check"]
+            return (f"You are already checking the logs for {c['ids'][0]} in {c['env']}; "
+                    f"say so in a few words. Do not guess the answer.")
+        return ""
+    about_one = booking_case.points_at_one(theirs) or bool(booking_case.spoken_ids(theirs))
+    answering = state.get("asked") and (booking_case.spoken_ids(theirs)
+                                        or booking_case.env_of(theirs))
+    so_far = _theirs_so_far(lines, theirs)
+    if not answering and not (about_one and booking_case.asks(so_far)):
+        return ""
+    found = booking_case.spoken_ids(so_far)
+    env = booking_case.env_of(so_far)
+    if not found:
+        state["asked"] = True
+        return (f"They are asking about ONE booking but its number is not clear. Ask them to "
+                f"read out the booking number slowly, or drop it in the chat, and which "
+                f"environment ({booking_case.ENVS}). Do not answer from the project knowledge "
+                f"as if it applied to this booking.")
+    if not env:
+        state["asked"] = True
+        return (f"They mean booking {found[0]} (as heard). Read it back to confirm and ask which "
+                f"environment it is in: {booking_case.ENVS}. Do not answer about this booking "
+                f"yet — the logs will.")
+    state["asked"] = False
+    try:
+        task = responder.check_for_call(who, so_far, found, env)
+    except Exception:                                          # noqa: BLE001
+        task = None
+    if task and task.get("reused") and task.get("result"):
+        return _finding_note(found[0], env, task.get("result") or "")
+    if not task:
+        return (f"Checking the logs is not possible right now. Give the general rule from the "
+                f"project knowledge if it helps, say it is not confirmed for {found[0]}, and that "
+                f"Arun will check the logs and come back.")
+    import time as _t
+    state["check"] = {"id": task["id"], "ids": found, "env": env, "at": _t.time(),
+                      "told": False, "still": False}
+    return (f"You have just started checking the logs for booking {found[0]} in {env}. Read the "
+            f"number back, tell them it takes a couple of minutes and ask them to hold on — "
+            f"or carry on talking meanwhile. Do not guess the answer.")
+
+
+def _finding_note(booking: str, env: str, result: str) -> str:
+    from . import answers
+    analysis, _reply = answers.split(result or "")
+    found = " ".join((analysis or result or "").split())[:1500]
+    return (f"Your log check for booking {booking} in {env} is done. The finding, for you — "
+            f"not to be read out: {found}\nTell them what it found in two or three plain "
+            f"spoken sentences, the answer first. Where the logs and the documents disagree, "
+            f"say so. Do not spell the booking number out.")
+
+
+async def _call_gone(page, rtc: bool) -> bool:
+    with contextlib.suppress(Exception):
+        if rtc:
+            from . import call_rtc
+            ctx = (meetings._CALL or {}).get("ctx")
+            return bool(ctx is not None and await call_rtc.ended(ctx))
+        from .call_screen import call_ended
+        return bool(page is not None and await call_ended(page))
+    return False
+
+
+def check_ready(state: dict) -> str:
+    """The note to say the finding with, once the check is done; '' while it runs."""
+    from . import store
+    c = state.get("check")
+    if not c or c.get("told"):
+        return ""
+    t = store.get_task(c["id"]) or {}
+    status = t.get("status") or ""
+    if status == "done":
+        c["told"] = True
+        return _finding_note(c["ids"][0], c["env"], t.get("result") or "")
+    if status in ("failed", "error", "cancelled"):
+        c["told"] = True
+        return (f"Your log check for {c['ids'][0]} could not finish. Say so honestly in one "
+                f"sentence, and that Arun will look and come back to them.")
+    return ""
+
+
+def waiting_line(state: dict) -> str:
+    """What to say while they hold on in silence: '' (keep waiting), a still-
+    checking line once, or the hand-over to chat when it is too slow."""
+    import time as _t
+    c = state.get("check")
+    if not c or c.get("told"):
+        return ""
+    waited = _t.time() - c["at"]
+    if waited >= CHECK_WAIT_SECONDS:
+        c["told"] = True
+        return _TO_CHAT
+    if waited >= CHECK_STILL_SECONDS and not c.get("still"):
+        c["still"] = True
+        return _STILL_CHECKING
+    return ""
+
+
 async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0,
                    agenda: str = "", languages: str = "",
                    voice_name: str = "") -> str:
@@ -686,9 +814,31 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
         ended = False
         interrupted = bool(meetings._CALL.get("interrupted"))
         nudged = False
-        while elapsed() < limit and turns < max_turns:
+        booking: dict = {}
+        while (elapsed() < limit and turns < max_turns) \
+                or (booking.get("check") and not booking["check"].get("told")):
+            ready_note = check_ready(booking)
+            if ready_note:
+                mind = await _mind_if_ready(thinking_ahead)
+                if mind is not None:
+                    ended, interrupted = await _speak_reply(
+                        mind, "", said, lines, rtc, elapsed=elapsed(),
+                        limit=limit if seconds else 0, note=ready_note)
+                    if ended:
+                        break
             theirs = (await _hear_rtc(lines, rang, keep=interrupted) if rtc
                       else await _hear(page, lines, HEAR_SECONDS))
+            if not theirs and booking.get("check") and not booking["check"].get("told"):
+                # They are holding on for the log check: silence is waiting,
+                # not the line going dead — unless they have hung up, when the
+                # answer goes to their chat.
+                if await _call_gone(page, rtc):
+                    break
+                line = waiting_line(booking)
+                if line:
+                    await _say(line, said, lines, rtc)
+                    interrupted = bool(meetings._CALL.get("interrupted"))
+                continue
             if not theirs:
                 # One nudge, the way a person would, before deciding they have gone.
                 if rtc and not nudged and heard_any:
@@ -704,10 +854,13 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
                 interrupted = bool(meetings._CALL.get("interrupted"))
                 continue
             mind = await _mind_if_ready(thinking_ahead)
+            note = ""
+            with contextlib.suppress(Exception):
+                note = booking_turn(rang, theirs, lines, booking)
             if mind is not None:
                 ended, interrupted = await _speak_reply(
                     mind, theirs, said, lines, rtc,
-                    elapsed=elapsed(), limit=limit if seconds else 0)
+                    elapsed=elapsed(), limit=limit if seconds else 0, note=note)
             else:
                 thinking = asyncio.get_event_loop().create_task(answer_from_knowledge(
                     f"You are Arun's assistant on a live phone call with his colleague "

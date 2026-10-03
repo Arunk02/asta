@@ -847,6 +847,14 @@ async def converse(text: str) -> dict:
         if kb:
             decided = voice_talker.ANSWER
             store.record_outcome("voice", "knowledge", detail=f"{len(kb)} chars · {text[:100]}")
+    if decided == voice_talker.ANSWER and not kb:
+        from . import booking_case
+        if (booking_case.points_at_one(text) or booking_case.spoken_ids(text)) \
+                and booking_case.asks(text):
+            # About one booking: the worker checks its logs (or asks which
+            # booking, which environment) — the talker would answer from the
+            # documents as if they knew this booking (2 Oct).
+            decided = voice_talker.DO
     if decided == voice_talker.LISTEN:
         _STATE["last_heard"] = time.time()
         await say("I'm listening.", kind="answer")
@@ -931,8 +939,11 @@ _WORK_WORDS = re.compile(r"\b(?:check|debug|logs?|send|message|ping|fix|investig
 def knows_about(text: str) -> bool:
     """A question about what something is or how it works — the knowledge
     answers it — rather than work to do."""
-    from . import project_knowledge
-    return project_knowledge.is_knowledge_question(text) and not _WORK_WORDS.search(text or "")
+    from . import booking_case, project_knowledge
+    # "…for this booking" is about ONE booking: the logs answer it, not the
+    # documents — it goes to the worker, which finds the booking or asks (2 Oct).
+    return project_knowledge.is_knowledge_question(text) and not _WORK_WORDS.search(text or "") \
+        and not booking_case.points_at_one(text)
 
 
 async def _filler(started: float) -> None:
@@ -1179,6 +1190,11 @@ def with_context(text: str, context: list[str]) -> str:
     """His request, with what was said just before it — the worker starts each
     job fresh, and "the booking Rajendra shared" is only clear with the rest."""
     before = [ln for ln in context if ln != f"Arun: {' '.join(text.split())[:300]}"][-6:]
+    from . import booking_case
+    spelled = [i for i in booking_case.spoken_ids(text) if i not in booking_case.ids(text)]
+    if spelled:
+        # "M H 6 5 W 8…" as recognised speech: the id it spells, marked as heard.
+        text += f"\n(The id he spelled, as heard — may be misheard: {', '.join(spelled)})"
     if not before:
         return text
     return text + "\n\n(Said out loud to Asta — speech recognition mishears names and terms, so read " \

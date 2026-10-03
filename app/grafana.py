@@ -357,7 +357,7 @@ def _json_body(line: str) -> dict:
     return found if isinstance(found, dict) else {}
 
 
-def signature(line: str) -> str:
+def signature(line: str, width: int = 80) -> str:
     """A stable name for an error, so two of the same defect count as one.
 
     Structured logs are why this is not just "normalise the line": a JSON line
@@ -384,7 +384,123 @@ def signature(line: str) -> str:
     flat = re.sub(r"\([^)]{10,}\)", "(…)", flat)
     flat = re.sub(r'"[^"]{10,}"', '"…"', flat)
     flat = re.sub(r"\[[^\]]{10,}\]", "[…]", flat)
-    return re.sub(r"\s+", " ", flat).strip()[:80]
+    return re.sub(r"\s+", " ", flat).strip()[:width]
+
+
+#: What a hand-off looks like in a log line: an event sent, a feedback or ack
+#: received, a workflow started or signalled. Kept first when a trail is long.
+_MILESTONE = re.compile(r"[A-Z]{2,}_[A-Z_]{2,}|eventName|signal|\bsent\b|\bsend|receiv|publish|"
+                        r"feedback|\back\b|acknowledg|execution|status|complet|start\w* workflow|"
+                        r"success", re.I)
+#: The most a trail carries: an id's story, not its log.
+TRAIL_ROWS = 30
+#: Lines read when tracing one identifier.
+TRACE_LINES = 2000
+
+
+_EVENT_NAME = re.compile(r"\b[A-Z]{2,}(?:_[A-Z]{2,})+\b")
+
+
+def _trail_key(line: str, terms: list[str]) -> str:
+    """The event a line records, with the traced ids kept readable."""
+    marks = [f"ZQTERM{'abcdefgh'[i]}QZ" for i in range(min(len(terms), 8))]
+    for t, m in zip(terms, marks):
+        line = line.replace(t, m)
+    sig = signature(line, 400)
+    for t, m in zip(terms, marks):
+        sig = sig.replace(m, t)
+    return sig[:150]
+
+
+#: No one service fills the trail: an id's story crosses several.
+TRAIL_PER_SERVICE = 8
+
+
+def trail(records: list[dict], terms: list[str] | None = None) -> list[dict]:
+    """Every distinct thing that happened to an identifier, oldest first — info
+    lines included. 2 Oct: "was SEND_TO_TMS sent, did the ack come back?" could
+    not be answered at all, because a clean send is an INFO line and the summary
+    kept errors only; the same booking read "TMS: yes" once and "cannot confirm"
+    the next time."""
+    terms = [t for t in (terms or []) if t]
+    rows: dict[tuple, dict] = {}
+    for r in records:
+        key = (r.get("service", ""), _trail_key(r["line"], terms))
+        row = rows.setdefault(key, {"service": key[0], "signature": key[1], "count": 0,
+                                    "first_seen": r["timestamp"], "last_seen": r["timestamp"],
+                                    "level": r.get("level", "info"), "events": set()})
+        row["count"] += 1
+        row["last_seen"] = max(row["last_seen"], r["timestamp"])
+        row["events"] |= set(_EVENT_NAME.findall(r["line"][:4000]))
+        if r.get("level") in _BAD_LEVELS:
+            row["level"] = r["level"]
+    out = sorted(rows.values(), key=lambda x: x["first_seen"])
+    for x in out:
+        x["events"] = sorted(x["events"])
+    if len(out) > TRAIL_ROWS:
+        # Named events and failures first — the first burst of routine lines
+        # otherwise fills the trail and the later send or ack is cut.
+        def weight(x):
+            return (3 if _EVENT_NAME.search(x["signature"]) else 0) \
+                + (2 if x["level"] in _BAD_LEVELS else 0) \
+                + (1 if _MILESTONE.search(x["signature"]) else 0)
+        ranked = sorted(out, key=lambda x: (-weight(x), x["first_seen"]))
+        # Every named event gets its first sighting — a send and its ack are
+        # what the trail is read for.
+        kept, per, named = [], {}, set()
+        for x in out:
+            new = [e for e in x["events"] if e not in named]
+            if new and len(kept) < TRAIL_ROWS:
+                kept.append(x)
+                named |= set(x["events"])
+                per[x["service"]] = per.get(x["service"], 0) + 1
+        for x in ranked:
+            if x in kept:
+                continue
+            if per.get(x["service"], 0) < TRAIL_PER_SERVICE and len(kept) < TRAIL_ROWS:
+                kept.append(x)
+                per[x["service"]] = per.get(x["service"], 0) + 1
+        out = sorted(kept, key=lambda x: x["first_seen"])
+        out.append({"omitted": len(ranked) - len(kept)})
+    return out
+
+
+async def records_for(term: str, ns: str, minutes: int = 4320) -> list[dict]:
+    """Every line for one identifier in one environment, all levels, oldest
+    first — the raw material for its trail. Raises GrafanaError."""
+    ns = resolve_namespace(ns)
+    end = datetime.now(timezone.utc)
+    span = minutes
+    while True:
+        query = build_query(ns, terms=[term], errors_only=False)
+        try:
+            return parse(await _get(QUERY_RANGE_PATH, query_params(
+                query, end - timedelta(minutes=span), end, TRACE_LINES)))
+        except GrafanaError as exc:
+            if "too many bytes" in str(exc) and span > 60:
+                span //= 4
+                continue
+            raise
+
+
+def render_trail(rows: list[dict], at_most: int = TRAIL_ROWS) -> str:
+    omitted = sum(x.get("omitted", 0) for x in rows)
+    rows = [x for x in rows if "omitted" not in x]
+    if not rows:
+        return ""
+    omitted += max(0, len(rows) - at_most)
+    lines = [f"Trail ({len(rows[:at_most])} distinct events, oldest first, all levels"
+             + (f"; {omitted} routine ones left out" if omitted else "") + "):"]
+    for x in rows[:at_most]:
+        first = time.strftime("%d %b %H:%M:%S", time.localtime(x["first_seen"]))
+        last = time.strftime("%H:%M:%S", time.localtime(x["last_seen"]))
+        n = f" ×{x['count']}" if x["count"] > 1 else ""
+        flag = f" [{x['level']}]" if x["level"] in _BAD_LEVELS else ""
+        lines.append(f"  {first}{'→' + last if n else ''}{n}{flag} "
+                     f"{x['service'].replace('telikos-', '')}: {x['signature']}"
+                     + (f"  {{{', '.join(x['events'][:4])}}}" if x.get("events")
+                        and not _EVENT_NAME.search(x["signature"]) else ""))
+    return "\n".join(lines)
 
 
 def parse(payload: dict) -> list[dict]:
@@ -452,6 +568,10 @@ async def logs(service: str = "", terms: list[str] | None = None, minutes: int =
         raise GrafanaError("no namespace to search — ASTA_GRAFANA_NAMESPACE, or say which")
     minutes = minutes or window_minutes()
     limit = limit or max_lines()
+    if not errors_only and terms:
+        # An identifier's whole story, not its newest few hundred lines: the send
+        # that started it is the OLDEST line, and backward reading cuts it first.
+        limit = max(limit, TRACE_LINES)
     end = end or datetime.now(timezone.utc)
     start = end - timedelta(minutes=minutes)
     query = build_query(ns, service=service or None, terms=list(terms or []),
@@ -463,14 +583,23 @@ async def logs(service: str = "", terms: list[str] | None = None, minutes: int =
     except GrafanaError as exc:
         records, fallback = await _via_mcp(query, start, end, limit, exc)
     out = summarise(records)
+    if not errors_only and terms:
+        out["trail"] = trail(records, list(terms))
     out.update(query=query, namespace=ns, service=service, minutes=minutes,
                took_ms=int((time.monotonic() - began) * 1000),
                via="mcp fallback" if fallback else "api", fallback_reason=fallback)
     return out
 
 
-def render(found: dict, lines: int = 6) -> str:
-    """The summary as a brain reads it — signatures, not a log dump."""
+def render(found: dict, lines: int = 6, trail_rows: int = TRAIL_ROWS) -> str:
+    """The summary as a brain reads it — signatures, not a log dump — and, when
+    an identifier was traced, its trail."""
+    body = _render_errors(found, lines)
+    story = render_trail(found.get("trail") or [], trail_rows)
+    return f"{body}\n{story}" if story else body
+
+
+def _render_errors(found: dict, lines: int = 6) -> str:
     where = f"{found.get('namespace', '')}"
     if found.get("service"):
         where += f" · {found['service']}"

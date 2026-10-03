@@ -2063,7 +2063,9 @@ async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
     ("prod", "preprod"/"pp", "uat", "sit", "qa", "dev") or "all" to search every
     environment at once — use "all" for a booking or trace id when nobody said
     which environment; blank means prod. errors_only=False when you are tracing
-    an identifier rather than hunting a failure.
+    an identifier rather than hunting a failure: you then also get its TRAIL — every
+    distinct event for it, info lines included, oldest first — which is where a
+    send, an ack or a feedback shows up.
 
     You do not write LogQL here. The query is built in code — it always carries the
     namespace and cluster labels Loki requires, and your terms become filters Loki
@@ -2071,13 +2073,17 @@ async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
     how often, first and last seen, the top stack frames and trace ids. Ask once
     and reason from the answer; do not re-query for a detail you were already sent.
     """
-    from . import grafana
+    from . import booking_case, grafana
+    if booking_case.ids(" ".join(_terms(terms))):
+        # A booking id is traced, never error-hunted: its sends and acks are
+        # INFO lines (2 Oct — "TMS: yes" one run, "cannot confirm" the next).
+        errors_only = False
     if (namespace or "").strip().lower() in ("all", "every", "everywhere", "*"):
         found_all = await grafana.logs_everywhere(service=service, terms=_terms(terms),
                                                   minutes=minutes, errors_only=bool(errors_only))
         return "\n\n".join(
             f"[{f['env']}] could not read {f['namespace']} — {f['error']}" if f.get("error")
-            else f"[{f['env']}] " + grafana.render(f) for f in found_all)
+            else f"[{f['env']}] " + grafana.render(f, trail_rows=12) for f in found_all)
     try:
         found = await grafana.logs(service=service, terms=_terms(terms), minutes=minutes,
                                    ns=namespace, errors_only=bool(errors_only))

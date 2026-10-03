@@ -2425,6 +2425,12 @@ async def _worker(task_id: int) -> None:
     if t["kind"] in ("analysis", "teams_draft"):
         from . import context_pack
         prompt += context_pack.build(task_id, "analysis" if t["kind"] == "analysis" else "draft")
+    if t["kind"] == "analysis":
+        # A question about one booking starts from what its logs say, read in
+        # code per flow — not from whatever a keyword search happens to find.
+        with contextlib.suppress(Exception):
+            from . import booking_case
+            prompt += await asyncio.wait_for(booking_case.evidence(prompt), 60)
     elif t["kind"] == "code":
         prompt = first_code_prompt(task_id, t)
     try:

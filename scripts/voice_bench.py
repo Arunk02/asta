@@ -24,6 +24,22 @@ vm._JOBS.clear()
 
 store.init()
 
+# Nothing reaches his phone. 2 Oct: "what's pending with my PRs and what is
+# scheduled?" answered into his WhatsApp on every run — four "🎙 Your message to
+# Vinish…" at 23:21-23:26, while he was asking for silence. Every outward door
+# of the voice path is a recorder here.
+from app import notify as _notify  # noqa: E402
+
+OUTWARD: list[str] = []
+
+
+async def _kept(text, *a, **k):
+    OUTWARD.append(str(text))
+    return {}
+
+_notify.wa_send = _kept
+_notify.notify = _kept
+
 
 class Ear:
     """The menu-bar app, as a recorder of what would be played and when."""

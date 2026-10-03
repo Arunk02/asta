@@ -406,7 +406,16 @@ def turn_context(user_text: str) -> str:
             voice = style.rider(who) if who else ""
             if voice:
                 parts.append(voice)
-    if _SEEKING.search(user_text or ""):
+    # A question about one booking: checked in the logs, with the booking and
+    # its environment asked for first when missing — the same rule Teams
+    # investigations and calls follow (app/booking_case.py).
+    case = ""
+    with contextlib.suppress(Exception):
+        from . import booking_case
+        case = booking_case.for_turn(user_text).strip()
+        if case:
+            parts.append(case)
+    if _SEEKING.search(user_text or "") or case:
         with contextlib.suppress(Exception):
             # The same lookup every channel uses: his documents AND the repo
             # summaries, misheard words corrected, ~500 tokens. Docs-only at 60%

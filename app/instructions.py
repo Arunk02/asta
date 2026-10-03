@@ -196,6 +196,10 @@ def quiet_spec(text: str, now: float | None = None) -> str:
         while last + 1 in ahead:
             last += 1
         start = max(at, _day_at(midnight, first, 0))
+        if _TODAY.search(quiet_part):
+            # "Today is a holiday … next two days are weekend" (2 Oct, 23:25): the
+            # quiet starts now, not at Saturday midnight.
+            start = at
         return _window(start, _day_at(midnight, last + 1))
     m = _FOR.search(t)
     if m:

@@ -218,6 +218,12 @@ def what_it_asks(text: str) -> str:
         return "review_request" if _WANTS_MY_REVIEW.search(blob) else "pr_review"
     if _DEBUG.search(blob):
         return "debug"
+    # A question about one booking, id in hand — "does manual customs reach
+    # billing for booking MH65W8JZNVNT" — is checked in the logs. It used to read
+    # as "nothing checkable": no investigation, one line on his phone (2 Oct).
+    from . import booking_case
+    if booking_case.ids(blob) and booking_case.asks(blob):
+        return "debug"
     # Anything triage reads as a genuine ask. One detector for "is this an ask",
     # shared with the notification path, rather than a second opinion here that
     # could disagree with what he was told.
@@ -261,7 +267,8 @@ _HOW = (
     "guardrails), ONE wide call for an identifier — namespace ONLY, never a "
     "container matcher — then "
     "reason from what came back instead of "
-    "querying again. Production unless an env is named.\n"
+    "querying again. The environment they named; when none was named, every "
+    "environment — never assume production.\n"
     "EVERY service in that namespace is in scope, not just the one the question "
     "names — reading logs changes nothing, so 'that service is outside this "
     "read-only pass' is never a reason to stop. The evidence for 'did it "
@@ -706,9 +713,6 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     return t
 
 
-#: Identifiers worth tracing: booking refs (H65ZMWX52B2, MH65W8JZNVNT), CBK/job
-#: numbers, long numeric ids.
-_AN_ID = re.compile(r"\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{9,14}\b|\bCBK\d{5,}\b|\b\d{8,10}\b")
 _RUN_URL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/actions/runs/\d+")
 _PR_URL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _HOW_WHY = re.compile(r"\b(why|how does|how do|how is|where is|which service|flow)\b", re.I)
@@ -721,15 +725,19 @@ def playbook(text: str) -> str:
     which does not exist, and answered "no trace — is the ref right?". The
     booking was in preprod with a billing error on it. The steps below make
     "which environment?" the first question an investigation answers."""
+    from . import booking_case
     steps: list[str] = []
-    ids = sorted(set(_AN_ID.findall(text or "")))
+    ids = booking_case.ids(text)
+    env = booking_case.env_of(text)
     if ids:
+        where = (f"in {env} — grafana_logs(terms=[id], namespace=\"{env}\", errors_only=false, "
+                 "minutes=4320)" if env and env != "lower" else
+                 "FIRST find which environment they live in — grafana_logs(terms=[id], "
+                 "namespace=\"all\", errors_only=false, minutes=4320) searches every "
+                 "environment at once. Never conclude an id does not exist from one environment")
         steps.append(
-            f"Identifiers {', '.join(ids[:4])}: FIRST find which environment they live in — "
-            "grafana_logs(terms=[id], namespace=\"all\", errors_only=false, minutes=4320) "
-            "searches every environment at once. Never conclude an id does not exist from "
-            "one environment. Then temporal_workflows in that environment for its workflow, "
-            "and the error signatures around it.")
+            f"Identifiers {', '.join(ids[:4])}: {where}. Then temporal_workflows in that "
+            "environment for its workflow, and the error signatures around it.")
     if _RUN_URL.search(text or ""):
         steps.append("A GitHub Actions run: `gh run view <id> --repo <owner/repo> --log-failed`; "
                      "name the failing job and step, quote the error line, and check whether a "
@@ -744,7 +752,7 @@ def playbook(text: str) -> str:
     if not steps:
         return ""
     return ("\n\nHow to check this (do these, in order, before concluding):\n"
-            + "\n".join(f"- {x}" for x in steps))
+            + "\n".join(f"- {x}" for x in steps) + booking_case.rule(text))
 
 
 def _their_questions(who: str, need: str, questions: list) -> str:
@@ -863,3 +871,43 @@ def line_for(task: dict, who: str, kind: str) -> str:
         return (f"🔎 {who or 'Someone'} asked the same thing that is already being "
                 f"checked (task #{task['id']}) — joined it, not started again.")
     return f"🔎 {who or 'Someone'} asked — I'm checking {what} now (task #{task['id']})."
+
+
+# --- asked on a call ----------------------------------------------------------
+
+#: Said into the brief of a check started on a live call.
+_ON_THE_LINE = (
+    "\n\nAsked on a LIVE CALL — {who} is waiting on the line for this. Go straight to the "
+    "logs and Temporal for this booking; aim to finish within a few minutes. Lead your "
+    "analysis with the answer in one or two plain sentences that can be said out loud.")
+
+
+def check_for_call(who: str, question: str, ids: list[str], env: str) -> dict | None:
+    """Start the log check for a booking someone asked about on a call.
+
+    Arun, 2 Oct: "even if someone asks in call also check in logs, ask them to
+    wait for couple of mints, check and update". The same read-only analysis a
+    Teams ask gets — same brief, same knowledge, same rule — with their 1:1 as
+    where the written answer goes, for his "send?". None when the responder is
+    off. A question already checked comes back as `reused` with its result."""
+    if not enabled() or not ids:
+        return None
+    from . import answers, results_cache, tasks
+    text = f"{question}\n(booking: {', '.join(ids[:3])})" + (f"\n(environment: {env})" if env else "")
+    ck = results_cache.key_for("debug", text)
+    hit = results_cache.lookup(ck)
+    if hit:
+        return {"id": hit["task_id"], "reused": hit["state"] == "done",
+                "joined": hit["state"] != "done", "result": hit.get("result", "")}
+    brief = (brief_for("debug", who, text) + _ON_THE_LINE.format(who=who or "They")
+             + _waiting_brief(who, text, "", need=question[:160]))
+    t = tasks.spawn(title_for("debug", who, text), brief, "analysis", None,
+                    teams_chat=who, priority=1)
+    _note_started(__import__("time").time())
+    store.kv_set(f"responder_task:{t['id']}", f"call|{who}|debug|asked on a call")
+    answers.remember_meta(t["id"], who=who, need=question[:160], chat=who, group=False,
+                          thread="")
+    results_cache.start(ck, "debug", t["id"])
+    store.record_outcome("responder", "call_check", subject=str(t["id"]),
+                         detail=f"{who}: {text[:140]}")
+    return t

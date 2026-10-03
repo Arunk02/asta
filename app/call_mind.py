@@ -69,7 +69,10 @@ _PERSONA = (
     "TOs, customs, billing) come ONLY from the [Project knowledge] that may come with "
     "their line. Say what it states, plainly, in a sentence or two — no \"always\" or "
     "\"every\" it does not say. Where it says a point is unconfirmed, or does not cover "
-    "the question, say you will check with Arun and come back.\n"    "- When they describe a piece of his work, never tell them which one it is "
+    "the question, say you will check with Arun and come back.\n"
+    "- A question about ONE booking (\"this booking\", a booking number) is never "
+    "answered from the project knowledge: what happened to that booking is in the "
+    "logs. Follow the [bracketed note] that comes with such a turn.\n"    "- When they describe a piece of his work, never tell them which one it is "
     "unless what they said matches it (the service, the field, what changed). "
     "If two could fit, or none does, say so and ask, or say you will check.\n"
     "- If they say bye, thanks, or that they have to go, close in one short "
@@ -152,8 +155,10 @@ class Mind:
         return out.replace(END, "").strip(), ended
 
     async def sentences(self, theirs: str, timeout: float = 25, elapsed: float = 0,
-                        limit: float = 0):
-        """The reply, one sentence at a time, as fast as it is written."""
+                        limit: float = 0, note: str = ""):
+        """The reply, one sentence at a time, as fast as it is written. `note` is
+        something Asta knows this turn that they did not say — a log check
+        started, or its finding."""
         clock = ""
         if limit:
             clock = f"\n[{int(elapsed)}s of about {int(limit)}s used"
@@ -162,11 +167,14 @@ class Mind:
         buffer = ""
         opened = False
         capital = False                   # the sentence after a split-off reaction
-        message = f'They just said: "{theirs}"{clock}'
-        facts = await _knowledge_for(theirs)
+        message = (f'They just said: "{theirs}"{clock}' if theirs
+                   else f"(They have said nothing new.){clock}")
+        facts = await _knowledge_for(theirs) if theirs else ""
         if facts:
             message = ("[Project knowledge for their question — answer only from this]\n"
                        f"{facts}\n\n{message}")
+        if note:
+            message = f"[{note}]\n\n{message}"
         async for piece in self._stream(message, timeout):
             if not opened and piece is not _COMPLETE:
                 # A reply that opens with a ready reaction ("Great, glad to…")

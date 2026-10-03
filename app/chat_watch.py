@@ -1130,6 +1130,92 @@ def _concrete(text: str) -> bool:
     return responder.what_it_asks(text or "") in ("incident", "debug", "pr_review", "review_request")
 
 
+# --- half an ask: wait for the other half ------------------------------------
+#
+# 2 Oct, Arun: "if they split and send in as two messages — first message and
+# then bookingid — wait and understand, ask them and then respond". The question
+# ("does manual customs reach billing for this booking") was answered from the
+# documents before the id arrived, and the id alone was then "nothing to check".
+# A message that points at a booking it does not include, or an id with no
+# question yet, waits — at most HOLD_SECONDS — and is read with what follows.
+
+#: How long half an ask waits for its other half. Typing an id takes seconds.
+HOLD_SECONDS = float(os.environ.get("ASTA_SPLIT_HOLD_SECONDS", "60"))
+_HELD_KEY = "chatwatch_held"
+
+
+def _held_all() -> dict:
+    try:
+        return json.loads(store.kv_get(_HELD_KEY) or "{}")
+    except (ValueError, TypeError):
+        return {}
+
+
+def held(chat: str) -> dict:
+    """{'since', 'why', 'msgs'} for a chat whose half-ask is waiting, or {}."""
+    return _held_all().get(chat) or {}
+
+
+def hold(chat: str, msgs: list[dict], why: str, since: float) -> None:
+    allh = _held_all()
+    allh[chat] = {"since": since, "why": why,
+                  "msgs": [{k: m.get(k) for k in ("sender", "text", "sent_at")} for m in msgs]}
+    store.kv_set(_HELD_KEY, json.dumps(allh))
+
+
+def release(chat: str) -> list[dict]:
+    """The held messages, taken back out to be read with the rest."""
+    allh = _held_all()
+    got = allh.pop(chat, None) or {}
+    if got:
+        store.kv_set(_HELD_KEY, json.dumps(allh))
+    return list(got.get("msgs") or [])
+
+
+def _held_due(now: float) -> list[str]:
+    return [c for c, h in _held_all().items() if now - float(h.get("since") or 0) >= HOLD_SECONDS]
+
+
+def _next_held(now: float) -> float | None:
+    waits = [max(0.0, HOLD_SECONDS - (now - float(h.get("since") or 0)))
+             for h in _held_all().values()]
+    return min(waits) if waits else None
+
+
+def _wait_reason(c: dict, now: float) -> str:
+    """Why this conversation should wait for the next message, or ''."""
+    from . import booking_case
+    if c["handled_by_him"] or not c["raw"]:
+        return ""
+    h = held(c["chat"])
+    if h and now - float(h.get("since") or 0) >= HOLD_SECONDS:
+        return ""                                   # waited long enough: read it now
+    texts = [(m.get("text") or "") for m in c["raw"]]
+    before = "\n".join([c.get("open_need") or "", *texts[:-1]])
+    return booking_case.waiting_for_more(texts[-1], before)
+
+
+def _with_the_case(ask_text: str, need: str, convo: list[str]) -> str:
+    """The ask with the booking and environment it is about, when those came in
+    different messages: "MH65W8JZNVNT" alone, or "preprod" answering "which
+    environment?", is the second half of a question asked before."""
+    from . import booking_case, responder
+    around = "\n".join(convo[-8:])
+    if not (booking_case.ids(ask_text) or booking_case.env_of(ask_text)
+            or booking_case.points_at_one(ask_text)):
+        return ask_text
+    out = ask_text
+    if not responder.what_it_asks(out) and need:
+        out = f"{need}\n{out}"
+    found = [i for i in booking_case.ids(around) if i not in booking_case.ids(out)]
+    if found and not booking_case.ids(out):
+        out += f"\n(booking: {', '.join(found[:3])})"
+    env = booking_case.env_of(around)
+    if env and not booking_case.env_of(out):
+        out += f"\n(environment: {env})"
+    return out
+
+
 async def _nudged(tid: str, c: dict, who: str, now: float) -> str:
     """They pinged again while something of theirs is open. The line for him."""
     from . import answers, loop, responder, threads
@@ -1222,7 +1308,11 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
     now = _time.time()
     opened = failed = 0
     convs: dict[str, dict] = {}
-    for chat in (only if only is not None else await candidates()):
+    chats = list(only) if only is not None else await candidates()
+    # A held half-ask is read on the next pass whatever the rail says.
+    chats += [c for c in _held_all() if c not in chats and only is None]
+    read_ok: set[str] = set()
+    for chat in chats:
         opened += 1
         try:
             known = {(r.get("text") or "") for r in store.teams_messages(chat=chat, limit=300)}
@@ -1236,6 +1326,11 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 note_unopenable(chat)
             failed += 1
             continue                # one unreadable thread must not end the sweep
+        read_ok.add(chat)
+        # Half an ask held back last time is read again, before what is new.
+        waiting = held(chat)
+        if waiting:
+            fresh = [*(waiting.get("msgs") or []), *fresh]
         for m in fresh:
             who = (m.get("sender") or chat).strip()
             text = (m.get("text") or "").strip()
@@ -1257,7 +1352,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 "id": tid, "who": who, "chat": chat, "counterpart": counterpart,
                 "one_to_one": one_to_one, "new": [], "keys": [], "known": known,
                 "handled_by_him": False, "wanted": False, "pri": pri,
-                "last": "", "sent_at": None, "first_at": m.get("sent_at")})
+                "last": "", "sent_at": None, "first_at": m.get("sent_at"), "raw": []})
+            c["raw"].append(m)
             seen = as_read(text, known)
             c["new"].append(seen if one_to_one else f"{who}: {seen}")
             c["keys"].append(key)
@@ -1275,6 +1371,12 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             "teams-chat", RuntimeError(f"all {opened} chat(s) failed to open"))
     elif opened:
         attention.note_scrape("teams-chat")
+    # A hold whose chat was read but came to nothing this pass (not his to
+    # answer after all) is let go, not carried for ever.
+    for chat in read_ok:
+        if held(chat) and not any(c["chat"] == chat for c in convs.values()) \
+                and now - float(held(chat).get("since") or 0) >= HOLD_SECONDS:
+            release(chat)
     if not convs:
         return []
 
@@ -1305,6 +1407,22 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 day = _time.strftime("%d %b", _time.localtime(float(r["closed_at"])))
                 c["past"].append(f"#{r['id']} ({day}): {r['need']} — {r['summary']}".strip())
 
+    from . import booking_case
+    for tid in list(convs):
+        c = convs[tid]
+        why_wait = _wait_reason(c, now)
+        if why_wait:
+            since = float(held(c["chat"]).get("since") or now)
+            hold(c["chat"], c["raw"], why_wait, since)
+            store.record_outcome("chatwatch", "held", subject=c["chat"][:80],
+                                 detail=f"{why_wait} — {(c['last'] or '')[:100]}")
+            del convs[tid]
+            continue
+        if held(c["chat"]):
+            release(c["chat"])
+    if not convs:
+        return []
+
     decisions = await understand.read(list(convs.values()))
 
     handled: list[dict] = []
@@ -1334,6 +1452,17 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         # colleague; "🔴 Yogesh Kumar Ravichandran: Discuss and understand the
         # fix" reads like a log line. The template is the floor, not the format.
         tell = (d.get("tell") or "") if d.get("source") == "model" else ""
+        # A question about one booking with the booking or its environment still
+        # missing is asked for — never answered from the documents, never
+        # searched in prod by assumption (2 Oct).
+        theirs = "\n".join((m.get("text") or "") for m in c["raw"])
+        around = "\n".join([c.get("open_need") or "", *c.get("conversation", [])[-8:]])
+        case_q = booking_case.ask_line(theirs, around)
+        if c["status"] == "clarifying" and c.get("open_need") and state != "ask" \
+                and (booking_case.ids(theirs) or booking_case.env_of(theirs)):
+            # The booking or environment Asta asked for. It reads like an answer
+            # ("status") — it is the rest of their question, and it is worked.
+            state = "ask"
 
 
         if c["handled_by_him"]:
@@ -1389,6 +1518,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             # saying hello has no issue yet.
             if ping:
                 ask = steward.ping_back(c["chat"])
+            elif case_q:
+                ask = case_q
             else:
                 ask = understand.safe_question(d.get("question") or "", who) \
                     or steward.opener_line(c["chat"], who)
@@ -1462,6 +1593,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             q = ""
         if not q and d.get("subject") == "unclear" and state == "ask":
             q = steward.ASK_BACK
+        if case_q and state == "ask":
+            q = case_q
         if state == "ask" and q and c["asked_back"] < MAX_QUESTIONS \
                 and steward.ask_back_enabled() \
                 and await _say(c["chat"], q, group=not c["one_to_one"], since=c.get("sent_at")):
@@ -1491,6 +1624,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         from . import offers
         before = offers.pending()
         ask_text = "\n".join(c["new"])
+        ask_text = _with_the_case(ask_text, c.get("open_need") or said,
+                                  c.get("conversation", []))
         if review and not responder.what_it_asks(ask_text):
             # The message that reached him was only the mention ("Arunkumar,
             # Vinish"); the PR itself is a few lines up in the same chat.
@@ -1954,6 +2089,8 @@ def take_hot() -> list[str]:
     for c in due:
         _BACKOFF[c] = _BACKOFF.get(c, 0) + 1
     chats = sorted(_HOT, key=_HOT.get) + [c for c in due if c not in _HOT]
+    # Half an ask that has waited its time is read now, with or without the rest.
+    chats += [c for c in _held_due(now) if c not in chats]
     _HOT.clear()
     _hot_event().clear()
     for c in chats:
@@ -1967,9 +2104,9 @@ async def _wait_for_work(timeout: float) -> str:
     from . import wake
     ev = _hot_event()
     full = timeout
-    nxt = _next_restored(_t.time())
-    if nxt is not None:
-        timeout = min(timeout, max(1.0, nxt))
+    for nxt in (_next_restored(_t.time()), _next_held(_t.time())):
+        if nxt is not None:
+            timeout = min(timeout, max(1.0, nxt))
     sleeper = asyncio.ensure_future(wake.sleep(timeout))
     waiter = asyncio.ensure_future(ev.wait())
     try:
@@ -1983,7 +2120,7 @@ async def _wait_for_work(timeout: float) -> str:
         return "hot"
     if sleeper.result():
         return "full"                           # the Mac woke: read everything
-    if _restored_due(_t.time()):
+    if _restored_due(_t.time()) or _held_due(_t.time()):
         return "hot"
     # Woken early for a re-read that is not due after all: NOT a full sweep.
     # (A full sweep every minute was the old fall-through.)

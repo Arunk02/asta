@@ -81,7 +81,7 @@ def test_an_id_on_its_own_is_asked_what_to_check():
 def test_the_check_rule_puts_the_logs_over_the_documents():
     r = booking_case.rule(f"{Q} {ID} in preprod")
     assert ID in r and "preprod" in r
-    assert "The rule" in r and "grafana_logs" in r and "Temporal" in r
+    assert "what SHOULD happen" in r and "what DID happen" in r and "grafana_logs" in r and "Temporal" in r
     assert "the logs win" in r and "not confirmed in the logs" in r
 
 
@@ -107,7 +107,7 @@ def test_a_booking_question_with_its_id_is_investigated_not_nothing(monkeypatch)
 def test_the_investigation_searches_the_named_environment_and_checks_the_rule():
     from app import responder
     p = responder.playbook(f"{Q} {ID} in sit")
-    assert 'namespace="sit"' in p and "Verdict" in p and "the logs win" in p
+    assert 'namespace="sit"' in p and "the logs win" in p
 
 
 def test_the_investigation_never_defaults_to_production():
@@ -275,7 +275,7 @@ def test_a_chat_turn_about_one_booking_carries_the_rule_or_the_question():
 
 def test_the_chat_brains_get_it_in_their_turn_context():
     from app import copilot_cli
-    assert "The rule" in copilot_cli.turn_context(f"{Q} {ID} in preprod")
+    assert "what DID happen" in copilot_cli.turn_context(f"{Q} {ID} in preprod")
 
 
 def test_voice_does_not_answer_this_booking_from_the_documents():
@@ -407,13 +407,21 @@ def test_the_check_looks_both_ways_at_every_hand_off_and_summarises():
     summarisation" — and "some places only one way, like receiving execution
     from TMS": a one-way flow is never reported as "no ack"."""
     r = booking_case.rule(f"have we sent TMS for {ID} in sit? and customs UNITED?")
-    for x in ("SENT and ACK BACK", "SEND_TO_TMS → SAP_TMS_ACK_FEEDBACK", "CIP_GOT",
-              "inbound only, say RECEIVED or not, never 'no ack'", "SAP_TMS_EXECUTION_STATUS",
+    for x in ("two-way (sent, then ack back)", "SEND_TO_TMS → SAP_TMS_ACK_FEEDBACK", "CIP_GOT",
+              "inbound only (received or not — never 'no ack')", "SAP_TMS_EXECUTION_STATUS",
               "outbound only", "booking→IOM", "SEND_DOCUMENTS"):
         assert x in r, x
-    assert "direct answer in one or two lines" in r and "class:line that proves it" in r
     assert "with the id ALONE first" in r, "never 'not sent' from one keyword filter"
     assert len(r) < 2400, "a brief, not a manual"
+
+
+def test_whatever_they_ask_is_answered_simply_not_a_form_filled():
+    """3 Oct: "dont restrict u … whatever the user asks, based on that analyse from
+    the logs and summarise simple"."""
+    r = booking_case.rule(f"why is {ID} stuck in uat?")
+    assert "Answer WHATEVER they asked" in r and "Summarise SIMPLY" in r
+    assert "answer to their question first" in r
+    assert "No table or per-flow list unless they asked what happened overall" in r
 
 
 def test_billing_is_checked_only_when_they_ask_about_it():
@@ -533,3 +541,47 @@ def test_the_worker_adds_the_evidence_to_an_analysis():
     import inspect
     from app import tasks
     assert "booking_case.evidence(prompt)" in inspect.getsource(tasks._worker)
+
+
+# --- milestones and the event log, as the UI shows them ------------------------------
+
+def _raw(t, service, line):
+    return {"timestamp": t, "line": line, "service": f"telikos-{service}", "level": "info",
+            "trace_id": ""}
+
+
+def test_milestones_are_read_as_the_ui_tracks_them():
+    """3 Oct: "always focus on event log as well as milestone … all tracked by
+    milestone, as u see in the UI"."""
+    recs = [_raw(1, "booking-service", json.dumps({
+                "logger": "x.UpdateFeedbackActivityImpl", "message": f"Total time taken for bookingId : {ID}",
+                "TIME_TAKEN_MILLIS": "1000", "WORK_PROCESS_NAME": "READY_FOR_PLANNING",
+                "MILESTONE": "BOOKING_MILESTONE", "WORK_PROCESS_STATUS": "COMPLETED"})),
+            _raw(9, "booking-service", json.dumps({
+                "message": "Total time taken", "TIME_TAKEN_MILLIS": "6136000",
+                "WORK_PROCESS_NAME": "SEND_TO_TMS", "MILESTONE": "BOOKING_MILESTONE",
+                "WORK_PROCESS_STATUS": "COMPLETED"}))]
+    out = booking_case.milestones(recs)
+    assert out.index("READY_FOR_PLANNING · COMPLETED") < out.index("SEND_TO_TMS · COMPLETED")
+    assert "took 6136.0s" in out
+    assert "none logged" in booking_case.milestones([])
+
+
+def test_the_event_log_lists_entries_with_their_source_and_billing_only_when_asked():
+    recs = [_raw(1, "activityplanworkflow-service", json.dumps({"message":
+                f"At send event history for bookingId {ID} and orderId MX1 and eventName Booking Created"})),
+            _raw(2, "email-service", json.dumps({"message":
+                f"Published event history for orderId MX1, booking id {ID} and event name Booking Confirmed"})),
+            _raw(3, "billing-service", 'EventHistory={"eventType": "Calculate preferred billing date"}'),
+            _raw(4, "event-history-service", json.dumps({"message":
+                f"Data saved successfully to database with orderId: MX1 and bookingNumber: {ID}"}))]
+    out = booking_case.event_log(recs)
+    assert "Booking Created (activityplanworkflow)" in out and "Booking Confirmed (email)" in out
+    assert "saved by event-history-service ×1" in out
+    assert "billing date" not in out
+    assert "Calculate preferred billing date (billing)" in booking_case.event_log(recs, billing=True)
+
+
+def test_the_rule_asks_for_milestones_and_the_event_log():
+    r = booking_case.rule(f"what happened to {ID} in uat?")
+    assert "Milestones and the event log are how the UI tracks a booking" in r

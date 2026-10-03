@@ -172,31 +172,31 @@ def rule(text: str, context: str = "", heard: bool = False) -> str:
              "the lower environments (sit, uat, preprod)" if env == "lower" else
              "an environment nobody named — search every one (namespace=\"all\") and say which "
              "it was found in; never assume prod")
-    out = (f"\n\nThis is about a specific case — {', '.join(found[:3])}, in {where}. Never answer it "
-           "from documents alone:\n"
-           "1. The rule: what the project knowledge says should happen (name the document).\n"
-           "2. This booking: grafana_logs(terms=[id]) with the id ALONE first — see which "
-           "services touched it (filters are case-sensitive, and 'custom' matches 'customer': "
-           "never conclude 'not sent' from one keyword) — and its Temporal history. Check each "
-           "flow the question touches (all of them when they ask what happened to it), in its "
-           "real direction:\n"
-           "   two-way, say SENT and ACK BACK: booking→AP (sendServicePlanDetailsToAP → "
-           "ACTIVITYPLAN_FEEDBACK); booking→TMS (SEND_TO_TMS → SAP_TMS_ACK_FEEDBACK); "
-           "AP→customs UNITED (send → CIP_CHASSIS / CIP_GOT Ack).\n"
-           "   inbound only, say RECEIVED or not, never 'no ack': TMS execution status "
-           "(SAP_TMS_EXECUTION_STATUS); customs status (CIP_GOT); manual customs "
-           "(CUSTOMS_UPDATE).\n"
-           "   outbound only, say SENT or not: booking→IOM (start/end events, TO ack); "
-           "→event history; AP→email and documents (SEND_DOCUMENTS).\n"
+    out = (f"\n\nThis is about a specific case — {', '.join(found[:3])}, in {where}. Answer "
+           "WHATEVER they asked about it — a send, an ack, a status, a milestone, a failure, "
+           "why something did or did not happen — never from documents alone:\n"
+           "1. From the project knowledge, what SHOULD happen for their question (name the "
+           "document).\n"
+           "2. From this booking's logs and Temporal history, what DID happen: "
+           "grafana_logs(terms=[id]) with the id ALONE first — see which services touched it "
+           "(filters are case-sensitive, and 'custom' matches 'customer': never conclude 'not "
+           "sent' from one keyword). Milestones and the event log are how the UI tracks a "
+           "booking — use them. Mind each flow's real direction:\n"
+           "   two-way (sent, then ack back): booking→AP (→ ACTIVITYPLAN_FEEDBACK); booking→TMS "
+           "(SEND_TO_TMS → SAP_TMS_ACK_FEEDBACK); AP→customs UNITED (→ CIP_CHASSIS / CIP_GOT "
+           "Ack).\n"
+           "   inbound only (received or not — never 'no ack'): SAP_TMS_EXECUTION_STATUS; "
+           "customs status (CIP_GOT); manual customs (CUSTOMS_UPDATE).\n"
+           "   outbound only (sent or not): booking→IOM; →event history; AP→email and "
+           "documents (SEND_DOCUMENTS).\n"
            + (_BILLING if _ABOUT_BILLING.search(whole) else _NOT_BILLING) +
-           "3. Verdict: does this booking follow the rule? Where the logs and the document "
-           "disagree, say so plainly — for this booking the logs win — and that the document "
-           "may need correcting.\n"
-           "Write the ANALYSIS like a senior engineer's finding, numbered: first the direct "
-           "answer in one or two lines; then one line per flow — flow | direction | sent or "
-           "received (time) | ack (time, status) for two-way only | OK, or what is missing — "
-           "each with the log line or class:line that proves it; what could not be checked "
-           "(retention, access) said plainly; at most one 'Also noticed'.\n"
+           "3. Where the logs and the document disagree, say so — for this booking the logs "
+           "win — and that the document may need correcting.\n"
+           "Summarise SIMPLY, in the ANALYSIS: the answer to their question first, in one or "
+           "two plain lines; then only the few facts that prove it (time, service, event, "
+           "milestone — a log line or class:line where it matters); then what is missing or "
+           "could not be checked. No table or per-flow list unless they asked what happened "
+           "overall. At most one 'Also noticed'.\n"
            "If the logs or Temporal cannot be read, say 'from the documents only — not "
            "confirmed in the logs' and what failed. Never present a document's answer as checked.")
     if heard:
@@ -312,6 +312,81 @@ def flows(records: list[dict], billing: bool = False) -> str:
     return "\n".join(out)
 
 
+# --- milestones and the event log: what the UI shows ------------------------------
+#
+# Arun, 3 Oct: "always focus on event log as well as milestone … here all tracked by
+# milestone, as u see in the UI". booking-service logs each milestone as a
+# structured line (UpdateFeedbackActivityImpl.logTime: MILESTONE, WORK_PROCESS_NAME,
+# WORK_PROCESS_STATUS, TIME_TAKEN_MILLIS); event-log entries are published by AP
+# ("At send event history … eventName X"), email ("Published event history … event
+# name X") and as EventHistory payloads ("eventType": "X"), and persisted by
+# event-history-service.
+
+_EH_NAME = (re.compile(r"At send event history for bookingId \S+ and orderId \S+ and eventName ([^\"\\]+)"),
+            re.compile(r"Published event history for orderId \S+ booking id \S+ and event name ([^\"\\]+)"),
+            re.compile(r"(?:EventHistory|eventDetails).{0,400}?\\?\"eventType\\?\": ?\\?\"([^\"\\]+)"))
+
+
+def _short(service: str) -> str:
+    return service.replace("telikos-", "").replace("-service", "")
+
+
+def milestones(records: list[dict]) -> str:
+    """Each milestone booking-service recorded: name, work process, status, when."""
+    import json as _json
+    import time as _t
+    seen: dict[tuple, list] = {}
+    for r in records:
+        line = r.get("line") or ""
+        if '"MILESTONE"' not in line:
+            continue
+        try:
+            body = _json.loads(line[line.find("{"):])
+        except ValueError:
+            continue
+        key = (body.get("MILESTONE", "?"), body.get("WORK_PROCESS_NAME", "?"),
+               body.get("WORK_PROCESS_STATUS", "?"))
+        seen.setdefault(key, []).append((r["timestamp"], body.get("TIME_TAKEN_MILLIS")))
+    if not seen:
+        return "Milestones: none logged in this window."
+    out = ["Milestones (booking-service — what the UI tracks):"]
+    for (ms, wp, st), hits in sorted(seen.items(), key=lambda kv: kv[1][0][0]):
+        when = _t.strftime("%d %b %H:%M:%S", _t.localtime(hits[0][0]))
+        took = f", took {int(hits[0][1]) / 1000:.1f}s" if str(hits[0][1] or "").isdigit() else ""
+        out.append(f"- {ms} · {wp} · {st} · {when}{took}" + (f" ×{len(hits)}" if len(hits) > 1 else ""))
+    return "\n".join(out)
+
+
+def event_log(records: list[dict], billing: bool = False) -> str:
+    """The booking's event log as published: entry, who published it, when; and
+    whether event-history-service saved it."""
+    import time as _t
+    entries: dict[tuple, list] = {}
+    saved = []
+    for r in records:
+        line, svc = r.get("line") or "", r.get("service", "")
+        if "event-history" in svc and "saved successfully" in line:
+            saved.append(r["timestamp"])
+            continue
+        if "billing" in svc and not billing:
+            continue
+        for rx in _EH_NAME:
+            m = rx.search(line)
+            if m:
+                entries.setdefault((m.group(1).strip(), _short(svc)), []).append(r["timestamp"])
+                break
+    if not entries and not saved:
+        return "Event log: nothing published in this window."
+    out = ["Event log (entries published, source; as the UI's event log shows):"]
+    for (name, src), hits in sorted(entries.items(), key=lambda kv: kv[1][0])[:15]:
+        when = _t.strftime("%d %b %H:%M:%S", _t.localtime(min(hits)))
+        out.append(f"- {when} {name} ({src})" + (f" ×{len(hits)}" if len(hits) > 1 else ""))
+    if saved:
+        out.append(f"- saved by event-history-service ×{len(saved)}, last "
+                   + _t.strftime("%d %b %H:%M:%S", _t.localtime(max(saved))))
+    return "\n".join(out)
+
+
 _CASE = re.compile(r"This is about a specific case — ([A-Z0-9, ]+?), in (?:the (\w+) environment|"
                    r"the lower environments|an environment nobody named)")
 
@@ -349,6 +424,7 @@ async def evidence(prompt: str, minutes: int = 4320) -> str:
                          f"Flows (matched in code on known log messages; 'not seen' means not "
                          f"in these logs — it may be logged differently, so check before "
                          f"saying it was not sent):\n{flows(recs, billing)}\n"
+                         f"{milestones(recs)}\n{event_log(recs, billing)}\n"
                          + grafana.render_trail(grafana.trail(recs, [booking]),
                                                 30 if len(hit) == 1 else 12))
     if not parts:

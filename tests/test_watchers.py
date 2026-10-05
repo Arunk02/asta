@@ -310,6 +310,39 @@ def test_partial_backlog_warns_without_claiming_a_fresh_complete_read(monkeypatc
     assert "backlog could not be verified" in store.kv_get("attention_scrape_error:teams")
 
 
+def test_catch_up_does_not_drop_mentions_beyond_the_first_notification(monkeypatch):
+    class Finished(BaseException):
+        pass
+
+    batches = []
+    store.kv_set(teams_bridge.ACTIVITY_SEEN_KEY, json.dumps(["previous"]))
+
+    async def wait(seconds):
+        if batches:
+            raise Finished
+
+    async def read(limit=25):
+        assert limit == 200
+        return teams_bridge.ActivityRows([
+            {"text": f"Sam — mentioned you in a channel — question {i}", "unread": True}
+            for i in range(27)])
+
+    async def push(notify, wanted):
+        batches.append(wanted)
+
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
+    monkeypatch.setattr(teams_bridge, "_activity_wait", wait)
+    monkeypatch.setattr(teams_bridge, "read_activity_rows", read)
+    monkeypatch.setattr(teams_bridge, "_push_activity", push)
+    monkeypatch.setattr(teams_bridge, "reap_orphans", lambda: None)
+    monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
+    monkeypatch.setattr(teams_bridge, "logged_in_once", lambda: True)
+    with pytest.raises(Finished):
+        asyncio.run(teams_bridge.activity_watch_loop())
+    assert [len(batch) for batch in batches] == [12, 12, 3]
+    assert len(json.loads(store.kv_get(teams_bridge.ACTIVITY_SEEN_KEY))) == 28
+
+
 @pytest.mark.parametrize("row", [
     "Missed call from Alex Kumar — Teams call — Call — Chat",
     "Tatum M invited you: Tatum - OOO - 31/08",

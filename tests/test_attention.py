@@ -686,6 +686,13 @@ def test_a_login_redirect_does_not_verify_cached_activity(monkeypatch):
     assert page.probes == 1
 
 
+def test_connectivity_probe_never_calls_a_non_teams_origin():
+    page = _Page(state={"offline": True, "network": True})
+    page.url = "https://other.example.invalid/"
+    assert asyncio.run(teams_bridge._activity_connected(page)) is False
+    assert page.probes == 0
+
+
 def test_activity_catches_up_past_the_first_25_rows(monkeypatch):
     monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
     old = {"text": "Previously seen mention", "unread": True}

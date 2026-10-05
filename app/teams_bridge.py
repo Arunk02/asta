@@ -2015,6 +2015,9 @@ async def _activity_connected(page) -> bool:
     from urllib.parse import urlsplit
 
     url = urlsplit(page.url)
+    if url.scheme != "https" or url.hostname not in (
+            "teams.microsoft.com", "teams.cloud.microsoft"):
+        return False
     origin = f"{url.scheme}://{url.netloc}/"
     try:
         response = await page.context.request.get(
@@ -2022,7 +2025,7 @@ async def _activity_connected(page) -> bool:
             params={"asta_connectivity": str(time.time_ns())},
             max_redirects=0, timeout=5000)
         try:
-            return response.ok and response.url.startswith(origin)
+            return response.ok and urlsplit(response.url).hostname == url.hostname
         finally:
             await response.dispose()
     except Exception:
@@ -2513,7 +2516,6 @@ async def activity_watch_loop() -> None:
         keys = [_activity_key(it) for it in items]
         if seen is not None:
             keys = keys + [k for k in seen if k not in keys][:300 - len(keys)]
-        store.kv_set(ACTIVITY_SEEN_KEY, _json.dumps(keys[:300]))
         # He reads Teams on his phone too — anything he has already opened is
         # settled, and pushing it again is exactly the noise he complained about.
         opened = {_activity_key(r["text"]) for r in rows if r.get("unread") is False}
@@ -2525,9 +2527,9 @@ async def activity_watch_loop() -> None:
             if r.get("unread") is False:
                 attention.note_read(attention.key_for(r["text"]))
         wanted = [it for it in fresh if _activity_wanted(it)]
-        if not wanted:
-            continue
-        await _push_activity(notify, wanted)
+        for offset in range(0, len(wanted), 12):
+            await _push_activity(notify, wanted[offset:offset + 12])
+        store.kv_set(ACTIVITY_SEEN_KEY, _json.dumps(keys[:300]))
 
 
 async def check_session() -> bool:

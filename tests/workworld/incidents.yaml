@@ -509,6 +509,10 @@ scenarios:
     setup:
       # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
       env: {ASTA_RESPOND: "1"}
+      prs:
+        - {url: "https://github.com/acme/booking/pull/1409",
+           head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+           checks: [{name: build, conclusion: SUCCESS}]}
     brains:
       task:
         - calls:
@@ -532,6 +536,10 @@ scenarios:
     setup:
       # Declared, not inherited: ASTA_RESPOND is on in his .env and off on CI.
       env: {ASTA_RESPOND: "1"}
+      prs:
+        - {url: "https://github.com/acme/booking/pull/1409",
+           head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+           checks: [{name: build, conclusion: SUCCESS}]}
     brains:
       task:
         - calls:

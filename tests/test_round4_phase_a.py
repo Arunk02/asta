@@ -169,5 +169,5 @@ def test_the_web_ui_keeps_its_own_chats_untouched():
     """The UI already has one context per chat; only phone channels, which are one
     endless thread, need a sitting boundary."""
     from app import episodes
-    assert episodes.applies_to("whatsapp") and episodes.applies_to("telegram")
+    assert all(episodes.applies_to(channel) for channel in ("whatsapp", "telegram", "voice"))
     assert not episodes.applies_to("web")

@@ -464,12 +464,21 @@ with per-conversation continuity, at zero personal API cost. If it hits a quota
 error mid-conversation the turn is handed to whichever brain is actually up, with a
 note in the chat saying who took over and that the work carried across.
 
-**Switch from anywhere.** "use claude_cli", "switch to copilot", "which model" work
-on WhatsApp and Telegram, not just the web picker — the quota warning arrives on
-your phone, so the ability to act on it belongs there too. The choice sticks to the
-conversation; the default only fills in when you haven't picked one or the one you
-picked has since stopped being available. Resolved through the shared registry, so
-a brain added to the spec table is switchable from your phone the same day.
+**Switch from anywhere.** "use Claude" selects the Claude CLI subscription;
+"use Copilot" selects Copilot CLI. Commands on web/phone/voice and the web picker
+save one preference for subsequent text, voice, and new calls, including after a
+restart. The preference takes precedence over older conversations' model fields;
+the default is used only until a preference is set. If the selected brain is
+unavailable, text/voice announces the fallback; a new call does not ring on a
+different brain. An ongoing call finishes on the brain selected when it started.
+Claude's warm voice talker is used only when Claude CLI is selected. Copilot
+voice answers use the chat pipeline; Copilot calls resume a no-tool CLI session
+per turn, so their responses can be slower than the warm Claude call engine.
+An explicit Claude tier (Opus/Sonnet/Haiku) also follows the choice into voice
+and new calls.
+Voice turns retire an oversized CLI session above 24k context tokens, and a
+voice message after a two-hour gap starts a fresh sitting with a short recap.
+Both reuse the phone chat's existing memory/recap instead of dropping its history.
 
 **Which model, not just which brain.** "use opus", "use sonnet" and "use haiku"
 switch the model inside the Claude CLI brain, from any channel, and the picker

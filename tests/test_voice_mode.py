@@ -60,6 +60,12 @@ def run(coro):
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def _existing_claude_talker(monkeypatch):
+    """Existing voice behavior stays covered independently of the host's model."""
+    monkeypatch.setattr(vm, "_talker_selected", lambda: True)
+
+
 # --- the switches -----------------------------------------------------------------------
 
 def test_both_switches_start_off_and_he_hears_if_they_had_been_on():
@@ -389,7 +395,7 @@ def test_a_question_is_acknowledged_within_a_second_with_audio_made_beforehand(h
     vm._CACHE.clear()
 
 
-def test_the_first_sentence_is_said_while_the_rest_is_still_being_written(helper, monkeypatch):
+def test_the_first_sentence_is_said_while_the_rest_is_still_being_written(helper, chat, monkeypatch):
     monkeypatch.setattr(vm, "ACK_SECONDS", 5)
     said_at: list[float] = []
 
@@ -408,6 +414,7 @@ def test_the_first_sentence_is_said_while_the_rest_is_still_being_written(helper
     assert said_at == [1], "said before the answer was finished"
     assert helper.said() == ["Booking PR 1429 is still waiting on Vinish.",
                              "AP PR 1252 is mergeable. The details are in the chat."]
+    assert len(chat) == 1 and "And more detail here." in chat[0]
 
 
 def test_talking_over_asta_drops_the_rest_of_that_answer(helper, monkeypatch):
@@ -471,6 +478,83 @@ def test_a_voice_turn_answers_even_when_no_brain_can_be_chosen(helper, monkeypat
     vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
     assert run(vm.handle("what is pending?"))["did"] == "answered"
     assert helper.said() == ["Nothing pending right now."]
+
+
+def test_copilot_voice_answer_uses_shared_chat_pipeline_not_claude_talker(
+        helper, monkeypatch):
+    from app import voice_talker
+    monkeypatch.setattr(vm, "_talker_selected", lambda: False)
+    monkeypatch.setattr(main, "_channel_model", lambda conv: "copilot")
+    monkeypatch.setattr(main, "_preferred_model", lambda: "copilot")
+    async def decide(text, context=None):
+        return voice_talker.ANSWER
+    async def no_local_answer(text):
+        return False
+    async def no_talker(*args, **kwargs):
+        raise AssertionError("the Claude talker must not answer Copilot voice")
+        yield
+    async def dispatch(conv, text, sink, channel):
+        assert conv["model"] == "copilot" and channel == "voice"
+        await sink.send({"type": "delta", "text": "The integration uses the selected Copilot brain."})
+        return None
+    monkeypatch.setattr(voice_talker, "route", decide)
+    monkeypatch.setattr(voice_talker, "sentences", no_talker)
+    monkeypatch.setattr(vm, "answer_question", no_local_answer)
+    monkeypatch.setattr(vm, "jobs_answer", lambda text: "")
+    monkeypatch.setattr(vm, "pr_answer", lambda text: "")
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    result = run(vm.handle("Asta, explain the integration"))
+    assert result["did"] == "answered"
+    assert helper.said() == ["The integration uses the selected Copilot brain."]
+
+
+def test_a_claude_limit_stops_retrying_the_voice_talker(monkeypatch):
+    from app import agent, call_mind, voice_talker
+    async def limited(*args, **kwargs):
+        raise call_mind.Unavailable("You've hit your session limit; resets 11:30am")
+    monkeypatch.setattr(call_mind, "spawn", limited)
+    monkeypatch.setattr(voice_talker, "_TALKER", dict(voice_talker._TALKER))
+    assert run(voice_talker._start()) is None
+    assert agent.quota_down("claude_cli")
+
+
+def test_explicit_claude_tier_reaches_the_warm_voice_talker(monkeypatch):
+    from app import agent, call_mind, voice_talker
+    agent.set_tier("claude_cli", "opus")
+    chosen = []
+    async def spawn(system, model):
+        chosen.append(model)
+        return object()
+    async def brief(mind):
+        return ""
+    monkeypatch.setattr(call_mind, "spawn", spawn)
+    monkeypatch.setattr(voice_talker, "_brief", brief)
+    monkeypatch.setattr(voice_talker, "_TALKER", dict(voice_talker._TALKER))
+    run(voice_talker._start())
+    assert chosen == ["opus"]
+
+
+def test_spoken_switch_bypasses_router_and_changes_shared_preference(helper, monkeypatch):
+    from app import agent, voice_talker
+    monkeypatch.setattr(agent, "model_registry", lambda: {
+        "copilot": {"available": True, "label": "Copilot"},
+        "claude_cli": {"available": True, "label": "Claude CLI"}})
+    async def no_router(*args, **kwargs):
+        raise AssertionError("a model command must not reach the voice router")
+    async def switched(brain):
+        return "work switched"
+    async def warm():
+        return None
+    monkeypatch.setattr(voice_talker, "route", no_router)
+    monkeypatch.setattr(voice_talker, "warm", warm)
+    from app import tasks
+    monkeypatch.setattr(tasks, "use_brain", switched)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.handle("Asta, use Claude"))
+    assert store.kv_get("chat_model_preference") == "claude_cli"
+    run(vm.handle("Asta, use Copilot"))
+    assert store.kv_get("chat_model_preference") == "copilot"
 
 
 @pytest.mark.parametrize("heard", ["موسيقى موسيقى موسيقى موسيقى", "[Music]", "♪ la la la ♪",
@@ -812,6 +896,24 @@ def test_a_sentence_cut_at_a_pause_is_joined_with_the_rest(helper, decided):
     first, second = run(go())
     assert first["did"] == "joined" and second["did"] == "decided"
     assert decided == ["So I want to do debug on booking like a the one Rajendra shared yesterday."]
+
+
+def test_a_still_cut_off_question_is_not_sent_as_a_new_turn(helper, decided):
+    vm._STATE.update(speaker=True, mic=True)
+    result = run(vm.assemble("Did you send the finish the booking and"))
+    assert result["did"] == "unfinished"
+    assert decided == []
+    assert "finish your question" in helper.said()[-1]
+
+
+def test_voice_context_cap_is_below_the_slow_recorded_prompt(monkeypatch):
+    monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "100000")
+    assert main.session_max_tokens("voice") == 24000
+    assert main.session_max_tokens("whatsapp") == 100000
+    monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "16000")
+    assert main.session_max_tokens("voice") == 16000
+    monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "0")
+    assert main.session_max_tokens("voice") == 0
 
 
 def test_a_turn_waits_while_he_is_still_talking(helper, decided):
@@ -1263,6 +1365,18 @@ def test_a_short_answer_is_not_also_pushed(helper, chat):
 
     run(go())
     assert chat == []
+
+
+def test_a_truncated_copilot_turn_sends_full_answer_to_chat(helper, chat, monkeypatch):
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    monkeypatch.setattr(main, "_channel_model", lambda conv: "copilot")
+    async def dispatch(conv, text, sink, channel):
+        await sink.send({"type": "delta", "text": LONG})
+        return None
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    run(vm.turn("tell me the PR status"))
+    assert chat == ["🎙 " + LONG]
+    assert any(vm.IN_CHAT in line for line in helper.said())
 
 
 def test_a_question_is_asked_out_loud_and_on_the_phone(helper):

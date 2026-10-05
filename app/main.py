@@ -357,14 +357,15 @@ def rotate_sessions(conv_id: str) -> list[str]:
     return dropped
 
 
-def session_max_tokens() -> int:
+def session_max_tokens(channel: str = "") -> int:
     """Context, in tokens of ONE model call, past which a chat session is retired.
-    0 disables. Default 100k: a Claude session re-reads its whole context on every
-    call, so the first word waits on the size of the session, not the question."""
+    0 disables. Voice shares the long-running phone conversation but needs a
+    shorter session so its first spoken answer does not wait on old context."""
     try:
-        return int(os.environ.get("ASTA_SESSION_MAX_TOKENS", "100000") or 0)
+        cap = int(os.environ.get("ASTA_SESSION_MAX_TOKENS", "100000") or 0)
     except ValueError:
-        return 100000
+        cap = 100000
+    return min(cap, 24000) if cap and channel == "voice" else cap
 
 
 def retire_session_for_size(conv: dict, context: int) -> list[str]:
@@ -427,6 +428,7 @@ def api_status():
     return {
         "name": agent_mod.assistant_name(),
         "models": agent_mod.model_registry(),
+        "preferred_model": _preferred_model() or agent_mod.default_chat_model(),
         "mcp": MCP_STATUS,
         "workspaces": workspace_tools.available_workspaces(),
         "usage": store.usage_summary(),
@@ -941,6 +943,23 @@ async def api_model_tier(request: Request):
         raise HTTPException(400, f"{brain} offers {', '.join(offered)}")
     agent_mod.set_tier(brain, tier)
     return {"brain": brain, "tier": agent_mod.tier_of(brain)}
+
+
+@app.post("/api/model-preference", dependencies=[Depends(require_auth)])
+async def api_model_preference(request: Request):
+    """The web picker changes the same brain used by chat and voice."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected a model selection")
+    model = str(body.get("model") or "")
+    info = agent_mod.model_registry().get(model)
+    if not info or not info["available"]:
+        raise HTTPException(400, "Select an available model")
+    store.kv_set(_MODEL_PREFERENCE_KEY, model)
+    moved_to = {"copilot": "copilot", "claude_cli": "claude"}.get(model)
+    if moved_to:
+        await tasks.use_brain(moved_to)
+    return {"model": model}
 
 
 @app.post("/api/evals", dependencies=[Depends(require_auth)])
@@ -1614,18 +1633,18 @@ async def api_wa_config(request: Request):
     return result
 
 
-def _channel_model(conv: dict) -> str:
-    """Which brain answers on a phone channel.
+_MODEL_PREFERENCE_KEY = "chat_model_preference"
 
-    Both channels used to pin this to default_chat_model() on every message,
-    which quietly overrode any choice he had made — so "use claude" on WhatsApp
-    would appear to work and then answer on Copilot anyway. His choice wins; the
-    default only fills in when there is none, or when the one he picked has since
-    stopped being available (a key removed, LM Studio closed), because failing the
-    message is worse than answering it on something that works.
-    """
-    picked = (conv.get("model") or "").strip()
-    if picked and agent_mod.model_registry().get(picked, {}).get("available"):
+
+def _preferred_model() -> str:
+    """One explicit choice across chat and voice, persisted through restarts."""
+    return store.kv_get(_MODEL_PREFERENCE_KEY) or ""
+
+
+def _channel_model(conv: dict) -> str:
+    """The shared choice wins; a broken choice falls back for this turn only."""
+    picked = _preferred_model() or (conv.get("model") or "").strip()
+    if picked and agent_mod.available(picked) and not agent_mod.quota_down(picked):
         return picked
     return agent_mod.default_chat_model()
 
@@ -2047,7 +2066,7 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
     await _correct_claims(out, conv, reply, started_at)
     # Retire a session that has grown past the cap NOW, before the next message
     # can resume it — the idle digest never fires on a thread that never idles.
-    cap = session_max_tokens()
+    cap = session_max_tokens(channel)
     if cap and spent.context > cap:
         retire_session_for_size(conv, spent.context)
     await out.send({"type": "done", "tools": [tool_name]})
@@ -2461,17 +2480,22 @@ async def ws_chat(ws: WebSocket) -> None:
             msg = json.loads(raw)
             if msg.get("type") != "chat":
                 continue
+            requested_model = msg.get("model")
+            if requested_model is not None and (
+                    not isinstance(requested_model, str)
+                    or requested_model not in agent_mod.model_registry()):
+                await ws.send_json({"type": "error", "message": "Unknown model selection"})
+                continue
             conv_id = msg.get("conversation_id")
             conv = store.get_conversation(conv_id) if conv_id else None
             if conv is None:
                 conv = store.create_conversation(
-                    model=msg.get("model", "claude"),
+                    model=requested_model or _preferred_model() or agent_mod.default_chat_model(),
                     workspace=msg.get("workspace") or None,
                 )
                 await ws.send_json({"type": "conv", "conversation": conv})
-            elif msg.get("model") and msg["model"] != conv["model"]:
-                store.update_conversation(conv["id"], model=msg["model"])
-                conv["model"] = msg["model"]
+            if requested_model and requested_model != _preferred_model():
+                _switch_model(conv, requested_model)
             if msg.get("workspace") != conv.get("workspace"):
                 store.update_conversation(conv["id"], workspace=msg.get("workspace") or None)
                 conv["workspace"] = msg.get("workspace") or None
@@ -3248,7 +3272,7 @@ def _model_listing(current: str) -> str:
     pick = (f"\n\nModels: {', '.join(tiers)} — say “use opus” or “use sonnet” "
             f"to change which one answers." if tiers else "")
     return ("Brains:\n" + "\n".join(lines) +
-            "\n\nSay “use <name>” to switch. The switch sticks for this chat." + pick)
+            "\n\nSay “use <name>” to switch chat and voice together." + pick)
 
 
 def _resolve_brain(wanted: str) -> str:
@@ -3300,6 +3324,7 @@ def _switch_tier(conv: dict, brain: str, tier: str) -> str:
     for the case he asks for it in.
     """
     agent_mod.set_tier(brain, tier)
+    store.kv_set(_MODEL_PREFERENCE_KEY, brain)
     label = agent_mod.model_registry().get(brain, {}).get("label") or brain
     moved = ""
     if agent_mod.normalize_model(conv.get("model", "")) != brain:
@@ -3307,11 +3332,11 @@ def _switch_tier(conv: dict, brain: str, tier: str) -> str:
         conv["model"] = brain
         moved = f" This chat is now on {brain}, which is the brain that runs it."
     return (f"✅ Now using {tier}. ({label}){moved}\n\n"
-            f"Applies everywhere — chat and delegated tasks — until you say otherwise.")
+            f"Applies to chat and voice until you say otherwise.")
 
 
 def _switch_model(conv: dict, wanted: str) -> str:
-    """Point this conversation at another brain. Returns what to tell him.
+    """Point chat and voice at one brain. Returns what to tell him.
 
     Resolved through the shared registry rather than a hardcoded list, so a brain
     added to the spec table is switchable from his phone the same day — the whole
@@ -3319,6 +3344,8 @@ def _switch_model(conv: dict, wanted: str) -> str:
     """
     registry = agent_mod.model_registry()
     want = agent_mod.normalize_model(wanted.strip().lower().replace(" ", "_"))
+    if want == "claude":
+        want = "claude_cli"
     if want not in registry:
         # He may be naming the MODEL rather than the brain — "use opus". That is
         # how he thinks about the choice, and exactly one brain offers each tier,
@@ -3334,12 +3361,13 @@ def _switch_model(conv: dict, wanted: str) -> str:
     info = registry[want]
     store.update_conversation(conv["id"], model=want)
     conv["model"] = want
+    store.kv_set(_MODEL_PREFERENCE_KEY, want)
     if not info.get("available"):
         # Switched anyway: he may be about to add the key, and refusing a choice
         # he stated is more annoying than a warning he can ignore.
         return (f"Switched to {want}, but it isn't configured yet — "
                 f"{info.get('label', want)} needs its key or CLI before it can answer.")
-    return f"✅ Now using {info.get('label') or want} for this chat."
+    return f"✅ Now using {info.get('label') or want} for chat and voice."
 
 
 def _health_mute_reply(text: str) -> str:
@@ -3389,6 +3417,12 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     starting one (status answer, augment folded in, task steered) — so a
     request/response channel knows whether there's anything to wait for."""
     cid = conv["id"]
+    preferred = _preferred_model()
+    if preferred:
+        conv["model"] = _channel_model(conv)
+        if preferred != conv["model"] and not _model_request(user_text or ""):
+            await sink.send({"type": "note", "text":
+                             f"{preferred} is unavailable; using {conv['model']} for this turn."})
     # When he last spoke to Asta. Read by the nightly bench, which must never
     # compete with him for a subscription window he is in the middle of using.
     store.kv_set("last_user_message_at", str(time.time()))
@@ -3464,6 +3498,8 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web") -> a
     if switch:
         before = conv.get("model", "")
         await sink.send({"type": "note", "text": _switch_model(conv, switch)})
+        if channel == "web":
+            await sink.send({"type": "model", "model": conv["model"]})
         # "use copilot" means the WORK too, not only this chat: new tasks go
         # there, and anything paused on a limit carries on there now (30 Sep).
         moved_to = {"copilot": "copilot", "claude_cli": "claude"}.get(conv.get("model", ""))

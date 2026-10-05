@@ -434,7 +434,7 @@ def test_the_call_brain_never_sees_his_refused_api_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-refused")
     monkeypatch.setattr(call_mind.asyncio, "create_subprocess_exec", spawn)
     with pytest.raises(FileNotFoundError):
-        asyncio.run(call_mind.start("A colleague", "a quick word"))
+        asyncio.run(call_mind.spawn(call_mind.persona("A colleague", "a quick word")))
     assert "ANTHROPIC_API_KEY" not in seen["env"]
 
 

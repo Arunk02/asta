@@ -390,6 +390,15 @@ def test_a_call_asked_for_in_his_voice_sets_it_before_anything_is_said(monkeypat
                         or voice.VOICE_ASSISTANT)
     monkeypatch.setattr(conversation.meetings, "call_person",
                         lambda who: _boom(order))
+    class ReadyMind:
+        async def close(self):
+            pass
+
+    async def ready(*args, **kwargs):
+        return ReadyMind()
+
+    from app import call_mind
+    monkeypatch.setattr(call_mind, "start", ready)
 
     said = asyncio.run(conversation.converse("Vinish Kumar", "a test",
                                              voice_name=voice.VOICE_MINE))

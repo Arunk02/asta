@@ -137,6 +137,9 @@ function handleWs(msg) {
     el.textContent = msg.text;
     $("#messages").appendChild(el);
     scrollBottom();
+  } else if (msg.type === "model") {
+    $("#model-pick").value = msg.model;
+    renderTierPicker();
   } else if (msg.type === "error") {
     if (state.streamEl) state.streamEl.classList.remove("streaming");
     addMsg("error", "⚠ " + msg.message);
@@ -174,7 +177,6 @@ function send() {
     type: "chat",
     conversation_id: state.convId,
     message: text,
-    model: $("#model-pick").value,
     workspace: $("#workspace-pick").value || null,
   }));
 
@@ -216,7 +218,6 @@ async function loadConversations() {
 
 async function openConversation(c) {
   state.convId = c.id;
-  $("#model-pick").value = c.model;
   $("#workspace-pick").value = c.workspace || "";
   $("#messages").innerHTML = "";
   const msgs = await api(`/api/conversations/${c.id}/messages`);
@@ -231,6 +232,8 @@ async function openConversation(c) {
     }
     addMsg(m.role, m.content);
   });
+  try { await loadStatus(); }
+  catch (err) { addMsg("error", `Could not refresh model: ${err.message}`); }
   loadConversations();
   closeSidebar();
   switchTab("chat");
@@ -243,7 +246,10 @@ function newChat() {
   closeSidebar();
   switchTab("chat");
 }
-$("#new-chat").onclick = () => { newChat(); loadConversations(); };
+$("#new-chat").onclick = () => {
+  newChat(); loadConversations();
+  loadStatus().catch((err) => addMsg("error", `Could not refresh model: ${err.message}`));
+};
 
 /* ---------- status / models ---------- */
 
@@ -260,7 +266,6 @@ async function loadStatus() {
   const s = await api("/api/status");
   applyName(s.name);
   const pick = $("#model-pick");
-  const prev = pick.value;
   pick.innerHTML = "";
   Object.entries(s.models).forEach(([name, m]) => {
     const o = document.createElement("option");
@@ -269,7 +274,8 @@ async function loadStatus() {
     pick.appendChild(o);
   });
   const firstOn = Object.entries(s.models).find(([, m]) => m.available);
-  pick.value = prev && [...pick.options].some((o) => o.value === prev && !o.disabled) ? prev : firstOn ? firstOn[0] : "claude";
+  pick.value = s.preferred_model && s.models[s.preferred_model]?.available
+    ? s.preferred_model : firstOn ? firstOn[0] : "";
   state.models = s.models;
   renderTierPicker();
 
@@ -353,7 +359,17 @@ function setGraph(url) {
 }
 $("#graph-pick").onchange = (e) => setGraph(e.target.value);
 $("#workspace-pick").onchange = () => { if ($("#pane-graph").classList.contains("active")) loadGraphs(); };
-$("#model-pick").onchange = renderTierPicker;
+$("#model-pick").onchange = async () => {
+  const model = $("#model-pick").value;
+  try {
+    await api("/api/model-preference", {
+      method: "POST", body: JSON.stringify({ model }),
+    });
+  } catch (err) {
+    alert(`Could not change model: ${err.message}`);
+  }
+  await loadStatus();
+};
 $("#tier-pick").onchange = setTier;
 
 /* ---------- memory tab ---------- */

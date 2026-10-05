@@ -487,7 +487,10 @@ final class Ears {
                 log("reopening the mic without echo cancelling")
                 engine.reset()
                 useVoiceProcessing = false
+                retriedProcessing = true
                 start()
+            } else {
+                onInputError?("Microphone could not start: \(error.localizedDescription)")
             }
         }
     }

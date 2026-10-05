@@ -379,6 +379,7 @@ def test_the_menu_bar_helper_builds(tmp_path):
     assert "firstChannel" in src, "the 9-channel echo-cancelled input is reduced to its first channel"
     assert "reopening the mic without echo cancelling" in src, "and falls back when it cannot start"
     assert "mic produced no usable audio after retry" in src, "no input frames must stop the mic"
+    assert "Microphone could not start:" in src, "engine start failure must not look like quiet"
     assert "AVSpeechSynthesizer" in src, "the Mac's voice when Asta's is down"
 
 

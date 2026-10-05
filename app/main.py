@@ -3092,14 +3092,26 @@ def _mechanical_send(staged: dict) -> dict | None:
 
 
 async def _run_op(op: dict, cid: str, sink, channel: str,
-                  staged: dict | None = None) -> None:
+                  staged: dict | None = None) -> bool:
     """Run one recorded outward call and report the outcome, success or failure.
 
     A send that fails leaves its draft where it was: "send" again retries the
     same words to the same chat. It used to vanish with the failure, and the
     brain then re-made it from memory — into Shabda's 1:1 instead of the group,
     and "already sent" when nothing had gone (1 Oct)."""
-    if op.get("name") == "teams_send" and teams_bridge.in_a_call():
+    if staged and staged.get("review_origin"):
+        from . import answers
+        if not await answers.review_is_current(staged["review_origin"]):
+            line = f"🔄 {staged['review_origin']['ref']} changed or could not be verified. " \
+                   "Nothing sent; the review needs to be checked again."
+            store.add_ui_message(cid, "assistant", line, {"via": "staged-send", "channel": channel})
+            await sink.send({"type": "note", "text": line})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return False
+    deferred = op.get("name") == "teams_send" and teams_bridge.in_a_call()
+    success = False
+    if deferred:
         # Asta's own call holds the Teams browser. The message goes out the
         # moment it ends — he does not have to remember to ask again.
         line = ("📞 I'm on a Teams call right now — this goes out the moment the call "
@@ -3108,6 +3120,7 @@ async def _run_op(op: dict, cid: str, sink, channel: str,
     else:
         try:
             line = await ops.run(op)
+            success = not line.startswith("⛔ Not done")
         except Exception as exc:
             line = f"⚠️ Not sent — {type(exc).__name__}: {exc}"
             if staged:
@@ -3118,6 +3131,7 @@ async def _run_op(op: dict, cid: str, sink, channel: str,
     await sink.send({"type": "note", "text": line})
     if channel == "web":
         await sink.send({"type": "done", "tools": []})
+    return success
 
 
 #: How long a send waits for Asta's own call to end before giving up on it.
@@ -3129,8 +3143,20 @@ async def _send_after_call(op: dict, cid: str, staged: dict | None) -> None:
     while teams_bridge.in_a_call() and waited < AFTER_CALL_SECONDS:
         await asyncio.sleep(3)
         waited += 3
+    if staged and staged.get("review_origin"):
+        from . import answers
+        if not await answers.review_is_current(staged["review_origin"]):
+            line = f"🔄 {staged['review_origin']['ref']} changed or could not be verified. " \
+                   "Nothing sent; the review needs to be checked again."
+            store.add_ui_message(cid, "assistant", line, {"via": "after-call", "channel": "whatsapp"})
+            await notify.notify(line, "send", urgency="direct", considered=True)
+            return
     try:
         line = await ops.run(op)
+        if staged and not line.startswith("⛔ Not done"):
+            from . import answers
+            answers.sent(staged)
+            await answers.next_after(cid)
     except Exception as exc:                                    # noqa: BLE001
         line = f"⚠️ Not sent after the call — {type(exc).__name__}: {exc}"
         if staged:
@@ -3771,12 +3797,13 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             # ends with Arun believing a message went out that never did.
             op = _mechanical_send(staged)
             if op:
-                await _run_op(op, cid, sink, channel, staged=staged)
+                sent = await _run_op(op, cid, sink, channel, staged=staged)
                 # A colleague's answer went out: the conversation knows Asta spoke
                 # in it, and the next finished answer, if one is waiting, comes up.
                 from . import answers
-                answers.sent(staged)
-                await answers.next_after(cid)
+                if sent is not False:
+                    answers.sent(staged)
+                    await answers.next_after(cid)
                 return None
             with contextlib.suppress(Exception):
                 from . import ledger

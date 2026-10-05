@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
 import time
@@ -1670,6 +1671,31 @@ SENT: list[tuple[float, str]] = []
 #: When each send began — a send the brain started a moment ago may still be
 #: on its way when the brain says so.
 STARTED: list[float] = []
+_automatic_send: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "teams_automatic_send", default="")
+
+
+async def send_automatic(chat: str, text: str) -> str:
+    """Send an unapproved acknowledgement and attribute only its verified message."""
+    token = _automatic_send.set(chat)
+    try:
+        return await send_message(chat, text)
+    finally:
+        _automatic_send.reset(token)
+
+
+def _automatic_receipt(chat: str, text: str, raw: list[dict], started_at: float) -> bool:
+    from .chat_watch import is_from_him
+    normalized = " ".join(text.split())
+    match = next((m for m in reversed(raw)
+                  if (_to_epoch(m.get("iso", "")) or 0) >= started_at - 2
+                  and (is_from_him(m.get("sender", ""))
+                       or m.get("sender", "").lower() == "me")
+                  and " ".join((m.get("text") or "").split()) == normalized), None)
+    if not match:
+        return False
+    store.record_automatic_teams_message(_msg_key(chat, match), chat)
+    return True
 
 
 async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
@@ -1681,7 +1707,8 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
     """
     from . import senior
     senior.check(chat)        # manager and above: only with his yes, whoever calls
-    STARTED.append(time.time())
+    started_at = time.time()
+    STARTED.append(started_at)
     del STARTED[:-50]
     async with teams_page() as page:
         title = await _open_target(page, chat, allow_group)
@@ -1750,6 +1777,14 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
         if not landed:
             raise RuntimeError(
                 f"message does not appear in '{title}' after sending — treat as NOT sent")
+        if _automatic_send.get() == chat:
+            try:
+                raw = await page.evaluate(_MESSAGE_JS, 6)
+                if not _automatic_receipt(chat, text, raw, started_at):
+                    store.record_outcome("teams", "receipt missing", subject=chat[:80],
+                                         detail="automatic send landed but has no timed message identity")
+            except Exception as exc:
+                quiet.note("teams.automatic_receipt", exc)
         store.kv_set("teams_session_ok", "1")
         await park(page)
         SENT.append((time.time(), title))

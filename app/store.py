@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS teams_messages (
     stamp TEXT NOT NULL DEFAULT '',
     seen_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS teams_automatic_messages (
+    key TEXT PRIMARY KEY,
+    chat TEXT NOT NULL,
+    recorded_at REAL NOT NULL
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS teams_fts USING fts5(
     chat, sender, text, content=teams_messages, content_rowid=rowid
 );
@@ -1112,6 +1117,22 @@ def save_teams_messages(rows: list[dict]) -> int:
         )
         after = conn.execute("SELECT COUNT(*) FROM teams_messages").fetchone()[0]
         return after - before
+
+
+def record_automatic_teams_message(key: str, chat: str) -> None:
+    """A verified outbound message Asta sent without Arun approving its words."""
+    with _connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO teams_automatic_messages (key, chat, recorded_at) "
+                     "VALUES (?, ?, ?)", (key, chat, time.time()))
+
+
+def is_automatic_teams_message(key: str, chat: str) -> bool:
+    if not key:
+        return False
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM teams_automatic_messages WHERE key=? AND chat=?",
+            (key, chat)).fetchone() is not None
 
 
 #: How stale a read may be and still count as covering a window that is still

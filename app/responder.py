@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 
 from . import attention, store
 
@@ -320,7 +321,9 @@ _BRIEFS = {
         "unhandled failure paths. Every point names a `path:line`.\n\n"
         "Finish by calling `propose_pr_review` with your notes — that stages one "
         "GitHub review with a comment on each line, for Arun's yes. Do not change "
-        "any code, and do not approve anything yourself."
+        "any code, and do not approve anything yourself. In the REPLY section, "
+        "write a neutral, addressee-free answer about this PR that Arun could "
+        "send unchanged to anyone who asked the same question."
     ),
     "debug": (
         "{who} is asking Arun to look into something on Teams:\n\n"
@@ -611,7 +614,8 @@ LOOK_FOR_WAITING_COLLEAGUE = True
 def respond(source: str, who: str, text: str, priority: int | None = None,
             key: str = "", workspace: str = "", sent_at: float | None = None,
             context: str = "", reply_to: str = "", group: bool = False,
-            need: str = "", thread: str = "", questions: list | None = None) -> dict | None:
+            need: str = "", thread: str = "", questions: list | None = None,
+            review_revision: str = "") -> dict | None:
     """Start the investigation this message deserves. The spawned task, or None.
 
     Deliberately synchronous and tiny: it decides and delegates. Everything slow
@@ -684,10 +688,19 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     # on what it is ABOUT, so two people asking about one booking in different
     # words share one investigation. See app/results_cache.py.
     from . import results_cache
-    ck = results_cache.key_for(kind or "ask", grounds)
-    hit = results_cache.lookup(ck)
+    # A PR number alone collides across repositories; even a full link says
+    # nothing about whether a new commit or failing CI invalidated the review.
+    # Only the live-verified revision supplied by the Teams sweep is reusable.
+    ck = (f"review_request:{review_revision}" if review_revision else "") \
+        if kind == "review_request" else (
+            "" if kind == "pr_review" else results_cache.key_for(kind or "ask", grounds))
+    hit = results_cache.lookup(ck) if ck else None
     if hit:
         done = hit["state"] == "done"
+        if not done and reply_to:
+            from . import answers
+            answers.remember_waiter(hit["task_id"], who=who, need=need or message_of(text)[:160],
+                                    chat=reply_to, group=group, thread=thread)
         store.record_outcome("responder", "reused" if done else "joined",
                              subject=str(hit["task_id"]), detail=f"{who}: {text[:120]}")
         return {"id": hit["task_id"], "title": title_for(kind, who, text),
@@ -709,7 +722,11 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         from . import answers
         answers.remember_meta(t["id"], who=who, need=need or message_of(text)[:160],
                               chat=reply_to, group=group, thread=thread)
-    results_cache.start(ck, kind or "ask", t["id"])
+    if review_revision:
+        store.kv_set(f"review_origin:{t['id']}", json.dumps(
+            {"ref": review_revision.rsplit("@", 1)[0], "revision": review_revision}))
+    if ck:
+        results_cache.start(ck, kind or "ask", t["id"])
     return t
 
 

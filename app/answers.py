@@ -35,6 +35,7 @@ STALE_SECONDS, is retired and he is told, in one line, what was dropped.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import time
@@ -145,6 +146,11 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
     cid = phone_conversation()
     if not cid or not (reply or "").strip() or not chat:
         return False
+    origin = _review_origin(task_id)
+    if origin and not await review_is_current(origin):
+        store.record_outcome("answer", "stale review", subject=str(task_id or ""),
+                             detail=f"{origin['ref']} changed before staging")
+        return False
     if _already_put(chat, need, reply):
         # The same ask for the same person, already in front of him (or already
         # answered) today. "These we already discussed — why again?" (30 Sep,
@@ -179,8 +185,13 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
               "to_group": bool(group), "task_id": task_id, "thread": thread,
               "who": who, "need": need, "analysis": analysis, "note": note,
               "lead": lead, "_at": time.time()}
+    if origin:
+        intent["review_origin"] = origin
+        intent["review_auto_ok"] = not more
     if thread:
         threads.update(thread, status="awaiting_arun")
+    if await _deliver_approved_review(intent):
+        return True
     if _blocked(cid):
         _enqueue({"type": "answer", **intent})
         return True
@@ -353,25 +364,86 @@ async def next_after(cid: str = "") -> bool:
         await notify.notify(f"🗂 Didn't send these — too old now, or left unanswered: {names}. "
                             "Tell me if you still want one to go out.",
                             "answer", urgency="ambient", considered=True)
-    q = _load_queue()
-    if not q:
-        return False
-    item = q.pop(0)
-    store.kv_set(_QUEUE, json.dumps(q))
-    if item.get("type") == "plan":
-        await _show_plan(item)
-    else:
+    while q := _load_queue():
+        item = q.pop(0)
+        store.kv_set(_QUEUE, json.dumps(q))
+        if item.get("type") == "plan":
+            await _show_plan(item)
+            return True
+        origin = item.get("review_origin")
+        if origin and not await review_is_current(origin):
+            store.record_outcome("answer", "stale review", subject=str(item.get("task_id") or ""),
+                                 detail=origin.get("ref", ""))
+            await notify.notify(f"🔄 {origin['ref']} changed. I dropped the queued old "
+                                "reply; a new review is needed.",
+                                "answer", urgency="direct", considered=True)
+            continue
+        if await _deliver_approved_review(item):
+            continue
         await _show(cid, item)
-    return True
+        return True
+    return False
 
 
 def sent(staged: dict) -> None:
     """The reply went out: the conversation now has Asta's words in it."""
     from . import threads
+    origin = (staged or {}).get("review_origin")
+    if origin and staged.get("type") == "answer" and not staged.get("to_group"):
+        store.kv_set(_approved_review_key(origin), json.dumps({
+            "what": staged.get("what", ""), "chat": staged.get("to", ""),
+            "who": staged.get("who", ""), "at": time.time()}))
     tid = (staged or {}).get("thread") or ""
     if tid and threads.get(tid):
         threads.update(tid, asta_spoke=1, status="answered")
         threads._record(tid, "answered", (staged.get("what") or "")[:160])
+
+
+def _approved_review_key(origin: dict) -> str:
+    return "approved_review_reply:" + hashlib.sha256(origin["revision"].encode()).hexdigest()[:24]
+
+
+async def _deliver_approved_review(intent: dict) -> bool:
+    """Reuse only the exact wording he previously approved for this PR revision."""
+    origin = intent.get("review_origin")
+    if not origin or not intent.get("review_auto_ok") or intent.get("to_group"):
+        return False
+    from . import senior
+    if senior.is_senior(intent.get("to", "")):
+        return False
+    try:
+        approved = json.loads(store.kv_get(_approved_review_key(origin)) or "{}")
+    except ValueError:
+        return False
+    reply = intent.get("what", "")
+    first = (approved.get("who") or "").split()[:1]
+    if (not approved or approved.get("chat") == intent.get("to")
+            or approved.get("what") != reply or "?" in reply
+            or (first and re.search(rf"\b{re.escape(first[0])}\b", reply, re.I))):
+        return False
+    if not await review_is_current(origin):
+        return False
+    from . import chat_watch, ops, notify
+    if await chat_watch.he_replied_since(intent["to"], chat_watch.their_last(intent["to"])):
+        return False
+    try:
+        line = await ops.run({"name": "teams_send",
+                              "args": {"to": intent["to"], "text": reply, "to_group": False}})
+    except Exception as exc:
+        store.record_outcome("answer", "approved reuse failed",
+                             subject=str(intent.get("task_id") or ""),
+                             detail=f"{intent['to']}: {type(exc).__name__}: {exc}"[:200])
+        return False
+    if line.startswith("⛔ Not done"):
+        store.record_outcome("answer", "approved reuse blocked",
+                             subject=str(intent.get("task_id") or ""), detail=line[:200])
+        return False
+    sent({**intent, "review_origin": None})
+    store.record_outcome("answer", "approved review reused",
+                         subject=str(intent.get("task_id") or ""), detail=intent["to"][:200])
+    await notify.notify(f"{line} (same approved review of {origin['ref']}).",
+                        "answer", urgency="ambient", considered=True)
+    return True
 
 
 async def present_task(task_id: int, t: dict, result: str) -> bool:
@@ -382,6 +454,15 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
         meta = {}
     if not meta:
         return False
+    origin = _review_origin(task_id)
+    if origin and not await review_is_current(origin):
+        from . import notify
+        await notify.notify(f"🔄 {origin['ref']} changed while I was reviewing it. "
+                            "I won't present or send the old findings; a new review is needed.",
+                            "answer", urgency="direct", considered=True)
+        store.record_outcome("answer", "stale review", subject=str(task_id),
+                             detail=origin["ref"])
+        return True
     analysis, reply = split(result)
     if not reply:
         return False
@@ -397,10 +478,14 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
             await notify.notify(f"❓ Asked {first}: “{reply.strip()}”\n\n{analysis}".strip(),
                                 "answer", urgency="direct", considered=True)
             return True
-    return await present(who=meta.get("who", ""), need=meta.get("need", ""),
-                         chat=meta.get("chat") or t.get("teams_chat", ""),
-                         group=bool(meta.get("group")), analysis=analysis, reply=reply,
-                         task_id=task_id, thread=meta.get("thread", ""))
+    waiters = _review_waiters(task_id)
+    shown = False
+    for recipient in [meta, *waiters]:
+        shown = await present(who=recipient.get("who", ""), need=recipient.get("need", ""),
+                              chat=recipient.get("chat") or t.get("teams_chat", ""),
+                              group=bool(recipient.get("group")), analysis=analysis, reply=reply,
+                              task_id=task_id, thread=recipient.get("thread", "")) or shown
+    return shown
 
 
 #: How long after an answer is finished a further message still belongs to it.
@@ -505,3 +590,42 @@ def remember_meta(task_id: int, *, who: str, need: str, chat: str, group: bool,
                   thread: str) -> None:
     store.kv_set(f"answer_meta:{task_id}", json.dumps(
         {"who": who, "need": need, "chat": chat, "group": group, "thread": thread}))
+
+
+def remember_waiter(task_id: int, *, who: str, need: str, chat: str, group: bool,
+                    thread: str) -> None:
+    key = f"answer_waiters:{task_id}"
+    waiters = _review_waiters(task_id)
+    if not any(r["chat"] == chat and r["need"] == need for r in waiters):
+        waiters.append({"who": who, "need": need, "chat": chat,
+                        "group": group, "thread": thread})
+        store.kv_set(key, json.dumps(waiters))
+
+
+def _review_waiters(task_id: int) -> list[dict]:
+    try:
+        waiters = json.loads(store.kv_get(f"answer_waiters:{task_id}") or "[]")
+    except (ValueError, TypeError):
+        return []
+    return [w for w in waiters if isinstance(w, dict)] if isinstance(waiters, list) else []
+
+
+def _review_origin(task_id: int | None) -> dict:
+    if not task_id:
+        return {}
+    try:
+        origin = json.loads(store.kv_get(f"review_origin:{task_id}") or "{}")
+    except (ValueError, TypeError):
+        return {}
+    return origin if isinstance(origin, dict) else {}
+
+
+async def review_is_current(origin: dict) -> bool:
+    from . import review
+    try:
+        current, good = await review.revision(origin["ref"])
+        return good and current == origin["revision"]
+    except (RuntimeError, ValueError, KeyError) as exc:
+        store.record_outcome("review", "verification failed",
+                             subject=str(origin.get("ref", ""))[:80], detail=str(exc)[:200])
+        return False

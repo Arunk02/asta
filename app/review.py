@@ -24,6 +24,7 @@ not an instruction to go and make one.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from pathlib import Path
 
@@ -125,6 +126,32 @@ def pr_target(pr: str) -> tuple[str, str]:
             if found.group(3) else (found.group(4), found.group(5), found.group(6))
         return number, f"{owner}/{repo}"
     return str(pr or "").strip().lstrip("#"), ""
+
+
+async def revision(pr: str) -> tuple[str, bool]:
+    """Exact repository, head commit and CI state for a review cache lookup.
+
+    No bare PR number is accepted: numbers collide across repositories. GitHub
+    errors are propagated rather than treating unknown state as a cache hit.
+    """
+    number, target = pr_target(pr)
+    if not target or not number.isdigit():
+        raise ValueError("a full owner/repo pull request link is required")
+    rc, out = await _gh(Path.home(), "pr", "view", number, "-R", target, "--json",
+                        "headRefOid,state,isDraft,statusCheckRollup", timeout=25)
+    if rc:
+        raise RuntimeError(f"could not verify {target}#{number}: {out.strip()[:200]}")
+    data = json.loads(out)
+    head = data.get("headRefOid") or ""
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", head):
+        raise RuntimeError(f"{target}#{number} has no verified head commit")
+    checks = sorted((c.get("name") or c.get("context") or "",
+                     (c.get("conclusion") or c.get("state") or "").upper())
+                    for c in data.get("statusCheckRollup") or [])
+    fingerprint = hashlib.sha256(json.dumps(checks).encode()).hexdigest()[:16]
+    good = (data.get("state") == "OPEN" and not data.get("isDraft") and bool(checks)
+            and all(state in ("SUCCESS", "NEUTRAL", "SKIPPED") for _, state in checks))
+    return f"{target.lower()}#{number}@{head.lower()}:{fingerprint}", good
 
 
 def _linked_recently(number: str, days: float = 7) -> str:
@@ -231,7 +258,7 @@ async def gather(pr: str, workspace: str = "", repo: str = "") -> dict:
     number, where, cwd = _where(pr, workspace, repo)
     rc, out = await _gh(cwd, "pr", "view", number, *where, "--json",
                         "number,title,author,body,baseRefName,headRefName,url,"
-                        "additions,deletions,changedFiles,files,state,isDraft,"
+                        "additions,deletions,changedFiles,files,state,isDraft,headRefOid,"
                         "headRepositoryOwner,headRepository")
     if rc != 0:
         raise RuntimeError(f"gh pr view failed: {out[:300]}")
@@ -244,6 +271,10 @@ async def gather(pr: str, workspace: str = "", repo: str = "") -> dict:
         diff = f"(diff unavailable: {diff[:200]})"
     rc, checks = await _gh(cwd, "pr", "checks", number, *where, "--json", "name,state")
     meta["checks"] = json.loads(checks) if rc == 0 and checks.strip() else []
+    if meta.get("url"):
+        current, _ = await revision(meta["url"])
+        if meta.get("headRefOid", "").lower() != current.rsplit("@", 1)[-1].split(":")[0]:
+            raise RuntimeError(f"PR #{number} changed while its diff was being read; review again")
     meta["diff"] = diff
     meta["repo_dir"] = str(cwd)
     meta["target"] = (where[1] if where else
@@ -392,7 +423,8 @@ async def brief(pr: str, workspace: str, repo: str = "") -> tuple[str, dict]:
     header = (
         f"PR #{meta['number']}: {meta['title']}\n"
         f"Author: {(meta.get('author') or {}).get('login', '?')} · "
-        f"{meta.get('headRefName')} → {meta.get('baseRefName')} · "
+        f"{meta.get('headRefName')} → {meta.get('baseRefName')} "
+        f"({(meta.get('headRefOid') or '')[:12]}) · "
         f"{meta.get('changedFiles', 0)} files, +{meta.get('additions', 0)}/"
         f"-{meta.get('deletions', 0)}"
         f"{' · DRAFT' if meta.get('isDraft') else ''}\n{meta.get('url', '')}\n\n"

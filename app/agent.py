@@ -1515,12 +1515,39 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
 
     Call this at the end of every review. Notes that stay in your answer reach
     nobody — that is the failure this path exists to fix."""
-    from . import offers, review
+    from . import offers, review, capabilities, store
+    import json
     findings = review.parse_findings(notes)
     action = review.verdict_of(notes)
     if not findings and action != "approve":
         return ("No finding named a file and a line, so there is nothing to attach. "
                 "Write each point as `path/to/File.ext:line — what is wrong → what to do`.")
+    task_id = capabilities.FROM_TASK.get()
+    try:
+        origin = json.loads(store.kv_get(f"review_origin:{task_id}") or "{}") if task_id else {}
+    except ValueError:
+        origin = {}
+    number, target = review.pr_target(pr)
+    if origin:
+        if number != origin["ref"].rsplit("#", 1)[-1] or (
+                target and f"{target.lower()}#{number}" != origin["ref"]):
+            return "Not staged: this review names a different PR than the verified task."
+        pr = origin["ref"]
+        target = origin["ref"].rsplit("#", 1)[0]
+        try:
+            current, good = await review.revision(origin["ref"])
+        except (RuntimeError, ValueError) as exc:
+            return f"Not staged: could not verify the PR — {exc}"
+        if current != origin["revision"]:
+            return "Not staged: the PR head or CI changed while the review was running."
+    else:
+        try:
+            verified, good = await review.revision(pr)
+        except (RuntimeError, ValueError) as exc:
+            return f"Not staged: verify the full PR link first — {exc}"
+        origin = {"ref": verified.rsplit("@", 1)[0], "revision": verified}
+    if action == "approve" and not good:
+        return "Not staged: approval needs an open PR with successful CI checks."
     head = (notes or "").strip().splitlines()
     summary = next((line for line in head if line.upper().startswith("VERDICT")), "")
     blocking = [f for f in findings if f["blocking"]]
@@ -1528,15 +1555,15 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
                          for f in findings[:6])
     if len(findings) > 6:
         preview += f"\n• …and {len(findings) - 6} more"
-    number, target = review.pr_target(pr)
     where = f" in {target}" if target else ""
     verb = {"approve": "Approve", "comment": "Comment on",
             "request_changes": "Request changes on"}[action]
     offers.staged_write(
         "pr_review_inline",
         {"pr": pr, "workspace": workspace, "repo": repo, "action": action,
-         "body": summary, "comments": findings},
-        f"🔎 {verb} PR #{number}{where} — {len(findings)} inline comment(s)",
+         "body": summary, "comments": findings, "review_origin": origin},
+        f"🔎 {verb} PR #{number}{where} @ {origin['revision'].split('@')[-1][:12]} "
+        f"— {len(findings)} inline comment(s)",
         (summary + "\n\n" + preview).strip()[:900],
         f"Post this review on PR #{number} as you?", kind="pr_write")
     return (f"Staged a {action.replace('_', ' ')} review on PR #{number}: "

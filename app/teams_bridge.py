@@ -413,7 +413,16 @@ async def teams_page():
             # relaunches in ten minutes, each "no person match for 'Followed
             # threads'") costs seconds and the whole pooled session; going back
             # to the chat list costs one navigation.
-            if isinstance(exc, ActivityUnavailable):
+            if isinstance(exc, ActivityOffline):
+                try:
+                    await page.locator('button[aria-label^="Chat"]:visible').first.click(timeout=5000)
+                    if not await wait_for_rail(page, timeout=5):
+                        raise RuntimeError("chat rail did not return")
+                except Exception as restore_exc:
+                    store.record_outcome(
+                        "teams", "activity_restore_failed",
+                        detail=f"{type(restore_exc).__name__}: {str(restore_exc)[:120]}")
+            elif isinstance(exc, ActivityUnavailable):
                 try:
                     await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=30000)
                     await page.wait_for_selector(APP_MARKERS, timeout=15000)
@@ -1954,6 +1963,10 @@ class ActivityUnavailable(NotFound):
     goes home, it is not thrown away. 3 Oct: every miss relaunched Chrome."""
 
 
+class ActivityOffline(ActivityUnavailable):
+    """The app shell responds, but a live Teams connection could not be verified."""
+
+
 #: The Activity button — its label carries the shortcut ("Activity (⌃ ⇧ 1)").
 _ACTIVITY_BUTTON = 'button[aria-label^="Activity"]:visible'
 _ACTIVITY_LIST = '[data-tid="activity-list-container"], [data-tid="activity-feed-list-item"]'
@@ -1997,6 +2010,25 @@ def _activity_failure(state: dict, last: str) -> str:
             + (f"; dialogs {state['dialogs']}" if state.get("dialogs") else "") + ")")
 
 
+async def _activity_connected(page) -> bool:
+    """Check the server, not cached page markup or Chromium's online hint."""
+    from urllib.parse import urlsplit
+
+    url = urlsplit(page.url)
+    origin = f"{url.scheme}://{url.netloc}/"
+    try:
+        response = await page.context.request.get(
+            origin, headers={"Cache-Control": "no-store"},
+            params={"asta_connectivity": str(time.time_ns())},
+            max_redirects=0, timeout=5000)
+        try:
+            return response.ok and response.url.startswith(origin)
+        finally:
+            await response.dispose()
+    except Exception:
+        return False
+
+
 async def _open_activity(page) -> None:
     """Click through to the Activity feed, surviving Teams re-rendering under us.
 
@@ -2016,8 +2048,6 @@ async def _open_activity(page) -> None:
         if state.get("signin"):
             _activity_failure(state, "Teams is showing a sign-in page")
             raise RuntimeError("SESSION_EXPIRED: Teams is showing a sign-in page")
-        if state.get("offline"):
-            raise RuntimeError(_activity_failure(state, "Teams is offline"))
         if state.get("oops"):
             try:
                 await page.get_by_role("button", name="Retry").click(timeout=5000)
@@ -2043,14 +2073,24 @@ async def _open_activity(page) -> None:
                 last += f"; shortcut: {str(shortcut_exc)[:150]}"
         try:
             await page.wait_for_selector(_ACTIVITY_LIST, timeout=15000)
+            if state.get("offline") and not await _activity_connected(page):
+                raise ActivityOffline(_activity_failure(
+                    state, "Teams reports offline; the visible feed may be cached"))
+            if state.get("offline"):
+                store.record_outcome("teams", "offline_signal_false",
+                                     detail="Activity opened; Teams origin answered a live request")
             return
+        except ActivityOffline:
+            raise
         except Exception as exc:
             last = f"{last}; " if last else ""
             last += f"no feed: {str(exc)[:350]}"
             await asyncio.sleep(2 * (attempt + 1))
     state = await _page_state(page)
     problem = _activity_failure(state, last or "feed did not render")
-    if state.get("app") and not state.get("oops") and not state.get("offline"):
+    if state.get("app") and not state.get("oops"):
+        if state.get("offline"):
+            raise ActivityOffline(problem)
         raise ActivityUnavailable(problem)
     raise RuntimeError(problem)
 
@@ -2102,6 +2142,66 @@ _ACTIVITY_ROWS_JS = """() => {
 }"""
 
 
+_ACTIVITY_SCROLL_JS = """() => {
+    const root = document.querySelector('[data-tid="activity-list-container"]')
+        || document.querySelector('[data-tid="activity-feed-list-item"]');
+    const first = root && (root.querySelector('[role="listbox"]') || root);
+    for (let node = first; node; node = node.parentElement) {
+        if (node.scrollHeight <= node.clientHeight + 4) continue;
+        const before = node.scrollTop;
+        node.scrollTop += Math.max(200, node.clientHeight - 80);
+        return node.scrollTop > before;
+    }
+    return false;
+}"""
+
+ACTIVITY_BACKLOG_KEY = "teams_activity_backlog_anchor"
+
+
+class ActivityRows(list):
+    def __init__(self, rows: list[dict], *, complete: bool = True):
+        super().__init__(rows)
+        self.complete = complete
+
+
+async def _activity_catch_up(page, rows: list[dict], limit: int) -> ActivityRows:
+    """Walk a bounded virtualized feed until a previously processed row appears."""
+    raw = store.kv_get(ACTIVITY_BACKLOG_KEY) or store.kv_get(ACTIVITY_SEEN_KEY)
+    try:
+        seen = set(json.loads(raw)) if raw else set()
+    except (TypeError, ValueError):
+        seen = set()
+    if not seen or any(_activity_key(row["text"]) in seen for row in rows[:limit]):
+        store.kv_set(ACTIVITY_BACKLOG_KEY, "")
+        return ActivityRows(rows[:limit])
+    if len(rows) < 25 and not store.kv_get(ACTIVITY_BACKLOG_KEY):
+        return ActivityRows(rows[:limit])
+
+    rows = rows[:limit]
+    found = {_activity_key(row["text"]) for row in rows}
+    for _ in range(8):
+        if len(rows) >= limit or not await page.evaluate(_ACTIVITY_SCROLL_JS):
+            break
+        await asyncio.sleep(0.7)
+        batch = await page.evaluate(_ACTIVITY_ROWS_JS)
+        if not isinstance(batch, dict) or batch.get("valid") is not True:
+            break
+        for row in batch["rows"]:
+            key = _activity_key(row["text"])
+            if key not in found:
+                rows.append(row)
+                found.add(key)
+        if found & seen:
+            store.kv_set(ACTIVITY_BACKLOG_KEY, "")
+            return ActivityRows(rows[:limit])
+
+    if not store.kv_get(ACTIVITY_BACKLOG_KEY):
+        store.kv_set(ACTIVITY_BACKLOG_KEY, json.dumps(list(seen)))
+    store.record_outcome("teams", "activity_backlog_incomplete",
+                         detail=f"read {len(rows)} rows without reaching a previously seen row")
+    return ActivityRows(rows[:limit], complete=False)
+
+
 async def read_activity_rows(limit: int = 25) -> list[dict]:
     """Activity feed rows as {text, unread}, newest first. Zero LLM tokens.
 
@@ -2116,17 +2216,18 @@ async def read_activity_rows(limit: int = 25) -> list[dict]:
         if not isinstance(result, dict) or result.get("valid") is not True:
             raise ActivityUnavailable(_activity_failure(
                 await _page_state(page), "Activity rendered but its rows could not be read"))
+        rows = result["rows"]
+        collected = (await _activity_catch_up(page, rows, limit)
+                     if limit > 25 else ActivityRows(rows[:limit]))
         await _back_to_chat(page)
         store.kv_set("teams_session_ok", "1")
-        rows = result["rows"]
-        rows = rows[:limit]
         # If NOTHING is marked unread the selectors probably just missed on this
         # build — that is unknown, not "he has read everything". Saying unknown
         # keeps the old behaviour (push it) instead of going silent on him.
-        if rows and not any(r.get("unread") for r in rows):
-            for r in rows:
+        if collected and not any(r.get("unread") for r in collected):
+            for r in collected:
                 r["unread"] = None
-        return rows
+        return collected
 
 
 async def read_activity(limit: int = 25) -> list[str]:
@@ -2206,11 +2307,9 @@ _FEED_ONLY = ("missed call", "invited you", "updated", "reacted to")
 def duplicates_chat_watch(item: str) -> bool:
     """Would `chat_watch` deliver this same message, with better text?
 
-    Two readers over one surface is two notifications. Once chat_watch reads the
-    conversations directly it sees every message the feed describes — and sees the
-    actual sentence rather than the feed's truncated rendering — so the feed
-    stepping in as well is the duplication he hit: the same line from Glen
-    arriving twice, in two different shapes.
+    The chat reader does not open channels. Only a feed row explicitly naming
+    a chat with Arun can be safely left to it; an ambiguous mention stays in
+    Activity rather than being silently lost.
 
     Missed calls, invites and reactions are NOT messages in any thread, so they
     stay with the feed, which is the only thing that can see them.
@@ -2226,7 +2325,10 @@ def duplicates_chat_watch(item: str) -> bool:
         return False                      # the feed is the only reader; keep it all
     if any(k in t for k in _FEED_ONLY):
         return False
-    return any(k in t for k in _A_MESSAGE)
+    if "in a channel" in t or "in the channel" in t:
+        return False
+    return (bool(re.search(r"(?:^| — )in chat with you(?:$| — )", t))
+            and any(k in t for k in _A_MESSAGE))
 
 
 def _outlook_reading(within: float = 3600.0) -> bool:
@@ -2337,12 +2439,15 @@ async def activity_watch_loop() -> None:
         # …or sooner: the moment "Mentions" turns bold on the rail (chat_watch
         # sets the event), the feed is read — a channel @mention is not left
         # for the next five-minute look.
-        await _activity_wait(ACTIVITY_POLL_SECONDS)
+        retry_after = (min(ACTIVITY_POLL_SECONDS,
+                           min(300, 30 * 2 ** min(consecutive_failures - 1, 4)))
+                       if consecutive_failures else ACTIVITY_POLL_SECONDS)
+        await _activity_wait(retry_after)
         if (in_a_call() or not enabled() or not logged_in_once()
                 or store.kv_get("teams_session_ok") == "0"):
             continue
         try:
-            rows = await read_activity_rows()
+            rows = await read_activity_rows(limit=200)
         except Exception as exc:
             # Still swallowed — a transient DOM hiccup must not kill the loop.
             # But the REASON is kept now. This handler ran silently every five
@@ -2370,9 +2475,7 @@ async def activity_watch_loop() -> None:
                 await read_activity_rows()
                 return True
 
-            if "Teams is offline" in str(exc):
-                rungs = []
-            elif isinstance(exc, ActivityUnavailable):
+            if isinstance(exc, ActivityUnavailable):
                 rungs = [("retry_activity", verify_feed)]
             else:
                 rungs = repair_rungs()[:2]
@@ -2386,9 +2489,21 @@ async def activity_watch_loop() -> None:
             if repaired["healed"]:
                 mentioned().set()  # process the verified feed now, not five minutes later
             continue
-        consecutive_failures = 0
-        recovery.note_escalated("teams", False)
-        attention.note_scrape("teams")   # only on success — see attention.stale_sources
+        if getattr(rows, "complete", True):
+            consecutive_failures = 0
+            recovery.note_escalated("teams", False)
+            recovery.note_escalated("teams-activity-backlog", False)
+            attention.note_scrape("teams")
+        else:
+            consecutive_failures += 1
+            attention.note_scrape_error(
+                "teams", ActivityUnavailable("Activity backlog could not be verified"))
+            if consecutive_failures >= 3 and not recovery.already_escalated("teams-activity-backlog"):
+                recovery.note_escalated("teams-activity-backlog", True)
+                await notify.notify(
+                    "⚠️ Teams Activity is readable, but its older rows could not be "
+                    "checked after an interruption. Check channel mentions in Teams "
+                    "manually until the Activity backlog recovers.", "warn")
         if not rows:
             continue
         items = [r["text"] for r in rows]

@@ -13,6 +13,7 @@ Three guarantees, in the order they matter:
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -354,7 +355,26 @@ class _Page:
         self.opened = False
         self.chat = True
         self.navigated = []
+        self.probes = 0
+        self.url = "https://teams.cloud.microsoft/"
         page = self
+
+        class _Response:
+            ok = page.state.get("network", False)
+            url = page.state.get("network_url", page.url)
+
+            async def dispose(self):
+                pass
+
+        class _Request:
+            async def get(self, url, **kwargs):
+                page.probes += 1
+                return _Response()
+
+        class _Context:
+            request = _Request()
+
+        self.context = _Context()
 
         class _Loc:
             def __init__(self, sel):
@@ -615,14 +635,12 @@ def test_a_failed_chat_click_can_reload_without_losing_the_activity_read(monkeyp
     assert page.navigated == [teams_bridge.TEAMS_URL] and page.chat
 
 
-def test_an_offline_page_is_replaced_and_the_next_read_succeeds(monkeypatch):
-    offline = _Page(state={"offline": True})
-    online = _Page()
-    pages = iter((offline, online))
+def test_a_false_offline_signal_still_reads_the_activity_feed(monkeypatch):
+    offline = _Page(state={"offline": True, "network": True})
     discarded = []
 
     async def pooled():
-        return next(pages)
+        return offline
 
     async def discard(why=""):
         discarded.append(why)
@@ -630,11 +648,98 @@ def test_an_offline_page_is_replaced_and_the_next_read_succeeds(monkeypatch):
     monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
     monkeypatch.setattr(teams_bridge, "_discard_pool", discard)
     monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
-    with pytest.raises(RuntimeError, match="Teams is offline"):
-        asyncio.run(teams_bridge.read_activity_rows())
-    assert discarded and store.kv_get("teams_session_ok") != "1"
     assert asyncio.run(teams_bridge.read_activity_rows())[0]["text"] == "Sam mentioned you"
-    assert online.chat and store.kv_get("teams_session_ok") == "1"
+    assert offline.clicks == 1 and offline.probes == 1 and not discarded
+    assert offline.chat and store.kv_get("teams_session_ok") == "1"
+
+
+def test_a_cached_feed_during_real_offline_is_not_counted_as_a_read(monkeypatch):
+    offline = _Page(state={"offline": True, "network": False})
+    discarded = []
+
+    async def pooled():
+        return offline
+
+    async def discard(why=""):
+        discarded.append(why)
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    monkeypatch.setattr(teams_bridge, "_discard_pool", discard)
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    with pytest.raises(teams_bridge.ActivityOffline, match="visible feed may be cached"):
+        asyncio.run(teams_bridge.read_activity_rows())
+    assert offline.clicks == 1 and offline.probes == 1 and not discarded
+    assert offline.chat and store.kv_get("teams_session_ok") != "1"
+
+
+def test_a_login_redirect_does_not_verify_cached_activity(monkeypatch):
+    page = _Page(state={"offline": True, "network": True,
+                        "network_url": "https://login.microsoftonline.com/"})
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+
+    async def pooled():
+        return page
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    with pytest.raises(teams_bridge.ActivityOffline):
+        asyncio.run(teams_bridge.read_activity_rows())
+    assert page.probes == 1
+
+
+def test_activity_catches_up_past_the_first_25_rows(monkeypatch):
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    old = {"text": "Previously seen mention", "unread": True}
+    store.kv_set(teams_bridge.ACTIVITY_SEEN_KEY,
+                 json.dumps([teams_bridge._activity_key(old["text"])]))
+    first = [{"text": f"New mention {i}", "unread": True} for i in range(25)]
+    page = _Page(read_result={"valid": True, "rows": first})
+    original = page.evaluate
+    scrolled = False
+
+    async def evaluate(script, *args):
+        nonlocal scrolled
+        if script == teams_bridge._ACTIVITY_SCROLL_JS:
+            scrolled = True
+            return True
+        if script == teams_bridge._ACTIVITY_ROWS_JS and scrolled:
+            return {"valid": True, "rows": [first[-1], {"text": "New mention 25", "unread": True}, old]}
+        return await original(script, *args)
+
+    page.evaluate = evaluate
+
+    async def pooled():
+        return page
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    rows = asyncio.run(teams_bridge.read_activity_rows(limit=200))
+    assert len(rows) == 27 and rows.complete
+    assert rows[-1] == old
+    assert store.kv_get(teams_bridge.ACTIVITY_BACKLOG_KEY) == ""
+
+
+def test_unscannable_activity_backlog_is_reported_not_silently_cleared(monkeypatch):
+    monkeypatch.setattr(teams_bridge.asyncio, "sleep", _instant)
+    store.kv_set(teams_bridge.ACTIVITY_SEEN_KEY, json.dumps(["older-known-row"]))
+    page = _Page(read_result={"valid": True, "rows": [
+        {"text": f"New mention {i}", "unread": True} for i in range(25)]})
+    original = page.evaluate
+
+    async def evaluate(script, *args):
+        if script == teams_bridge._ACTIVITY_SCROLL_JS:
+            return False
+        return await original(script, *args)
+
+    page.evaluate = evaluate
+
+    async def pooled():
+        return page
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    rows = asyncio.run(teams_bridge.read_activity_rows(limit=200))
+    assert len(rows) == 25 and not rows.complete
+    assert store.kv_get(teams_bridge.ACTIVITY_BACKLOG_KEY) == '["older-known-row"]'
+    assert any(r["outcome"] == "activity_backlog_incomplete"
+               for r in store.recent_outcomes(5))
 
 
 def test_a_broken_app_shell_is_not_kept_as_a_healthy_browser(monkeypatch):
@@ -679,7 +784,7 @@ def test_failed_activity_repair_must_recheck_the_feed_not_just_login(monkeypatch
 
 @pytest.mark.parametrize("failure, expected_rungs", [
     (teams_bridge.ActivityUnavailable("feed selector changed"), ["retry_activity"]),
-    (RuntimeError("Teams is offline"), []),
+    (teams_bridge.ActivityOffline("Teams is offline"), ["retry_activity"]),
     (RuntimeError("Teams app shell not ready"), ["recycle", "restart"]),
 ])
 def test_activity_failures_never_trigger_profile_repair(monkeypatch, failure, expected_rungs):
@@ -694,7 +799,7 @@ def test_activity_failures_never_trigger_profile_repair(monkeypatch, failure, ex
             raise Finished
         attempts.append(seconds)
 
-    async def fail_read():
+    async def fail_read(limit=25):
         raise failure
 
     async def ladder(source, rungs, stale_polls, **kwargs):
@@ -726,7 +831,7 @@ def test_confirmed_sign_in_stops_polls_and_reports_relogin(monkeypatch):
         if checked:
             raise Finished
 
-    async def fail_read():
+    async def fail_read(limit=25):
         raise RuntimeError("SESSION_EXPIRED: Teams is showing a sign-in page")
 
     async def check():
@@ -766,7 +871,7 @@ def test_a_repaired_activity_feed_is_read_again_without_waiting_for_the_next_pol
         if len(reads) == 2:
             raise Finished
 
-    async def read():
+    async def read(limit=25):
         reads.append(True)
         if len(reads) == 1:
             raise teams_bridge.ActivityUnavailable("transient feed failure")
@@ -864,5 +969,11 @@ async def test_activity_reader_distinguishes_real_rows_empty_feed_and_broken_mar
 
             await page.set_content("<div>Oops, app failed to load</div>")
             assert (await teams_bridge._page_state(page))["oops"]
+
+            await page.set_content("""<div data-tid="activity-list-container"
+                style="height:40px;overflow-y:auto">
+                <div role="listbox"><div style="height:300px">Older activity</div></div>
+                </div>""")
+            assert await page.evaluate(teams_bridge._ACTIVITY_SCROLL_JS)
         finally:
             await browser.close()

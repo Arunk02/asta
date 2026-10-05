@@ -298,7 +298,7 @@ _TASK_NON_CODE_EDIT = re.compile(
 _TASK_EXTERNAL_DELIVERY = re.compile(
     r"\b(?:send|share|notify|inform|tell)\s+(?:(?:it|this|the\s+(?:pr|link|result))\s+)?"
     r"(?:to|with)\b", re.I)
-_CI_SUBJECT = re.compile(r"\b(?:ci|checks?|builds?|pipelines?|workflows?)\b", re.I)
+_CI_SUBJECT = re.compile(r"\b(?:ci|checks|builds?|pipelines?|workflows?)\b", re.I)
 _CI_HISTORY = re.compile(
     r"\b(?:why|reason|root cause|histor(?:y|ical)|previous|earlier|"
     r"intermittent|flak(?:e|es|y)|fail(?:ed|ing|ure|ures)?|logs?)\b", re.I)

@@ -38,6 +38,18 @@ def conversation():
     return store.create_conversation(model="claude_cli", workspace="booking")
 
 
+def test_checking_an_unrelated_subject_is_not_the_running_tasks_ci():
+    conv = conversation()
+    task = store.create_task("Booking fix", "code", "fix", "booking")
+    store.update_task(task["id"], status="running")
+    tasks.link_task(conv["id"], task["id"])
+
+    assert frontdesk.ci_inquiry("check the consumer lag on the AP side") == (False, False)
+    assert main._task_inquiry_target(conv["id"], "check the consumer lag on the AP side") is None
+    assert frontdesk.ci_inquiry("check the CI and PR checks") == (True, False)
+    assert main._task_inquiry_target(conv["id"], "check the CI") == task["id"]
+
+
 @pytest.mark.asyncio
 async def test_named_ci_questions_do_not_restart_a_shipped_worker(monkeypatch):
     conv = conversation()

@@ -99,6 +99,7 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     let synth = AVSpeechSynthesizer()
     var speaking = false
     var onDone: (() -> Void)?
+    private var currentText = ""
     // Lines wait their turn: "Let me check." is not cut off by the answer.
     private var waiting: [(String, Data?, Bool)] = []
 
@@ -181,20 +182,23 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
 
     private func play(text: String, audio: Data?, chime: Bool) {
         speaking = true                     // from the chime on: the next line queues
+        currentText = text
         let go = {
             guard self.speaking else { return }    // interrupted during the chime
             if let audio = audio, let p = try? AVAudioPlayer(data: audio) {
                 self.player = p
                 p.delegate = self
                 p.volume = self.ducked ? 0.15 : 1.0
-                p.play()
-                log("saying: \(text.prefix(400))")
+                if p.play() {
+                    log("saying: \(text.prefix(400))")
+                } else {
+                    log("voice playback did not start — using Mac speech")
+                    self.player = nil
+                    self.useMacVoice(text)
+                }
             } else {
                 // No Asta voice (Voicebox down): the Mac's own, never silence.
-                self.synth.speak(AVSpeechUtterance(string: text))
-                DispatchQueue.main.asyncAfter(deadline: .now() + Double(text.count) / 14.0 + 0.5) {
-                    self.finished()
-                }
+                self.useMacVoice(text)
             }
         }
         if chime {
@@ -202,6 +206,13 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: go)
         } else {
             go()
+        }
+    }
+
+    private func useMacVoice(_ text: String) {
+        synth.speak(AVSpeechUtterance(string: text))
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(text.count) / 14.0 + 0.5) {
+            self.finished()
         }
     }
 
@@ -213,6 +224,13 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        guard self.player === player else { return }
+        if !flag && speaking {
+            log("voice playback failed — using Mac speech")
+            self.player = nil
+            useMacVoice(currentText)
+            return
+        }
         finished()
     }
 
@@ -386,6 +404,7 @@ final class Ears {
     }
     lazy var recognizer = Recognizer(queue: queue)
     var onBargeIn: (() -> Void)?
+    var onInputError: ((String) -> Void)?
     /// He started talking (true), or a sound too short to be speech ended (false).
     /// Asta holds a half-said turn while he talks instead of answering the half.
     var onSpeaking: ((Bool) -> Void)?
@@ -411,6 +430,7 @@ final class Ears {
     private var peakDb: Float = -120
     private var lastReport = Date()
     private var openedAt = Date()
+    private var lastGoodAudioAt = Date.distantPast
     var useVoiceProcessing = true
     private var retriedProcessing = false
 
@@ -426,6 +446,7 @@ final class Ears {
         let inFormat = input.outputFormat(forBus: 0)
         log("mic format: \(inFormat.sampleRate) Hz, \(inFormat.channelCount) ch, voice processing \(useVoiceProcessing)")
         openedAt = Date()
+        queue.sync { lastGoodAudioAt = .distantPast }
         peakDb = -120
         // Echo cancelling hands over 9 channels on a Mac; the first is the
         // cleaned voice. One channel goes to the converter — a 9-to-1 convert
@@ -440,6 +461,25 @@ final class Ears {
             try engine.start()
             running = true
             log("mic open")
+            let opened = openedAt
+            queue.asyncAfter(deadline: .now() + 8) { [weak self] in
+                guard let self = self, self.lastGoodAudioAt < opened else { return }
+                DispatchQueue.main.async {
+                    guard self.running, self.openedAt == opened else { return }
+                    if self.useVoiceProcessing && !self.retriedProcessing {
+                        log("mic produced no usable audio — retrying without voice processing")
+                        self.stop()
+                        self.engine.reset()
+                        self.useVoiceProcessing = false
+                        self.retriedProcessing = true
+                        self.start()
+                    } else {
+                        log("mic produced no usable audio after retry — stopping")
+                        self.stop()
+                        self.onInputError?("Microphone input produced no usable audio after retry")
+                    }
+                }
+            }
         } catch {
             input.removeTap(onBus: 0)
             log("mic failed: \(error)")
@@ -498,6 +538,7 @@ final class Ears {
         for s in frames { let f = Float(s) / 32768; sum += f * f }
         let rms = sqrt(sum / Float(max(frames.count, 1)))
         let db = 20 * log10(max(rms, 1e-6))
+        if db > -90 { lastGoodAudioAt = Date() }
         let ms = Double(frames.count) / rate * 1000
         peakDb = max(peakDb, db)
         if Date().timeIntervalSince(lastReport) > 3 {
@@ -641,6 +682,9 @@ final class App: NSObject, NSApplicationDelegate {
         ears.onBargeIn = { [weak self] in
             self?.mouth.duck()
             self?.link.send(["type": "barge"])
+        }
+        ears.onInputError = { [weak self] reason in
+            self?.link.send(["type": "mic_error", "reason": reason])
         }
         link.onState = { [weak self] _ in self?.redraw() }
         link.onMessage = { [weak self] msg in self?.handle(msg) }

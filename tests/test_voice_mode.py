@@ -323,6 +323,13 @@ def test_the_websocket_wants_the_token_and_speaks_the_protocol(monkeypatch):
     from fastapi.testclient import TestClient
     monkeypatch.setenv("ASTA_TOKEN", "t0k")
     vm._STATE.update(speaker=False, mic=False, helper=None)
+    notices = []
+
+    async def notify_mic_error(text, *args, **kwargs):
+        notices.append(text)
+        return {}
+
+    monkeypatch.setattr(notify, "notify", notify_mic_error)
     client = TestClient(main.app)
     with pytest.raises(Exception):
         with client.websocket_connect("/ws/voice-mode?token=wrong") as ws:
@@ -346,6 +353,11 @@ def test_the_websocket_wants_the_token_and_speaks_the_protocol(monkeypatch):
         assert heard == {"type": "heard", "text": "what is pending", "did": "dry"}
         ws.send_text(json.dumps({"type": "locked"}))
         assert json.loads(ws.receive_text())["mic"] is False, "screen locked: mic off"
+        ws.send_text(json.dumps({"type": "toggle", "what": "mic"}))
+        assert json.loads(ws.receive_text())["mic"] is True
+        ws.send_text(json.dumps({"type": "mic_error", "reason": "no audio after retry"}))
+        assert json.loads(ws.receive_text())["mic"] is False, "failed input: mic off"
+        assert notices and "no audio reached Asta" in notices[0]
     assert vm.state()["helper"] is False
     vm._STATE.update(speaker=False, mic=False, helper=None)
 
@@ -366,6 +378,7 @@ def test_the_menu_bar_helper_builds(tmp_path):
     assert "setVoiceProcessingEnabled(useVoiceProcessing)" in src, "echo cancelling on the input"
     assert "firstChannel" in src, "the 9-channel echo-cancelled input is reduced to its first channel"
     assert "reopening the mic without echo cancelling" in src, "and falls back when it cannot start"
+    assert "mic produced no usable audio after retry" in src, "no input frames must stop the mic"
     assert "AVSpeechSynthesizer" in src, "the Mac's voice when Asta's is down"
 
 

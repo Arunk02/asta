@@ -1397,8 +1397,8 @@ async def voice_check() -> str:
         return f"🎙 Cannot be heard — {r['error']}"
     peak = r.get("peak")
     if r.get("heard"):
-        return (f"🎙 Audio reaches the call: peak {peak:.4f} on "
-                f"{r.get('label') or r.get('device')}. Speaking works.")
+        return (f"🎙 Synthetic audio reaches the browser call track: peak {peak:.4f} on "
+                f"{r.get('label') or r.get('device')}. Actual call audio is not verified.")
     return (f"🎙 SILENT — the browser got a track labelled "
             f"{r.get('label') or r.get('device')!r} and every sample was zero "
             f"(peak {peak}). Anything Asta says will not be transmitted. This is "

@@ -1622,6 +1622,18 @@ async def serve(ws) -> None:
             elif kind == "locked":
                 if _STATE["mic"]:
                     await set_mode(mic=False, why="screen locked")
+            elif kind == "mic_error":
+                if _STATE["mic"]:
+                    reason = str(msg.get("reason") or "Microphone input failed")[:200]
+                    await set_mode(mic=False, why=reason)
+                    from . import notify
+                    try:
+                        await notify.notify(
+                            "🎙 Mic stopped — no audio reached Asta. Check the Mac microphone "
+                            "and restart it with ⌃⌥M.", "voice", urgency="direct", considered=True)
+                    except Exception as exc:
+                        from . import quiet
+                        quiet.note("voice.mic_error_notify", exc)
             elif kind == "hello":
                 await _to_helper({"type": "state", **state(), "why": "hello"})
     except Exception:                                          # noqa: BLE001

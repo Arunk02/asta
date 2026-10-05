@@ -187,7 +187,7 @@ def test_a_card_shows_the_timeline():
 
 @pytest.mark.parametrize("text,named,want", [
     ("check the consumer lag on the AP side", False, "ambiguous"),   # never folded on a guess
-    ("check the consumer lag on the AP side", True, "augment"),      # he named the job
+    ("check the consumer lag on the AP side", True, "ambiguous"),    # a name alone cannot restart it
     ("also cover the amend path", False, "augment"),                 # the rule says addition
     ("stop, wrong repo", False, "redirect"),
     ("what's failing?", True, "independent"),                        # a question, even if named

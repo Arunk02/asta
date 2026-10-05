@@ -164,10 +164,11 @@ _TABLE: tuple[Capability, ...] = (
                     "Use it instead of asking 'shall I?' in prose — prose is lost when the "
                     "turn ends. Not for anything leaving the chat: that is prepare_to_send."),
     Capability("prepare_to_send", "loop",
-               http='POST /api/loop/prepare-send {"what":"…","to":"…","channel":"teams|email|jira|pr|chat"}',
+               http='POST /api/loop/prepare-send {"what":"…","to":"…","channel":"teams|email|pr|chat"}',
                note="The ONLY approved way to send on Arun's behalf: it STAGES the draft "
-                    "and asks him to confirm — nothing goes out until he says yes. Never "
-                    "send outward through any other tool without staging it here first."),
+                    "and asks him to confirm — nothing goes out until he says yes. "
+                    "Jira is NOT a send channel: use jira_comment / jira_transition, "
+                    "which stage recorded operations for their own confirmation."),
     # --- workspace / code context -------------------------------------------
     Capability("resolve_context", "workspace",
                http="GET /api/workspaces/{workspace}/resolve?q={question}",
@@ -426,11 +427,17 @@ _TABLE: tuple[Capability, ...] = (
                     "stage it. A chat turn cannot run gh — this is how the PR changes."),
     Capability("refine_task", "tasks", http='POST /api/tasks/{id}/refine {"text":"…"}',
                write=True,
-               note="THE tool for any comment on work a task already delivered — a "
-                    "correction, 'also handle X', a review comment, a red PR build. "
+               note="For explicit implementation changes to work already delivered — "
+                    "a correction, 'also handle X', or a request to FIX a red PR build. "
+                    "Never use for a CI question, status check, or failure analysis: "
+                    "read the linked PR with task_ci_report instead. "
                     "NEVER spawn a new task for feedback: refine continues the original "
                     "task in its own session, so it keeps everything it already worked "
                     "out. A new task would re-derive it all and reimplement the change."),
+    Capability("task_ci_report", "tasks", http="GET /api/tasks/{id}/ci?historical=true|false",
+               note="Read current checks and review state for a task's linked PR; "
+                    "historical=true also checks past workflow runs and failed logs. "
+                    "Read-only: never resumes the code worker or repeats DONE."),
     Capability("task_pr_status", "tasks", http="GET /api/tasks/prs",
                note="Where shipped work stands — CI, review, merged or not. Use it for "
                     "'what's pending', 'did that merge', 'any PR blocked'."),
@@ -519,6 +526,7 @@ SIDE_READS = frozenset({
     "outlook_mail", "outlook_meetings", "meeting_prep", "meeting_recap",
     "debug_stack_health", "check_teams_selectors", "answer_quality",
     "list_background_tasks", "task_result", "list_tracked", "task_pr_status",
+    "task_ci_report",
     "list_my_reminders", "health_check", "ci_status", "trace_report",
     "token_audit", "quality_report",
 })

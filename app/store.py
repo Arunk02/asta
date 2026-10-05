@@ -596,6 +596,18 @@ def list_ui_messages(conv_id: str) -> list[dict]:
     return out
 
 
+def latest_send_prompt(conv_id: str) -> dict | None:
+    """Most recent draft confirmation actually shown in this conversation."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT content, created_at FROM ui_messages "
+            "WHERE conv_id=? AND role='assistant' "
+            "AND json_extract(meta, '$.via')='loop-confirm-send' "
+            "ORDER BY id DESC LIMIT 1", (conv_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 # --- usage -------------------------------------------------------------------
 
 def add_usage(conv_id: str, model: str, input_tokens: int, output_tokens: int,

@@ -269,16 +269,82 @@ def is_question(text: str) -> bool:
     return asks and not _CHANGES.search(t)
 
 
+_TASK_LEAD = re.compile(r"^\s*(?:task\s*#?\s*|#)?\d{1,5}\b[\s:,.—-]*", re.I)
+_TASK_EDIT = re.compile(
+    r"^\s*(?:(?:please|pls|also|and|can you|could you)\s+)*"
+    r"(?:fix|implement|change|modify|edit|refactor|add|remove|replace|"
+    r"update(?!\s+(?:me|on|about|of|with)\b)|correct|repair|"
+    r"rework|cover|handle|continue|resume)\b"
+    r"|\b(?:then|and|please|need you to)\s+"
+    r"(?:fix|implement|change|modify|edit|add|remove|"
+    r"update(?!\s+(?:me|on|about|of|with)\b)|rework)\b"
+    r"|\bfix\s+(?:it|this|the\s+(?:code|test|failure|bug))\b", re.I)
+_TASK_READ = re.compile(
+    r"\b(?:ci|checks?|builds?|pipelines?|workflows?|status|progress|"
+    r"updates?|check|inspect|verify|review|analys[ei]s|analyse|analyze|"
+    r"investigate|trace|debug|explain|why|reason|root cause|"
+    r"fail(?:ed|ing|ure|ures)?|flak(?:e|es|y)|history|logs?)\b", re.I)
+_TASK_OTHER_ACTION = re.compile(
+    r"^\s*(?:(?:please|can you|could you)\s+)*"
+    r"(?:approve|send|post|merge|ship|push|commit|notify|tell|inform|"
+    r"rerun|re-run|retry|deploy|release|cancel|stop|schedule|"
+    r"review\s+(?:the\s+)?(?:pr|pull request))\b", re.I)
+_TASK_NON_CODE_EDIT = re.compile(
+    r"\b(?:update|change|edit|add|remove)\s+(?:(?:the|my|a)\s+)?"
+    r"(?:pr\b(?!\s+(?:ci|checks?|builds?|pipelines?|workflows?)\b)|"
+    r"pull request|(?:jira|bug)\s+(?:ticket|issue|transition|comment)|"
+    r"transition|comment|message|reply)\b",
+    re.I)
+_TASK_EXTERNAL_DELIVERY = re.compile(
+    r"\b(?:send|share|notify|inform|tell)\s+(?:(?:it|this|the\s+(?:pr|link|result))\s+)?"
+    r"(?:to|with)\b", re.I)
+_CI_SUBJECT = re.compile(r"\b(?:ci|checks?|builds?|pipelines?|workflows?)\b", re.I)
+_CI_HISTORY = re.compile(
+    r"\b(?:why|reason|root cause|histor(?:y|ical)|previous|earlier|"
+    r"intermittent|flak(?:e|es|y)|fail(?:ed|ing|ure|ures)?|logs?)\b", re.I)
+
+
+def task_intent(text: str) -> str:
+    """An explicit task reference supplies context, never permission to edit.
+
+    Returns 'edit', 'read', 'external', or 'ambiguous'. "Update me on CI"
+    is not an amendment; "update the PR" is an external operation, not code.
+    """
+    t = _TASK_LEAD.sub("", (text or "").strip())
+    if re.match(r"^(?:does|did|has|have|is|are|was|were|what|why|when|where|how)\b",
+                t, re.I):
+        return "read"
+    if (_TASK_OTHER_ACTION.match(t) or _TASK_NON_CODE_EDIT.search(t)
+            or _TASK_EXTERNAL_DELIVERY.search(t)):
+        return "external"
+    if _TASK_EDIT.search(t):
+        return "edit"
+    if _TASK_READ.search(t) or "?" in t:
+        return "read"
+    return "ambiguous"
+
+
+def ci_inquiry(text: str) -> tuple[bool, bool]:
+    """(about CI, asks about past failures) for a read-only task inquiry."""
+    t = text or ""
+    return bool(_CI_SUBJECT.search(t)), bool(_CI_HISTORY.search(t))
+
+
 # --- binding a message to a job ----------------------------------------------------------
 
 def interjection(text: str, named: bool) -> str:
     """How a message relates to a live job — decided by RULES, never by a brain.
 
-    Unnamed and unclear stays 'ambiguous': the message is answered on its own,
-    never folded in on a guess. Named and unclear goes to the job he named.
+    Unclear stays 'ambiguous', even when named: a task number identifies the
+    subject, but does not authorize resuming its implementation.
     """
     verdict = activity.classify_interjection(text)
-    if verdict == "ambiguous" and named:
+    intent = task_intent(text)
+    if intent == "read" and verdict == "augment":
+        return "independent"
+    if intent == "external" and verdict == "augment":
+        return "ambiguous"
+    if verdict == "ambiguous" and named and intent == "edit":
         return "augment"
     return verdict
 
@@ -366,4 +432,3 @@ def instruction_only(text: str, cand) -> bool:
     if cand.kind != "note":
         return len(t) <= 200
     return len(t) <= 320 and bool(_STANDING.search(t))
-

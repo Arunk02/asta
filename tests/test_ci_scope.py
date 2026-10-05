@@ -70,6 +70,25 @@ def test_a_run_he_triggered_is_reported(monkeypatch):
     assert notes and "🔴" in notes[0]
 
 
+def test_work_repo_filters_runs_by_office_account(monkeypatch):
+    monkeypatch.setenv("ASTA_GITHUB_WORK_OWNERS", "example-work-org")
+    monkeypatch.setenv("ASTA_GITHUB_WORK_USER", "example-work-user")
+    users = []
+
+    async def fake(*args, timeout=30):
+        if args[0] == "pr":
+            return 0, "[]"
+        if "--user" in args:
+            users.append(args[args.index("--user") + 1])
+            return 0, json.dumps([{"databaseId": "2"}])
+        return 0, json.dumps([_run("2")])
+
+    monkeypatch.setattr(ci_watch, "_run_gh", fake)
+    monkeypatch.setattr(ci_watch, "my_login", _login)
+    asyncio.run(ci_watch._poll_repo("example-work-org/booking-service"))
+    assert users == ["example-work-user"]
+
+
 def test_a_red_pipeline_on_his_pr_is_reported_even_when_he_did_not_push(monkeypatch):
     """The gap the actor filter left: someone else pushes to his branch, his PR
     goes red, and he was the last to hear about it."""

@@ -327,9 +327,22 @@ async def test_newer_jira_prompt_cannot_approve_unrelated_pr_review(monkeypatch,
     sink = Sink()
     await main._dispatch(conv, "yes", sink, "whatsapp")
     assert "Nothing was posted" in sink.text
+    assert "Post review on PR #94?" in sink.text
     assert offers.pending().id == review.id
+    assert offers.pending().shown
     assert len(offers.waiting()) == 2
     assert store.get_task(tid)["status"] == "shipped"
+    sent = []
+
+    async def run(op):
+        sent.append(op)
+        return "Review posted"
+
+    monkeypatch.setattr(ops, "run", run)
+    await main._dispatch(conv, "yes", Sink(), "whatsapp")
+    assert sent == [review.op]
+    assert offers.pending().op["name"] == "jira_comment"
+    assert not offers.pending().shown
 
 
 @pytest.mark.asyncio

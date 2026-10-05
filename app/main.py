@@ -3855,13 +3855,20 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     open_offer = None if skip_new_gates else offers.pending()
     if open_offer and (user_text or "").strip():
         last_send = store.latest_send_prompt(cid) if _affirmation(user_text)[0] else None
-        if last_send and last_send["created_at"] > open_offer.created:
+        if last_send and last_send["created_at"] > open_offer.created \
+                and store.latest_offer_clarification(cid, open_offer.id) \
+                <= last_send["created_at"]:
             # A newer draft asked for "send" while this offer was waiting.
-            # A bare yes is not approval of the older (possibly unseen) offer.
-            await sink.send({"type": "note", "text": (
+            # This yes is not approval of the older offer. Put its actual
+            # question in front of him; only a subsequent yes can accept it.
+            line = (
                 "That confirmation was for a different draft. Nothing was "
-                f"posted for “{open_offer.subject}”. Its exact offer must be "
-                "shown and confirmed separately; no other queued action was run.")})
+                f"posted for “{open_offer.subject}”. Other queued actions were "
+                "not run either. The currently open question is:\n\n"
+                + open_offer.render())
+            await sink.send({"type": "note", "text": line})
+            store.add_ui_message(cid, "assistant", line,
+                                 {"via": "offer-clarification", "offer_id": open_offer.id})
             if channel == "web":
                 await sink.send({"type": "done", "tools": []})
             return None

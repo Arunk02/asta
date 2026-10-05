@@ -397,7 +397,8 @@ def test_a_call_asked_for_in_his_voice_sets_it_before_anything_is_said(monkeypat
     async def ready(*args, **kwargs):
         return ReadyMind()
 
-    from app import call_mind
+    from app import call_mind, main
+    monkeypatch.setattr(main, "_channel_model", lambda conv: "claude_cli")
     monkeypatch.setattr(call_mind, "start", ready)
 
     said = asyncio.run(conversation.converse("Vinish Kumar", "a test",

@@ -674,7 +674,8 @@ def test_a_limit_notice_is_never_spoken_as_a_reply():
 
 
 def test_nobody_is_rung_when_the_call_brain_is_out_of_its_window(monkeypatch):
-    from app import call_mind, conversation
+    from app import call_mind, conversation, main
+    monkeypatch.setattr(main, "_channel_model", lambda conv: "claude_cli")
     rang = []
 
     async def out_of_window(*a, **kw):
@@ -754,7 +755,8 @@ def test_the_greeting_cannot_be_interrupted_but_what_follows_can():
 
 
 def test_nobody_is_rung_when_the_voice_service_is_down(monkeypatch):
-    from app import call_mind, conversation, voice
+    from app import call_mind, conversation, main, voice
+    monkeypatch.setattr(main, "_channel_model", lambda conv: "claude_cli")
     monkeypatch.setenv("ASTA_CALL_RTC", "1")
     rang = []
 

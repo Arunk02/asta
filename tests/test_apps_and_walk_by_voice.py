@@ -370,6 +370,7 @@ def test_no_filler_while_asta_is_still_deciding_if_it_was_meant_for_her(helper, 
     """Voice bench, 3 Oct: "one sec, I'm on a call" → "One moment." The second
     look may still stay quiet; the filler waits until it is known to be for Asta."""
     from app import voice_talker
+    monkeypatch.setattr(vm, "_talker_selected", lambda: True)
     vm._STATE.update(speaker=True)
     monkeypatch.setattr(vm, "FILLER_SECONDS", 0.05)
     monkeypatch.setattr(vm, "in_conversation", lambda *a, **k: True)

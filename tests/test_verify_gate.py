@@ -22,6 +22,7 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
     # The check runs in the task's own tree (see tasks._verify_gate).
     monkeypatch.setattr(tasks, "task_cwd", lambda tid, ws: str(tmp_path))
+    monkeypatch.setattr(tasks, "code_cwd", lambda ws: str(tmp_path))
     t = store.create_task("verify me", "code", "do the thing", "tw")
     # The verify gate only ever runs on an IMPLEMENTED task, and implementing
     # only happens after Arun approves the plan — which since 11 September is

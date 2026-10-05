@@ -1001,7 +1001,7 @@ async def test_the_done_message_carries_the_review(tmp_path, monkeypatch):
     monkeypatch.setattr(tasks, "_verify_gate", lambda *a, **k: _false())
 
     await tasks._finish_code(t["id"], dict(t), "the work is done", hops=0)
-    done = [s for s in said if "DONE" in s]
+    done = [s for s in said if "Local implementation ready" in s]
     assert done, "no completion message was sent"
     assert "swallows the exception" in done[0], \
         "the task finished without telling him what its own review found"

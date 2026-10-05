@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS ui_messages (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ui_messages_conv ON ui_messages(conv_id);
+CREATE TABLE IF NOT EXISTS deferred_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conv_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deferred_messages_conv
+    ON deferred_messages(conv_id, status, id);
 CREATE TABLE IF NOT EXISTS usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conv_id TEXT NOT NULL,
@@ -463,6 +473,7 @@ def delete_conversation(conv_id: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM conversations WHERE id=?", (conv_id,))
         conn.execute("DELETE FROM ui_messages WHERE conv_id=?", (conv_id,))
+        conn.execute("DELETE FROM deferred_messages WHERE conv_id=?", (conv_id,))
 
 
 def update_conversation(conv_id: str, **fields) -> None:
@@ -488,9 +499,9 @@ def stale_undigested_conversations(idle_seconds: float = 1800) -> list[dict]:
 
 # --- UI messages -------------------------------------------------------------
 
-def add_ui_message(conv_id: str, role: str, content: str, meta: dict | None = None) -> None:
+def add_ui_message(conv_id: str, role: str, content: str, meta: dict | None = None) -> int:
     with _connect() as conn:
-        conn.execute(
+        row = conn.execute(
             "INSERT INTO ui_messages (conv_id, role, content, meta, created_at) VALUES (?,?,?,?,?)",
             (conv_id, role, content, json.dumps(meta or {}), time.time()),
         )
@@ -500,6 +511,63 @@ def add_ui_message(conv_id: str, role: str, content: str, meta: dict | None = No
         # per call by 11 September, and a 48-second wait for the first word.
         conn.execute("UPDATE conversations SET updated_at=?, digested=0 WHERE id=?",
                      (time.time(), conv_id))
+        return row.lastrowid
+
+
+def user_message_by_id(conv_id: str, message_id: int) -> str | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT content FROM ui_messages WHERE id=? AND conv_id=? AND role='user'",
+            (message_id, conv_id),
+        ).fetchone()
+    return row["content"] if row else None
+
+
+def enqueue_followup(conv_id: str, content: str, channel: str) -> int:
+    with _connect() as conn:
+        row = conn.execute(
+            "INSERT INTO deferred_messages (conv_id, content, channel, created_at) "
+            "VALUES (?,?,?,?)", (conv_id, content, channel, time.time()))
+        return row.lastrowid
+
+
+def claim_followup(conv_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM deferred_messages WHERE conv_id=? AND status='queued' "
+            "ORDER BY id LIMIT 1", (conv_id,)).fetchone()
+        if row:
+            conn.execute("UPDATE deferred_messages SET status='running' WHERE id=?",
+                         (row["id"],))
+    return dict(row) if row else None
+
+
+def finish_followup(message_id: int, status: str = "done") -> None:
+    if status not in ("done", "failed", "cancelled"):
+        raise ValueError(f"invalid deferred message status: {status}")
+    with _connect() as conn:
+        conn.execute("UPDATE deferred_messages SET status=? WHERE id=?",
+                     (status, message_id))
+
+
+def pending_followup_conversations() -> list[str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT conv_id FROM deferred_messages WHERE status='queued' "
+            "ORDER BY conv_id").fetchall()
+    return [r[0] for r in rows]
+
+
+def orphaned_followups() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM deferred_messages WHERE status='running'").fetchall()
+    return [dict(r) for r in rows]
+
+
+def cancel_followups(conv_id: str) -> None:
+    with _connect() as conn:
+        conn.execute("UPDATE deferred_messages SET status='cancelled' "
+                     "WHERE conv_id=? AND status='queued'", (conv_id,))
 
 
 def last_user_message_at() -> float:

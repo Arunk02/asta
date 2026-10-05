@@ -370,6 +370,8 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         lean = chat_tools()
         if lean and not copilot_cli.mcp_cli_enabled():
             cmd += ["--tools", lean]
+    if capabilities.READ_ONLY_TURN.get():
+        cmd += ["--disallowed-tools", "Bash"]
     # Native tools instead of curl, when enabled: Claude Code spawns Asta's MCP
     # server and calls capabilities as `mcp__asta__*` tools that forward to the
     # running server. Off by default — the curl path is the proven one, and this
@@ -385,7 +387,10 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         # per-conversation file on disk (each held a copy of the token and leaked
         # when a chat was deleted) and matches the Copilot path exactly.
         selected = tool_index.select_sticky(conv["id"], ranking_text)
-        cmd += ["--mcp-config", _json.dumps(mcp_server.config_entry(tools=selected, conv_id=conv["id"])),
+        cmd += ["--mcp-config", _json.dumps(mcp_server.config_entry(
+            tools=selected, conv_id=conv["id"],
+            read_only=capabilities.READ_ONLY_TURN.get(),
+            message_id=conv.get("_turn_message_id"))),
                 "--strict-mcp-config"]
     from . import agent as agent_mod
     model = agent_mod.tier_of("claude_cli")

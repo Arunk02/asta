@@ -262,7 +262,8 @@ def test_mcp_proxy_forwards_to_invoke(monkeypatch):
     assert sent["url"].endswith("/api/_invoke")
     # conv_id rides on every forwarded call — without it the capabilities that
     # read the conversation fail on the far side of this hop, and did.
-    assert sent["payload"] == {"tool": "health_check", "args": {}, "conv_id": "", "task_id": ""}
+    assert sent["payload"] == {"tool": "health_check", "args": {}, "conv_id": "",
+                               "task_id": "", "message_id": None, "read_only": False}
 
 
 # --- the conversation has to survive the hop ---------------------------------
@@ -347,12 +348,57 @@ def test_the_spawned_server_is_told_which_conversation_it_is_in():
 def test_both_cli_brains_pass_it():
     """One brain fixed and the other not is the per-brain drift that has caused
     this before — the same message reaching two different sets of rules."""
-    import inspect
-
     from app import claude_cli, copilot_cli
+    import inspect
     for mod in (claude_cli, copilot_cli):
         src = inspect.getsource(mod)
-        assert "config_entry(tools=selected, conv_id=" in src, mod.__name__
+        assert "mcp_server.config_entry(" in src and 'conv_id=conv["id"]' in src, mod.__name__
+        assert 'message_id=conv.get("_turn_message_id")' in src, mod.__name__
+
+
+def test_invoke_uses_exact_origin_not_the_latest_message(client, monkeypatch):
+    from types import SimpleNamespace
+    first = store.create_conversation("copilot", None)
+    second = store.create_conversation("copilot", None)
+    origin = store.add_ui_message(first["id"], "user", "tell Vinish")
+    store.add_ui_message(first["id"], "user", "tell Shabda")
+    store.add_ui_message(second["id"], "user", "tell someone else")
+    monkeypatch.setattr(capabilities, "get", lambda _: SimpleNamespace(
+        fn=capabilities.said_this_turn, write=False))
+
+    async def go():
+        async with client as c:
+            body = {"tool": "origin", "args": {}, "conv_id": first["id"],
+                    "message_id": origin}
+            r = await c.post("/api/_invoke", json=body)
+            assert r.status_code == 200 and r.json()["result"] == "tell Vinish"
+            body["conv_id"] = second["id"]
+            r = await c.post("/api/_invoke", json=body)
+            assert r.status_code == 400
+            assert capabilities.TURN_TEXT.get() == ""
+            assert capabilities.MCP_TURN.get() is False
+
+    asyncio.run(go())
+
+
+def test_read_only_mcp_turn_refuses_write_capability(client):
+    async def go():
+        async with client as c:
+            r = await c.post("/api/_invoke",
+                             json={"tool": "prepare_to_send", "args": {},
+                                   "read_only": True})
+            assert r.status_code == 403
+
+    asyncio.run(go())
+
+
+def test_side_session_only_exposes_actual_reads(monkeypatch):
+    from app import mcp_server
+    monkeypatch.setenv("ASTA_MCP_READ_ONLY", "1")
+    tools = asyncio.run(mcp_server.build_server().list_tools())
+    names = {t.name for t in tools}
+    assert "ci_status" in names and "teams_read_chat" in names
+    assert not {"prepare_to_send", "ask_user", "delegate_task", "set_reminder"} & names
 
 
 def test_every_conversation_dependent_capability_is_tested_across_the_hop():

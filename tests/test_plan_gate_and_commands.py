@@ -106,7 +106,7 @@ def test_an_approved_task_finishes_normally(quiet, monkeypatch):
     tasks.mark_approved(t["id"])
     asyncio.run(tasks._finish_code(t["id"], t, "Changed one line. Tests: 3 passed.", hops=0))
     assert store.get_task(t["id"])["status"] == "done"
-    assert any("DONE" in p for p in quiet)
+    assert any("Local implementation ready" in p and "Not shipped" in p for p in quiet)
 
 
 async def _false(*a, **k):

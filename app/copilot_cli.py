@@ -479,7 +479,12 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     if sk:
         parts.append(sk)
     port = os.environ.get("ASTA_PORT", "8321")
-    if mcp_cli_enabled():
+    if mcp_cli_enabled() and capabilities.READ_ONLY_TURN.get():
+        parts.append(
+            "This is a parallel read-only answer. Use only the available read tools "
+            "from Asta's MCP server. Do not send, delegate, schedule, stage, or edit "
+            "anything; the active implementation has its own separate session.")
+    elif mcp_cli_enabled():
         # Tools, descriptions and rules all arrive over MCP, so the ~2k-token
         # curl catalogue is dead weight — this is the orientation's biggest line.
         parts.append(
@@ -710,6 +715,8 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     if not capabilities.chat_may_write():
         for tool in _CHAT_DENY:
             cmd += ["--deny-tool", tool]
+    if capabilities.READ_ONLY_TURN.get():
+        cmd += ["--deny-tool", "shell"]
     # Native asta tools instead of curl, when enabled. Copilot takes the config
     # as inline JSON (its flag differs from Claude's --mcp-config). --allow-all-
     # tools above already clears the MCP tools. Kept in lockstep with the shared
@@ -721,7 +728,10 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
         # brains): the ~handful the message needs, or the full set when ambiguous.
         selected = tool_index.select_sticky(conv["id"], ranking_text)
         cmd += ["--additional-mcp-config",
-                _json.dumps(mcp_server.config_entry(tools=selected, conv_id=conv["id"]))]
+                _json.dumps(mcp_server.config_entry(
+                    tools=selected, conv_id=conv["id"],
+                    read_only=capabilities.READ_ONLY_TURN.get(),
+                    message_id=conv.get("_turn_message_id")))]
     model = os.environ.get("COPILOT_CLI_MODEL")
     if model:
         cmd += ["--model", model]

@@ -114,7 +114,33 @@ def test_a_code_task_plans_stops_at_the_gate_then_builds_on_approval(world, monk
     assert runner.manages(tid)
     assert [c["plan_only"] for c in brain.calls] == [True, False]
     assert brain.calls[1]["resume"] is True                 # the same session, continued
-    assert any("PLAN #" in p for p in world) and any("✅ DONE" in p for p in world)
+    assert any("PLAN #" in p for p in world) and any("Local implementation ready" in p for p in world)
+
+
+def test_approval_cannot_complete_blocked_release_work(world, monkeypatch):
+    _use(monkeypatch, Brain("Plan for develop and release/3.1.6\n\nPLAN READY",
+                            '```outcome\n{"kind":"blocked","summary":'
+                            '"release/3.1.6 branch not prepared"}\n```'))
+
+    async def go():
+        t = _spawn("update both develop and release/3.1.6")
+        tid = t["id"]
+        await _settle(tid)
+        tasks.reply(tid, "PLAN APPROVED")
+        await _settle(tid)
+        assert await runner.waiting_at(tid) == "verify"
+        before = len(world)
+        refusal = await tasks.approve(tid)
+        await asyncio.sleep(0)
+        assert "cannot mark it done" in refusal
+        assert _status(tid) == "awaiting_approval"
+        assert await runner.waiting_at(tid) == "verify"
+        assert len(world) == before
+        return tid
+
+    tid = asyncio.run(go())
+    assert not any("✅ DONE" in p for p in world)
+    assert store.get_task(tid)["pr_urls"] in (None, "")
 
 
 def test_feedback_at_the_gate_replans_in_the_same_session(world, monkeypatch):

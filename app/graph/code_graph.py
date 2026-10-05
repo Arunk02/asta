@@ -223,6 +223,8 @@ def after_wait_verify(state: JobState) -> str:
     ans = state.get("answer") or {}
     if ans.get("rejected"):
         return "end"
+    if (state.get("outcome") or {}).get("kind") in _STOPPING:
+        return "implement"
     return "complete" if ans.get("approved") else "fix"
 
 
@@ -418,14 +420,19 @@ async def park(state: JobState) -> dict:
         reason = f"still failing after {verify.max_rounds()} fix attempts"
         tail = state.get("verify_tail", "")
     store.kv_set(f"task_gate:{tid}", "verify")
+    store.kv_set(f"task_gate_blocked:{tid}", "1" if out.get("kind") in _STOPPING else "0")
     store.record_outcome("verify", "unresolved", subject=str(tid),
                          detail=f"{reason}: {state.get('verify_cmd', '')[:140]}")
     store.update_task(tid, status="awaiting_approval",
                       result=(state.get("text") or "") + "\n\n--- still not done ---\n" + tail)
+    instruction = (f"Give a direction to unblock it or 'reject task {tid}'. "
+                   "Approval alone cannot finish missing work."
+                   if out.get("kind") in _STOPPING else
+                   f"Reply with a hint, 'approve task {tid}' to accept as-is, or "
+                   f"'reject task {tid}'.")
     await notify.notify(
         f"🔴 #{tid} {t['title']} — {reason}:\n\n{tasks._phone_text(tail, 700)}\n\n"
-        f"Reply with a hint, 'approve task {tid}' to accept as-is, or "
-        f"'reject task {tid}'.", "task")
+        f"{instruction}", "task")
     return {}
 
 

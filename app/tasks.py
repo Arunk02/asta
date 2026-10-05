@@ -1955,11 +1955,14 @@ async def _already_pushed(task_id: int, t: dict) -> list[str]:
         rc, ahead = await repo_ops.git(repo, "git", "rev-list", "--count", "@{u}..HEAD")
         if rc != 0 or ahead.strip() != "0":
             return []
-        rc, url = await repo_ops.git(repo, "gh", "pr", "view", "--json", "url", "--jq", ".url",
-                                     timeout=60)
-        if rc != 0 or not url.strip().startswith("http"):
+        rc, head = await repo_ops.git(repo, "git", "rev-parse", "--abbrev-ref", "HEAD")
+        if rc != 0 or not head.strip():
             return []
-        urls.append(f"{repo.name}: {url.strip()}")
+        try:
+            url = await _verified_pr(repo, head.strip())
+        except RuntimeError:
+            return []
+        urls.append(f"{repo.name}: {url}")
     return urls
 
 
@@ -2221,13 +2224,13 @@ async def ship_as_told(task_id: int) -> None:
     try:
         await ship(task_id)
     except (ValueError, RuntimeError) as exc:
-        await notify.notify(f"❌ #{task_id}: finished, but I couldn't raise the PR — "
-                            f"{str(exc)[:300]}", "task", urgency="direct")
+        await notify.notify(f"❌ #{task_id}: not fully shipped — {str(exc)[:500]}",
+                            "task", urgency="direct")
 
 
 async def complete(task_id: int, t: dict, result: str) -> None:
     """The one way a code task is marked done and announced — both engines."""
-    from . import notify
+    from . import go, notify
     if (store.get_task(task_id) or {}).get("status") in _ALREADY_REPORTED:
         return
     # The branch the work is ACTUALLY on, read from git rather than from the name
@@ -2236,6 +2239,41 @@ async def complete(task_id: int, t: dict, result: str) -> None:
     # no upstream and unknown to Asta. `pr_urls` stayed empty on both tasks, so
     # nothing watched a PR or reported CI.
     landed = committed_so_far(task_id, t)
+    from . import worktrees
+    workspace = t.get("workspace")
+    if workspace and worktrees.exists(Path(code_cwd(workspace)), task_id) and not landed:
+        root = Path(task_cwd(task_id, workspace))
+        dirty = False
+        inspect_error = ""
+        for repo in worktrees.repos_in(root):
+            rc, changes = await repo_ops.git(repo, "git", "status", "--porcelain")
+            if rc:
+                inspect_error = f"Could not inspect {repo.name} for code changes: {changes[:150]}"
+                break
+            if changes.strip():
+                dirty = True
+                break
+        if not dirty and not await _already_pushed(task_id, t):
+            if not inspect_error and re.search(
+                r"\b(?:no (?:code )?changes? (?:needed|required)|"
+                r"already implemented)\b", result, re.I
+            ):
+                store.update_task(task_id, status="done", result=result,
+                                  finished_at=time.time())
+                await notify.notify(
+                    f"ℹ️ No change needed — #{task_id} {t['title']}\n\n"
+                    f"{_phone_text(result, 700)}\n\nNo local changes or PR to ship.",
+                    "task")
+                return
+            reason = (inspect_error or
+                      "The code task reported completion, but its worktree has no changes or verified PR.")
+            store.update_task(task_id, status="failed", result=result, error=reason,
+                              finished_at=time.time())
+            await notify.notify(
+                f"⚠️ #{task_id} {t['title']} — not completed: {reason} "
+                f"Reply with 'task {task_id}: continue the implementation' to retry "
+                f"this task in its own session.", "task")
+            return
     if landed:
         store.kv_set(f"task_landed:{task_id}", _json.dumps(landed))
         expected = (store.kv_get(f"task_branch:{task_id}") or "").strip()
@@ -2259,9 +2297,9 @@ async def complete(task_id: int, t: dict, result: str) -> None:
     waste = _audit_note(task_id)
     own = await _self_review(task_id, t, result)
     from . import prname
-    pushed = []
-    with contextlib.suppress(Exception):
-        pushed = await _already_pushed(task_id, t)
+    multi_base = bool(_BOTH.search(f"{t['title']}\n{t['prompt']}\n{go.words(task_id)}") and
+                      _RELEASE.search(f"{t['title']}\n{t['prompt']}\n{go.words(task_id)}"))
+    pushed = [] if multi_base else await _already_pushed(task_id, t)
     if pushed:
         # It is on origin and its PR exists: say that, not "nothing pushed — say
         # raise PR" underneath a report that opens "Pushed." (#185, 30 Sep).
@@ -2273,18 +2311,20 @@ async def complete(task_id: int, t: dict, result: str) -> None:
             + "\n".join("• " + prname.name_links(u) for u in pushed)
             + f"\nI'm watching its CI and will tell you how it ends.{waste}", "task")
         return
-    from . import go
     if go.enabled() and go.ships(task_id):
         # He already said "…and raise the PR". Asking "say ship" now would be
         # the second ask for one instruction.
         await notify.notify(
-            f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}{own}\n\n"
-            f"Raising the PR now, as you said.{waste}", "task")
+            f"🛠 Implementation ready — #{task_id} {t['title']}\n\n"
+            f"{_phone_text(result, 700)}{own}\n\n"
+            f"Raising the required PR{'s' if multi_base else ''} now, as you said; "
+            f"not calling them shipped until GitHub confirms.{waste}", "task")
         await ship_as_told(task_id)
         return
     await notify.notify(
-        f"✅ DONE — #{task_id} {t['title']}\n\n{_phone_text(result, 700)}{own}\n\n"
-        f"Diff is local only — nothing pushed. Say *raise PR* when you're happy, "
+        f"🛠 Local implementation ready — #{task_id} {t['title']}\n\n"
+        f"{_phone_text(result, 700)}{own}\n\n"
+        f"Not shipped — say *raise PR* when you're happy, "
         f"or just reply with changes and I'll continue THIS task rather than "
         f"starting a new one."
         f"{waste}", "task")
@@ -2526,6 +2566,15 @@ def reply(task_id: int, text: str) -> str:
     if t["kind"] != "code" or t["status"] != "awaiting_approval":
         raise ValueError(f"task #{task_id} is not a code task awaiting approval "
                          f"(kind={t['kind']}, status={t['status']})")
+    if _graph().manages(task_id) and store.kv_get(f"task_gate:{task_id}") == "verify":
+        approved = text.strip().upper().startswith("PLAN APPROVED")
+        if approved and store.kv_get(f"task_gate_blocked:{task_id}") == "1":
+            return (f"Task #{task_id} is blocked with unfinished work; approval cannot "
+                    "mark it done. Send a direction to unblock it or reject the task.")
+        store.update_task(task_id, status="running")
+        _graph().answer(task_id, {"approved": approved, "text": text})
+        return (f"Task #{task_id}: accepting the check failure as-is."
+                if approved else f"Task #{task_id}: continuing with your direction.")
     # A plan approved WITH amendments is still an approval. Exact-match meant
     # "PLAN APPROVED — but hold the PDF half" was scored as a rejection, run at
     # planning effort, and sent back for a whole extra planning round before it
@@ -2867,6 +2916,8 @@ async def approve(task_id: int) -> str:
         if store.kv_get(f"task_gate:{task_id}") == "context":
             return reply(task_id, "Your understanding is correct — proceed to "
                                   "discovery and planning.")
+        if store.kv_get(f"task_gate:{task_id}") == "verify":
+            return reply(task_id, "PLAN APPROVED")
         return reply(task_id, "PLAN APPROVED")
     if t["kind"] != "teams_draft" or t["status"] != "awaiting_approval":
         raise ValueError(f"task #{task_id} is not a draft awaiting approval "
@@ -2916,47 +2967,63 @@ async def _other_bases(task_id: int, t: dict, repo: Path, base: str) -> list[str
         if rc != 0:
             await repo_ops.git(repo, "git", "fetch", "origin", name, timeout=120)
             rc, _ = await repo_ops.git(repo, "git", "rev-parse", "--verify", f"origin/{name}")
-        if rc == 0:
-            found.append(name)
+        if rc != 0:
+            raise RuntimeError(f"{repo.name}: requested base {name} is not available on origin")
+        found.append(name)
     return found[:3]
 
 
 async def _port(repo: Path, cur: str, base: str, other: str) -> str:
     """Put this branch's commits onto `other` as a branch of its own, push it
-    and open its PR. Returns the PR url, or one line saying why not."""
+    and open its PR. A failed required port is never a successful shipment."""
     import tempfile
     branch = f"{cur}-{other.replace('/', '-')}"[:120]
     rc, commits = await repo_ops.git(repo, "git", "rev-list", "--reverse", f"{base}..HEAD")
     picks = commits.split()
     if rc != 0 or not picks:
-        return "(nothing to port)"
+        raise RuntimeError(f"{repo.name}: no commits to port from {base} onto {other}")
     where = Path(tempfile.mkdtemp(prefix="asta-port-")) / "wt"
     try:
         rc, out = await repo_ops.git(repo, "git", "worktree", "add", "-B", branch,
                                      str(where), f"origin/{other}", timeout=120)
         if rc != 0:
-            return f"(could not cut {branch}: {out[:160]})"
+            raise RuntimeError(f"{repo.name}: could not cut {branch}: {out[:160]}")
         rc, out = await repo_ops.git(where, "git", "cherry-pick", *picks, timeout=120)
         if rc != 0:
             await repo_ops.git(where, "git", "cherry-pick", "--abort")
-            return f"(does not apply cleanly on {other} — needs a hand: {out[:160]})"
+            raise RuntimeError(f"{repo.name}: does not apply cleanly on {other}: {out[:160]}")
         rc, out = await repo_ops.git(where, "git", "push", "-u", "origin", branch, timeout=300)
         if rc != 0:
-            return f"(push failed: {out[:160]})"
+            raise RuntimeError(f"{repo.name}: push to {other} failed: {out[:160]}")
         rc, out = await repo_ops.git(where, "gh", "pr", "create", "--fill", "--base", other,
                                      "--head", branch, timeout=300)
-        mu = re.search(r"https://github\.com/\S+/pull/\d+", out)
-        if mu:
-            return mu.group(0)
         if rc != 0 and "already exists" not in out:
-            return f"(pushed {branch}, PR failed: {out[:160]})"
-        rc, out = await repo_ops.git(where, "gh", "pr", "view", branch, "--json", "url", "--jq", ".url")
-        return out.strip() if rc == 0 else f"(pushed {branch})"
+            raise RuntimeError(f"{repo.name}: pushed {branch}, PR failed: {out[:160]}")
+        return await _verified_pr(where, branch, other, repo_name=repo.name)
     finally:
         await repo_ops.git(repo, "git", "worktree", "remove", "--force", str(where))
 
 
 _BRANCH_NAMED = re.compile(r"\b((?:feature|bugfix|hotfix|fix|release|chore)/[\w.\-/]+[\w])")
+
+
+async def _verified_pr(repo: Path, head: str, base: str = "",
+                       *, repo_name: str = "") -> str:
+    rc, raw = await repo_ops.git(repo, "gh", "pr", "view", head, "--json",
+                                 "url,headRefName,baseRefName", timeout=60)
+    if rc != 0:
+        raise RuntimeError(f"{repo.name}: could not verify PR for {head}: {raw[:180]}")
+    try:
+        pr = _json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{repo.name}: invalid PR receipt for {head}") from exc
+    url = pr.get("url") or ""
+    if (pr.get("headRefName") != head or
+            (base and pr.get("baseRefName") != base.removeprefix("origin/")) or
+            not re.fullmatch(r"https://github\.com/[^/]+/" +
+                             re.escape(repo_name or repo.name) + r"/pull/\d+", url)):
+        raise RuntimeError(f"{repo.name}: PR head/base/repository does not match {head}")
+    return url
 
 
 async def _push_named_branches(task_id: int, t: dict) -> list[str]:
@@ -2967,12 +3034,25 @@ async def _push_named_branches(task_id: int, t: dict) -> list[str]:
     names = list(dict.fromkeys(m.group(1).rstrip(".,;:)") for m in _BRANCH_NAMED.finditer(text)))
     if not names:
         return []
+    named_repos = {m.group(1) for m in re.finditer(
+        r"github\.com/[^/\s]+/([^/\s]+)/pull/\d+", t.get("prompt", ""), re.I)}
     try:
         root = Path(_cwd(t.get("workspace")))
     except Exception:                                          # noqa: BLE001
         return []
+    repos = _wt.repos_in(root)
+    named_repos.update(r.name for r in repos if re.search(
+        rf"(?<![\w-]){re.escape(r.name)}(?![\w-])",
+        f"{t.get('title', '')}\n{t.get('prompt', '')}", re.I))
+    if not named_repos and len(repos) != 1:
+        raise RuntimeError("existing PR target is ambiguous — name its repository")
+    if named_repos and not any(r.name in named_repos for r in repos):
+        raise RuntimeError(f"existing PR target {', '.join(sorted(named_repos))} "
+                           "is not in this workspace; no branch was pushed")
     out: list[str] = []
-    for repo in _wt.repos_in(root):
+    for repo in repos:
+        if named_repos and repo.name not in named_repos:
+            continue
         for b in names:
             rc, _ = await repo_ops.git(repo, "git", "rev-parse", "--verify", b)
             if rc != 0:
@@ -2980,11 +3060,18 @@ async def _push_named_branches(task_id: int, t: dict) -> list[str]:
             rc, ahead = await repo_ops.git(repo, "git", "rev-list", "--count", f"origin/{b}..{b}")
             if rc != 0 or not ahead.strip().isdigit() or int(ahead.strip()) == 0:
                 continue
+            url = await _verified_pr(repo, b)
+            requested_prs = set(re.findall(
+                r"\bPR\s*#?(\d+)\b|github\.com/[^/\s]+/[^/\s]+/pull/(\d+)",
+                f"{t.get('title', '')}\n{t.get('prompt', '')}", re.I))
+            expected = {num for pair in requested_prs for num in pair if num}
+            if expected and url.rsplit("/", 1)[-1] not in expected:
+                raise RuntimeError(f"{repo.name}: {b} is not the requested PR "
+                                   f"#{', #'.join(sorted(expected))}")
             rc, msg = await repo_ops.git(repo, "git", "push", "origin", b, timeout=300)
             if rc != 0:
                 raise RuntimeError(f"{repo.name}: push of {b} failed: {msg[:300]}")
-            rc, url = await repo_ops.git(repo, "gh", "pr", "view", b, "--json", "url", "--jq", ".url")
-            out.append(f"{repo.name}: {url.strip() if rc == 0 and url.strip() else b + ' (pushed)'}")
+            out.append(f"{repo.name}: {url}")
             store.kv_set(f"task_branch:{task_id}", b)
     return out
 
@@ -3026,21 +3113,21 @@ async def ship(task_id: int) -> str:
         rc, out = await repo_ops.git(repo, "git", "push", "-u", "origin", cur, timeout=300)
         if rc != 0:
             raise RuntimeError(f"{repo.name}: push failed: {out[:300]}")
-        rc, out = await repo_ops.git(repo, "gh", "pr", "create", "--fill", "--head", cur, timeout=300)
+        rc, out = await repo_ops.git(repo, "gh", "pr", "create", "--fill", "--head", cur,
+                                     "--base", base.removeprefix("origin/"), timeout=300)
         if rc != 0 and "already exists" not in out:
             raise RuntimeError(f"{repo.name}: gh pr create failed: {out[:300]}")
-        import re as _re
-        mu = _re.search(r"https://github\.com/\S+/pull/\d+", out)
-        if not mu:
-            rc2, out2 = await repo_ops.git(repo, "gh", "pr", "view", "--json", "url", "--jq", ".url")
-            urls.append(f"{repo.name}: {out2.strip() if rc2 == 0 else '(PR url unavailable)'}")
-        else:
-            urls.append(f"{repo.name}: {mu.group(0)}")
+        urls.append(f"{repo.name}: {await _verified_pr(repo, cur, base)}")
         # "develop as well as release 3.1.6": the same commits, on the other
         # base too, each with its own PR. A task has one worktree, so #178
         # stopped at "needs a worktree" with half the ask undone (30 Sep).
-        for other in await _other_bases(task_id, t, repo, base):
-            urls.append(f"{repo.name} → {other}: {await _port(repo, cur, base, other)}")
+        try:
+            for other in await _other_bases(task_id, t, repo, base):
+                url = await _port(repo, cur, base, other)
+                urls.append(f"{repo.name} → {other}: {url}")
+        except RuntimeError as exc:
+            raise RuntimeError(f"{repo.name}: required release PR still incomplete ({exc}). "
+                               f"Already opened: {'; '.join(urls)}") from exc
     if not urls:
         # The work may be on a branch that already has a PR — he sent the task
         # to it ("add it to PR 1429"), so its commit is not on the task's own
@@ -3517,9 +3604,12 @@ async def refine(task_id: int, feedback: str) -> str:
     was_shipped = t["status"] in SHIPPED_STATUSES
     store.update_task(task_id, status="running")
     prompt = (
-        f"FOLLOW-UP ON YOUR OWN COMPLETED WORK — this is not a new task.\n"
-        f"You already implemented this; the diff is in the working tree"
-        + (" and a PR is open for it.\n" if was_shipped else ".\n")
+        f"FOLLOW-UP ON YOUR OWN TASK — this is not a new task.\n"
+        + ("The previous run claimed completion without leaving a code change; "
+           "implement the original request before reporting done.\n"
+           if t.get("error", "").startswith("The code task reported completion")
+           else "You already implemented this; the diff is in the working tree"
+           + (" and a PR is open for it.\n" if was_shipped else ".\n"))
         + f"Arun's feedback:\n{feedback}\n\n"
         f"Apply it to the EXISTING change. Do not start over, do not re-plan "
         f"from scratch, and do not revert what is already correct."
@@ -3532,7 +3622,9 @@ async def refine(task_id: int, feedback: str) -> str:
         job = asyncio.create_task(_resume_worker(task_id, prompt, approved=True))
         _running[task_id] = job
         job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
-    where = "the open PR" if was_shipped else "the existing diff"
+    where = ("the open PR" if was_shipped else
+             "the original implementation" if t.get("error", "").startswith(
+                 "The code task reported completion") else "the existing diff")
     return f"Task #{task_id}: continuing {where} with your feedback (same session, full context)."
 
 

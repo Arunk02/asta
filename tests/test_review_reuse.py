@@ -65,6 +65,33 @@ def test_only_verified_matching_pr_reuses_completed_review(monkeypatch):
                                  reply_to="Vinish", review_revision="").get("reused")
 
 
+def test_materially_different_pr_question_requires_a_new_review(monkeypatch):
+    monkeypatch.setenv("ASTA_RESPOND", "1")
+    monkeypatch.setattr(responder, "familiar", lambda text: (True, "known"))
+    spawned = []
+
+    def spawn(title, prompt, kind, workspace, **kw):
+        t = store.create_task(title, kind, prompt, workspace)
+        spawned.append(t["id"])
+        return t
+
+    monkeypatch.setattr(tasks, "spawn", spawn)
+    revision = "acme/booking#1409@" + "a" * 40 + ":green"
+    assert responder.review_scope("Hi Arun, please review my PR acme/booking#1409") == ""
+    assert responder.review_scope("Can you check and approve if all good?") == ""
+    assert responder.review_scope("Please review PR #1409 specifically for retry races") \
+        == "races|retry|specifically"
+    for i, (who, question) in enumerate([
+        ("Shabda", "please review my PR acme/booking#1409"),
+        ("Vinish", "can you approve if all good?"),
+        ("Sam", "review PR #1409 specifically for retry races"),
+    ]):
+        responder.respond("teams-chat", who, "please review my PR acme/booking#1409",
+                          priority=1, key=f"scope-{i}", reply_to=who,
+                          review_revision=revision, review_question=question)
+    assert len(spawned) == 2, "generic asks join; a specific new question needs fresh analysis"
+
+
 def test_joined_review_delivers_to_each_chat(monkeypatch):
     monkeypatch.setenv("ASTA_RESPOND", "1")
     monkeypatch.setattr(responder, "familiar", lambda text: (True, "known"))

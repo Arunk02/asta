@@ -1652,7 +1652,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                                  key=c["keys"][-1], sent_at=c["sent_at"], context=context,
                                  reply_to=c["chat"], group=not c["one_to_one"], need=said,
                                  thread=tid, questions=d.get("questions") or [],
-                                 review_revision=review_revision)
+                                 review_revision=review_revision,
+                                 review_question=c["last"])
         if task and task.get("reused"):
             from . import answers
             analysis, reply = answers.split(task.get("result") or "")

@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import hashlib
 
 from . import attention, store
 
@@ -249,6 +250,22 @@ def pr_number(text: str) -> str:
     from . import review
     number, target = review.pr_target(text or "")
     return number if target and number.isdigit() else ""
+
+
+def review_scope(text: str) -> str:
+    """Keep extra review questions separate from an ordinary whole-PR review."""
+    from . import review
+    without_links = review._PR_LINK.sub(" ", text or "")
+    without_numbers = re.sub(r"\b(?:pr|pull\s+request)\s*#?\s*\d+\b",
+                             " ", without_links, flags=re.I)
+    routine = {"hi", "hello", "hey", "arun", "arunkumar", "please", "pls",
+               "can", "could", "would", "you", "your", "i", "me", "my", "our",
+               "the", "this", "it", "a", "an", "for", "if", "all", "good",
+               "review", "check", "look", "at", "approve", "approval", "pr",
+               "pull", "request", "code", "thanks", "thank", "and", "once",
+               "ready", "is", "up"}
+    return "|".join(sorted(set(re.findall(r"[a-z]{2,}", without_numbers.lower()))
+                           - routine))
 
 
 # --- the brief ----------------------------------------------------------------
@@ -615,7 +632,7 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
             key: str = "", workspace: str = "", sent_at: float | None = None,
             context: str = "", reply_to: str = "", group: bool = False,
             need: str = "", thread: str = "", questions: list | None = None,
-            review_revision: str = "") -> dict | None:
+            review_revision: str = "", review_question: str = "") -> dict | None:
     """Start the investigation this message deserves. The spawned task, or None.
 
     Deliberately synchronous and tiny: it decides and delegates. Everything slow
@@ -691,7 +708,9 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     # A PR number alone collides across repositories; even a full link says
     # nothing about whether a new commit or failing CI invalidated the review.
     # Only the live-verified revision supplied by the Teams sweep is reusable.
-    ck = (f"review_request:{review_revision}" if review_revision else "") \
+    scope = review_scope(review_question)
+    ck = (f"review_request:{review_revision}:"
+          f"{hashlib.sha256(scope.encode()).hexdigest()[:12]}" if review_revision else "") \
         if kind == "review_request" else (
             "" if kind == "pr_review" else results_cache.key_for(kind or "ask", grounds))
     hit = results_cache.lookup(ck) if ck else None

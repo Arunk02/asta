@@ -358,6 +358,12 @@ def test_the_websocket_wants_the_token_and_speaks_the_protocol(monkeypatch):
         ws.send_text(json.dumps({"type": "mic_error", "reason": "no audio after retry"}))
         assert json.loads(ws.receive_text())["mic"] is False, "failed input: mic off"
         assert notices and "no audio reached Asta" in notices[0]
+        ws.send_text(json.dumps({"type": "toggle", "what": "mic"}))
+        assert json.loads(ws.receive_text())["mic"] is True
+        ws.send_text(json.dumps({"type": "mic_error", "reason":
+                                 "Microphone could not start: CoreAudio error 1937010544"}))
+        assert json.loads(ws.receive_text())["mic"] is False
+        assert "Restart the Mac" in notices[-1] and "Switching it on again" in notices[-1]
     assert vm.state()["helper"] is False
     vm._STATE.update(speaker=False, mic=False, helper=None)
 

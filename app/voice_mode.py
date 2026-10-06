@@ -1634,10 +1634,15 @@ async def serve(ws) -> None:
                     reason = str(msg.get("reason") or "Microphone input failed")[:200]
                     await set_mode(mic=False, why=reason)
                     from . import notify
+                    if reason.startswith("Microphone could not start:"):
+                        notice = ("🎙 Mic stopped — macOS could not start the microphone. "
+                                  "Switching it on again will not help until system audio recovers. "
+                                  "Restart the Mac when safe, then check Sound > Input.")
+                    else:
+                        notice = ("🎙 Mic stopped — no audio reached Asta. Check the Mac microphone "
+                                  "and restart it with ⌃⌥M.")
                     try:
-                        await notify.notify(
-                            "🎙 Mic stopped — no audio reached Asta. Check the Mac microphone "
-                            "and restart it with ⌃⌥M.", "voice", urgency="direct", considered=True)
+                        await notify.notify(notice, "voice", urgency="direct", considered=True)
                     except Exception as exc:
                         from . import quiet
                         quiet.note("voice.mic_error_notify", exc)

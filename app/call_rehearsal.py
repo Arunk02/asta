@@ -18,6 +18,8 @@ and the colleague's own ears time every gap and hear every word Asta sends.
 
     .venv/bin/python -m app.call_rehearsal            # every scenario
     .venv/bin/python -m app.call_rehearsal quick-yes  # one
+    ASTA_SELF_TALK_TEST=1 .venv/bin/pytest -s tests/test_call_rehearsal.py \
+        tests/test_voice_mode.py -k 'asta_to_asta_call or asta_voice_speaks'
 
 Isolated like WorkWorld: its own temporary database, nothing reaches his phone,
 his Teams, or his microphone. It does use the real voice server and a real
@@ -31,6 +33,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -148,8 +151,9 @@ class Scenario:
 
     Steps are (trigger, action) pairs. Triggers: "connected" (the call is up),
     "asta_done" (Asta spoke and then went quiet), "asta_speaking" (Asta started a
-    line). Actions: {"say": text} with optional "after" seconds and "then"/"pause"
-    for a two-part line, {"silence": seconds}, {"hang_up": True}.
+    line). Actions: {"say": text} with optional "after" seconds, "when" to name
+    the line to interrupt, and "then"/"pause" for a two-part line;
+    {"silence": seconds}; or {"hang_up": True}.
     """
     name: str
     title: str
@@ -167,13 +171,15 @@ SCENARIOS: list[Scenario] = [
         ("asta_done", {"say": "Yes."}),
         ("asta_done", {"say": "Sounds good. Okay, bye!"}),
     ], expect={"greeting_within": 2.5, "reply_within": 2.5, "sound_within": 2.2,
-               "greeting_whole": True, "asta_ends": True}),
+               "greeting_whole": True, "asta_ends": True, "audio_only": True}),
     Scenario("interrupts", "Talks over Asta's second line with a question", [
         ("connected", {"say": "Hello?", "after": 0.3}),
         ("asta_done", {"say": "Yes, go ahead."}),
-        ("asta_speaking", {"say": "Sorry, wait, who is this?", "after": 1.5}),
+        ("asta_speaking", {"say": "Sorry, wait, who is this?", "when": "can you hear me",
+                            "after": 1.5}),
         ("asta_done", {"say": "Okay, got it. Bye."}),
-    ], expect={"stops_within": 1.5, "reply_within": 2.5, "sound_within": 2.2}),
+    ], expect={"stops_within": 1.5, "must_hear": "who is this", "audio_only": True,
+               "reply_within": 2.5, "sound_within": 2.2}),
     Scenario("goes-quiet", "Answers once, then says nothing", [
         ("connected", {"say": "Hello?", "after": 0.3}),
         ("asta_done", {"say": "Yes."}),
@@ -233,6 +239,17 @@ async def _wait_asta(page, since: float, done: bool, timeout: float) -> float | 
     return None
 
 
+async def _wait_saying(events: list[tuple[float, str]], phrase: str, since: float,
+                       timeout: float) -> float | None:
+    end = time.time() + timeout
+    while time.time() < end:
+        for at, text in events:
+            if at >= since and phrase.lower() in text.lower():
+                return at
+        await asyncio.sleep(0.1)
+    return None
+
+
 async def _say(page, wav: bytes) -> float:
     return float(await page.evaluate("(b) => window.__colleague.say(b)",
                                      base64.b64encode(wav).decode()))
@@ -260,6 +277,7 @@ async def run(sc: Scenario, keep_dir: Path) -> dict:
                 await line(act[key])
 
     timeline: list[dict] = []
+    saying_events: list[tuple[float, str]] = []
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             channel=os.environ.get("ASTA_BROWSER_CHANNEL", "chrome") or None, headless=True,
@@ -286,17 +304,26 @@ async def run(sc: Scenario, keep_dir: Path) -> dict:
                 offer = await col_page.evaluate("window.__colleague.offer()")
                 answer = await asta_page.evaluate("(s) => window.__answer(s)", offer)
                 await col_page.evaluate("(s) => window.__colleague.accept(s)", answer)
+                flight_log = call_rtc.recorder(f"rehearsal-{sc.name}")
+
+                def log(event):
+                    flight_log(event)
+                    if "saying" in event:
+                        saying_events.append((time.time() * 1000, event["saying"]))
+
                 meetings._CALL.clear()
                 meetings._CALL.update(ctx=asta_ctx, page=asta_page, pw=None, rtc=True,
                                       url="rehearsal", joined_at=meetings._now(), captions=[],
                                       answered_at=0.0, speaks=True, who=name, mic_proven=1.0,
-                                      log=call_rtc.recorder(f"rehearsal-{sc.name}"))
+                                      log=log)
                 store.kv_set("teams_in_call", f"call:{name}")
                 connected.set()
                 return name
 
             real_call_person = meetings.call_person
+            real_with_history = conversation.with_history
             meetings.call_person = call_person
+            conversation.with_history = lambda _who, agenda: agenda
             try:
                 async def colleague() -> None:
                     await connected.wait()
@@ -312,8 +339,12 @@ async def run(sc: Scenario, keep_dir: Path) -> dict:
                                 timeline.append({"event": "asta never finished", "at": time.time() * 1000})
                                 return
                         elif trigger == "asta_speaking":
-                            started = await _wait_asta(col_page, mark, False, 40)
+                            started = (await _wait_saying(saying_events, act["when"], mark, 40)
+                                       if act.get("when") else
+                                       await _wait_asta(col_page, mark, False, 40))
                             if started is None:
+                                timeline.append({"event": "asta never spoke the expected line",
+                                                 "at": time.time() * 1000})
                                 return
                         await asyncio.sleep(act.get("after", 0.4))
                         if act.get("silence"):
@@ -336,23 +367,31 @@ async def run(sc: Scenario, keep_dir: Path) -> dict:
                         mark = ended
 
                 bot = asyncio.ensure_future(colleague())
-                started = time.time()
-                outcome = await asyncio.wait_for(conversation.converse(
-                    who, "a quick rehearsal call", seconds=sc.minutes * 60,
-                    agenda="check they can hear you; ask one or two easy questions"),
-                    timeout=sc.minutes * 60 + 90)
-                took = time.time() - started
-                bot.cancel()
-                heard = await col_page.evaluate("window.__colleague.state()")
+                try:
+                    started = time.time()
+                    outcome = await asyncio.wait_for(conversation.converse(
+                        who, "a quick rehearsal call", seconds=sc.minutes * 60,
+                        agenda="This is only an audio check with a simulated voice. Ask if they can "
+                               "hear you, then respond to their answers until they say goodbye. "
+                               "Do not mention projects, PRs, bookings, or Arun's work."),
+                        timeout=sc.minutes * 60 + 90)
+                    took = time.time() - started
+                    heard = await col_page.evaluate("window.__colleague.state()")
+                finally:
+                    bot.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await bot
             finally:
                 meetings.call_person = real_call_person
+                conversation.with_history = real_with_history
         finally:
             with contextlib.suppress(Exception):
                 await browser.close()
 
     log = sorted((tmp / "calls").glob("*.jsonl"))
     saying = _lines_said(log[-1]) if log else []
-    report = _judge(sc, timeline, heard["spans"], outcome, took, saying)
+    heard_lines = _lines_heard(log[-1]) if log else []
+    report = _judge(sc, timeline, heard["spans"], outcome, took, saying, heard_lines)
     report["flight_recorder"] = str(log[-1]) if log else ""
     keep_dir.mkdir(parents=True, exist_ok=True)
     (keep_dir / f"{sc.name}.json").write_text(json.dumps(report, indent=1))
@@ -374,8 +413,14 @@ def _lines_said(path: Path) -> list[tuple[float, str]]:
     return out
 
 
+def _lines_heard(path: Path) -> list[str]:
+    with path.open() as log:
+        return [row["heard"] for line in log if "heard" in (row := json.loads(line))]
+
+
 def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
-           took: float, saying: list[tuple[float, str]] | None = None) -> dict:
+           took: float, saying: list[tuple[float, str]] | None = None,
+           heard_lines: list[str] | None = None) -> dict:
     """Latencies and the verdict, from what the colleague's own ears measured —
     and, where Asta's own record says which line was which, from that."""
     connected = next((t["at"] for t in timeline if t["event"] == "connected"), None)
@@ -426,6 +471,12 @@ def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
             talking = [sp for sp in spans if sp["start"] < inter["start"] < sp["end"]]
             if talking and (talking[0]["end"] - inter["start"]) / 1000 > ex["stops_within"]:
                 fails.append(f"kept talking {(talking[0]['end'] - inter['start']) / 1000:.1f}s over them")
+    if ex.get("must_hear") and ex["must_hear"].lower() not in " ".join(heard_lines or []).lower():
+        fails.append(f"never heard the interruption: {ex['must_hear']}")
+    if ex.get("audio_only") and any(
+            re.search(r"\b(?:booking|project|PR\s*#?\d+)\b", text, re.I)
+            for _, text in saying or []):
+        fails.append("audio-only rehearsal drifted into Arun's work")
     if ex.get("no_self_talk") and outcome.lower().count("didn't catch") > 1:
         fails.append("answered its own echo")
     firsts = [g for g, s in zip(sounds[1:], said[1:]) if g is not None]

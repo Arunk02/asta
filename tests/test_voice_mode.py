@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -20,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from app import main, notify, store, voice_mode as vm
+from app.voice import speak as real_voice_speak
 
 
 class _Helper:
@@ -971,6 +973,37 @@ def test_segments_are_joined_in_recording_order_when_transcription_finishes_out_
                 break
             time.sleep(0.05)
     assert decided == ["Check the Activityplan service and tell me whether Vinish received my reply."]
+
+
+@pytest.mark.skipif(os.environ.get("ASTA_SELF_TALK_TEST") != "1",
+                    reason="uses the local Voicebox to let Asta speak to Asta")
+def test_asta_voice_speaks_hears_and_answers_its_other_voice(helper, monkeypatch):
+    from app import voice
+
+    monkeypatch.setattr(voice, "BASE", voice.CONFIGURED_BASE)
+    monkeypatch.setattr(voice, "DEFAULT_PROFILE", "Asta (male)")
+    monkeypatch.setattr(voice, "speak", real_voice_speak)
+    monkeypatch.delitem(vm._CACHE, vm.ACKS["listening"], raising=False)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+
+    async def exchange():
+        prompt = await voice.speak("Hello, hello.", profile="Asta (male)")
+        assert prompt, "Asta's test voice produced no audio"
+        started = time.monotonic()
+        result = await vm.heard(prompt, asta=False)
+        took = time.monotonic() - started
+        replies = [m for m in helper.sent if m.get("type") == "say"]
+        assert result["did"] == "listening", (result, [
+            r["detail"] for r in store.recent_outcomes(5) if r["outcome"] == "stt_failed"])
+        assert len(replies) == 1 and replies[0]["text"] == "I'm listening."
+        assert replies[0]["audio"], "Asta replied with text, but produced no voice"
+        words = await voice.transcribe(base64.b64decode(replies[0]["audio"]),
+                                       filename="asta-answer.wav")
+        assert "listening" in words.lower(), f"Asta's reply was not intelligible: {words!r}"
+        return result["text"], words, took
+
+    heard, answered, seconds = run(exchange())
+    print(f"Asta-to-Asta voice: heard {heard!r}, replied {answered!r} in {seconds:.2f}s")
 
 
 def test_a_finished_sentence_is_decided_at_once(helper, decided, monkeypatch):

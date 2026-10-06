@@ -297,7 +297,12 @@ final class Recognizer {
 
     /// Speech started: a new request, with what came just before it.
     func begin(_ samples: [Int16]) {
-        cancel()
+        if waiting != nil {
+            log("recognition overlapped next segment; delivering previous audio")
+            complete()
+        } else {
+            cancel()
+        }
         guard let r = recognizer, r.isAvailable else { return }
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.requiresOnDeviceRecognition = true
@@ -395,7 +400,7 @@ final class Ears {
     let engine = AVAudioEngine()
     var running = false
     var mouth: Mouth?
-    var onUtterance: ((Data, String, Float, Bool) -> Void)?
+    var onUtterance: ((Data, String, Float, Bool, Bool) -> Void)?
     /// Was Asta audible at any point while this recording was made? If not, it
     /// cannot be Asta's echo — 2 Oct: "Can you explain the booking service?",
     /// said in silence, was dropped as echo of an earlier answer.
@@ -611,17 +616,21 @@ final class Ears {
         let seconds = Double(speech.count) / rate
         if quietMs >= 700 || seconds >= 30 {
             let take = speech
+            let continued = seconds >= 30 && quietMs < 700
             inSpeech = false; loudFrames = 0; quietMs = 0; speech = []; preroll = []
             if seconds >= 0.5 {
                 let wav = Ears.wav(take, rate: Int(rate))
                 let audible = astaAudible
                 recognizer.finish { text, conf in
-                    DispatchQueue.main.async { self.onUtterance?(wav, text, conf, audible) }
+                    DispatchQueue.main.async { self.onUtterance?(wav, text, conf, audible, continued) }
                 }
                 // Asta may speak again once his answer is in: a moment's grace
                 // in case he goes on.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    if !self.inSpeechNow { self.mouth?.hold(false) }
+                    if !self.inSpeechNow {
+                        self.mouth?.hold(false)
+                        if continued { self.onSpeaking?(false) }
+                    }
                 }
             } else {
                 recognizer.cancel()
@@ -677,9 +686,10 @@ final class App: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         ears.mouth = mouth
         mouth.isUserSpeaking = { [weak self] in self?.ears.inSpeechNow ?? false }
-        ears.onUtterance = { [weak self] wav, text, conf, audible in
+        ears.onUtterance = { [weak self] wav, text, conf, audible, continued in
             self?.link.send(["type": "utterance", "wav": wav.base64EncodedString(),
-                             "text": text, "confidence": Double(conf), "asta": audible])
+                             "text": text, "confidence": Double(conf), "asta": audible,
+                             "continued": continued])
         }
         ears.onSpeaking = { [weak self] now in
             if !now { self?.mouth.unduck() }       // too short to be him

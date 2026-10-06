@@ -44,7 +44,8 @@ def helper(monkeypatch):
     vm._HEARD.clear()
     vm._SPOKEN.clear()
     vm._STATE["barge_heard"] = 0.0
-    vm._TURN.update(parts=[], gen=0, first_at=0.0, speaking=False, pending=0)
+    vm._TURN.update(parts=[], gen=0, first_at=0.0, speaking=False, pending=0,
+                    continued=False)
 
     async def speak(text, **k):
         return b"RIFFfake"
@@ -921,6 +922,26 @@ def test_a_turn_waits_for_a_piece_still_being_transcribed(helper, decided):
     assert run(go()) == [] and decided == ["Check the booking."]
 
 
+def test_a_30_second_clip_waits_for_the_rest_even_past_the_normal_hold(helper, decided, monkeypatch):
+    monkeypatch.setattr(vm, "HOLD_MAX_SECONDS", 0.1)
+    monkeypatch.setattr(vm, "TURN_MAX_SECONDS", 0.1)
+
+    async def go():
+        vm._TURN["continued"] = True
+        vm._TURN["speaking"] = True
+        first = asyncio.create_task(vm.assemble("Check the Activityplan service and"))
+        await asyncio.sleep(0.25)
+        assert not first.done() and decided == []
+        vm._TURN["speaking"] = False
+        second = await vm.assemble("tell me whether Vinish received my reply.")
+        return await first, second
+
+    first, second = run(go())
+    assert first["did"] == "joined" and second["did"] == "decided"
+    assert decided == ["Check the Activityplan service and tell me whether Vinish received my reply."]
+    assert vm._TURN["continued"] is False
+
+
 def test_a_finished_sentence_is_decided_at_once(helper, decided, monkeypatch):
     monkeypatch.setattr(vm, "HOLD_UNFINISHED_SECONDS", 3.0)
     started = time.time()
@@ -1703,6 +1724,14 @@ def test_helper_does_not_release_its_hold_while_speech_is_detected():
     src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
     assert "self.heldAt == mine && self.isUserSpeaking?() != true" in src
     assert "mouth.isUserSpeaking = { [weak self] in self?.ears.inSpeechNow ?? false }" in src
+
+
+def test_helper_delivers_pending_segment_before_restarting_recognition():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    start = src.index("    func begin(_ samples: [Int16]) {")
+    body = src[start:src.index("    func feed(_ samples:", start)]
+    assert body.index("if waiting != nil {") < body.index("complete()") < body.index("guard let r = recognizer")
+    assert '"continued": continued' in src
 
 
 def test_a_voice_job_reads_the_project_he_means(monkeypatch):

@@ -108,7 +108,8 @@ REPEAT_SECONDS = 90.0
 _QUEUE: list[str] = []
 #: The turn being assembled: his pieces so far, a counter that moves when more
 #: comes, whether he is talking right now, and transcriptions still in flight.
-_TURN: dict = {"parts": [], "gen": 0, "first_at": 0.0, "speaking": False, "pending": 0}
+_TURN: dict = {"parts": [], "gen": 0, "first_at": 0.0, "speaking": False,
+               "pending": 0, "continued": False}
 #: The conversation, newest last: (when, "Arun" | "Asta", words).
 _HEARD: list[tuple[float, str, str]] = []
 _KV = "voice_mode"
@@ -156,6 +157,7 @@ async def set_mode(speaker: bool | None = None, mic: bool | None = None,
         _STATE["mic"] = bool(mic)
         if not mic:
             _TURN["speaking"] = False
+            _TURN["continued"] = False
             store.kv_set("voice_conversation", "")
     store.kv_set(_KV, json.dumps({"speaker": _STATE["speaker"], "mic": _STATE["mic"], "at": now}))
     # Warm what is about to be used. The first transcription loads the model —
@@ -712,6 +714,8 @@ async def assemble(text: str) -> dict:
     long as he is still talking, and while another piece is being transcribed —
     and the turn is decided once, whole."""
     if is_noise(text) and not wake_only(text):
+        if not _TURN["parts"] and not _TURN["speaking"] and not _TURN["pending"]:
+            _TURN["continued"] = False
         return {"text": text, "did": "ignored"}     # a waiting turn goes on waiting
     if not _TURN["parts"]:
         _TURN["first_at"] = time.time()
@@ -726,6 +730,9 @@ async def assemble(text: str) -> dict:
         await asyncio.sleep(0.05)
         if _TURN["gen"] != gen:
             return {"text": text, "did": "joined"}  # more came: the newest piece decides
+        if (_TURN["continued"] and (_TURN["speaking"] or _TURN["pending"])
+                and time.time() - _TURN["first_at"] < MIC_IDLE_SECONDS):
+            continue
         if time.time() - _TURN["first_at"] > TURN_MAX_SECONDS or time.time() - arrived > HOLD_MAX_SECONDS:
             break
         if time.time() < deadline or (not calling and (_TURN["speaking"] or _TURN["pending"])):
@@ -733,6 +740,7 @@ async def assemble(text: str) -> dict:
         break
     whole = " ".join(_TURN["parts"])
     _TURN["parts"] = []
+    _TURN["continued"] = False
     return await handle(whole)
 
 
@@ -1633,7 +1641,10 @@ async def serve(ws) -> None:
                 # waits while he talks.
                 _TURN["speaking"] = bool(msg.get("value"))
             elif kind == "utterance":
-                _TURN["speaking"] = False
+                if msg.get("continued") is True:
+                    _TURN["continued"] = True
+                else:
+                    _TURN["speaking"] = False
                 wav = base64.b64decode(msg.get("wav") or "")
                 said = str(msg.get("text") or "")
                 confidence = float(msg.get("confidence") or 0)

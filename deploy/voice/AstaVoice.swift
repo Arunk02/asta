@@ -119,11 +119,11 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
     /// or just after, Asta was audible.
     private(set) var silentSince = Date.distantPast
 
-    /// Waiting is capped: room sound reads as "him talking" too — with echo
-    /// cancelling off, an answer ready at 17:50:39 waited 10 s while he said
-    /// "Hello? Hello?" because nothing came (2 Oct). After this long Asta speaks.
+    /// Room sound can look like speech; release a stale hold only when the
+    /// microphone no longer detects speech. Never talk over an actual sentence.
     static let holdMax: TimeInterval = 2.5
     private var heldAt = Date.distantPast
+    var isUserSpeaking: (() -> Bool)?
 
     func hold(_ on: Bool) {
         guard on != held else { return }
@@ -132,7 +132,9 @@ final class Mouth: NSObject, AVAudioPlayerDelegate {
             heldAt = Date()
             let mine = heldAt
             DispatchQueue.main.asyncAfter(deadline: .now() + Mouth.holdMax) {
-                if self.held && self.heldAt == mine { self.hold(false) }
+                if self.held && self.heldAt == mine && self.isUserSpeaking?() != true {
+                    self.hold(false)
+                }
             }
             return
         }
@@ -674,6 +676,7 @@ final class App: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         ears.mouth = mouth
+        mouth.isUserSpeaking = { [weak self] in self?.ears.inSpeechNow ?? false }
         ears.onUtterance = { [weak self] wav, text, conf, audible in
             self?.link.send(["type": "utterance", "wav": wav.base64EncodedString(),
                              "text": text, "confidence": Double(conf), "asta": audible])

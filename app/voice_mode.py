@@ -24,6 +24,8 @@ Rules that do not bend:
   * A voice turn is an ordinary turn: same brain, guardrails, approvals. A
     send is read back and goes on "send it"; merges, group posts and anyone on
     his manager-and-above list still need a tap — voice can only prepare them.
+  * Voice has its own conversation for each mic-on sitting. It uses the same
+    selected model as chat, without carrying old WhatsApp messages into speech.
 """
 
 from __future__ import annotations
@@ -154,6 +156,7 @@ async def set_mode(speaker: bool | None = None, mic: bool | None = None,
         _STATE["mic"] = bool(mic)
         if not mic:
             _TURN["speaking"] = False
+            store.kv_set("voice_conversation", "")
     store.kv_set(_KV, json.dumps({"speaker": _STATE["speaker"], "mic": _STATE["mic"], "at": now}))
     # Warm what is about to be used. The first transcription loads the model —
     # 9.8 s measured, then 1.4 s — and his first sentence must not be the one
@@ -190,6 +193,7 @@ def startup() -> bool:
         was = {}
     _STATE.update(speaker=False, mic=False, busy=False)
     store.kv_set(_KV, json.dumps({"speaker": False, "mic": False, "at": time.time()}))
+    store.kv_set("voice_conversation", "")
     return bool(was.get("speaker") or was.get("mic"))
 
 
@@ -266,11 +270,19 @@ async def _to_helper(msg: dict) -> bool:
         return False
 
 
-async def to_chat(text: str) -> None:
+async def to_chat(text: str) -> bool:
     """The whole answer, in his WhatsApp — what "the details are in the chat" promises."""
-    with contextlib.suppress(Exception):
-        from . import notify
-        await notify.wa_send("🎙 " + text.strip())
+    from . import notify
+    try:
+        delivered = await notify.wa_send("🎙 " + text.strip())
+    except Exception as exc:
+        store.record_outcome("voice", "chat_failed", detail=str(exc)[:200])
+        return False
+    if not delivered:
+        store.record_outcome("voice", "chat_failed", detail="WhatsApp delivery unavailable")
+    else:
+        store.record_outcome("voice", "chat_sent", detail=f"{len(text.strip())} characters")
+    return bool(delivered)
 
 
 async def say_lines(text: str) -> bool:
@@ -279,14 +291,15 @@ async def say_lines(text: str) -> bool:
     words = speakable(text)
     if not words:
         return False
-    if IN_CHAT in words:
-        asyncio.ensure_future(to_chat(text))
+    chat = asyncio.create_task(to_chat(text)) if IN_CHAT in words else None
     parts = [p for p in re.split(r"(?<=[.!?।])\s+", words) if p.strip()]
     started = time.time()
     ok = False
     for part in parts:
         if _STATE["barged_at"] > started:
             break                               # he talked over it: the rest is in the chat
+        if part == IN_CHAT and chat is not None and not await chat:
+            part = "I couldn't send the details to chat."
         ok = await say(part, kind="answer", since=started) or ok
     return ok
 
@@ -302,7 +315,8 @@ async def say(text: str, kind: str = "answer", since: float = 0.0) -> bool:
     if not words:
         return False
     if IN_CHAT in words and IN_CHAT not in (text or "") and kind == "answer":
-        asyncio.ensure_future(to_chat(text))        # cut short here: the rest goes to the chat
+        if not await to_chat(text):
+            words = words.replace(IN_CHAT, "I couldn't send the details to chat.")
     if kind == "answer" and words not in ACKS.values() and said_lately(words):
         store.record_outcome("voice", "not_repeated", detail=words[:120])
         return True                             # already said: once is enough
@@ -452,6 +466,15 @@ _NOISE = re.compile(r"^\W*(?:um+|uh+|hmm+|ah+|oh+|thank you|thanks|you|bye)\W*$"
 #: Only words that cannot be mistaken for the room: "Yeah." and "Go go go" were
 #: background audio, live on 2 Oct, and each started a brain turn.
 _ONE_WORD = re.compile(r"^\W*(?:send|yes|no|approve|approved|stop|cancel|retry|hello|hi|hey)\W*$", re.I)
+
+
+def wake_only(text: str) -> bool:
+    """A greeting or name alone calls Asta; it is not a chat or work request."""
+    words = re.findall(r"[^\W_]+", text or "")
+    return bool(words) and len(words) <= 5 and all(
+        word.lower() in ("hello", "hi", "hey") or bool(_NAME.fullmatch(word))
+        for word in words
+    ) and sum(bool(_NAME.fullmatch(word)) for word in words) <= 1
 
 
 #: Scripts he speaks: Latin (English, romanised Hindi) and Devanagari.
@@ -746,7 +769,7 @@ def in_conversation(now: float | None = None) -> bool:
 
 async def handle(text: str) -> dict:
     """What he said, already as text."""
-    if not listening() or is_noise(text):
+    if not listening() or (is_noise(text) and not wake_only(text)):
         return {"text": text, "did": "ignored"}
     command = len(_tokens(text)) <= 7     # a switch is said on its own, not inside a long sentence
     if command and _GO_OFF.search(text):
@@ -896,6 +919,11 @@ async def converse(text: str) -> dict:
     if done is not None:
         remember("Arun", text)
         return done
+    if wake_only(text):
+        _STATE["last_heard"] = time.time()
+        remember("Arun", text)
+        await say(ACKS["listening"], kind="answer")
+        return {"text": text, "did": "listening"}
     started = time.time()
     context = recent(started)
     decided = await voice_talker.route(text, context)
@@ -1309,16 +1337,15 @@ def _job_conversation(text: str) -> dict:
     conv = store.create_conversation(model="claude_cli", workspace=None)
     store.update_conversation(conv["id"], title=f"🎙 {text[:50]}")
     phone = store.get_conversation(store.kv_get("wa_conversation") or "") or conv
+    voice = store.get_conversation(store.kv_get("voice_conversation") or "") or conv
     with contextlib.suppress(Exception):
         conv["model"] = main._channel_model(phone)
-    ws = phone.get("workspace") or ""
+    ws = ""
+    with contextlib.suppress(Exception):
+        from .workspace import registry
+        ws = registry.infer(text) or ""
     if not ws:
-        # The project he is talking about, else his stated default. 2 Oct: every
-        # voice job ran with NO workspace — "what is Telikos Inland Booking" had
-        # no project knowledge to read, and was asked about four times.
-        with contextlib.suppress(Exception):
-            from .workspace import registry
-            ws = registry.infer(text) or ""
+        ws = voice.get("workspace") or ""
         if not ws:
             with contextlib.suppress(Exception):
                 from . import policy
@@ -1517,22 +1544,23 @@ def _kind_of(text: str) -> str:
 
 
 async def turn(text: str) -> str:
-    """Run what he said through the same pipeline as WhatsApp, and say the answer.
+    """Run what he said through the shared chat pipeline in a voice conversation.
 
     He hears something within about a second — the acknowledgement, or the
     answer's first sentence the moment the brain writes it — and the rest when
     it is done. Whatever he says meanwhile is its own turn: a comment on work in
     progress is folded into it by the dispatcher, as it is on WhatsApp."""
     from . import main
-    cid = store.kv_get("wa_conversation") or ""
+    cid = store.kv_get("voice_conversation") or ""
     conv = store.get_conversation(cid) if cid else None
+    phone = store.get_conversation(store.kv_get("wa_conversation") or "") or {}
     if conv is None:
-        conv = store.create_conversation(model="claude_cli", workspace=None)
-        store.kv_set("wa_conversation", conv["id"])
-    # The brain his phone conversation uses; if that cannot be worked out, the
-    # conversation's own — never no answer.
+        conv = store.create_conversation(model=phone.get("model") or "claude_cli", workspace=None)
+        store.update_conversation(conv["id"], title="Voice")
+        store.kv_set("voice_conversation", conv["id"])
+    # Use the phone's selected brain, not its old conversation history.
     with contextlib.suppress(Exception):
-        conv["model"] = main._channel_model(conv)
+        conv["model"] = main._channel_model(phone or conv)
     sink = VoiceSink()
     started = time.time()
     async def acknowledge() -> None:
@@ -1554,6 +1582,8 @@ async def turn(text: str) -> str:
     reply = sink.text()
     rest = "" if sink.cut() else speakable(reply, skip=sink.spoken)
     if rest:
+        if IN_CHAT in rest and not await to_chat(reply):
+            rest = rest.replace(IN_CHAT, "I couldn't send the details to chat.")
         await say(rest, kind="answer")
     store.record_outcome("voice", "turn", detail=f"{time.time() - started:.1f}s · {text[:120]}")
     return reply

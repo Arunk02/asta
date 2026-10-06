@@ -470,6 +470,9 @@ your phone, so the ability to act on it belongs there too. The choice sticks to 
 conversation; the default only fills in when you haven't picked one or the one you
 picked has since stopped being available. Resolved through the shared registry, so
 a brain added to the spec table is switchable from your phone the same day.
+Voice uses the selected phone brain but has its own conversation for each mic-on
+sitting, so old WhatsApp messages cannot steer live speech. Switching the mic off
+or restarting starts a fresh sitting.
 
 **Which model, not just which brain.** "use opus", "use sonnet" and "use haiku"
 switch the model inside the Claude CLI brain, from any channel, and the picker

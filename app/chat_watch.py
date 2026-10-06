@@ -1563,7 +1563,14 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         source_exchange = (pending.get("exchange") or []) if reference else (
             _transcript(c["chat"], float(corrected["created_at"])) if corrected else [])
         if corrected:
-            _answers.invalidate_answer(corrected["id"])
+            from . import notify as alerts
+            withdrew = _answers.invalidate_answer(corrected["id"])
+            if not reference:
+                await alerts.notify(
+                    f"{who} says my previous answer was wrong (task #{corrected['id']}). "
+                    + ("I withdrew the pending draft and am checking the correction."
+                       if withdrew else "I am checking the correction."),
+                    "answer", urgency="direct", considered=True)
             original = _answers._meta(corrected["id"]).get("source_text") or ""
             options = _reference_options(original, source_exchange) if not reference else None
             if options:

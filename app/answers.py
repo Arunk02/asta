@@ -603,7 +603,7 @@ def corrected_task(thread: str, text: str, now: float | None = None) -> dict | N
     return None
 
 
-def invalidate_answer(task_id: int) -> None:
+def invalidate_answer(task_id: int) -> bool:
     """A rejected draft must not remain sendable while its answer is revisited."""
     from . import loop
     cid = phone_conversation()
@@ -616,6 +616,7 @@ def invalidate_answer(task_id: int) -> None:
     if len(keep) != len(queue):
         store.kv_set(_QUEUE, json.dumps(keep))
         store.record_outcome("answer", "correction withdrew queued", subject=str(task_id))
+    return bool(staged and staged.get("task_id") == task_id) or len(keep) != len(queue)
 
 
 def _meta(task_id: int) -> dict:

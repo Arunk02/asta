@@ -676,6 +676,7 @@ def test_rejected_answer_with_ambiguous_reference_is_clarified_not_reused(rail, 
     assert not rail.asked
     assert len(rail.sent) == 1 and "1429" in rail.sent[0][1] and "1466" in rail.sent[0][1]
     assert loop.awaiting(phone["cid"]) is None
+    assert any("withdrew the pending draft" in p["text"] for p in phone["pushed"])
     rail.rows[chat] = [_msg(chat, "I meant #1466.", now + 30)]
     rail.script["teams:Vinish Kumar"] = {
         "state": "status", "need": "", "closing_confidence": 0.7,
@@ -683,6 +684,7 @@ def test_rejected_answer_with_ambiguous_reference_is_clarified_not_reused(rail, 
     rail.sweep()
     assert rail.asked and rail.asked[0]["correction_of"] == task["id"]
     assert "/pull/1466" in rail.asked[0]["text"]
+    assert sum("says my previous answer was wrong" in p["text"] for p in phone["pushed"]) == 1
 
 
 def test_specific_correction_reopens_work_instead_of_filing_status(rail):

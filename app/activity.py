@@ -42,11 +42,11 @@ _DONE_ICON = {"done": "✅", "failed": "❌", "cancelled": "⏹", "rejected": "�
 # behind the very turn it was asking about and was never answered at all. He
 # types the way he texts, and an acknowledgement in front of a question is
 # normal speech, not a different question.
-_LEAD = r"(?:ok(?:ay)?|k|got\s*it|right|cool|hey|so|and|hi)?[\s,.]*"
+_LEAD = r"(?:(?:no+\b|nope\b|nah\b)(?:[\s,.]+first)?|ok(?:ay)?|k|got\s*it|right|cool|hey|so|and|hi)?[\s,.]*"
 _STATUS_ASK = re.compile(
     r"^\s*" + _LEAD +
     r"(what(?:'s| is|s)?\s+(?:the\s+)?(?:update|status|going on|happening)"
-    r"|w(?:h)?at(?:'s| is|s)?\s+(?:are\s+)?(?:you|u|ya)\s+(?:doing|up\s*to|upto|on)"
+    r"|w(?:h)?at(?:'s| is|s)?\s+(?:are\s+)?(?:you|u|ya)\s+(?:doing|up\s*to|upto|on|working\s+on)"
     r"|any\s+update|any\s?thing\s+yet|status|progress"
     r"|(?:are\s+)?(?:you|u)\s+(?:done|there|still\s+(?:working|going|on\s+it))"
     r"|still\s+(?:working|going|running|on\s+it)"

@@ -1535,15 +1535,22 @@ async def turn(text: str) -> str:
         conv["model"] = main._channel_model(conv)
     sink = VoiceSink()
     started = time.time()
-    job = await main._dispatch(conv, text, sink, "voice")
-    if job is not None:
-        done, _ = await asyncio.wait({job}, timeout=ACK_SECONDS)
-        if not done and sink.spoken == 0 and not sink.cut():
+    async def acknowledge() -> None:
+        await asyncio.sleep(ACK_SECONDS)
+        if sink.spoken == 0 and not sink.cut():
             await say(ACKS[_kind_of(text)], kind="answer")
-        if not done:
+
+    ack = asyncio.create_task(acknowledge())
+    try:
+        job = await main._dispatch(conv, text, sink, "voice")
+        if job is not None:
             # No timed "still on it": he called that nagging (2 Oct). He heard
             # the acknowledgement; the answer comes when it comes.
             await asyncio.wait({job}, timeout=TURN_SECONDS)
+    finally:
+        ack.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ack
     reply = sink.text()
     rest = "" if sink.cut() else speakable(reply, skip=sink.spoken)
     if rest:

@@ -487,6 +487,37 @@ def test_a_voice_turn_answers_even_when_no_brain_can_be_chosen(helper, monkeypat
     assert helper.said() == ["Nothing pending right now."]
 
 
+def test_voice_acknowledges_while_dispatch_is_still_starting(helper, monkeypatch):
+    monkeypatch.setattr(main, "_channel_model", lambda conv: "copilot")
+    monkeypatch.setattr(vm, "ACK_SECONDS", 0.02)
+    entered = asyncio.Event()
+    continue_dispatch = asyncio.Event()
+
+    async def dispatch(conv, text, sink, channel):
+        assert conv["model"] == "copilot" and channel == "voice"
+        entered.set()
+        await continue_dispatch.wait()
+        await sink.send({"type": "delta", "text": "The booking PR is ready for review."})
+        return None
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+
+    async def check():
+        answer = asyncio.create_task(vm.turn("Asta, is the booking PR ready?"))
+        await entered.wait()
+        for _ in range(100):
+            if helper.said():
+                break
+            await asyncio.sleep(0.01)
+        assert helper.said() == ["Let me check."], "the dispatcher must not delay first words"
+        continue_dispatch.set()
+        await answer
+        assert helper.said() == ["Let me check.", "The booking PR is ready for review."]
+
+    run(check())
+
+
 @pytest.mark.parametrize("heard", ["موسيقى موسيقى موسيقى موسيقى", "[Music]", "♪ la la la ♪",
                                    "okay okay okay okay", "谢谢大家"])
 def test_music_and_other_rooms_noise_are_not_turns(heard):

@@ -942,6 +942,37 @@ def test_a_30_second_clip_waits_for_the_rest_even_past_the_normal_hold(helper, d
     assert vm._TURN["continued"] is False
 
 
+def test_segments_are_joined_in_recording_order_when_transcription_finishes_out_of_order(
+        helper, decided, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import voice
+
+    monkeypatch.setenv("ASTA_TOKEN", "voice-test-token")
+
+    async def transcribe(data, filename="", language=""):
+        if data == b"RIFFfirst":
+            await asyncio.sleep(0.2)
+            return "Check the Activityplan service and"
+        assert data == b"RIFFlast"
+        await asyncio.sleep(0.01)
+        return "tell me whether Vinish received my reply."
+
+    monkeypatch.setattr(voice, "transcribe", transcribe)
+    with TestClient(main.app).websocket_connect("/ws/voice-mode?token=voice-test-token") as ws:
+        assert json.loads(ws.receive_text())["type"] == "state"
+        assert json.loads(ws.receive_text())["type"] == "vocab"
+        ws.send_text(json.dumps({"type": "toggle", "what": "mic"}))
+        assert json.loads(ws.receive_text())["mic"] is True
+        for wav, continued in ((b"RIFFfirst", True), (b"RIFFlast", False)):
+            ws.send_text(json.dumps({"type": "utterance", "wav": base64.b64encode(wav).decode(),
+                                     "continued": continued, "asta": False}))
+        for _ in range(40):
+            if decided:
+                break
+            time.sleep(0.05)
+    assert decided == ["Check the Activityplan service and tell me whether Vinish received my reply."]
+
+
 def test_a_finished_sentence_is_decided_at_once(helper, decided, monkeypatch):
     monkeypatch.setattr(vm, "HOLD_UNFINISHED_SECONDS", 3.0)
     started = time.time()

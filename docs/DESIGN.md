@@ -475,7 +475,7 @@ sitting, so old WhatsApp messages cannot steer live speech. Switching the mic of
 or restarting starts a fresh sitting.
 When speech crosses the helper's 30-second recording boundary, the previous
 audio is delivered before recognition restarts; the server waits for the next
-segment before deciding the complete utterance.
+segment and transcribes the clips in recording order before deciding the complete utterance.
 
 **Which model, not just which brain.** "use opus", "use sonnet" and "use haiku"
 switch the model inside the Claude CLI brain, from any channel, and the picker

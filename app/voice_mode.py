@@ -36,6 +36,7 @@ import contextlib
 import json
 import re
 import time
+from collections.abc import Callable
 
 from . import store
 
@@ -557,7 +558,7 @@ def mac_words(said: str, confidence: float) -> str:
 
 
 async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float = 0.0,
-                asta: bool | None = None) -> dict:
+                asta: bool | None = None, appended: Callable[[], None] | None = None) -> dict:
     """One utterance from the helper: transcribe, decide, act. Returns what happened.
 
     `said` is the helper's own on-device transcription, made while he talked —
@@ -613,6 +614,8 @@ async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float
         _STATE["barged_at"] = time.time()
         store.record_outcome("voice", "barge", detail=mine[:120])
         await _to_helper({"type": "hush"})
+    if appended:
+        return await assemble(mine, appended=appended)
     return await assemble(mine)
 
 
@@ -706,7 +709,7 @@ def unfinished(text: str) -> bool:
     return not re.search(r"[.।]$", t) or bool(_TRAILING.search(t))
 
 
-async def assemble(text: str) -> dict:
+async def assemble(text: str, appended: Callable[[], None] | None = None) -> dict:
     """His pieces joined into one turn, decided once he has finished.
 
     The helper ends a piece at a short pause; people pause mid-sentence. So a
@@ -716,11 +719,15 @@ async def assemble(text: str) -> dict:
     if is_noise(text) and not wake_only(text):
         if not _TURN["parts"] and not _TURN["speaking"] and not _TURN["pending"]:
             _TURN["continued"] = False
+        if appended:
+            appended()
         return {"text": text, "did": "ignored"}     # a waiting turn goes on waiting
     if not _TURN["parts"]:
         _TURN["first_at"] = time.time()
     _TURN["parts"].append(text)
     _TURN["gen"] += 1
+    if appended:
+        appended()
     gen = _TURN["gen"]
     calling = wake_only(text) or (len(_tokens(text)) <= 4 and (named(text) or _ONE_WORD.match(text)))
     hold = 0.0 if calling else HOLD_UNFINISHED_SECONDS if unfinished(text) else HOLD_SECONDS
@@ -1610,12 +1617,22 @@ async def idle_loop() -> None:
 
 
 async def _heard_quietly(wav: bytes, said: str = "", confidence: float = 0.0,
-                         asta: bool | None = None) -> None:
+                         asta: bool | None = None, previous: asyncio.Future[None] | None = None,
+                         ready: asyncio.Future[None] | None = None) -> None:
+    def mark_ready() -> None:
+        if ready is not None and not ready.done():
+            ready.set_result(None)
+
     try:
-        await heard(wav, said=said, confidence=confidence, asta=asta)
+        if previous is not None:
+            await previous
+        await heard(wav, said=said, confidence=confidence, asta=asta,
+                    appended=mark_ready if ready is not None else None)
     except Exception as exc:                                    # noqa: BLE001
         from . import quiet
         quiet.note("voice.heard", exc)
+    finally:
+        mark_ready()
 
 
 # --- the helper's connection ----------------------------------------------------------
@@ -1630,6 +1647,7 @@ async def serve(ws) -> None:
     store.record_outcome("voice", "helper", detail="connected")
     await _to_helper({"type": "state", **state(), "why": "connected"})
     await _to_helper({"type": "vocab", "words": vocabulary()})
+    previous_assembled: asyncio.Future[None] | None = None
     try:
         while True:
             msg = json.loads(await ws.receive_text())
@@ -1655,8 +1673,11 @@ async def serve(ws) -> None:
                     # In the background: a turn can take minutes, and the hotkeys
                     # must keep working while it does.
                     asta = msg.get("asta")
+                    ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
                     asyncio.ensure_future(_heard_quietly(
-                        wav, said, confidence, asta if isinstance(asta, bool) else None))
+                        wav, said, confidence, asta if isinstance(asta, bool) else None,
+                        previous=previous_assembled, ready=ready))
+                    previous_assembled = ready
             elif kind == "transcript":
                 transcript(msg)
             elif kind == "barge":

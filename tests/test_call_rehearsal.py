@@ -121,3 +121,26 @@ def test_asta_to_asta_call_hears_and_answers_an_interruption(tmp_path, monkeypat
     assert report["passed"], report["fails"]
     assert report["reply_gaps"] and all(g is not None for g in report["reply_gaps"])
     print(f"Asta-to-Asta call: heard interruption; reply gaps {report['reply_gaps']}s")
+
+
+@pytest.mark.skipif(os.environ.get("ASTA_SELF_TALK_TEST") != "1",
+                    reason="starts two no-tool call brains on isolated browser endpoints")
+def test_two_asta_brains_hear_and_answer_each_other_over_audio(tmp_path, monkeypatch):
+    from app import voice
+
+    if not (Path(__file__).resolve().parents[1] / ".env").is_file():
+        pytest.skip("two call brains need a configured local Asta checkout")
+    monkeypatch.setattr(voice, "BASE", voice.CONFIGURED_BASE)
+    monkeypatch.setattr(voice, "DEFAULT_PROFILE", "Asta (male)")
+    original_db = store.DB_PATH
+    try:
+        report = asyncio.run(R.run(R.TWO_MINDS, tmp_path))
+    finally:
+        store.DB_PATH = original_db
+    assert report["passed"], report["fails"]
+    assert len(report["partner_turns"]) == 2
+    assert len(report["primary_heard"]) >= 2
+    assert "hear" in report["partner_turns"][1]["heard"].lower()
+    assert "hear" in " ".join(report["primary_heard"]).lower()
+    print("Two Asta brains over WebRTC: partner reply delays "
+          f"{[turn['answer_after'] for turn in report['partner_turns']]}s")

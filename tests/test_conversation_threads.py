@@ -420,6 +420,13 @@ def test_different_bookings_are_different_work():
     assert rc.key_for("ask", "check booking 88271234") != rc.key_for("ask", "check booking 99999999")
 
 
+def test_same_booking_in_another_environment_or_for_another_flow_is_not_reused():
+    from app import results_cache as rc
+    base = rc.key_for("debug", "check invoice dispatch booking MH12AB34CD56 in uat")
+    assert base != rc.key_for("debug", "check invoice dispatch booking MH12AB34CD56 in preprod")
+    assert base != rc.key_for("debug", "check customs booking MH12AB34CD56 in uat")
+
+
 def test_a_running_investigation_is_joined_not_repeated(monkeypatch):
     from app import results_cache as rc
     tid = store.create_task("Check booking 88271234", "analysis", "brief", None)["id"]

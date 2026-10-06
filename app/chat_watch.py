@@ -7,11 +7,10 @@ Arun, on why the Activity feed was always the wrong reader:
      tag in both personal one to one chat as well as group chat this is basic
      thing"
 
-He is right and it is basic. Teams' Activity feed lists mentions, replies,
-reactions and invites. It never lists an ordinary message. So a 1:1 — where every
-message is addressed to him by definition — was invisible unless somebody
-@mentioned him inside his own DM, and the second message of any conversation was
-invisible because nobody tags twice.
+He is right about 1:1 chats: Teams' Activity feed lists mentions, replies,
+reactions and invites, not ordinary messages. Each 1:1 message is addressed to
+him without a tag. His later group rule is stricter: only the individual group
+message that tags or names him is his to act on, not a subsequent untagged reply.
 
 **Asta's high-water mark, not his read state.** What matters is whether ASTA has
 processed a message, not whether Teams believes Arun has seen it. Keying off
@@ -75,21 +74,6 @@ _CURSOR_KEY = "chatwatch_cursor"
 READ_LIMIT = int(os.environ.get("ASTA_CHATWATCH_READ", "12"))
 
 _RAIL_KEY = "chatwatch_rail"
-
-#: How long a group conversation stays "his" after he is tagged in it.
-#:
-#: "need my attentation for group chats that is valid my name tagged at first,
-#: follow up convo with or without tagging as well.. but it should aware and
-#: follow up post the first tag message as well".
-#:
-#: A tag in a group opens a thread that belongs to him; the replies that follow it
-#: do not get tagged again, and they are the substance. So the tag starts a window
-#: rather than marking one message. A 1:1 needs none of this — every message there
-#: is his by construction.
-#: Shortened from 12h after it fired live. A tag at breakfast should not make the
-#: room his until the evening; a conversation that resumes tomorrow gets tagged
-#: again, because that is what people do.
-ENGAGED_HOURS = float(os.environ.get("ASTA_GROUP_FOLLOW_HOURS", "2"))
 
 #: Rail rows that are not somebody talking to him.
 #:
@@ -345,71 +329,22 @@ def remember(chat: str, rows: list[dict]) -> None:
         store.kv_set(_seen_at_key(chat), str(max(before, max(times))))
 
 
-def _engaged_key(chat: str) -> str:
-    return f"chatwatch_tagged:{chat.strip().lower()[:60]}"
-
-
 def mentions_him(text: str) -> bool:
-    """Is his name in this message? The signal that a group thread became his."""
+    """Only the sender's words, not a quote, attachment path or URL, can tag him."""
     from . import meetings
-    low = (text or "").lower()
-    return any(n and n in low for n in meetings.HIS_NAMES)
-
-
-def note_tagged(chat: str, now: float | None = None, by: str = "") -> None:
-    """Remember WHEN he was pulled in, and by WHOM.
-
-    Who matters as much as when. Alex tagged him in a release channel and, for
-    the next twelve hours, every message in the room reached his phone — Peyton's
-    schema question, Hayden's "22nd September ko release hai", and "Alex Kumar
-    what do you say", which is addressed to Alex. Being pulled into a thread is
-    not being subscribed to a room.
-    """
-    import time
-    when = now if now is not None else time.time()
-    store.kv_set(_engaged_key(chat), f"{when}|{(by or '').strip()}")
-
-
-def engaged(chat: str, now: float | None = None) -> tuple[bool, str]:
-    """(is this still a conversation he was pulled into, who pulled him in)."""
-    import time
-    raw = (store.kv_get(_engaged_key(chat)) or "").strip()
-    if not raw:
-        return False, ""
-    stamp, _, by = raw.partition("|")
-    try:
-        when = float(stamp)
-    except ValueError:
-        return False, ""
-    now = time.time() if now is None else now
-    return ((now - when) < ENGAGED_HOURS * 3600), by
+    own_words = _URL.sub("", _IMAGE_MARK.sub("", clean_message(text))).lower()
+    aliases = set(meetings.HIS_NAMES)
+    aliases.update(n.replace(" ", "") for n in meetings.HIS_NAMES if " " in n)
+    return any(re.search(rf"(?<!\w){re.escape(n)}(?!\w)", own_words)
+               for n in aliases if n)
 
 
 def addressed_to_him(chat: str, sender: str, text: str,
                      now: float | None = None) -> bool:
-    """Does this message want something from Arun?
-
-    Three rules, in his words:
-      * a 1:1 always counts — "there no point whether they mention or not the
-        message is for me only";
-      * a group counts once his name is in it;
-      * and thereafter, for a while, so does the conversation that follows —
-        "follow up convo with or without tagging as well".
-    """
+    """Every 1:1 counts; a group message needs its own tag or his name."""
     if (sender or "").strip().lower() == (chat or "").strip().lower():
-        return True                         # a 1:1: the chat IS the person
-    if mentions_him(text):
-        note_tagged(chat, now, by=sender)
         return True
-    open_window, by = engaged(chat, now)
-    if not open_window:
-        return False
-    # Inside the window, the follow-up is what the person who pulled him in says
-    # next — not everything the room says. Anything naming somebody ELSE is
-    # theirs: "Alex Kumar what do you say" is a question for Alex.
-    if names_someone_else(text, sender):
-        return False
-    return (sender or "").strip().lower() == (by or "").strip().lower()
+    return mentions_him(text)
 
 
 # --- what he actually reads ---------------------------------------------------
@@ -1210,11 +1145,14 @@ def _with_the_case(ask_text: str, need: str, convo: list[str]) -> str:
     if not responder.what_it_asks(out) and need:
         out = f"{need}\n{out}"
     found = [i for i in booking_case.ids(around) if i not in booking_case.ids(out)]
-    if found and not booking_case.ids(out):
-        out += f"\n(booking: {', '.join(found[:3])})"
-    env = booking_case.env_of(around)
-    if env and not booking_case.env_of(out):
-        out += f"\n(environment: {env})"
+    if len(set(found)) == 1 and not booking_case.ids(out):
+        out += f"\n(booking: {found[0]})"
+    if not booking_case.env_of(out):
+        for line in reversed(convo[-8:]):
+            scope = booking_case.case_scope(line)
+            if scope and scope[0] in booking_case.ids(out):
+                out += f"\n(environment: {scope[1]})"
+                break
     return out
 
 
@@ -1614,7 +1552,9 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             from . import answers
             await answers.offer_plan(who=who, chat=c["chat"], need=said,
                                      summary=fields["summary"], thread=tid,
-                                     words="\n".join(c["new"]))
+                                     words="\n".join(c["new"]),
+                                     group=not c["one_to_one"],
+                                     source_text=c["raw"][-1].get("text") or "")
             continue
 
         # 3. Everything else is worked — a call request too: if there is
@@ -1653,13 +1593,15 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                                  reply_to=c["chat"], group=not c["one_to_one"], need=said,
                                  thread=tid, questions=d.get("questions") or [],
                                  review_revision=review_revision,
-                                 review_question=c["last"])
+                                 review_question=c["last"],
+                                 source_text=c["raw"][-1].get("text") or "")
         if task and task.get("reused"):
             from . import answers
             analysis, reply = answers.split(task.get("result") or "")
             if reply and await answers.present(
                     who=who, need=said, chat=c["chat"], group=not c["one_to_one"],
                     analysis=analysis, reply=reply, task_id=task["id"], thread=tid,
+                    source_text=c["raw"][-1].get("text") or "",
                     note=f"Already looked into this recently (task #{task['id']}) — not run again."):
                 continue
         if task and not task.get("reused"):
@@ -1689,7 +1631,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                     and _worth_telling(tid, said, fyi=False, group=not c["one_to_one"], now=now) \
                     and await answers.present(who=who, need=said, chat=c["chat"],
                                               group=not c["one_to_one"], analysis="",
-                                              reply=d["reply"], thread=tid, lead=tell):
+                                              reply=d["reply"], thread=tid, lead=tell,
+                                              source_text=c["raw"][-1].get("text") or ""):
                 continue
         # Not taken on — he needs to know, and to know what would move it.
         after = offers.pending()
@@ -1758,8 +1701,7 @@ async def sweep(notify=None, only: list[str] | None = None) -> list[dict]:
         for i, m in enumerate(fresh):
             who = (m.get("sender") or chat).strip()
             text = (m.get("text") or "").strip()
-            # 1:1 always; a group once he is tagged, and for a window after —
-            # the replies that follow a tag are never tagged again.
+            # Every 1:1 message counts; each group message needs its own tag.
             direct = addressed_to_him(chat, who, text)
             key = attention.key_for(f"{chat}:{text}")
             v = triage.classify(who, text, addressed=direct)

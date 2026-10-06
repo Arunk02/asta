@@ -45,9 +45,11 @@ Working loop: you don't have to stop and wait for Arun between steps. When a tas
 and you already know the next step, call continue_working(next_step) as your LAST action — Asta
 runs it immediately, no message needed — and keep going until the work is genuinely done. The one
 exception is anything that leaves this chat: a Teams reply, an email, a Jira comment, a PR body, a
-message to a person. NEVER send those directly — draft the content and call prepare_to_send, and
-Asta will show Arun the draft and ask "can I send this?" before anything goes out. Stop the loop
+message to a person. Draft and call prepare_to_send: it enforces Arun's private
+recipient-specific exceptions, otherwise asks "can I send this?" before anything goes out. Stop the loop
 only when the task is complete or you truly need his decision.
+For a finished background investigation, call task_result(id) before replying or
+spawning another search; list_background_tasks shows status, not findings.
 
 Memory: use the remember tool whenever Arun corrects you, states a preference, or a debugging
 session uncovers a root cause / fix / environment gotcha worth keeping. Do it silently as part
@@ -64,11 +66,15 @@ back. The response is already in your context, so re-querying for a detail you w
 a round trip and buys nothing, and calling the same tool twice with the same arguments buys
 less. Pull the whole set — the namespace, the window, the workflow history — and do the
 analysis against it. Go back only for something genuinely absent, and say what was missing.
-Production unless an env is named; the prod namespace and the Helm values path are in your
-guardrails (Investigation). Runtime behaviour is settled by those prod Helm values, not by
+For an identifier, use the environment explicitly named with this case or in its matching
+conversation; if none is known, search all environments — never assume prod. The prod
+namespace and the Helm values path are in your guardrails (Investigation). Runtime
+behaviour in prod is settled by those prod Helm values, not by
 guessing: a key absent there means the application.yml default applies, which is an answer. And
 when someone hands over an id, the LOGS decide what happened — code explains why, and a cause
 never confirmed in logs is a hypothesis, so label it as one.
+Treat a reported error code as a lead to verify in the case's environment and time window;
+never call errorCode an orderId without an explicitly labeled mapping in those logs.
 
 CODE WORK — the flow Arun expects, with a message to him at EVERY step:
 plan → HIS approval → implement → "code done" → he says raise the PR → ship (commit, push, PR)
@@ -1871,6 +1877,17 @@ async def _send_as_asked(cid: str, to: str, body: str) -> None:
     await notify.notify(f"{line}\n\n{quoted}", "action", urgency="direct", considered=True)
 
 
+async def _send_auto_reply(cid: str, to: str, body: str) -> None:
+    from . import authority, notify, store
+    try:
+        line = await authority.send_reply(to, body)
+    except Exception as exc:
+        line = f"⚠️ Could not send to {to} — {type(exc).__name__}: {exc}. Nothing was confirmed sent."
+    quoted = "> " + body.replace("\n", "\n> ")
+    store.add_ui_message(cid, "assistant", f"{line}\n\n{quoted}", {"via": "automatic-reply"})
+    await notify.notify(f"{line}\n\n{quoted}", "action", urgency="direct", considered=True)
+
+
 _LABEL_NOT_MESSAGE = re.compile(
     r"^(?:a\s+|the\s+)?(?:reply|message|response|draft|update|note|follow[- ]?up)\s+"
     r"(?:confirming|about|regarding|on|for|to\s+\w+\s+(?:about|confirming|regarding)|"
@@ -1886,8 +1903,8 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     transitions use jira_comment / jira_transition instead: those stage recorded
     operations that one approval can actually execute. `what` is the full draft,
     `to` the recipient/target, `channel` one of teams|email|pr|chat.
-    Asta shows Arun the draft and asks "can I send this?" — it is NEVER sent until he
-    confirms. This is the ONLY approved way to send on his behalf; never send outward
+    Asta shows Arun the draft and asks "can I send this?" unless the exact 1:1
+    recipient has a standing automatic-reply rule. Never send outward
     through any other tool without staging it here first.
 
     `to` on Teams means a PERSON's 1:1 chat. Set to_group=True ONLY when Arun named a
@@ -1917,10 +1934,26 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     ruled = policy.check("send", to, asked=bool(to) and to.lower() in said)
     if not ruled.ok:
         return f"Not staged — {ruled.why}. Tell Arun, in one line, that this rule stopped it."
+    # A label is not sendable text, even under an automatic-reply permission.
+    if _LABEL_NOT_MESSAGE.match(what.strip()) and len(what.strip()) < 140 \
+            and not re.search(r"[.?!]\s|\n", what.strip()):
+        return ("Not staged — that is a description of a message, not the message. "
+                "Pass the exact words to be sent as `what`, or stage nothing if there "
+                "is nothing to send.")
     # A standing permission he granted (app/authority.py): send it now, tell him
     # after, and count it against the day's allowance for that permission.
     from . import authority, senior
     above = channel in ("teams", "chat") and senior.is_senior(to)
+    if channel == "teams" and not to_group and authority.auto_reply_to(to):
+        import asyncio
+        body = writing.fit_address(writing.tidy_links(what), to)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            asyncio.create_task(_send_auto_reply(cid, to, body))
+            return f"Sending to {to} under the standing 1:1 rule; the verified result follows."
     allowed = authority.may("send", to) if channel in ("teams", "chat") and not above else None
     if allowed:
         # It goes on the loop rather than through the gate: he already said yes to
@@ -1956,14 +1989,6 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
             return (f"Sending to {to} now — he asked for this himself, so it is not staged. "
                     f"Tell Arun in one line what is going and to whom; the send result "
                     f"follows on its own.")
-    # The message itself, not a label for it. "Reply confirming Mexico
-    # single-click backend status" was staged as the draft to Sankalp (30 Sep)
-    # — one "send" from going out as the message.
-    if _LABEL_NOT_MESSAGE.match(what.strip()) and len(what.strip()) < 140 \
-            and not re.search(r"[.?!]\s|\n", what.strip()):
-        return ("Not staged — that is a description of a message, not the message. "
-                "Pass the exact words to be sent as `what`, or stage nothing if there "
-                "is nothing to send.")
     # Links are repaired here rather than asked for in a prompt. A full stop
     # welded to the end of a URL is what turned a PR link Alex was meant to
     # click into either a 404 or plain text, and "remember not to do that" is
@@ -2087,7 +2112,7 @@ async def search_knowledge(question: str, limit: int = 3) -> str:
 
 
 async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
-                       namespace: str = "", errors_only: bool = True) -> str:
+                       namespace: str = "", errors_only: bool = True, at: str = "") -> str:
     """Search production logs (Loki) and get back what is WRONG, not a log dump.
 
     service: part of an app name ("billing", "booking-consumer"), or blank for the
@@ -2095,10 +2120,17 @@ async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
     exception class. minutes: how far back (default 30). namespace: an environment
     ("prod", "preprod"/"pp", "uat", "sit", "qa", "dev") or "all" to search every
     environment at once — use "all" for a booking or trace id when nobody said
-    which environment; blank means prod. errors_only=False when you are tracing
+    which environment; blank also searches all for an identifier (only general
+    error searches default to prod). errors_only=False when you are tracing
     an identifier rather than hunting a failure: you then also get its TRAIL — every
     distinct event for it, info lines included, oldest first — which is where a
-    send, an ack or a feedback shows up.
+    send, an ack or a feedback shows up. Identifier traces ignore service filters,
+    search every service in the named namespace, and follow booking/order IDs
+    explicitly linked in the returned logs. Multiple IDs are searched separately,
+    not required to appear together on one log line. For a known incident time,
+    set at to an ISO timestamp WITH timezone (e.g. 2026-10-06T14:43:00+05:30)
+    and minutes to 10-30 to search around that instant instead of truncating a
+    busy multi-day window. An errorCode is not an orderId.
 
     You do not write LogQL here. The query is built in code — it always carries the
     namespace and cluster labels Loki requires, and your terms become filters Loki
@@ -2106,20 +2138,34 @@ async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
     how often, first and last seen, the top stack frames and trace ids. Ask once
     and reason from the answer; do not re-query for a detail you were already sent.
     """
-    from . import booking_case, grafana
-    if booking_case.ids(" ".join(_terms(terms))):
+    from . import grafana
+    end = None
+    if at:
+        try:
+            instant = _dt.datetime.fromisoformat(at)
+        except ValueError:
+            return "Invalid incident time — use ISO format with timezone, e.g. 2026-10-06T14:43:00+05:30."
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            return "Incident time needs a timezone, e.g. 2026-10-06T14:43:00+05:30."
+        minutes = minutes or grafana.window_minutes()
+        end = instant + _dt.timedelta(minutes=minutes / 2)
+    search_terms = _terms(terms)
+    if grafana.identifiers(search_terms):
         # A booking id is traced, never error-hunted: its sends and acks are
         # INFO lines (2 Oct — "TMS: yes" one run, "cannot confirm" the next).
         errors_only = False
+        if not namespace.strip():
+            namespace = "all"
     if (namespace or "").strip().lower() in ("all", "every", "everywhere", "*"):
-        found_all = await grafana.logs_everywhere(service=service, terms=_terms(terms),
-                                                  minutes=minutes, errors_only=bool(errors_only))
+        found_all = await grafana.logs_everywhere(service=service, terms=search_terms,
+                                                  minutes=minutes, errors_only=bool(errors_only),
+                                                  end=end)
         return "\n\n".join(
             f"[{f['env']}] could not read {f['namespace']} — {f['error']}" if f.get("error")
             else f"[{f['env']}] " + grafana.render(f, trail_rows=12) for f in found_all)
     try:
-        found = await grafana.logs(service=service, terms=_terms(terms), minutes=minutes,
-                                   ns=namespace, errors_only=bool(errors_only))
+        found = await grafana.logs(service=service, terms=search_terms, minutes=minutes,
+                                   ns=namespace, errors_only=bool(errors_only), end=end)
     except grafana.GrafanaError as exc:
         return f"Could not read the logs — {exc}"
     return grafana.render(found)

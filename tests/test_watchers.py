@@ -233,6 +233,14 @@ def test_channel_and_ambiguous_mentions_stay_with_activity(row, monkeypatch):
     assert teams_bridge._activity_wanted(row)
 
 
+def test_channel_reply_without_new_tag_is_not_processed():
+    assert not teams_bridge._activity_wanted(
+        "Sam — replied to you in a channel — can you check this?")
+    assert teams_bridge._activity_wanted(
+        "Sam — replied to you in a channel — Arun, can you check this?")
+    assert teams_bridge._activity_wanted("Sam — missed call — 2m")
+
+
 def test_channel_mention_reaches_watcher_after_a_failed_poll(monkeypatch):
     from app import recovery
 

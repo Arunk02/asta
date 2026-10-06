@@ -169,6 +169,173 @@ def test_a_quiet_window_says_so():
     assert "No errors in that window" in grafana.render(found)
 
 
+def test_booking_trace_covers_all_services_and_follows_a_linked_order_id(monkeypatch):
+    booking, order = "H7JWWBZF5L9", "MHNJWVNBNCNS"
+    queries = []
+
+    async def get(path, params):
+        query = params["query"]
+        queries.append(query)
+        if f'|= "{booking}"' in query:
+            return _payload([("info", f"bookingId {booking} orderId {order}")],
+                            app="booking-service")
+        if f'|= "{order}"' in query:
+            return _payload([("error", f"Email Delivery Failed for orderId {order}")],
+                            app="email-service")
+        raise AssertionError(f"Unexpected query: {query}")
+
+    monkeypatch.setattr(grafana, "_get", get)
+    found = asyncio.run(grafana.logs(service="email", terms=[booking, order],
+                                      ns="uat", errors_only=False, minutes=180))
+    assert len(queries) == 2
+    assert all('namespace="team-uat"' in q and "app=" not in q and "app!~" not in q
+               for q in queries)
+    assert all(sum(f'|= "{i}"' in q for i in (booking, order)) == 1 for q in queries)
+    assert found["scanned"] == 2 and found["service"] == ""
+    assert found["searched_ids"] == [booking, order]
+    assert found["id_matches"] == {booking: 1, order: 1}
+    report = grafana.render(found)
+    assert "booking-service" in report and "email-service" in report
+    assert "Email Delivery Failed" in report and "all services" in report
+
+
+def test_booking_trace_auto_resolves_order_id_without_another_service_filter(monkeypatch):
+    booking, order = "H7JWWBZF5L9", "MHNJWVNBNCNS"
+    queried = []
+
+    async def get(path, params):
+        q = params["query"]
+        queried.append(q)
+        return _payload([("info", f'{{"bookingId":"{booking}","orderId":"{order}"}}')],
+                        app="booking-service") if booking in q else _payload(
+                            [("error", f"Email Delivery Failed for {order}")], app="email-service")
+
+    monkeypatch.setattr(grafana, "_get", get)
+    records = asyncio.run(grafana.records_for(booking, "uat"))
+    assert len(queried) == 2 and all("app=" not in q for q in queried)
+    assert {r["service"] for r in records} == {"booking-service", "email-service"}
+
+
+def test_unmatched_supplied_order_id_is_not_confused_with_linked_one(monkeypatch):
+    booking, wrong, linked = "H7JWWBZF5L9", "MHNJWVNBNCNS", "MH7JWV7B6C8S"
+
+    async def get(path, params):
+        query = params["query"]
+        if wrong in query:
+            return _payload([])
+        if linked in query:
+            return _payload([("info", f"orderId {linked} email delivery failed")],
+                            app="email-service")
+        return _payload([("info", f"bookingId {booking} orderId {linked} "
+                                   'errorCode: "7734800510"')], app="booking-service")
+
+    monkeypatch.setattr(grafana, "_get", get)
+    found = asyncio.run(grafana.logs(terms=[booking, wrong], ns="uat", errors_only=False))
+    assert found["id_matches"] == {booking: 1, wrong: 0, linked: 1}
+    text = grafana.render(found)
+    assert f"{wrong} (0 lines)" in text
+    assert f"{linked} (1 lines, linked in logs)" in text
+    assert "7734800510 (1 lines" not in text
+
+
+def test_business_failure_survives_a_busy_cross_service_trail():
+    booking, order = "H7JWWBZF5L9", "MH7JWV7B6C8S"
+    records = [
+        {"timestamp": i, "line": json.dumps({"message": f"eventName: EVENT_{i}"}),
+         "service": "booking-service", "level": "info"}
+        for i in range(60)
+    ]
+    records.append({
+        "timestamp": 61,
+        "line": json.dumps({"bookingId": booking, "orderId": order,
+                            "activityPlanEvent": {"errorCode": "7734800510",
+                                                  "message": "DocumentContentPDFBase64Encoded is null"}}),
+        "service": "billing-service", "level": "info",
+    })
+    report = grafana.render_trail(grafana.trail(records, [booking, order]))
+    assert "errorCode 7734800510: DocumentContentPDFBase64Encoded is null" in report
+    assert "exceptionCode 7734800510: DocumentContentPDFBase64Encoded is null" in \
+        grafana._trail_key("ExceptionResponse(exceptionCode=7734800510, "
+                           "exceptionMessage=DocumentContentPDFBase64Encoded is null)", [booking])
+    assert len([r for r in grafana.trail(records, [booking]) if "omitted" not in r]) <= 30
+    assert grafana._linked_ids(records, [booking]) == [order]
+
+
+def test_linked_id_query_failure_does_not_look_like_a_complete_trace(monkeypatch):
+    booking, order = "H7JWWBZF5L9", "MHNJWVNBNCNS"
+
+    async def get(path, params):
+        if order in params["query"]:
+            raise grafana.GrafanaError("Loki rejected order lookup")
+        return _payload([("info", f"bookingId {booking} orderId {order}")])
+
+    monkeypatch.setattr(grafana, "_get", get)
+    with pytest.raises(grafana.GrafanaError, match=f"Could not trace {order} in team-uat"):
+        asyncio.run(grafana.logs(terms=[booking], ns="uat", errors_only=False))
+
+
+def test_empty_id_trace_is_not_reported_as_success(monkeypatch):
+    async def get(path, params):
+        return {"data": {"result": []}}
+
+    monkeypatch.setattr(grafana, "_get", get)
+    found = asyncio.run(grafana.logs(terms=["H7JWWBZF5L9"], ns="prod", errors_only=False))
+    assert found["scanned"] == 0
+    assert "does not prove delivery succeeded" in grafana.render(found)
+
+
+def test_log_tool_traces_named_order_id_at_info_level(monkeypatch):
+    from app import agent
+    asked = {}
+
+    async def logs(**kw):
+        asked.update(kw)
+        return dict(grafana.summarise([]), namespace="team-uat", service="", minutes=30,
+                    searched_ids=["MHNJWVNBNCNS"])
+
+    monkeypatch.setattr(grafana, "logs", logs)
+    output = asyncio.run(agent.grafana_logs(service="email", terms=["MHNJWVNBNCNS"],
+                                             namespace="uat"))
+    assert asked["errors_only"] is False
+    assert "all services" in output
+    assert grafana._mcp_env("team-uat") == "uat"
+    assert grafana._mcp_env("telikos-sit-cdt") == "sit"
+    assert grafana.identifiers(["3255cd7b40b4b5d03c48c9eb9a4cb916"])
+
+
+def test_log_tool_can_center_a_narrow_search_on_the_incident(monkeypatch):
+    from app import agent
+    asked = {}
+
+    async def logs(**kw):
+        asked.update(kw)
+        return dict(grafana.summarise([]), namespace="team-uat", service="", minutes=10,
+                    searched_ids=["H7JWWBZF5L9"])
+
+    monkeypatch.setattr(grafana, "logs", logs)
+    asyncio.run(agent.grafana_logs(terms=["H7JWWBZF5L9"], namespace="uat", minutes=10,
+                                    at="2026-10-06T14:43:00+05:30"))
+    import datetime as dt
+    assert asked["end"] == dt.datetime.fromisoformat("2026-10-06T14:48:00+05:30")
+    assert "timezone" in asyncio.run(agent.grafana_logs(
+        terms=["H7JWWBZF5L9"], namespace="uat", at="2026-10-06T14:43:00"))
+
+
+def test_identifier_without_environment_searches_everywhere(monkeypatch):
+    from app import agent
+    asked = {}
+
+    async def everywhere(**kw):
+        asked.update(kw)
+        return [{"env": "uat", "namespace": "team-uat", "minutes": 30,
+                 "scanned": 0, "signatures": [], "searched_ids": ["H7JWWBZF5L9"]}]
+
+    monkeypatch.setattr(grafana, "logs_everywhere", everywhere)
+    output = asyncio.run(agent.grafana_logs(terms=["H7JWWBZF5L9"]))
+    assert asked["terms"] == ["H7JWWBZF5L9"] and asked["errors_only"] is False
+    assert "[uat]" in output and "No ID evidence" in output
+
+
 # --- talking to Grafana ----------------------------------------------------------------
 
 def test_an_expired_token_is_minted_again_and_the_query_retried(monkeypatch):

@@ -3109,6 +3109,17 @@ async def _run_op(op: dict, cid: str, sink, channel: str,
     same words to the same chat. It used to vanish with the failure, and the
     brain then re-made it from memory — into Shabda's 1:1 instead of the group,
     and "already sent" when nothing had gone (1 Oct)."""
+    if staged and staged.get("type") == "answer":
+        from . import answers
+        if not answers.origin_allowed(staged):
+            answers._record_rejected_origin(staged)
+            line = "The group answer is no longer allowed. Nothing sent."
+            store.add_ui_message(cid, "assistant", line, {"via": "staged-send", "channel": channel})
+            await sink.send({"type": "note", "text": line})
+            await answers.next_after(cid)
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return False
     if staged and staged.get("review_origin"):
         from . import answers
         if not await answers.review_is_current(staged["review_origin"]):
@@ -3153,6 +3164,15 @@ async def _send_after_call(op: dict, cid: str, staged: dict | None) -> None:
     while teams_bridge.in_a_call() and waited < AFTER_CALL_SECONDS:
         await asyncio.sleep(3)
         waited += 3
+    if staged and staged.get("type") == "answer":
+        from . import answers
+        if not answers.origin_allowed(staged):
+            answers._record_rejected_origin(staged)
+            line = "The group answer is no longer allowed. Nothing was sent after the call."
+            store.add_ui_message(cid, "assistant", line, {"via": "after-call", "channel": "whatsapp"})
+            await notify.notify(line, "send", urgency="direct", considered=True)
+            await answers.next_after(cid)
+            return
     if staged and staged.get("review_origin"):
         from . import answers
         if not await answers.review_is_current(staged["review_origin"]):
@@ -3535,6 +3555,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     Returns the turn it started, or None when the message was handled without
     starting one (status answer, augment folded in, task steered) — so a
     request/response channel knows whether there's anything to wait for."""
+    from . import answers
     cid = conv["id"]
     # When he last spoke to Asta. Read by the nightly bench, which must never
     # compete with him for a subscription window he is in the middle of using.
@@ -3779,6 +3800,17 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     if staged and (user_text or "").strip():
         approved, read_as = _affirmation(user_text)
         approved = approved or _send_to_staged(user_text, staged)
+        if approved and staged.get("type") == "answer" and not answers.origin_allowed(staged):
+            loop.clear_awaiting(cid)
+            answers._record_rejected_origin(staged)
+            line = ("That group answer came from a message that did not address you "
+                    "or is no longer allowed by your rules. I dropped the draft; nothing was sent.")
+            store.add_ui_message(cid, "assistant", line, {"via": "answer", "channel": channel})
+            await sink.send({"type": "note", "text": line})
+            await answers.next_after(cid)
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
         if (staged.get("channel") or "").strip().lower() == "jira":
             # Drafts persisted by older versions cannot be sent mechanically.
             # Never turn their approval into a fresh model-authored Jira action.

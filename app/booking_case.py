@@ -70,6 +70,19 @@ def env_of(text: str) -> str:
     return ""
 
 
+def case_scope(text: str) -> tuple[str, str] | None:
+    """An explicitly scoped case near the start of an ask, never a default env."""
+    head = (text or "")[:350]
+    match = ID.search(head)
+    if not match:
+        return None
+    nearby = head[max(0, match.start() - 90):match.end() + 140]
+    env = env_of(nearby)
+    if not env or env == "lower":
+        return None
+    return match.group(0).upper(), env
+
+
 def points_at_one(text: str) -> bool:
     """It is about one particular booking (or order, container…), named or not."""
     return bool(_FORWARD.search(text or "") or _BACK.search(text or "") or ids(text))
@@ -180,8 +193,13 @@ def rule(text: str, context: str = "", heard: bool = False) -> str:
            "2. From this booking's logs and Temporal history, what DID happen: "
            "grafana_logs(terms=[id]) with the id ALONE first — see which services touched it "
            "(filters are case-sensitive, and 'custom' matches 'customer': never conclude 'not "
-           "sent' from one keyword). Milestones and the event log are how the UI tracks a "
-           "booking — use them. Mind each flow's real direction:\n"
+           "sent' from one keyword). Milestones and the event log show upstream progress, "
+           "not proof of downstream completion. Follow the actual operation across every "
+           "relevant service and external boundary; distinguish each attempt, failure, "
+           "retry and eventual success by timestamp. Verify delivery in the destination's "
+           "own logs or response before declaring it successful. For 'no retry', state "
+           "observed start/end, env and services; never extrapolate beyond them. "
+           "Mind each flow's direction:\n"
            "   two-way (sent, then ack back): booking→AP (→ ACTIVITYPLAN_FEEDBACK); booking→TMS "
            "(SEND_TO_TMS → SAP_TMS_ACK_FEEDBACK); AP→customs UNITED (→ CIP_CHASSIS / CIP_GOT "
            "Ack).\n"
@@ -190,7 +208,9 @@ def rule(text: str, context: str = "", heard: bool = False) -> str:
            "   outbound only (sent or not): booking→IOM; →event history; AP→email and "
            "documents (SEND_DOCUMENTS).\n"
            + (_BILLING if _ABOUT_BILLING.search(whole) else _NOT_BILLING) +
-           "3. Where the logs and the document disagree, say so — for this booking the logs "
+           "3. A completed upstream milestone never rules out an earlier failed attempt or "
+           "a later downstream failure. State separately what failed, what later succeeded, "
+           "and what remains unverified. Where the logs and the document disagree, the logs "
            "win — and that the document may need correcting.\n"
            "Summarise SIMPLY, in the ANALYSIS: the answer to their question first, in one or "
            "two plain lines; then only the few facts that prove it (time, service, event, "
@@ -398,6 +418,8 @@ async def evidence(prompt: str, minutes: int = 4320) -> str:
     report that)."""
     import asyncio
     from . import grafana
+    if "[Prior task #" in (prompt or "") or "Previous investigation for this case" in (prompt or ""):
+        return ""
     m = _CASE.search(prompt or "")
     if not m or not grafana.enabled():
         return ""
@@ -408,26 +430,37 @@ async def evidence(prompt: str, minutes: int = 4320) -> str:
     billing = bool(_ABOUT_BILLING.search(prompt.split("This is about a specific case")[0]))
     parts = []
     for booking in found:
-        async def one(e: str) -> tuple[str, list[dict]]:
+        async def one(e: str) -> tuple[str, list[dict], str]:
             try:
-                return e, await grafana.records_for(booking, e, minutes)
-            except Exception:                                  # noqa: BLE001
-                return e, []
+                return e, await grafana.records_for(booking, e, minutes), ""
+            except Exception as exc:
+                return e, [], f"{type(exc).__name__}: {exc}"
         got = await asyncio.gather(*(one(e) for e in envs))
-        hit = [(e, r) for e, r in got if r]
+        hit = [(e, r) for e, r, _ in got if r]
+        failures = [f"{e}: {error}" for e, _, error in got if error]
         if not hit:
-            parts.append(f"{booking}: no log lines in {', '.join(envs)} over the last "
-                         f"{minutes // 1440} days.")
+            parts.append(f"{booking}: no log lines returned in {', '.join(envs)} over the last "
+                         f"{minutes // 1440} days."
+                         + (f" Query failed: {'; '.join(failures)}" if failures else ""))
             continue
         for e, recs in hit[:2]:
-            parts.append(f"{booking} in {e} — {len(recs)} lines, last {minutes // 1440} days.\n"
+            linked = grafana._linked_ids(recs, [booking])
+            coverage = f" across {len({r['service'] for r in recs})} services"
+            if linked:
+                coverage += f" (also traced linked IDs: {', '.join(linked)})"
+            parts.append(f"{booking} in {e} — {len(recs)} lines{coverage}, last "
+                         f"{minutes // 1440} days.\n"
                          f"Flows (matched in code on known log messages; 'not seen' means not "
                          f"in these logs — it may be logged differently, so check before "
                          f"saying it was not sent):\n{flows(recs, billing)}\n"
                          f"{milestones(recs)}\n{event_log(recs, billing)}\n"
                          + grafana.render_trail(grafana.trail(recs, [booking]),
                                                 30 if len(hit) == 1 else 12))
+        if failures:
+            parts.append(f"Other environment queries failed: {'; '.join(failures)}")
     if not parts:
         return ""
-    return ("\n\n[Evidence Asta read from the logs before you started — start from it, "
-            "confirm what you rely on]\n" + "\n\n".join(parts))
+    return ("\n\n[Evidence Asta already read from namespace-wide logs before you started. "
+            "Do not repeat this identifier/env/window query; use these records first. "
+            "Query again only for a missing downstream signal, a different time window, "
+            "or a new attempt, and say what was absent here.]\n" + "\n\n".join(parts))

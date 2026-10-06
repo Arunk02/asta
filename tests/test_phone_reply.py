@@ -162,7 +162,8 @@ def test_his_actual_words_reach_the_shortcut():
     for q in ("got it what u doing ?", "what u doing", "whats the update",
               "what are you doing?", "still working?", "u there", "how long",
               "anything yet", "ok what is happening", "progress",
-              "no first, what are you working on?", "no, what are you doing?"):
+              "no first, what are you working on?", "no, what are you doing?",
+              "no no what are you working on and update me that"):
         assert activity.is_status_ask(q), q
         assert activity.classify_interjection(q) == "status", q
 

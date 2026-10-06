@@ -607,6 +607,9 @@ def test_explicit_reference_or_plural_request_does_not_trigger_clarification():
                "Arun: https://github.com/org/booking/pull/1466"]
     assert not chat_watch._reference_question("Merge PR #1466", history)
     assert not chat_watch._reference_question("Please check both PRs", history)
+    assert not chat_watch._reference_question(
+        "Merge the PR", ["Arun: https://github.com/org/booking/pull/1429",
+                         "Vinish: PR #1429"])
     assert not chat_watch._resolved_reference("Not the first one", ["#1429", "#1466"])
     assert chat_watch._resolved_reference("First and second", ["#1429", "#1466"]) \
         == "#1429 and #1466"

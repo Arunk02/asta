@@ -1065,6 +1065,11 @@ def _reference_options(text: str, conversation: list[str]) -> tuple[str, list[st
         if named:
             continue
         candidates = list(dict.fromkeys(candidates))
+        if label == "PR":
+            urls = list(dict.fromkeys(c.lower() for c in candidates if "/pull/" in c))
+            candidates = urls + [
+                c for c in candidates if "/pull/" not in c
+                and not any(url.endswith("/" + c.split()[-1].lstrip("#")) for url in urls)]
         if len(candidates) > 1:
             return label, candidates[-2:]
     return None

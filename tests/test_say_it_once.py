@@ -1606,10 +1606,22 @@ def test_a_colleague_hears_checking_within_the_minute_once_an_hour(monkeypatch):
 
     monkeypatch.setattr(chat_watch, "_say", say)
     monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: ["bro"])
-    c = {"chat": "Vinish Kumar"}
+    c = {"chat": "Vinish Kumar", "last": "Please check booking H7JWWBZF5L9"}
     assert asyncio.run(chat_watch._acknowledge("teams:Vinish Kumar", c)) is True
     assert asyncio.run(chat_watch._acknowledge("teams:Vinish Kumar", c)) is False, "once an hour"
-    assert said == [("Vinish Kumar", "checking bro, will update you")]
+    assert said == [("Vinish Kumar", "Looking into the booking, bro")]
+
+
+def test_acknowledgement_reflects_the_actual_request_without_claiming_an_answer(monkeypatch):
+    from app import steward, writing
+    monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: ["bro"])
+    for request, expected in [
+        ("Can you review https://github.com/org/booking/pull/1466?", "Looking into the PR details, bro"),
+        ("What's the build status?", "Checking the build, bro"),
+        ("The error is happening again", "Looking into what went wrong, bro"),
+        ("Can you check this?", "Let me look into this, bro"),
+    ]:
+        assert steward.ack_line("Vinish Kumar", request) == expected
 
 
 def test_an_unclear_ask_is_asked_back_to_them_not_to_him(monkeypatch):

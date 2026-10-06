@@ -580,6 +580,44 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
 FOLLOWUP_SECONDS = 45 * 60
 
 
+_CORRECTION = re.compile(
+    r"^\s*(?:no[,!.\s]+)?(?:(?:that's|that is|this is|you're|you are|your answer is|"
+    r"your reply is|asta[,!.\s]+)\s+)?(?:not correct|incorrect|wrong|not right|"
+    r"mistaken)\b|^\s*(?:no[,!.\s]+)?(?:not that one|you (?:checked|picked|"
+    r"looked at) the wrong\b)", re.I)
+
+
+def corrected_task(thread: str, text: str, now: float | None = None) -> dict | None:
+    """The recent finished answer a colleague explicitly says was wrong."""
+    from . import chat_watch
+    if not thread or not _CORRECTION.match(chat_watch.clean_message(text)):
+        return None
+    now = time.time() if now is None else now
+    for task in store.list_tasks(limit=40):
+        if task["status"] != "done" or not task.get("result"):
+            continue
+        if now - float(task.get("finished_at") or 0) > FOLLOWUP_SECONDS:
+            continue
+        if _meta(task["id"]).get("thread") == thread:
+            return task
+    return None
+
+
+def invalidate_answer(task_id: int) -> None:
+    """A rejected draft must not remain sendable while its answer is revisited."""
+    from . import loop
+    cid = phone_conversation()
+    staged = loop.awaiting(cid) if cid else None
+    if staged and staged.get("task_id") == task_id:
+        loop.clear_awaiting(cid)
+        store.record_outcome("answer", "correction withdrew draft", subject=str(task_id))
+    queue = _load_queue()
+    keep = [item for item in queue if item.get("task_id") != task_id]
+    if len(keep) != len(queue):
+        store.kv_set(_QUEUE, json.dumps(keep))
+        store.record_outcome("answer", "correction withdrew queued", subject=str(task_id))
+
+
 def _meta(task_id: int) -> dict:
     try:
         d = json.loads(store.kv_get(f"answer_meta:{task_id}") or "{}")

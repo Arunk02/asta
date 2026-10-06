@@ -1106,6 +1106,14 @@ you with the ask. Four rules keep it from becoming the noise it replaced:
   recently-sent messages are investigated (`ASTA_RESPOND_MAX_AGE_MIN`), and a thread
   you have already replied in is left alone. Feedback on work you finished months
   ago is unaffected: it arrived just now.
+- **Recent words beat an old summary.** A bounded excerpt of both sides' latest
+  exchange goes into the investigation brief. A singular "the PR", ticket or
+  booking with several recent candidates is clarified before investigating; an
+  explicit correction to a recent answer withdraws any unsent draft and either
+  asks which item they mean or starts a fresh check rather than repeating it.
+- **Acknowledge the actual ask.** A 1:1 investigation gets one short receipt
+  naming its subject (PR, build, booking, ticket or failure), without claiming
+  a finding or spending another model call on small talk.
 - **Broadcasts are not asks.** A company-wide "Action Required", a channel post
   opening "Everyone please review" — nobody is waiting on you, and an approval queue
   you never answer teaches you to ignore the queue.

@@ -656,7 +656,8 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
             context: str = "", reply_to: str = "", group: bool = False,
             need: str = "", thread: str = "", questions: list | None = None,
             review_revision: str = "", review_question: str = "",
-            source_text: str = "") -> dict | None:
+            source_text: str = "", correction_of: int | None = None,
+            kind_override: str = "") -> dict | None:
     """Start the investigation this message deserves. The spawned task, or None.
 
     Deliberately synchronous and tiny: it decides and delegates. Everything slow
@@ -679,7 +680,15 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         return None
     if opening["opened_with"]:
         context = f"{opening['opened_with']}\n{context}".strip()
-    kind = what_it_asks(text)
+    original = store.get_task(correction_of) if correction_of else None
+    if correction_of and not original:
+        raise ValueError(f"correction task #{correction_of} not found")
+    if kind_override and kind_override not in _BRIEFS:
+        raise ValueError(f"unknown investigation kind: {kind_override}")
+    from . import answers
+    kind = (answers._meta(correction_of).get("ask_kind") or kind_override
+            or what_it_asks(text) or "ask") if original else (
+                kind_override or what_it_asks(text))
     key = key or attention.key_for(text)
     why_not = should_respond(kind, priority, key, now=time.time(),
                              broadcast=is_broadcast(who, text), sent_at=sent_at)
@@ -739,10 +748,13 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     # nothing about whether a new commit or failing CI invalidated the review.
     # Only the live-verified revision supplied by the Teams sweep is reusable.
     scope = review_scope(review_question)
-    ck = (f"review_request:{review_revision}:"
-          f"{hashlib.sha256(scope.encode()).hexdigest()[:12]}" if review_revision else "") \
-        if kind == "review_request" else (
-            "" if kind == "pr_review" else results_cache.key_for(kind or "ask", grounds))
+    if original:
+        ck = f"correction:{correction_of}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+    elif kind == "review_request":
+        ck = (f"review_request:{review_revision}:"
+              f"{hashlib.sha256(scope.encode()).hexdigest()[:12]}" if review_revision else "")
+    else:
+        ck = "" if kind == "pr_review" else results_cache.key_for(kind or "ask", grounds)
     hit = results_cache.lookup(ck) if ck else None
     if hit:
         done = hit["state"] == "done"
@@ -757,6 +769,16 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
                 "reused": done, "joined": not done, "result": hit.get("result", ""),
                 "at": hit.get("at")}
     brief = brief_for(kind, who, grounds)
+    if original:
+        from . import answers
+        prior = answers._meta(correction_of)
+        brief += (
+            f"\n\nCorrection to task #{correction_of}. They rejected the prior answer. "
+            "Recheck the actual subject against the most recent exchange and current "
+            "evidence; do not treat the previous conclusion as fact. If the referent "
+            "is still unclear, ask them rather than guessing.\n"
+            f"Original request: {(prior.get('source_text') or '')[:500]}\n"
+            f"Disputed answer: {(original.get('result') or '')[:1200]}")
     if reply_to:
         brief += _waiting_brief(who, text, context, need=need, questions=questions or [])
     t = tasks.spawn(title_for(kind, who, text), brief,

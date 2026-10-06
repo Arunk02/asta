@@ -194,7 +194,7 @@ def test_one_to_one_acknowledges_automatically_without_approving_each_send(
     asyncio.run(chat_watch.sweep())
     assert len(sent) == 1
     assert sent[0][0] == "Alex Kumar" and sent[0][2] is False
-    assert "checking" in sent[0][1].lower()
+    assert sent[0][1] == "Looking into what went wrong"
 
 
 def test_his_own_messages_are_not_things_he_was_asked(monkeypatch):

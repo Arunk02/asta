@@ -47,6 +47,16 @@ def test_a_slow_reply_fails_even_when_the_mm_hm_was_quick():
     assert not r["passed"] and r["reply_gaps"][1] == 5.0
 
 
+def test_a_quick_reaction_does_not_count_as_a_meaningful_answer():
+    timeline = [{"event": "connected", "at": 0},
+                {"event": "colleague", "text": "Can you hear me?", "start": 4000, "end": 5000}]
+    spans = [_span(100, 3000), _span(5400, 5800), _span(11000, 12500)]
+    saying = [(5300, "Mm."), (10800, "Yes, I hear you clearly.")]
+    r = R._judge(_sc(), timeline, spans, "Talked to Riya Test", 13, saying)
+    assert r["first_sound"] == [0.4]
+    assert r["meaningful_sound"] == [6.0]
+
+
 def test_a_fast_reply_does_not_pass_if_asta_missed_the_interruption():
     timeline = [{"event": "connected", "at": 0},
                 {"event": "colleague", "text": "Sorry, wait, who is this?", "start": 1000, "end": 2300}]

@@ -83,6 +83,8 @@ def fake(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _instant_brain(monkeypatch):
+    from app import call_mind
+    monkeypatch.setattr(call_mind, "start", lambda *a, **k: _done(None))
     monkeypatch.setattr(conversation, "answer_from_knowledge",
                         lambda *a, **k: _done("that's a fair point, I'll note it"))
     monkeypatch.setattr(conversation, "spoken_form", lambda t: t)
@@ -92,6 +94,34 @@ def _done(value):
     async def _c():
         return value
     return _c()
+
+
+def test_answer_stops_unused_speech_warmup_before_greeting(fake, monkeypatch):
+    m = fake(answer="answered", heard=["Hello?", "Bye."])
+    stopped = asyncio.Event()
+
+    async def waiting_opener(*args):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    async def answered(*args, **kwargs):
+        await asyncio.sleep(0)
+        return "answered"
+
+    old_say = m.say_in_call
+
+    async def say(text, voice_name=""):
+        if text.startswith("Hi,"):
+            assert stopped.is_set(), "warming must release the voice service at pickup"
+        return await old_say(text, voice_name)
+
+    monkeypatch.setattr(conversation, "_compose_opener", waiting_opener)
+    monkeypatch.setattr(m, "wait_for_answer", answered)
+    monkeypatch.setattr(m, "say_in_call", say)
+    asyncio.run(conversation.converse("Alex", "audio check", seconds=2))
+    assert stopped.is_set()
 
 
 def test_nobody_answered_means_nothing_is_spoken(fake):

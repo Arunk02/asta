@@ -25,7 +25,9 @@ Isolated like WorkWorld: its own temporary database, nothing reaches his phone,
 his Teams, or his microphone. It does use the real voice server and a real
 brain, because those are exactly the parts a live call exercises. The opt-in
 two-minds scenario replaces the scripted colleague with a second independent
-call brain, using recorded WebRTC audio for both directions.
+call brain, using recorded WebRTC audio for both directions. Reports distinguish
+first sound (which may be an acknowledgment) from the first audible useful
+answer; the partner's answer_after includes speech generation and playback.
 """
 
 from __future__ import annotations
@@ -59,6 +61,7 @@ COLLEAGUE_JS = r"""
       src.buffer = buf; src.connect(C.dest);
       src.onended = () => done(Date.now());
       src.start();
+      C.lastStart = Date.now();
     });
   };
 
@@ -410,8 +413,8 @@ async def run(sc: Scenario, keep_dir: Path) -> dict:
                             reply, ended = await partner.reply(heard_text, timeout=25)
                             if not reply:
                                 raise RuntimeError(f"the second Asta had no answer on turn {turn + 1}")
-                            start = time.time() * 1000
                             finish = await _say(col_page, await line(reply))
+                            start = float(await col_page.evaluate("window.__colleague.lastStart"))
                             await col_page.evaluate("window.__colleague.record()")
                             partner_turns.append({"heard": heard_text, "said": reply,
                                                   "answer_after": round((start - done) / 1000, 2),
@@ -539,12 +542,22 @@ def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
     and, where Asta's own record says which line was which, from that."""
     connected = next((t["at"] for t in timeline if t["event"] == "connected"), None)
     said = [t for t in timeline if t["event"] == "colleague"]
-    gaps, sounds = [], []
+    gaps, sounds, content_sounds = [], [], []
+    from . import call_mind, conversation
+    fillers = {line.strip(" .!").lower() for line in (
+        *call_mind.REACTIONS, *conversation._ACKS, *conversation._MOMENTS,
+        conversation._STILL_THERE)}
     for s in said:
         after = [sp for sp in spans if sp["start"] > s["end"] - 200]
         first_sp = after[0] if after else None
         sounds.append(round((first_sp["start"] - s["end"]) / 1000, 2) if first_sp else None)
         if saying:
+            content = next((at for at, text in saying if at > s["end"] - 200
+                            and text.strip(" .!").lower() not in fillers), None)
+            content_sp = next((sp for sp in spans if content is not None
+                               and sp["start"] >= content - 100), None)
+            content_sounds.append(round((content_sp["start"] - s["end"]) / 1000, 2)
+                                  if content_sp else None)
             reply = next((at for at, text in saying if at > s["end"] - 200
                           and text.strip(" .!").lower() not in _ACK_LINES), None)
             gaps.append(round((reply - s["end"]) / 1000, 2) if reply else None)
@@ -553,6 +566,7 @@ def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
         if first_sp and first_sp["end"] - first_sp["start"] < ACK_MS and len(after) > 1:
             first_sp = after[1]
         gaps.append(round((first_sp["start"] - s["end"]) / 1000, 2) if first_sp else None)
+        content_sounds.append(None)
     first = spans[0]["start"] if spans else None
     fails: list[str] = []
     ex = sc.expect
@@ -599,6 +613,7 @@ def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
         fails.append(f"silence after they stopped: {sounds}")
     return {"scenario": sc.name, "title": sc.title, "passed": not fails, "fails": fails,
             "greeting_after": greeting_at, "reply_gaps": gaps, "first_sound": sounds,
+            "meaningful_sound": content_sounds,
             "asta_spans": len(spans),
             "seconds": round(took, 1), "outcome": outcome[:1500]}
 

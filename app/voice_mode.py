@@ -711,14 +711,14 @@ async def assemble(text: str) -> dict:
     piece waits a moment for the next — longer when it reads unfinished, for as
     long as he is still talking, and while another piece is being transcribed —
     and the turn is decided once, whole."""
-    if is_noise(text):
+    if is_noise(text) and not wake_only(text):
         return {"text": text, "did": "ignored"}     # a waiting turn goes on waiting
     if not _TURN["parts"]:
         _TURN["first_at"] = time.time()
     _TURN["parts"].append(text)
     _TURN["gen"] += 1
     gen = _TURN["gen"]
-    calling = len(_tokens(text)) <= 4 and (named(text) or _ONE_WORD.match(text))
+    calling = wake_only(text) or (len(_tokens(text)) <= 4 and (named(text) or _ONE_WORD.match(text)))
     hold = 0.0 if calling else HOLD_UNFINISHED_SECONDS if unfinished(text) else HOLD_SECONDS
     arrived = time.time()
     deadline = arrived + hold

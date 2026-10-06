@@ -1543,6 +1543,18 @@ def test_a_greeting_answers_locally_even_when_voice_router_is_down(helper, monke
     assert helper.said() == ["I'm listening."]
 
 
+def test_repeated_greeting_survives_utterance_assembly(helper, monkeypatch):
+    from app import voice_talker
+
+    async def no_router(*args, **kwargs):
+        raise AssertionError("wake-only greeting must not consult the router")
+
+    monkeypatch.setattr(voice_talker, "route", no_router)
+    vm._STATE.update(speaker=True, mic=True)
+    assert run(vm.assemble("Hello, hello, hello, hello"))["did"] == "listening"
+    assert helper.said() == ["I'm listening."]
+
+
 @pytest.mark.parametrize("utterance", ["Hello Asta, check the booking PR", "Hey, how is the CI?",
                                         "Hello, can you hear me?"])
 def test_a_greeting_with_a_request_is_not_wake_only(utterance):

@@ -224,3 +224,18 @@ def test_a_test_change_is_planned_then_applied_only_after_approval(pushed, monke
     asyncio.run(approve())
     assert resumed and "assert the finance work process" in resumed[0]
     assert tasks.plan_approved(t["id"])
+
+
+def test_a_bare_ship_with_two_possible_tasks_asks_which(monkeypatch):
+    """22:31 — "ship" was for #257 (finished on its open PR); it approved #263."""
+    from app import go
+    plan = store.create_task("Remove unneeded booking JAAS config", "code", "p", "email")
+    store.update_task(plan["id"], status="awaiting_approval")
+    fix = store.create_task("Booking job open", "code", "p", "booking")
+    store.update_task(fix["id"], status="done",
+                      pr_urls="r: https://github.com/acme/booking/pull/1470")
+    t, problem = go.target(None)
+    assert t is None and "Which one" in problem
+    assert f"#{plan['id']}" in problem and f"#{fix['id']}" in problem
+    t, problem = go.target(fix["id"])
+    assert t["id"] == fix["id"] and not problem

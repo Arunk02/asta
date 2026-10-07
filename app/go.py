@@ -212,13 +212,23 @@ def target(wanted: int | None, now: float | None = None) -> tuple[dict | None, s
         t = store.get_task(wanted)
         return (t, "") if t else (None, f"There's no task #{wanted}.")
     rows = _candidates(now)
-    for statuses in (("awaiting_approval",), ("running", "queued", "paused"), ("done",)):
-        here = [t for t in rows if t["status"] in statuses and not t.get("pr_urls")]
-        if len(here) == 1 or (here and statuses == ("done",)):
-            return max(here, key=lambda t: t["id"]), ""
-        if len(here) > 1:
-            listing = "\n".join(f"  #{t['id']} {t['title'][:45]}" for t in here)
-            return None, f"Which one do you mean?\n{listing}\n\nSay “raise PR {here[0]['id']}”."
+    # Every task the word could be for, at once. Choosing by a fixed order was
+    # a guess: 7 Oct 22:31, "ship" (for #257, finished on its open PR) approved
+    # #263's plan instead, because a task with a PR was not even a candidate.
+    could = [t for t in rows if t["status"] in ("awaiting_approval", "running", "queued", "paused")
+             and not t.get("pr_urls")]
+    could += [t for t in rows if t["status"] == "done"]
+    if len(could) == 1:
+        return could[0], ""
+    live = [t for t in could if t["status"] != "done"]
+    if not live and could:
+        done = [t for t in could if not t.get("pr_urls")]
+        if len(done) == len(could):
+            return max(could, key=lambda t: t["id"]), ""   # only unshipped work: the newest
+    if len(could) > 1:
+        listing = "\n".join(f"  #{t['id']} {t['title'][:45]} ({t['status']})" for t in could[:6])
+        return None, (f"Which one do you mean?\n{listing}\n\n"
+                      f"Say “{could[0]['id']} ship”.")
     return None, ""
 
 

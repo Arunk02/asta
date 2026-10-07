@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import subprocess
 from pathlib import Path
 
 # Arun's rule: commits and PRs must look like HIS work. No Claude/Copilot
@@ -34,6 +35,60 @@ BASE_BRANCHES = ("main", "master", "develop")
 #: exists because not every repo has a develop; when it is used, the caller says
 #: so out loud rather than branching off something unexpected in silence.
 BASE_PREFERENCE = ("develop", "main", "master")
+
+
+def office_login(repo: str) -> str:
+    """The saved gh account for a configured work owner, never a token on disk."""
+    user = os.environ.get("ASTA_GITHUB_WORK_USER", "").strip()
+    owners = {s.strip().lower() for s in
+              os.environ.get("ASTA_GITHUB_WORK_OWNERS", "").split(",") if s.strip()}
+    return user if user and repo.split("/", 1)[0].lower() in owners else ""
+
+
+def _github_owner(cwd: Path, args: tuple[str, ...]) -> str:
+    for i, arg in enumerate(args):
+        if arg in ("-R", "--repo") and i + 1 < len(args):
+            return args[i + 1].split("/", 1)[0]
+        match = re.search(r"(?:github\.com[/:]|(?:^|/)repos/)([^/\s]+)/[^/\s]+",
+                          arg, re.I)
+        if match:
+            return match.group(1)
+    try:
+        remote = subprocess.run(
+            ["git", "-C", str(cwd), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    match = re.search(r"(?:github\.com[/:])([^/\s]+)/[^/\s]+",
+                      remote.stdout.strip(), re.I) if remote.returncode == 0 else None
+    return match.group(1) if match else ""
+
+
+async def github_env(cwd: Path, *args: str) -> dict[str, str] | None:
+    """Select the saved office login by target repo; keep personal repos personal."""
+    if not (os.environ.get("ASTA_GITHUB_WORK_USER")
+            and os.environ.get("ASTA_GITHUB_WORK_OWNERS")):
+        return None
+    owner = _github_owner(cwd, args)
+    if not owner:
+        return None
+    clean = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+    user = office_login(owner)
+    if not user:
+        return clean
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "auth", "token", "--user", user, env=clean,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        raw, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"GitHub login for {user} timed out") from None
+    token = raw.decode().strip()
+    if proc.returncode != 0 or not token:
+        raise RuntimeError(f"GitHub login for {user} unavailable — run gh auth login")
+    return {**os.environ, "GH_TOKEN": token, "GITHUB_TOKEN": token}
 
 
 async def start_branch(repo: Path, branch: str) -> dict:
@@ -109,8 +164,16 @@ async def git(cwd: Path, *args: str, timeout: float = 120,
     `gh api --input -`, whose payload is a JSON document with newlines in it and
     has no business being an argv string.
     """
+    remote_git = args[:2] in (("git", "fetch"), ("git", "pull"), ("git", "push"),
+                              ("git", "clone"), ("git", "ls-remote"))
+    env = await github_env(cwd, *args) if args and (args[0] == "gh" or remote_git) else None
+    if env and env.get("GH_TOKEN") and remote_git:
+        # The macOS keychain defaults to the personal account. Use the scoped
+        # office token for Git too, without changing global gh or git settings.
+        args = ("git", "-c", "credential.helper=", "-c",
+                "credential.helper=!gh auth git-credential", *args[1:])
     proc = await asyncio.create_subprocess_exec(
-        *args, cwd=str(cwd),
+        *args, cwd=str(cwd), env=env,
         stdin=asyncio.subprocess.PIPE if stdin else None,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     try:

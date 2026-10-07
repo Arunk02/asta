@@ -23,7 +23,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import store, workspace_tools
+from . import repo_ops, store, workspace_tools
 
 # A red build is worth knowing about while he is still in the change that caused
 # it. Ten minutes was long enough to have moved on to something else. GitHub API
@@ -36,8 +36,13 @@ _auth_cache: dict = {"ok": None, "at": 0.0}
 
 
 async def _run_gh(*args: str, timeout: float = 30) -> tuple[int, str]:
+    try:
+        env = await repo_ops.github_env(Path.cwd(), *args)
+    except RuntimeError as exc:
+        return 1, str(exc)
     proc = await asyncio.create_subprocess_exec(
-        "gh", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        "gh", *args, env=env, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT)
     try:
         raw, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -192,7 +197,7 @@ async def _poll_repo(repo: str) -> list[str]:
     if rc != 0:
         return []  # transient API/network error — next poll catches up
     runs = json.loads(out or "[]")
-    me = await my_login()
+    me = repo_ops.office_login(repo) or await my_login()
     if me:
         rc2, out2 = await _run_gh(
             "run", "list", "-R", repo, "--limit", "10", "--user", me, "--json", "databaseId")

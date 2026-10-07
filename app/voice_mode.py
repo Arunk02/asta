@@ -169,13 +169,13 @@ async def set_mode(speaker: bool | None = None, mic: bool | None = None,
         from . import voice_talker
         if mic:
             asyncio.ensure_future(voice.warm_the_ears())
+        if (mic or speaker) and _talker_selected():
             asyncio.ensure_future(voice_talker.warm())
-        elif mic is False and not _STATE["speaker"]:
+        elif (mic or speaker) or (mic is False and not _STATE["speaker"]):
             asyncio.ensure_future(voice_talker.close())
         if speaker:
             asyncio.ensure_future(voice.warm_the_voice())
             asyncio.ensure_future(warm_acks())
-            asyncio.ensure_future(voice_talker.warm())
     store.record_outcome("voice", "mode", detail=f"speaker={_STATE['speaker']} "
                                                 f"mic={_STATE['mic']} {why}"[:200])
     await _to_helper({"type": "state", **state(), "why": why})
@@ -699,6 +699,7 @@ def transcript(msg: dict) -> None:
 _TRAILING = re.compile(
     r"(?:\b(?:and|or|but|so|like|a|an|the|to|of|for|on|in|at|with|that|which|who|is|are|was|"
     r"i|we|my|your|this|about|because|if|then|also|um+|uh+)|[,\-–—…:]|\.\.\.)\W*$", re.I)
+_CUT_OFF = re.compile(r"\b(?:and|or|but|because|the|a|an|to|of|with)\W*$", re.I)
 
 
 def unfinished(text: str) -> bool:
@@ -748,6 +749,10 @@ async def assemble(text: str, appended: Callable[[], None] | None = None) -> dic
     whole = " ".join(_TURN["parts"])
     _TURN["parts"] = []
     _TURN["continued"] = False
+    if _CUT_OFF.search(whole):
+        store.record_outcome("voice", "unfinished", detail=whole[:200])
+        await say("I only heard part of that. Please finish your question.", kind="answer")
+        return {"text": whole, "did": "unfinished"}
     return await handle(whole)
 
 
@@ -782,6 +787,14 @@ def in_conversation(now: float | None = None) -> bool:
     return now - max(_STATE["last_spoke"], _STATE["last_heard"]) < FOLLOW_WINDOW_SECONDS
 
 
+def _talker_selected() -> bool:
+    """Only a chosen Claude CLI can use the Claude-only warm voice talker."""
+    from . import main
+    preferred = main._preferred_model()
+    voice = store.get_conversation(store.kv_get("voice_conversation") or "") or {}
+    return preferred in ("", "claude_cli") and main._channel_model(voice) == "claude_cli"
+
+
 async def handle(text: str) -> dict:
     """What he said, already as text."""
     if not listening() or (is_noise(text) and not wake_only(text)):
@@ -795,6 +808,16 @@ async def handle(text: str) -> dict:
         await say("Okay, going quiet.", kind="answer")
         await set_mode(speaker=False, why="he said so")
         return {"text": text, "did": "speaker_off"}
+    from . import main, voice_talker
+    request = _command(text)
+    if main._model_request(request) or main._MODEL_ASK.match(request):
+        remember("Arun", text)
+        reply = await turn(request)
+        if _talker_selected():
+            asyncio.ensure_future(voice_talker.warm())
+        else:
+            asyncio.ensure_future(voice_talker.close())
+        return {"text": text, "did": "model", "reply": reply}
     return await converse(text)
 
 
@@ -1047,6 +1070,13 @@ async def converse(text: str) -> dict:
         await say("On it.", kind="answer")
         asyncio.ensure_future(_work(text, context))
         return {"text": text, "did": "handed_on"}
+    if not _talker_selected():
+        if decided is None and not second_look and not await meant_for_asta(text, started):
+            store.record_outcome("voice", "not_for_asta", detail=text[:200])
+            return {"text": text, "did": "not_for_asta"}
+        _STATE["last_heard"] = time.time()
+        reply = await turn(text)
+        return {"text": text, "did": "answered", "reply": reply}
     spoken = 0
     handed = False
     # Only once it is known to be for Asta: on a second look the talker may yet
@@ -1349,12 +1379,12 @@ def _job_conversation(text: str) -> dict:
     """Each job its own conversation, so two requests run side by side instead
     of the second waiting behind the first ("I'm working on the previous one")."""
     from . import main
-    conv = store.create_conversation(model="claude_cli", workspace=None)
+    conv = store.create_conversation(
+        model=main._preferred_model() or "claude_cli", workspace=None)
     store.update_conversation(conv["id"], title=f"🎙 {text[:50]}")
-    phone = store.get_conversation(store.kv_get("wa_conversation") or "") or conv
     voice = store.get_conversation(store.kv_get("voice_conversation") or "") or conv
     with contextlib.suppress(Exception):
-        conv["model"] = main._channel_model(phone)
+        conv["model"] = main._channel_model(voice)
     ws = ""
     with contextlib.suppress(Exception):
         from .workspace import registry
@@ -1561,21 +1591,20 @@ def _kind_of(text: str) -> str:
 async def turn(text: str) -> str:
     """Run what he said through the shared chat pipeline in a voice conversation.
 
-    He hears something within about a second — the acknowledgement, or the
-    answer's first sentence the moment the brain writes it — and the rest when
-    it is done. Whatever he says meanwhile is its own turn: a comment on work in
-    progress is folded into it by the dispatcher, as it is on WhatsApp."""
+    After a brief wait he hears an acknowledgement, or the answer's first
+    sentence as soon as the brain writes it. Whatever he says meanwhile is
+    its own turn: a comment on work in progress is folded into it by the dispatcher."""
     from . import main
     cid = store.kv_get("voice_conversation") or ""
     conv = store.get_conversation(cid) if cid else None
-    phone = store.get_conversation(store.kv_get("wa_conversation") or "") or {}
     if conv is None:
-        conv = store.create_conversation(model=phone.get("model") or "claude_cli", workspace=None)
+        conv = store.create_conversation(
+            model=main._preferred_model() or "claude_cli", workspace=None)
         store.update_conversation(conv["id"], title="Voice")
         store.kv_set("voice_conversation", conv["id"])
-    # Use the phone's selected brain, not its old conversation history.
+    # Use the same selected brain as WhatsApp, not its old conversation history.
     with contextlib.suppress(Exception):
-        conv["model"] = main._channel_model(phone or conv)
+        conv["model"] = main._channel_model(conv)
     sink = VoiceSink()
     started = time.time()
     async def acknowledge() -> None:

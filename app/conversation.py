@@ -144,8 +144,9 @@ async def _answer_without_dead_air(thinking: "asyncio.Task") -> str:
 _SORRY = "Sorry, I could not work that out just now — I'll check with Arun and come back to you."
 _DROPPING_OFF = "Sorry, I have to drop off now — Arun will follow up with you. Thanks!"
 
-#: How long the call brain may take to prime before the dial goes ahead anyway.
+#: Claude can prime while ringing; Copilot must be ready before dialling.
 BRAIN_READY_SECONDS = 8
+COPILOT_READY_SECONDS = 32
 
 
 async def _mind_if_ready(task: "asyncio.Task", wait: float = 5):
@@ -737,7 +738,9 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
     _voice.in_voice(voice_name or _voice.VOICE_ASSISTANT)
     his_voice = _voice.in_voice() == _voice.VOICE_MINE
     # The call's own brain starts now, so it is warm by the time they answer.
-    from . import call_mind, voice
+    from . import call_mind, main, voice
+    phone = store.get_conversation(store.kv_get("wa_conversation") or "") or {}
+    copilot_call = main._channel_model(phone) == "copilot"
     thinking_ahead = asyncio.get_event_loop().create_task(
         call_mind.start(who, topic, agenda=with_history(who, agenda),
                         minutes=round(limit / 60, 1) if seconds else 0,
@@ -751,13 +754,23 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
         await _close_mind(thinking_ahead)
         return (f"Didn't call {who} — the voice service is not answering, so Asta "
                 f"could not speak. Nothing rang.")
-    # The brain primes in a few seconds; if it is out of its usage window the
-    # call is not placed either.
-    with contextlib.suppress(Exception):      # slow or broken: the call still goes ahead
+    # A slow Claude brain may prime while ringing. Copilot must be ready first:
+    # the one-shot CLI cannot answer a colleague until its session has started.
+    with contextlib.suppress(Exception):
         await asyncio.wait_for(asyncio.shield(thinking_ahead), timeout=BRAIN_READY_SECONDS)
+    if copilot_call and not thinking_ahead.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(thinking_ahead), timeout=COPILOT_READY_SECONDS)
+        except asyncio.TimeoutError:
+            await _close_mind(thinking_ahead)
+            return (f"Didn't call {who} — Copilot did not get ready in time. Nothing rang.")
+        except Exception:
+            pass                         # handled below as an unavailable brain
     if thinking_ahead.done() and isinstance(thinking_ahead.exception(), call_mind.Unavailable):
         return (f"Didn't call {who} — the brain that would talk to them is unavailable "
                 f"({thinking_ahead.exception()}). Nothing rang.")
+    if copilot_call and thinking_ahead.done() and thinking_ahead.exception():
+        return f"Didn't call {who} — Copilot could not start. Nothing rang."
     try:
         rang = await meetings.call_person(who)
     except RuntimeError as exc:

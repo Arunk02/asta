@@ -64,7 +64,7 @@ def session(monkeypatch, tmp_path):
                                     "title": "Repository", "explain": "New save method."}]})
         return "Because the id can be absent when the booking is new."
 
-    async def refine(task_id, feedback):
+    async def refine(task_id, feedback, **_):
         refined.append((task_id, feedback))
         return f"Task #{task_id}: continuing the open PR with your feedback."
 

@@ -686,7 +686,7 @@ async def apply_notes(cid: str, s: dict) -> str:
     store.record_outcome("walkthrough", "applied", subject=s["target"], detail=f"{len(notes)} notes")
     if s.get("task_id"):
         store.kv_set(f"review_notes:{s['task_id']}", "[]")
-        return await tasks.refine(int(s["task_id"]), spec)
+        return await tasks.refine(int(s["task_id"]), spec, code_change=True)
     t = tasks.spawn(f"Review notes on {s.get('pr') or s['target']}", spec + (
         f"\n\nThe change under review: {s.get('pr')}" if s.get("pr") else ""),
         kind="code", workspace=s.get("workspace") or None)

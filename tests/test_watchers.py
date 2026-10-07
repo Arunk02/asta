@@ -224,6 +224,126 @@ def test_a_chat_message_is_left_to_the_reader_that_sees_it_properly(monkeypatch)
 
 
 @pytest.mark.parametrize("row", [
+    "Sam — mentioned you in a channel — can you check this?",
+    "Sam — mentioned you — can you check this?",
+])
+def test_channel_and_ambiguous_mentions_stay_with_activity(row, monkeypatch):
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
+    assert not teams_bridge.duplicates_chat_watch(row)
+    assert teams_bridge._activity_wanted(row)
+
+
+def test_channel_mention_reaches_watcher_after_a_failed_poll(monkeypatch):
+    from app import recovery
+
+    class Finished(BaseException):
+        pass
+
+    reads, deliveries, waits = [], [], []
+    channel = "Sam — mentioned you in a channel — can you check this?"
+    chat = "Lee — mentioned you — hi — In chat with you"
+    store.kv_set(teams_bridge.ACTIVITY_SEEN_KEY, json.dumps(["previous"]))
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
+
+    async def wait(seconds):
+        waits.append(seconds)
+        if len(reads) == 2:
+            raise Finished
+
+    async def read(limit=25):
+        reads.append(True)
+        if len(reads) == 1:
+            raise teams_bridge.ActivityOffline("Teams is offline")
+        return [{"text": channel, "unread": True},
+                {"text": chat, "unread": True}]
+
+    async def push(notify, wanted):
+        deliveries.extend(wanted)
+
+    async def ladder(*args, **kwargs):
+        return {"healed": False}
+
+    monkeypatch.setattr(teams_bridge, "_activity_wait", wait)
+    monkeypatch.setattr(teams_bridge, "read_activity_rows", read)
+    monkeypatch.setattr(teams_bridge, "_push_activity", push)
+    monkeypatch.setattr(teams_bridge, "reap_orphans", lambda: None)
+    monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
+    monkeypatch.setattr(teams_bridge, "logged_in_once", lambda: True)
+    monkeypatch.setattr(recovery, "ladder", ladder)
+    with pytest.raises(Finished):
+        asyncio.run(teams_bridge.activity_watch_loop())
+    assert deliveries == [channel]
+    assert waits[:2] == [teams_bridge.ACTIVITY_POLL_SECONDS, min(30, teams_bridge.ACTIVITY_POLL_SECONDS)]
+    assert store.kv_get("attention_scrape_error:teams") == ""
+
+
+def test_partial_backlog_warns_without_claiming_a_fresh_complete_read(monkeypatch):
+    from app import notify
+
+    class Finished(BaseException):
+        pass
+
+    calls, warnings = [], []
+    store.kv_set(teams_bridge.ACTIVITY_SEEN_KEY, json.dumps(["previous"]))
+
+    async def wait(seconds):
+        if len(calls) == 3:
+            raise Finished
+
+    async def read(limit=25):
+        calls.append(limit)
+        return teams_bridge.ActivityRows([], complete=False)
+
+    async def warn(text, *args, **kwargs):
+        warnings.append(text)
+
+    monkeypatch.setattr(teams_bridge, "_activity_wait", wait)
+    monkeypatch.setattr(teams_bridge, "read_activity_rows", read)
+    monkeypatch.setattr(teams_bridge, "reap_orphans", lambda: None)
+    monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
+    monkeypatch.setattr(teams_bridge, "logged_in_once", lambda: True)
+    monkeypatch.setattr(notify, "notify", warn)
+    with pytest.raises(Finished):
+        asyncio.run(teams_bridge.activity_watch_loop())
+    assert calls == [200] * 3 and len(warnings) == 1
+    assert store.kv_get("attention_scrape:teams") is None
+    assert "backlog could not be verified" in store.kv_get("attention_scrape_error:teams")
+
+
+def test_catch_up_does_not_drop_mentions_beyond_the_first_notification(monkeypatch):
+    class Finished(BaseException):
+        pass
+
+    batches = []
+    store.kv_set(teams_bridge.ACTIVITY_SEEN_KEY, json.dumps(["previous"]))
+
+    async def wait(seconds):
+        if batches:
+            raise Finished
+
+    async def read(limit=25):
+        assert limit == 200
+        return teams_bridge.ActivityRows([
+            {"text": f"Sam — mentioned you in a channel — question {i}", "unread": True}
+            for i in range(27)])
+
+    async def push(notify, wanted):
+        batches.append(wanted)
+
+    monkeypatch.setenv("ASTA_CHATWATCH", "1")
+    monkeypatch.setattr(teams_bridge, "_activity_wait", wait)
+    monkeypatch.setattr(teams_bridge, "read_activity_rows", read)
+    monkeypatch.setattr(teams_bridge, "_push_activity", push)
+    monkeypatch.setattr(teams_bridge, "reap_orphans", lambda: None)
+    monkeypatch.setattr(teams_bridge, "enabled", lambda: True)
+    monkeypatch.setattr(teams_bridge, "logged_in_once", lambda: True)
+    with pytest.raises(Finished):
+        asyncio.run(teams_bridge.activity_watch_loop())
+    assert [len(batch) for batch in batches] == [12, 12, 3]
+    assert len(json.loads(store.kv_get(teams_bridge.ACTIVITY_SEEN_KEY))) == 28
+
+
+@pytest.mark.parametrize("row", [
     "Missed call from Alex Kumar — Teams call — Call — Chat",
     "Tatum M invited you: Tatum - OOO - 31/08",
     "Alex Kumar updated — AI Ideathon — 12:41",

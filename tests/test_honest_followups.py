@@ -160,7 +160,7 @@ def test_a_failed_jobs_log_is_read_from_its_end(monkeypatch, tmp_path):
     assert path.endswith("ci-job-112816764094-tail.log")
 
 
-def test_red_ci_after_the_rerun_is_fixed_by_the_task_not_handed_to_arun(monkeypatch):
+def test_red_ci_after_the_rerun_is_analysed_and_planned_for_approval(monkeypatch):
     monkeypatch.setenv("ASTA_CI_AUTOFIX", "1")
     t = store.create_task("Booking job open", "code", "p", "booking")
     store.update_task(t["id"], status="shipped", pr_urls="r: https://github.com/o/r/pull/7")
@@ -170,17 +170,57 @@ def test_red_ci_after_the_rerun_is_fixed_by_the_task_not_handed_to_arun(monkeypa
         return {"state": "OPEN", "statusCheckRollup": [{"conclusion": "FAILURE"}]}
     fixes = []
 
-    async def refine(task_id, feedback):
+    async def propose(task_id, feedback):
         fixes.append((task_id, feedback))
-        return "continuing"
+        return "planning"
+
+    async def must_not_fix(*a, **k):
+        raise AssertionError("changed code without his approval")
     monkeypatch.setattr(tasks, "_pr_state", red)
-    monkeypatch.setattr(tasks, "refine", refine)
+    monkeypatch.setattr(tasks, "propose_change", propose)
+    monkeypatch.setattr(tasks, "refine", must_not_fix)
     note = asyncio.run(tasks.check_pr(t["id"]))
     assert fixes and fixes[0][0] == t["id"] and "do not download CI logs" in fixes[0][1]
-    assert "Fixing it in" in note and "attempt 1/2" in note
+    assert "working out why" in note and "nothing changes before you do" in note
     assert "Say *rerun ci" not in note
     store.kv_set(f"task_ci_autofix:{t['id']}", str(tasks.CI_AUTOFIX_MAX))
     store.update_task(t["id"], pr_state="")
     store.kv_del(f"pr_told:https://github.com/o/r/pull/7")
     note = asyncio.run(tasks.check_pr(t["id"]))
     assert "it needs you" in note and len(fixes) == 1
+
+
+def test_a_test_change_is_planned_then_applied_only_after_approval(pushed, monkeypatch):
+    """"Show the plan for a CT upfront" (7 Oct) — and only then write it."""
+    t = pushed["task"]
+    store.update_task(t["id"], status="shipped")
+    legs = []
+
+    async def leg(task_id, prompt, cwd, **k):
+        legs.append((tasks.plan_approved(task_id), prompt))
+        return "1. CAUSE: step checks the booking work process\n2. PLAN: assert the finance work process"
+    resumed = []
+
+    async def resume(task_id, text, approved=False):
+        resumed.append(text)
+    monkeypatch.setattr(tasks, "_run_code_leg", leg)
+    monkeypatch.setattr(tasks, "_resume_worker", resume)
+
+    async def go():
+        out = await tasks.refine(t["id"], "add the JOB_OPENED CT in the existing scenario")
+        await asyncio.sleep(0.05)
+        return out
+    out = asyncio.run(go())
+    assert "you'll approve it" in out
+    assert legs and legs[0][0] is False and "PLAN ONLY" in legs[0][1], "the planning leg cannot write"
+    assert store.get_task(t["id"])["status"] == "awaiting_approval"
+    assert "proposed change (nothing changed yet)" in pushed["said"][-1]
+    assert not resumed
+
+    async def approve():
+        out = await tasks.approve(t["id"])
+        await asyncio.sleep(0.05)
+        return out
+    asyncio.run(approve())
+    assert resumed and "assert the finance work process" in resumed[0]
+    assert tasks.plan_approved(t["id"])

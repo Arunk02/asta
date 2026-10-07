@@ -112,7 +112,7 @@ async def test_explicit_edit_resumes_existing_task_not_a_new_one(monkeypatch):
 
     monkeypatch.setattr(tasks, "_resume_worker", resumed)
     sink = Sink()
-    await main._dispatch(conv, f"Task {tid} also add a regression test", sink, "whatsapp")
+    await main._dispatch(conv, f"Task {tid} also handle the amend path", sink, "whatsapp")
     assert "continuing the open PR" in sink.text
     assert store.get_task(tid)["status"] == "running"
 
@@ -562,18 +562,19 @@ async def test_a_bare_task_number_continues_that_task(monkeypatch):
     conv = conversation()
     tid = _failed_email_fix(conv)
     monkeypatch.setattr(tasks, "spawn", lambda *_a, **_k: pytest.fail("new task spawned"))
-    resumed = []
+    planned = []
 
-    async def resume(task_id, text, approved=False):
-        resumed.append((task_id, text))
-    monkeypatch.setattr(tasks, "_resume_worker", resume)
+    async def propose(task_id, feedback):
+        planned.append((task_id, feedback))
+        return f"Task #{task_id}: working out the cause and a plan"
+    monkeypatch.setattr(tasks, "propose_change", propose)
     sink = Sink()
     text = (f"in email CT fix {tid}, u shouldnt add booking jaas config and enable it , "
             "email not even using thne why we have to enable , remove that changes , fix it propelry")
     assert await main._dispatch(conv, text, sink, "whatsapp") is None
-    await asyncio.sleep(0)
-    assert "continuing" in sink.text and store.get_task(tid)["status"] == "running"
-    assert resumed and "jaas" in resumed[0][1]
+    # Same task — and a CT change is planned for his approval before it is made.
+    assert planned and planned[0][0] == tid and "jaas" in planned[0][1]
+    assert "plan" in sink.text
 
 
 def test_a_number_that_is_a_pr_or_build_is_not_a_task():

@@ -592,3 +592,25 @@ def test_a_new_code_task_that_continues_an_old_one_is_refused(monkeypatch):
                               f"This continues task #{tid} (Fix CT failure on email PR 675)…",
                               kind="code", workspace="email")
     assert f"refine_task({tid}" in out
+
+
+@pytest.mark.asyncio
+async def test_a_task_waiting_on_a_question_takes_his_message_as_the_answer(monkeypatch):
+    """7 Oct, #263: his answer said "check how it was in develop" and was read
+    as a status question; the task asked the same question again."""
+    conv = conversation()
+    t = store.create_task("Remove unneeded booking JAAS config", "code", "p", "email")
+    store.update_task(t["id"], status="awaiting_approval")
+    tasks.link_task(conv["id"], t["id"])
+    store.kv_set(f"task_gate:{t['id']}", "context")
+    answered = []
+    monkeypatch.setattr(tasks, "reply", lambda tid, text: answered.append((tid, text))
+                        or f"Task #{tid}: feedback sent to the pipeline — it will re-plan.")
+    sink = Sink()
+    text = (f"task {t['id']} : no how it was earlier it has to be same, before it was not "
+            "enabled then ideally u shouldnt, check how it was in develop if not enabled "
+            "then wont then analyse nd tell me the exact issue")
+    assert await main._dispatch(conv, text, sink, "whatsapp") is None
+    assert answered and answered[0][0] == t["id"] and "develop" in answered[0][1]
+    assert "feedback sent" in sink.text
+    assert main._task_awaiting_answer(conv["id"], f"task {t['id']} what did you find?") is None

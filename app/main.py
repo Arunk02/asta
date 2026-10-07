@@ -3759,6 +3759,22 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             await sink.send({"type": "done", "tools": []})
         return None
 
+    # A task that asked him something takes the message that names it as the
+    # answer. 7 Oct: "task 263 : no how it was earlier it has to be same …
+    # check how it was in develop" was read as a status question (it says
+    # "check") and got #263's status card; the task asked the same again.
+    waiting = _task_awaiting_answer(cid, user_text)
+    if waiting is not None:
+        try:
+            note = tasks.reply(waiting, _strip_task_ref(user_text))
+        except ValueError as exc:
+            note = str(exc)
+        frontdesk.record("job", f"answer #{waiting}")
+        await sink.send({"type": "note", "text": note})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+
     # A code walkthrough: "walk me through task 126", then next / back / questions
     # / notes / done — see app/walkthrough.py. Handled before the staged-draft
     # check, which would otherwise read "next" as feedback on a draft. A plain
@@ -4454,6 +4470,25 @@ def _remember_if_asked(feedback: str, task: dict) -> str:
 #: A number that is something else's: "PR 676", "pull/676", "build 251".
 _NOT_A_TASK_NUMBER = re.compile(
     r"(?:\b(?:pr|pull|mr|build|run|version|v|release|line|port|ticket|jira)\s*[#/:-]?\s*|/)$", re.I)
+
+
+def _task_awaiting_answer(cid: str, text: str) -> int | None:
+    """The code task named here that is stopped at a gate waiting for him."""
+    named = _explicit_task(text)
+    if named is None:
+        named = _named_recent_task(text, cid)
+    if named is None:
+        return None
+    t = store.get_task(named) or {}
+    if t.get("kind") != "code" or t.get("status") != "awaiting_approval":
+        return None
+    if store.kv_get(f"task_gate:{named}") not in ("context", "plan", "verify"):
+        return None
+    said = _strip_task_ref(text or "").strip()
+    if not said or (said.endswith("?") and frontdesk.task_intent(said) == "read"
+                    and re.match(r"^(?:what|why|when|where|how|did|does|is|are|any)\b", said, re.I)):
+        return None                       # a real question about it: the card answers
+    return named
 
 
 def _named_recent_task(text: str, cid: str) -> int | None:

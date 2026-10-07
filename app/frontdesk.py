@@ -278,7 +278,12 @@ _TASK_EDIT = re.compile(
     r"|\b(?:then|and|please|need you to)\s+"
     r"(?:fix|implement|change|modify|edit|add|remove|"
     r"update(?!\s+(?:me|on|about|of|with)\b)|rework)\b"
-    r"|\bfix\s+(?:it|this|the\s+(?:code|test|failure|bug))\b", re.I)
+    r"|\bfix\s+(?:it|this|the\s+(?:code|test|failure|bug))\b"
+    # "…like job closure, now update it correctly" (7 Oct, #257): the order
+    # comes last, after the domain facts — "update" there is not "any update?".
+    r"|\b(?:update|change|fix|correct|modify|rework|redo|apply)\s+"
+    r"(?:it|this|that|them|accordingly|the\s+(?:code|change|logic|implementation|"
+    r"mapping|enum|handling))\b", re.I)
 _TASK_READ = re.compile(
     r"\b(?:ci|checks?|builds?|pipelines?|workflows?|status|progress|"
     r"updates?|check|inspect|verify|review|analys[ei]s|analyse|analyze|"

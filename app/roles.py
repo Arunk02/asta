@@ -132,6 +132,7 @@ _SIGNS: tuple[tuple[str, str], ...] = (
 _BY_KIND = {
     "review_request": "review",
     "pr_review": "review",
+    "port": "analysis",
     "debug": "debugging",
     "ci_failure": "debugging",
     "incident": "infra",

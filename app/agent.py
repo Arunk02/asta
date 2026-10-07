@@ -1586,11 +1586,18 @@ async def review_pr(pr: str, workspace: str = "", repo: str = "") -> str:
     context, then runs the review as a background task — reviews are slow, so the chat
     stays free and Arun is notified when the notes are ready. Read-only: it never comments
     on the PR or approves it. Use for 'review PR 123', 'what do you think of this PR'."""
-    from . import review, tasks
+    from . import capabilities, review, tasks
     try:
         text, meta = await review.brief(pr, workspace, repo)
     except (RuntimeError, ValueError) as exc:
         return f"Could not read that PR: {exc}"
+    running = capabilities.FROM_TASK.get()
+    if running:
+        # A task that spawns its own review and then waits on it in the
+        # background is two workers on one question, and its wake-ups end up
+        # in the reply (7 Oct, #258 → #259). It reviews here, itself.
+        return (f"You are already running as task #{running} — do this review yourself, "
+                f"in this session, from the material below. Do not start another task.\n\n{text}")
     from . import prname
     named = prname.from_url(meta.get("url") or "") or prname.label(
         (meta.get("headRepository") or {}).get("name") or repo or "", meta["number"])
@@ -2393,6 +2400,11 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     # Not relying on relevance.guard_spawn for it: that guard is behind
     # ASTA_RELEVANCE, which is OFF, so today it returns None for every spawn. A
     # safety property must not depend on an opt-in flag being set.
+    running = capabilities.FROM_TASK.get()
+    if running and kind == "analysis":
+        return (f"You are already running as task #{running} — the investigation is you. "
+                "Do this reading yourself, in this session; do not start another task "
+                "and wait on it in the background.")
     if kind == "code" and capabilities.READ_ONLY_TURN.get():
         return ("I'm answering this alongside other work that's already running, so "
                 "I won't start a code task from here — that would edit a repo off "

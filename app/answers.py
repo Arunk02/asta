@@ -76,6 +76,11 @@ it; nothing they did not ask about. If you could not find it, or a term or
 reference is unclear ("topic refresh", "the prod PR"), the REPLY is the one short
 question to {who} that gets you what you need — ALWAYS write a REPLY; never end
 by asking Arun whether to ask them. Never promise work Arun has not agreed to.
+A question is open ("which part should change on booking?"), never a choice
+between your own guesses ("you mean A, or B?"). The REPLY is about their
+subject only — never about your process: no "I checked twice", "so I stop
+guessing", "my earlier read was wrong", "task complete". If you were corrected,
+answer the new information plainly. Nothing after the REPLY.
 
 If what they asked for is Arun himself — a call, a discussion — the ANALYSIS
 prepares him for it (where the topic stands, what changed, what is still open)
@@ -236,6 +241,15 @@ async def _deliver_automatic_reply(intent: dict) -> bool:
     target = intent.get("to", "")
     if not authority.auto_reply_to(target, group=bool(intent.get("to_group"))):
         return False
+    if held_after_correction(intent.get("thread", "")):
+        store.record_outcome("answer", "auto reply held", subject=target[:80],
+                             detail="they corrected an earlier answer in this thread")
+        return False
+    why = unfit_to_send(intent.get("what", ""))
+    if why:
+        store.record_outcome("answer", "auto reply held", subject=target[:80],
+                             detail=why)
+        return False
     if await chat_watch.he_replied_since(target, chat_watch.their_last(target)):
         return False
     try:
@@ -246,7 +260,7 @@ async def _deliver_automatic_reply(intent: dict) -> bool:
                              detail=f"{target}: {type(exc).__name__}: {exc}"[:200])
         intent["note"] = "Automatic send failed; delivery was not confirmed. Do not resend blindly."
         return False
-    sent({**intent, "review_origin": None})
+    sent({**intent, "review_origin": None}, by_arun=False)
     analysis = (intent.get("analysis") or "").strip()[:1200]
     await notify.notify(f"{line}" + (f"\n\n{analysis}" if analysis else "")
                         + "\n\n> " + intent["what"].replace("\n", "\n> "),
@@ -296,7 +310,8 @@ def _enqueue(item: dict) -> None:
 
 
 async def offer_plan(*, who: str, chat: str, need: str, summary: str, thread: str,
-                     words: str = "", group: bool = False, source_text: str = "") -> bool:
+                     words: str = "", group: bool = False, source_text: str = "",
+                     reference: str = "") -> bool:
     """A colleague wants code changed: ask him whether to plan it — now, or
     after whatever he is already deciding. True if shown now.
 
@@ -306,7 +321,7 @@ async def offer_plan(*, who: str, chat: str, need: str, summary: str, thread: st
     from . import threads
     item = {"type": "plan", "who": who, "chat": chat, "need": need,
             "summary": summary, "thread": thread, "words": (words or "")[:2500],
-            "group": group, "source_text": source_text}
+            "group": group, "source_text": source_text, "reference": reference}
     if not origin_allowed({"to_group": group, "to": chat, "who": who,
                            "source_text": source_text}):
         _record_rejected_origin(item)
@@ -319,6 +334,11 @@ async def offer_plan(*, who: str, chat: str, need: str, summary: str, thread: st
         return False
     await _show_plan(item)
     return True
+
+
+def _counterpart_method() -> str:
+    from . import responder
+    return responder.COUNTERPART_METHOD
 
 
 async def _show_plan(item: dict) -> None:
@@ -337,6 +357,9 @@ async def _show_plan(item: dict) -> None:
                 + (f"\n\nWhat {who} actually wrote — quotes included; the field, the PR "
                    f"and the repo are in here, so brief the task from THIS and do not ask "
                    f"Arun for what it already says:\n{item['words']}" if item.get("words") else "")
+                + (f"\n\nThe reference is {item['reference']} — the same change, on "
+                   f"the other side of the contract.\n\n{_counterpart_method()}"
+                   if item.get("reference") else "")
                 + "\n\nIts plan gate brings the plan back to Arun; nothing big is "
                   "written before he approves it, and nothing ships before he says ship."),
         kind="plan_code", payload={"who": who, "chat": item.get("chat"),
@@ -379,6 +402,68 @@ def _load_queue() -> list[dict]:
     except ValueError:
         return []
     return [x for x in q if isinstance(x, dict)]
+
+
+_CORRECTED = "thread_corrected:"
+
+
+def mark_corrected(thread: str) -> None:
+    """They rejected an answer in this thread: from now until Arun approves a
+    reply there himself, nothing goes to them on Asta's own say-so. 7 Oct:
+    Vinish said "Incorrect" and still got two more automatic answers."""
+    if thread:
+        store.kv_set(_CORRECTED + thread, str(time.time()))
+
+
+def held_after_correction(thread: str) -> bool:
+    return bool(thread and store.kv_get(_CORRECTED + thread))
+
+
+#: Words about Asta's own process. A colleague reading them learns that a
+#: machine is guessing, in Arun's name ("so I stop guessing", 7 Oct).
+_META_TALK = re.compile(
+    r"\b(?:stop\s+guessing|(?:checked|rechecked|looked)\s+(?:it\s+)?(?:both|twice|again)|"
+    r"(?:my|the)\s+(?:earlier|previous|last)\s+(?:read|reading|answer|reply)\s+was|"
+    r"both\s+readings|third\s+option|task\s+(?:is\s+)?(?:already\s+)?complete|"
+    r"background\s+(?:shell|task)s?)\b", re.I)
+#: A reply that says Arun wrote it himself, or that Asta is not involved. Never
+#: sent by Asta, under any rule. 7 Oct, task #261, to "you are talking or
+#: Asta?": "Yeah bro, it's me, Arun — not Asta." — sent automatically.
+_DENIES_ASTA = re.compile(
+    r"\bnot\s+(?:asta|aasta|a\s+bot|an?\s+(?:ai|assistant|bot))\b"
+    r"|\b(?:it'?s|its|this\s+is)\s+(?:me|really\s+me|arun)\b[^.?!]{0,20}\b(?:not|no)\b"
+    r"|\bno\s+(?:tool|assistant|bot|ai)\s+(?:is\s+)?involved\b", re.I)
+
+
+def unfit_to_send(reply: str) -> str:
+    """Why these words must not go out without Arun, or ''."""
+    if _DENIES_ASTA.search(reply or ""):
+        return "it claims Arun wrote it himself"
+    if _META_TALK.search(reply or ""):
+        return "it talks about Asta's own process"
+    return ""
+
+
+def moved_on(chat: str, since: float) -> str:
+    """'his' when Arun wrote in this 1:1 after `since`, 'theirs' when they did,
+    else ''. Asta's own automatic lines do not count as his."""
+    from . import chat_watch
+    try:
+        rows = store.teams_messages(chat=chat, since=since + 2, limit=200)
+    except Exception:                                          # noqa: BLE001
+        return ""
+    mine = set(chat_watch.asta_said(chat))
+    who = ""
+    for r in rows:
+        if (r.get("chat") or "").strip().lower() != (chat or "").strip().lower():
+            continue
+        text = " ".join((r.get("text") or "").split())
+        if chat_watch.is_from_him(r.get("sender", "")):
+            if store.is_automatic_teams_message(r.get("key", ""), chat) or text in mine:
+                continue
+            return "his"
+        who = "theirs"
+    return who
 
 
 def origin_allowed(intent: dict) -> bool:
@@ -482,9 +567,14 @@ async def next_after(cid: str = "") -> bool:
     return False
 
 
-def sent(staged: dict) -> None:
-    """The reply went out: the conversation now has Asta's words in it."""
+def sent(staged: dict, by_arun: bool = True) -> None:
+    """The reply went out: the conversation now has Asta's words in it.
+
+    `by_arun` — he approved these words. Only that lifts a thread's
+    after-correction hold; an automatic send never does."""
     from . import threads
+    if by_arun and (staged or {}).get("thread"):
+        store.kv_del(_CORRECTED + staged["thread"])
     origin = (staged or {}).get("review_origin")
     if origin and staged.get("type") == "answer" and not staged.get("to_group"):
         store.kv_set(_approved_review_key(origin), json.dumps({
@@ -503,7 +593,8 @@ def _approved_review_key(origin: dict) -> str:
 async def _deliver_approved_review(intent: dict) -> bool:
     """Reuse only the exact wording he previously approved for this PR revision."""
     origin = intent.get("review_origin")
-    if not origin or not intent.get("review_auto_ok") or intent.get("to_group"):
+    if not origin or not intent.get("review_auto_ok") or intent.get("to_group") \
+            or held_after_correction(intent.get("thread", "")):
         return False
     from . import senior
     if senior.is_senior(intent.get("to", "")):
@@ -535,7 +626,7 @@ async def _deliver_approved_review(intent: dict) -> bool:
         store.record_outcome("answer", "approved reuse blocked",
                              subject=str(intent.get("task_id") or ""), detail=line[:200])
         return False
-    sent({**intent, "review_origin": None})
+    sent({**intent, "review_origin": None}, by_arun=False)
     store.record_outcome("answer", "approved review reused",
                          subject=str(intent.get("task_id") or ""), detail=intent["to"][:200])
     await notify.notify(f"{line} (same approved review of {origin['ref']}).",
@@ -577,15 +668,50 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
     analysis, reply = split(result)
     if not reply:
         return False
+    chat = meta.get("chat") or t.get("teams_chat", "")
+    first = (meta.get("who") or "them").split()[0]
+    from . import notify
+    # The conversation may have moved on while this ran. 7 Oct: Vinish
+    # explained at 17:20:05, task #258 finished at 17:20:08 with its older
+    # reading, and that answer was sent to him anyway.
+    started = float(t.get("created_at") or 0)
+    after = moved_on(chat, started) if chat and started and not meta.get("group") else ""
+    if after == "theirs":
+        store.record_outcome("answer", "superseded", subject=str(task_id),
+                             detail=f"{first} wrote again while it ran — not sent")
+        return True
+    if after == "his":
+        store.record_outcome("answer", "his thread", subject=str(task_id),
+                             detail="Arun wrote in the chat while it ran — not sent")
+        await notify.notify(f"🔎 For your chat with {first} (you're already in it — "
+                            f"nothing sent):\n\n{analysis or reply}".strip(),
+                            "answer", urgency="ambient", considered=True)
+        return True
+    if _DENIES_ASTA.search(reply):
+        store.record_outcome("answer", "identity claim dropped", subject=str(task_id),
+                             detail=reply[:200])
+        await notify.notify(f"🙋 {first} asked something only you can answer "
+                            f"(whether it's you or Asta). I did not reply — over to you.",
+                            "answer", urgency="direct", considered=True)
+        return True
+    if meta.get("ask_kind") == "port" and not meta.get("group"):
+        from . import responder
+        ref = responder.counterpart(meta.get("source_text") or "") or {}
+        await offer_plan(who=meta.get("who", ""), chat=chat, need=meta.get("need", ""),
+                         summary=analysis[:900], thread=meta.get("thread", ""),
+                         words=meta.get("source_text") or "", group=False,
+                         source_text=meta.get("source_text") or "",
+                         reference=ref.get("pr", ""))
     # A question back to them goes straight to them — clarifying is his rule
     # (29 Sep: "talk to them directly, get what they want"); he hears what was
-    # asked. Answers still wait for his "send".
-    chat = meta.get("chat") or t.get("teams_chat", "")
-    if meta in eligible and not meta.get("group") and chat and _is_clarifying(reply, meta.get("who", "")):
-        from . import chat_watch, notify
+    # asked. Answers still wait for his "send". Not after a correction, and not
+    # words about Asta's own process — those wait for him like any reply.
+    if meta in eligible and not meta.get("group") and chat \
+            and not held_after_correction(meta.get("thread", "")) \
+            and not unfit_to_send(reply) and _is_clarifying(reply, meta.get("who", "")):
+        from . import chat_watch
         if await chat_watch._say(chat, reply.strip(), group=False,
                                  since=chat_watch.their_last(chat)):
-            first = (meta.get("who") or "them").split()[0]
             await notify.notify(f"❓ Asked {first}: “{reply.strip()}”\n\n{analysis}".strip(),
                                 "answer", urgency="direct", considered=True)
             return True

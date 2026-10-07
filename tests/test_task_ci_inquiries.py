@@ -497,3 +497,48 @@ def test_authenticated_ci_endpoint_is_read_only(monkeypatch):
     assert response.status_code == 200
     assert "earlier run failed" in response.json()["report"]
     assert store.get_task(tid)["status"] == "shipped"
+
+
+#: His message on 7 Oct, word for word: answered with #257's status card.
+DOMAIN_FEEDBACK = ("all the feedbacks workprocess comes from billing are FINANCE_MILESTONE , "
+                   "like how we keeping for job closure , rememember for future use , "
+                   "now update it correctly")
+
+
+def test_domain_feedback_ending_in_update_it_is_an_edit():
+    assert frontdesk.task_intent(f"task 257 - {DOMAIN_FEEDBACK}") == "edit"
+    assert frontdesk.task_intent("task 257 any update?") == "read"
+    assert frontdesk.task_intent("task 257 update me on CI") == "read"
+
+
+@pytest.mark.asyncio
+async def test_feedback_reaches_a_running_task_and_is_remembered(monkeypatch):
+    from app import memory
+    conv = conversation()
+    task = store.create_task("Plan booking-service implementation of AP PR 1260", "code",
+                             "plan", "booking")
+    store.update_task(task["id"], status="running")
+    kept = []
+    monkeypatch.setattr(memory, "remember", lambda title, fact, mtype="fact": kept.append(fact))
+    monkeypatch.setattr(tasks, "ci_report", lambda *_a, **_k: pytest.fail("read as a status ask"))
+    sink = Sink()
+    await main._dispatch(conv, f"task {task['id']} - {DOMAIN_FEEDBACK}", sink, "whatsapp")
+    assert "FINANCE_MILESTONE" in (store.kv_get(f"task_addenda:{task['id']}") or "")
+    assert "Saved it for future work" in sink.text
+    assert kept and "FINANCE_MILESTONE" in kept[0] and "rememember" not in kept[0]
+
+
+@pytest.mark.asyncio
+async def test_feedback_on_shipped_work_resumes_it(monkeypatch):
+    from app import memory
+    conv = conversation()
+    tid = shipped(conv)
+    monkeypatch.setattr(memory, "remember", lambda *a, **k: "")
+
+    async def resumed(*_a, **_k):
+        return None
+    monkeypatch.setattr(tasks, "_resume_worker", resumed)
+    sink = Sink()
+    await main._dispatch(conv, f"task {tid} - {DOMAIN_FEEDBACK}", sink, "whatsapp")
+    assert "continuing the open PR" in sink.text
+    assert store.get_task(tid)["status"] == "running"

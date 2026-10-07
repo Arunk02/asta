@@ -959,6 +959,7 @@ async def _say(chat: str, line: str, *, group: bool = False,
         quiet.note("chatwatch.say", exc)
         return False
     store.record_outcome("thread", "said", subject=chat[:80], detail=line[:200])
+    note_asta_said(chat, line)
     if not group:
         # He sees Asta answered someone: the 1:1 is marked unread for him, as
         # if they had just written (his ask, 2 Oct). Never in the way of the ack.
@@ -969,6 +970,44 @@ async def _say(chat: str, line: str, *, group: bool = False,
             from . import quiet
             quiet.note("chatwatch.unread_after_ack", exc)
     return True
+
+
+def _said_key(chat: str) -> str:
+    return f"asta_said:{(chat or '').strip().lower()[:80]}"
+
+
+def note_asta_said(chat: str, line: str) -> None:
+    """Remember the words Asta itself sent here, so they are never mistaken for
+    Arun stepping into the conversation (they go out under his name)."""
+    try:
+        said = json.loads(store.kv_get(_said_key(chat)) or "[]")
+    except ValueError:
+        said = []
+    said = [x for x in said if isinstance(x, str)] + [" ".join((line or "").split())]
+    store.kv_set(_said_key(chat), json.dumps(said[-30:]))
+
+
+def asta_said(chat: str) -> list[str]:
+    try:
+        said = json.loads(store.kv_get(_said_key(chat)) or "[]")
+    except ValueError:
+        return []
+    return [x for x in said if isinstance(x, str)]
+
+
+#: "Bro, you are talking or Asta?" — only Arun can answer that. 7 Oct: an
+#: investigation answered it, automatically, with "it's me, Arun — not Asta."
+_BOT = r"(?:a+sta|a\s+bot|bot|an?\s+ai|ai|an?\s+assistant|copilot|chat\s*gpt|claude|human|real|arun)"
+_WHO_IS_THIS = re.compile(
+    r"\b(?:you|u)\s+(?:are\s+)?(?:talking|replying|typing|answering|writing|chatting)\s+or\b"
+    r"|\b(?:is\s+(?:this|it)|are\s+(?:you|u)|r\s+u)\s+(?:really\s+)?" + _BOT + r"\b[^.!\n]{0,20}\?"
+    r"|\b(?:a+sta|bot|ai)\s+(?:is\s+)?(?:replying|talking|answering|typing|writing)\b[^.!\n]{0,20}\?"
+    r"|\b(?:is\s+(?:this|it)|are\s+(?:you|u))\s+(?:you|arun)\s+or\b"
+    r"|\bwho\s+is\s+(?:this|replying|talking|typing|answering)\b[^.!\n]{0,20}\?", re.I)
+
+
+def asks_who_is_replying(text: str) -> bool:
+    return bool(_WHO_IS_THIS.search(clean_message(text or "")))
 
 
 def their_last(chat: str, hours: float = 12) -> float | None:
@@ -1087,6 +1126,28 @@ def _reference_question(text: str, conversation: list[str]) -> str:
                 f"{c.split('/')[-3]}/{c.split('/')[-2]}#{c.rsplit('/', 1)[-1]}"
                 for c in candidates]
     return f"Just to be sure, which {label} do you mean — {' or '.join(candidates)}?"
+
+
+def _live_work(tid: str, text: str) -> tuple[str, int] | None:
+    """The live work this thread already has: ('investigation', id) for its own
+    running answer, or ('code', id) for a live code task about a PR the thread
+    names. 7 Oct: one conversation with Vinish ran a plan, three reviews and
+    three answers about AP PR 1260 side by side."""
+    from . import answers, review, tasks
+    prs = {(m.group(2) or m.group(5) or "", m.group(3) or m.group(6))
+           for m in review._PR_LINK.finditer(text or "")}
+    code = None
+    for t in store.list_tasks(limit=60):
+        if t.get("status") not in tasks.LIVE_STATUSES:
+            continue
+        if t.get("kind") == "analysis" and tid and answers._meta(t["id"]).get("thread") == tid:
+            return "investigation", t["id"]
+        prompt = t.get("prompt") or ""
+        if code is None and t.get("kind") == "code" and any(
+                f"/pull/{n}" in prompt and (not repo or repo.lower() in prompt.lower())
+                for repo, n in prs):
+            code = ("code", t["id"])
+    return code
 
 
 _REFERENCE_KEY = "chatwatch_reference:"
@@ -1528,8 +1589,18 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             threads.close(tid, why="he replied or reacted", now=now)
             continue
 
-        pending = _pending_reference(tid, now) if c["one_to_one"] else {}
         incoming = "\n".join(clean_message(m.get("text") or "", c["known"]) for m in c["raw"])
+        if asks_who_is_replying(incoming):
+            # Only Arun answers whether it is him. Nothing is investigated or sent.
+            from . import notify as alerts
+            threads.update(tid, status="awaiting_arun")
+            store.record_outcome("chatwatch", "identity question", subject=who[:80],
+                                 detail=incoming[:200])
+            await alerts.notify(f"🙋 {who} is asking whether it's you or Asta replying:\n"
+                                f"“{incoming[:200]}”\nI haven't answered — over to you.",
+                                "thread", urgency="direct", considered=True)
+            continue
+        pending = _pending_reference(tid, now) if c["one_to_one"] else {}
         reference = _resolved_reference(incoming, pending.get("candidates") or []) \
             if pending else ""
         if pending and not reference and responder.what_it_asks(incoming):
@@ -1564,6 +1635,7 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             _transcript(c["chat"], float(corrected["created_at"])) if corrected else [])
         if corrected:
             from . import notify as alerts
+            _answers.mark_corrected(tid)
             withdrew = _answers.invalidate_answer(corrected["id"])
             if not reference:
                 await alerts.notify(
@@ -1725,7 +1797,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         # and I'll plan it" (30 Sep). It is read, and the review comes to him.
         review = not corrected and not reference and responder.what_it_asks(
             f"{fields['need']}\n" + "\n".join(c["new"])) in ("review_request", "pr_review")
-        if d.get("work") == "code" and state != "urgent" and not review \
+        port = responder.counterpart("\n".join(c["new"]) + "\n" + (fields.get("need") or ""))
+        if d.get("work") == "code" and state != "urgent" and not review and not port \
                 and not corrected and not reference:
             from . import answers
             await answers.offer_plan(who=who, chat=c["chat"], need=said,
@@ -1779,6 +1852,29 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 except (RuntimeError, ValueError) as exc:
                     store.record_outcome("review", "verification failed",
                                          subject=next(iter(refs))[:80], detail=str(exc)[:200])
+        live = _live_work(tid, f"{ask_text}\n{recent}")
+        if live and live[0] == "code":
+            # Arun already has the change in hand: their words join that task.
+            from . import notify as alerts, tasks as _tasks
+            try:
+                _tasks.augment(live[1], f"{who} added on Teams: {ask_text[:1500]}",
+                               code_change=True)
+            except ValueError as exc:
+                store.record_outcome("chatwatch", "fold failed", subject=str(live[1]),
+                                     detail=str(exc)[:200])
+            else:
+                await alerts.notify(f"➕ Added {who.split()[0]}'s note to task #{live[1]}: "
+                                    f"{summarise(ask_text, limit=160)}",
+                                    "thread", urgency="ambient", considered=True)
+                threads.update(tid, status="working")
+                continue
+        if live and live[0] == "investigation":
+            # The older run is answering a conversation that has moved on.
+            from . import tasks as _tasks
+            await _tasks.cancel(live[1], status="superseded",
+                                why=f"{who} wrote again: {ask_text[:200]}")
+            store.record_outcome("chatwatch", "superseded", subject=str(live[1]),
+                                 detail=f"{who}: {ask_text[:160]}")
         task = responder.respond("teams-chat", who, ask_text, priority=c["pri"],
                                  key=c["keys"][-1], sent_at=c["sent_at"], context=context,
                                  reply_to=c["chat"], group=not c["one_to_one"],

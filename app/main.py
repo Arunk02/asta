@@ -4178,8 +4178,11 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     explicit = _explicit_task(user_text)
     if explicit is not None and frontdesk.task_intent(user_text) == "edit":
         existing = store.get_task(explicit)
-        if existing and existing["kind"] == "code" and existing["status"] in tasks.REFINABLE:
-            note = await tasks.refine(explicit, _strip_task_ref(user_text))
+        if existing and existing["kind"] == "code" and \
+                existing["status"] in tasks.REFINABLE + tasks.LIVE_STATUSES:
+            feedback = _strip_task_ref(user_text)
+            note = await tasks.refine(explicit, feedback)
+            note += _remember_if_asked(feedback, existing)
             frontdesk.record("job", f"refine #{explicit}")
             await sink.send({"type": "note", "text": note})
             return None
@@ -4415,6 +4418,26 @@ def _explicit_task(text: str) -> int | None:
             continue
         return int(m.group(1))
     return None
+
+
+#: "…remember for future use" inside feedback on a task: the rule is kept, not
+#: only applied this once (7 Oct: billing feedback workProcess is FINANCE_MILESTONE).
+_KEEP_FOR_LATER = re.compile(r"\brem\w*ber\b|\bfor\s+(?:the\s+)?future\b|\bgoing\s+forward\b", re.I)
+
+
+def _remember_if_asked(feedback: str, task: dict) -> str:
+    if not _KEEP_FOR_LATER.search(feedback or ""):
+        return ""
+    fact = re.sub(r"[,;]?\s*(?:and\s+)?(?:please\s+)?rem\w*ber\b[^,.;]*", "", feedback,
+                  flags=re.I).strip(" ,;.")
+    try:
+        memory.remember(f"{(task.get('workspace') or 'project')} — {fact[:60]}",
+                        f"{fact}\n\n(Arun, on task #{task['id']} “{task.get('title', '')[:80]}”, "
+                        f"{time.strftime('%Y-%m-%d')})")
+    except Exception as exc:                                    # noqa: BLE001
+        quiet.note("remember.task_feedback", exc)
+        return " I could not save it for future work."
+    return " Saved it for future work too."
 
 
 def _task_inquiry_target(cid: str, text: str) -> int | None:

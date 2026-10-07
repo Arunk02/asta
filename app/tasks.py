@@ -2183,26 +2183,104 @@ _ABOUT_CI = re.compile(r"\b(?:ci|build|pipeline|checks?|component\s+tests?|ct|re
                        r"fail(?:ed|ing|ure|ures)?)\b", re.I)
 
 
+#: A failed job's log is read from its END: the failure summary is there, and
+#: the whole log was 153 MB for booking's component test (7 Oct) — the worker's
+#: own download never finished, so it stopped "waiting on the log fetch".
+CI_LOG_TAIL_BYTES = 3_000_000
+_JOB_ID = re.compile(r"/actions/runs/\d+/job/(\d+)")
+_CI_SIGNAL = re.compile(
+    r"ComparisonFailure|AssertionError|AssertionFailedError|expected:\s*<|Expected:|"
+    r"Tests run:.*(?:Failures|Errors): [1-9]|BUILD FAILURE|Failed scenarios|"
+    r"\bFAILED\b|Caused by:|Exception:", re.I)
+_LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z\s?")
+
+
+async def _github_token(repo: str) -> str:
+    env = await repo_ops.github_env(ROOT, "-R", repo)
+    if env and env.get("GH_TOKEN"):
+        return env["GH_TOKEN"]
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "auth", "token", env=env, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL)
+    raw, _ = await asyncio.wait_for(proc.communicate(), 15)
+    return raw.decode().strip()
+
+
+async def _job_log_tail(repo: str, job_id: str, dest: Path | None = None) -> tuple[str, list[str]]:
+    """(saved path, failure lines) from the last few MB of one failed job's log."""
+    import httpx
+    token = await _github_token(repo)
+    if not token:
+        return "", []
+    async with httpx.AsyncClient(timeout=60) as client:
+        first = await client.get(
+            f"https://api.github.com/repos/{repo}/actions/jobs/{job_id}/logs",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json"}, follow_redirects=False)
+        where = first.headers.get("location") if first.is_redirect else ""
+        if not where:
+            return "", []
+        size = int((await client.head(where)).headers.get("content-length") or 0)
+        start = max(0, size - CI_LOG_TAIL_BYTES)
+        got = await client.get(where, headers={"Range": f"bytes={start}-{size - 1}"} if size else {})
+    lines = [_LOG_STAMP.sub("", line) for line in got.text.splitlines()]
+    hits: list[str] = []
+    for line in lines:
+        line = line.strip()
+        if line and _CI_SIGNAL.search(line) and line not in hits:
+            hits.append(line[:300])
+    path = ""
+    if dest is not None:
+        with contextlib.suppress(OSError):
+            dest.mkdir(parents=True, exist_ok=True)
+            target = dest / f"ci-job-{job_id}-tail.log"
+            target.write_text("\n".join(lines))
+            path = str(target)
+    return path, hits[-15:]
+
+
 async def _ci_failure_for(t: dict, feedback: str) -> str:
     """For "fix the CI": the failed jobs and what their logs say, read by Asta
     before the worker starts — so the worker does not download logs itself."""
     if os.environ.get("ASTA_CI_PREFETCH", "1") == "0" or not _ABOUT_CI.search(feedback or ""):
         return ""
+    dest = None
+    with contextlib.suppress(Exception):
+        dest = Path(task_cwd(t["id"], t.get("workspace"))) / ".asta-ci"
     out = []
     for url in _pr_links(t)[:2]:
         try:
             pr = await asyncio.wait_for(_pr_state(url), 70)
-            if _checks_verdict(pr) != "red":
-                continue
-            why = await asyncio.wait_for(_why_red(pr, url, timeout=60), 130)
         except Exception:                                      # noqa: BLE001
             continue
-        failed = [f"{c.get('name')}: {c.get('detailsUrl') or c.get('targetUrl') or ''}"
-                  for c in _latest_checks(pr)
+        if _checks_verdict(pr) != "red":
+            continue
+        failed = [c for c in _latest_checks(pr)
                   if (c.get("conclusion") or c.get("state") or "").upper() in _CI_FAILED]
-        out.append(f"{url}\nFailed checks:\n" + "\n".join(f"- {f}" for f in failed[:6])
-                   + (f"\nFrom the failed logs:{why}" if why else
-                      "\n(The failed logs named no test; read the job log above in the foreground.)"))
+        part = [f"{url}\nFailed checks:"] + [
+            f"- {c.get('name')}: {c.get('detailsUrl') or c.get('targetUrl') or ''}"
+            for c in failed[:6]]
+        seen_jobs: set[str] = set()
+        for c in failed[:4]:
+            m = _JOB_ID.search(c.get("detailsUrl") or "")
+            if not m or m.group(1) in seen_jobs:
+                continue
+            seen_jobs.add(m.group(1))
+            try:
+                path, hits = await asyncio.wait_for(
+                    _job_log_tail(_repo_of(url), m.group(1), dest), 150)
+            except Exception:                                  # noqa: BLE001
+                continue
+            if hits:
+                part.append(f"From {c.get('name')} (end of its log"
+                            + (f", saved at {path}" if path else "") + "):\n"
+                            + "\n".join(f"  {h}" for h in hits))
+        if len(part) == 1 + len(failed[:6]):
+            with contextlib.suppress(Exception):
+                why = await asyncio.wait_for(_why_red(pr, url, timeout=60), 130)
+                if why:
+                    part.append(f"From the failed logs:{why}")
+        out.append("\n".join(part))
     return ("[CI failure Asta read from GitHub before you started — start from it; "
             "do not download logs in the background]\n" + "\n\n".join(out)) if out else ""
 
@@ -3562,6 +3640,20 @@ def _auto_rerun() -> bool:
     return CI_AUTO_RERUN
 
 
+#: Fix attempts a task makes on its own red PR before it hands it to him.
+CI_AUTOFIX_MAX = 2
+CI_FIX_BRIEF = (
+    "Fix the red CI on this task's PR. Start from the failed checks and log lines "
+    "Asta read for you below — do not download CI logs yourself. Find the failing "
+    "test and its root cause, fix the cause (not the assertion), keep the coverage, "
+    "run the affected tests, and commit on the PR branch. Report the failing line, "
+    "the cause, and the fix with file:line.")
+
+
+def _auto_fix_ci() -> bool:
+    return os.environ.get("ASTA_CI_AUTOFIX", "1") != "0"
+
+
 async def rerun_ci(task_id: int) -> str:
     """Re-run the failed jobs on a task's PR. His "rerun it", done rather than
     described."""
@@ -3706,6 +3798,8 @@ async def check_pr(task_id: int) -> str | None:
         # whatever the stored state string says. #180 sat at "pr_ci_failed" with
         # every check passing, and he was never told it had recovered (30 Sep).
         recovered = checks == "green" and t["status"] == "pr_ci_failed"
+        if checks == "green":
+            store.kv_del(f"task_ci_autofix:{task_id}")
         # Two tasks on one PR (#185 and #187 both on booking PR 1429) must not
         # each report the same change: "CI green" arrived twice at 12:49.
         told_key = f"pr_told:{url}"
@@ -3739,8 +3833,25 @@ async def check_pr(task_id: int) -> str | None:
                     await rerun_ci(task_id)
                     return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}{why}\n"
                             f"Re-running the failed jobs once — I'll tell you how it ends.")
+            # Still red after the re-run: the task that wrote the change owns it
+            # until merge — it reads the failure and fixes it, he is told the
+            # cause and the fix (7 Oct: "it has to analyse, report and fix").
+            tries = int(store.kv_get(f"task_ci_autofix:{task_id}") or 0)
+            if _auto_fix_ci() and tries < CI_AUTOFIX_MAX:
+                store.kv_set(f"task_ci_autofix:{task_id}", str(tries + 1))
+                try:
+                    await refine(task_id, CI_FIX_BRIEF)
+                except Exception as exc:                       # noqa: BLE001
+                    store.record_outcome("task", "ci_autofix_failed", subject=str(task_id),
+                                         detail=str(exc)[:200])
+                else:
+                    return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}{why}\n"
+                            f"Fixing it in #{task_id} (attempt {tries + 1}/{CI_AUTOFIX_MAX}) — "
+                            f"I'll report the cause and the fix.")
             return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}{why}\n"
-                    f"Say *rerun ci {task_id}* to run the failed jobs again, or "
+                    + (f"Still red after {CI_AUTOFIX_MAX} fix attempts — it needs you. "
+                       if tries >= CI_AUTOFIX_MAX and _auto_fix_ci() else "")
+                    + f"Say *rerun ci {task_id}* to run the failed jobs again, or "
                     f"*fix #{task_id}* and I'll pick the task back up with everything "
                     f"it already knows.")
         if decision == "CHANGES_REQUESTED":

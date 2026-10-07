@@ -108,3 +108,79 @@ def test_a_ci_fix_starts_from_the_failed_logs_asta_read(monkeypatch):
     assert asyncio.run(tasks._ci_failure_for(store.get_task(t["id"]), "rename the flag")) == ""
     monkeypatch.setenv("ASTA_CI_PREFETCH", "0")
     assert asyncio.run(tasks._ci_failure_for(store.get_task(t["id"]), "fix the CI failure")) == ""
+
+
+# --- the task owns its red CI until merge -------------------------------------------
+
+LOG_END = ("2026-10-07T13:38:35.7604587Z [ERROR] Tests run: 53, Failures: 1, Errors: 0, "
+           "Skipped: 0 <<< FAILURE! -- in booking.events.processor.TestRunner\n"
+           "2026-10-07T13:38:35.7607168Z org.junit.ComparisonFailure: Work Process Name in "
+           "Booking DB do not match expected:<[JOB_OPENED]> but was:<[SEND_TO_TMS]>\n"
+           "2026-10-07T13:38:35.8082884Z [ERROR] BUILD FAILURE\n"
+           "2026-10-07T13:38:35.9Z some ordinary line\n")
+
+
+def test_a_failed_jobs_log_is_read_from_its_end(monkeypatch, tmp_path):
+    """153 MB for booking's component test: only the tail is fetched."""
+    import httpx
+    asked = []
+
+    class _R:
+        def __init__(self, status=200, headers=None, text=""):
+            self.status_code, self.headers, self.text = status, headers or {}, text
+            self.is_redirect = status in (301, 302, 307)
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, follow_redirects=True):
+            asked.append(("GET", url, (headers or {}).get("Range")))
+            if "api.github.com" in url:
+                return _R(302, {"location": "https://blob.example/log"})
+            return _R(206, text=LOG_END)
+
+        async def head(self, url):
+            return _R(200, {"content-length": "153460815"})
+
+    async def token(repo):
+        return "t"
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(tasks, "_github_token", token)
+    path, hits = asyncio.run(tasks._job_log_tail("acme/booking", "112816764094", tmp_path))
+    assert ("GET", "https://blob.example/log", f"bytes={153460815 - 3000000}-153460814") in asked
+    assert any("expected:<[JOB_OPENED]> but was:<[SEND_TO_TMS]>" in h for h in hits)
+    assert not any("ordinary line" in h for h in hits)
+    assert path.endswith("ci-job-112816764094-tail.log")
+
+
+def test_red_ci_after_the_rerun_is_fixed_by_the_task_not_handed_to_arun(monkeypatch):
+    monkeypatch.setenv("ASTA_CI_AUTOFIX", "1")
+    t = store.create_task("Booking job open", "code", "p", "booking")
+    store.update_task(t["id"], status="shipped", pr_urls="r: https://github.com/o/r/pull/7")
+    store.kv_set(f"task_ci_rerun:{t['id']}", "1")             # the one re-run already happened
+
+    async def red(url):
+        return {"state": "OPEN", "statusCheckRollup": [{"conclusion": "FAILURE"}]}
+    fixes = []
+
+    async def refine(task_id, feedback):
+        fixes.append((task_id, feedback))
+        return "continuing"
+    monkeypatch.setattr(tasks, "_pr_state", red)
+    monkeypatch.setattr(tasks, "refine", refine)
+    note = asyncio.run(tasks.check_pr(t["id"]))
+    assert fixes and fixes[0][0] == t["id"] and "do not download CI logs" in fixes[0][1]
+    assert "Fixing it in" in note and "attempt 1/2" in note
+    assert "Say *rerun ci" not in note
+    store.kv_set(f"task_ci_autofix:{t['id']}", str(tasks.CI_AUTOFIX_MAX))
+    store.update_task(t["id"], pr_state="")
+    store.kv_del(f"pr_told:https://github.com/o/r/pull/7")
+    note = asyncio.run(tasks.check_pr(t["id"]))
+    assert "it needs you" in note and len(fixes) == 1

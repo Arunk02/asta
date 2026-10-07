@@ -53,6 +53,18 @@ def test_an_instruction_is_not_filed_as_the_answer(said):
         f"{said!r} is something to DO — filing it as an answer means it never happens")
 
 
+@pytest.mark.parametrize("said", [
+    "Approve task 219",
+    "approve task #220",
+    "release/3.1.6 is still missing — implement it in the booking service",
+    "why is the AP PR not updated yet?",
+    "Komal asked for the AP change in telikos-activityplanworkflow-service; please fix it",
+])
+def test_other_work_and_explicit_task_commands_do_not_answer_a_question(said):
+    _open_question("Which VTS approach should I use: 1 or 2?")
+    assert asking.pending_for_reply(said) is None
+
+
 # --- what really is an answer -------------------------------------------------
 
 @pytest.mark.parametrize("said", [

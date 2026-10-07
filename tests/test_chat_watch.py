@@ -163,6 +163,40 @@ def test_it_investigates_what_it_finds(wired, monkeypatch):
     assert spawned and spawned[0]["kind"] == "analysis"
 
 
+def test_one_to_one_acknowledges_automatically_without_approving_each_send(
+        wired, monkeypatch):
+    monkeypatch.setenv("ASTA_RESPOND", "1")
+    monkeypatch.setenv("ASTA_THREADS", "1")
+    monkeypatch.setattr(chat_watch, "ACKNOWLEDGE", True)
+    from app import responder, understand, writing
+    monkeypatch.setattr(responder, "respond",
+                        lambda *a, **k: {"id": 7, "title": "check production bookings"})
+    async def understood(convs):
+        return {c["id"]: {"state": "ask", "need": "check production temporal bookings",
+                          "summary": "", "subject": "known", "question": "",
+                          "work": "analysis", "source": "model"} for c in convs}
+
+    monkeypatch.setattr(understand, "read", understood)
+    async def message(chat):
+        return [{"key": "ack-k1", "sender": "Alex Kumar",
+                 "text": "Can you check why the Temporal workflow failed in prod?"}]
+
+    monkeypatch.setattr(chat_watch, "new_in", message)
+    monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: [])
+    sent = []
+
+    async def say(chat, line, group=False, since=None):
+        sent.append((chat, line, group))
+        return True
+
+    monkeypatch.setattr(chat_watch, "_say", say)
+    asyncio.run(chat_watch.sweep())
+    asyncio.run(chat_watch.sweep())
+    assert len(sent) == 1
+    assert sent[0][0] == "Alex Kumar" and sent[0][2] is False
+    assert "checking" in sent[0][1].lower()
+
+
 def test_his_own_messages_are_not_things_he_was_asked(monkeypatch):
     from app import meetings
     monkeypatch.setattr(meetings, "speaker_is_arun", lambda s: "arun" in s.lower())

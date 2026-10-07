@@ -1294,11 +1294,11 @@ def test_his_spoken_reply_answers_the_question_asta_asked_out_loud(helper, decid
     mp = _p.MonkeyPatch()
     mp.setattr(asking, "answer", answer)
     try:
-        out = run(vm.handle("Check the yesterday booking, the H69 one."))
+        out = run(vm.handle("The H69 one."))
     finally:
         mp.undo()
     assert out["did"] == "answered_question"
-    assert got == {"id": q["id"], "text": "Check the yesterday booking, the H69 one."}, "his words alone"
+    assert got == {"id": q["id"], "text": "The H69 one."}, "his words alone"
     assert helper.said()[-1] == "Got it."
     store.close_question(q["id"], "x")
 

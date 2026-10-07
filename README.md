@@ -17,6 +17,9 @@ brains ── Copilot CLI · Claude CLI · LM Studio · API keys
 ## Features
 
 - **Real work, gated** — plan → your approval → implement in a worktree → verify → you say ship
+- **Separate requests stay separate** — independent code tasks can be scheduled while another is live (work in the same workspace is serialized for safety); queued chat messages survive a restart without being mistaken for answers to later questions. Name a task number when amending one of several live tasks (`task 219 also add tests`); `approve both 219 and 220` checks each gate individually.
+- **Honest completion** — blocked work cannot be marked done by approving it; code tasks with no worktree change or verified PR are not reported as implemented (explicit no-change results are labeled as such). A local implementation is not called shipped until the requested PRs, including release-branch PRs, have verified GitHub receipts.
+- **Teams replies** — a routine 1:1 "checking, will update you" acknowledgement is automatic and deduplicated; substantive answers are staged for your approval. `send to Vinish` approves a draft already staged for Vinish, not a different recipient.
 - **Any brain** — Copilot, Claude, local models; fails over when one runs out of quota
 - **Resumable** — tasks are checkpointed LangGraph threads; restarts and usage limits pick up where they stopped
 - **Quiet by design** — one ranked inbox, a daily interruption budget, a digest for the rest

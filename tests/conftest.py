@@ -22,7 +22,7 @@ import pytest
 #: what they test — the way the suites were written. Set before `app` is
 #: imported, so neither the machine's .env nor a module-scoped fixture (the bench
 #: runs before any function fixture) can switch one on behind a test's back.
-OFF_IN_TESTS = ("ASTA_CLI_MCP", "TEAMS_BRIDGE", "ASTA_ATTENTION", "ASTA_CONTACTS",
+OFF_IN_TESTS = ("ASTA_CI_PREFETCH", "ASTA_CLI_MCP", "TEAMS_BRIDGE", "ASTA_ATTENTION", "ASTA_CONTACTS",
                 "ASTA_DELIVERY", "ASTA_MEET2", "ASTA_VERIFY", "ASTA_GRAPH", "ASTA_ROUTING",
                 "ASTA_EVOLVE", "ASTA_APPS", "ASTA_SCREEN", "ASTA_GRAPHS", "ASTA_RESPOND",
                 "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_BENCH_NIGHTLY", "ASTA_ASK_BACK",

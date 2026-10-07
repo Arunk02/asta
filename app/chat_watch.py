@@ -983,7 +983,9 @@ async def he_replied_since(chat: str, since: float | None) -> bool:
         rows = await _bridge.read_history(chat, limit=8, max_scrolls=0)
     except Exception:                                          # noqa: BLE001
         return False
-    return any(float(r.get("sent_at") or 0) > float(since) and is_from_him(r.get("sender", ""))
+    return any(float(r.get("sent_at") or 0) > float(since)
+               and is_from_him(r.get("sender", ""))
+               and not store.is_automatic_teams_message(r.get("key", ""), chat)
                for r in rows)
 
 
@@ -1015,7 +1017,7 @@ async def _say(chat: str, line: str, *, group: bool = False,
         return False
     from . import teams_bridge as _bridge
     try:
-        await _bridge.send_message(chat, line)
+        await _bridge.send_automatic(chat, line)
     except Exception as exc:                                   # noqa: BLE001
         from . import quiet
         quiet.note("chatwatch.say", exc)
@@ -1630,10 +1632,28 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             # The message that reached him was only the mention ("Arunkumar,
             # Vinish"); the PR itself is a few lines up in the same chat.
             ask_text = f"{said}\n" + "\n".join(c.get("conversation", [])[-6:])
+        review_revision = ""
+        if responder.what_it_asks(ask_text) == "review_request":
+            from . import review as pr_review
+            refs = {f"{owner}/{repo}#{number}"
+                    for owner, repo, number, alt_owner, alt_repo, alt_number
+                    in pr_review._PR_LINK.findall(f"{ask_text}\n{context}")
+                    for owner, repo, number in
+                    [(owner or alt_owner, repo or alt_repo, number or alt_number)]}
+            if len(refs) == 1:
+                try:
+                    verified, reusable = await pr_review.revision(next(iter(refs)))
+                    if reusable:
+                        review_revision = verified
+                except (RuntimeError, ValueError) as exc:
+                    store.record_outcome("review", "verification failed",
+                                         subject=next(iter(refs))[:80], detail=str(exc)[:200])
         task = responder.respond("teams-chat", who, ask_text, priority=c["pri"],
                                  key=c["keys"][-1], sent_at=c["sent_at"], context=context,
                                  reply_to=c["chat"], group=not c["one_to_one"], need=said,
-                                 thread=tid, questions=d.get("questions") or [])
+                                 thread=tid, questions=d.get("questions") or [],
+                                 review_revision=review_revision,
+                                 review_question=c["last"])
         if task and task.get("reused"):
             from . import answers
             analysis, reply = answers.split(task.get("result") or "")
@@ -1642,7 +1662,7 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                     analysis=analysis, reply=reply, task_id=task["id"], thread=tid,
                     note=f"Already looked into this recently (task #{task['id']}) — not run again."):
                 continue
-        if task and not task.get("joined") and not task.get("reused"):
+        if task and not task.get("reused"):
             threads.update(tid, status="working")
             # They hear back within the minute — "checking", in his words — and
             # the answer follows. 1 Oct: Vinish asked at 13:36 and heard nothing
@@ -1653,6 +1673,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                                     or c["arun_minutes_ago"] > 5):
                 with contextlib.suppress(Exception):
                     await _acknowledge(tid, c)
+            if task.get("joined"):
+                continue
             if state == "urgent" and _worth_telling(tid, said, fyi=False,
                                                     group=not c["one_to_one"], now=now):
                 red.append(f"🚨 {tell}" if tell else f"🚨 {name}: {said}")

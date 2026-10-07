@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
 import time
@@ -261,6 +262,7 @@ async def _pool_alive() -> bool:
     if page is None:
         return False
     if time.time() - _POOL.get("born", 0) > POOL_MAX_AGE:
+        _WHY["discard"] = _WHY["discard"] or "recycled: older than the pool's max age"
         return False
     if _too_big():
         _WHY["discard"] = f"browser grew past {POOL_MAX_MB} MB"
@@ -272,7 +274,12 @@ async def _pool_alive() -> bool:
         # sleep can wait forever — and it waits holding the one Teams lock.
         return bool(await asyncio.wait_for(
             page.evaluate("() => !!document.querySelector('body')"), timeout=10))
-    except Exception:
+    except Exception as exc:
+        # WHY it went stale, kept: 3 Oct 17:30-17:41 it relaunched every 45 s and
+        # the record said only "pool went stale".
+        _WHY["discard"] = ("pool went stale: " + (
+            "page did not answer in 10 s" if isinstance(exc, asyncio.TimeoutError)
+            else f"{type(exc).__name__}: {str(exc).splitlines()[0][:100] if str(exc) else ''}"))
         return False
 
 
@@ -400,14 +407,33 @@ async def teams_page():
             raise
         try:
             yield page
-        except NotFound:
+        except NotFound as exc:
             # Nothing was typed and the browser is healthy — a search result
             # that did not match. Relaunching Chrome for it (29 Sep: twelve
             # relaunches in ten minutes, each "no person match for 'Followed
             # threads'") costs seconds and the whole pooled session; going back
             # to the chat list costs one navigation.
-            with contextlib.suppress(Exception):
-                await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
+            if isinstance(exc, ActivityOffline):
+                try:
+                    await page.locator('button[aria-label^="Chat"]:visible').first.click(timeout=5000)
+                    if not await wait_for_rail(page, timeout=5):
+                        raise RuntimeError("chat rail did not return")
+                except Exception as restore_exc:
+                    store.record_outcome(
+                        "teams", "activity_restore_failed",
+                        detail=f"{type(restore_exc).__name__}: {str(restore_exc)[:120]}")
+            elif isinstance(exc, ActivityUnavailable):
+                try:
+                    await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_selector(APP_MARKERS, timeout=15000)
+                    if not await wait_for_rail(page, timeout=10):
+                        raise RuntimeError("Teams chat rail did not return")
+                except Exception as reload_exc:
+                    await _discard_pool(f"Activity failed and Teams did not reload: "
+                                        f"{type(reload_exc).__name__}: {str(reload_exc)[:100]}")
+            else:
+                with contextlib.suppress(Exception):
+                    await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
             raise
         except Exception:
             # The operation failed with the page in an unknown state: half-typed
@@ -640,17 +666,19 @@ def repair_rungs() -> list[tuple[str, object]]:
     how this became a recurring bug rather than a one-off one.
     """
     async def recycle() -> bool:
-        """Seconds. Drop our browser, kill the leaks, prove a fresh one loads."""
+        """Drop the browser and prove the feed, not just the app shell, works."""
         await close_pool()
         reap_orphans()
-        return await check_session()
+        await read_activity_rows()
+        return True
 
     async def restart() -> bool:
         """Same, but insist on a genuinely new app boot rather than a reused tab."""
         await close_pool()
         reap_orphans()
         _POOL.clear()
-        return await check_session()
+        await read_activity_rows()
+        return True
 
     async def repair_profile() -> bool:
         """Last resort: clear Teams' wedged local store. The LOGIN SURVIVES —
@@ -1670,6 +1698,31 @@ SENT: list[tuple[float, str]] = []
 #: When each send began — a send the brain started a moment ago may still be
 #: on its way when the brain says so.
 STARTED: list[float] = []
+_automatic_send: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "teams_automatic_send", default="")
+
+
+async def send_automatic(chat: str, text: str) -> str:
+    """Send an unapproved acknowledgement and attribute only its verified message."""
+    token = _automatic_send.set(chat)
+    try:
+        return await send_message(chat, text)
+    finally:
+        _automatic_send.reset(token)
+
+
+def _automatic_receipt(chat: str, text: str, raw: list[dict], started_at: float) -> bool:
+    from .chat_watch import is_from_him
+    normalized = " ".join(text.split())
+    match = next((m for m in reversed(raw)
+                  if (_to_epoch(m.get("iso", "")) or 0) >= started_at - 2
+                  and (is_from_him(m.get("sender", ""))
+                       or m.get("sender", "").lower() == "me")
+                  and " ".join((m.get("text") or "").split()) == normalized), None)
+    if not match:
+        return False
+    store.record_automatic_teams_message(_msg_key(chat, match), chat)
+    return True
 
 
 async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
@@ -1681,7 +1734,8 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
     """
     from . import senior
     senior.check(chat)        # manager and above: only with his yes, whoever calls
-    STARTED.append(time.time())
+    started_at = time.time()
+    STARTED.append(started_at)
     del STARTED[:-50]
     async with teams_page() as page:
         title = await _open_target(page, chat, allow_group)
@@ -1750,6 +1804,14 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
         if not landed:
             raise RuntimeError(
                 f"message does not appear in '{title}' after sending — treat as NOT sent")
+        if _automatic_send.get() == chat:
+            try:
+                raw = await page.evaluate(_MESSAGE_JS, 6)
+                if not _automatic_receipt(chat, text, raw, started_at):
+                    store.record_outcome("teams", "receipt missing", subject=chat[:80],
+                                         detail="automatic send landed but has no timed message identity")
+            except Exception as exc:
+                quiet.note("teams.automatic_receipt", exc)
         store.kv_set("teams_session_ok", "1")
         await park(page)
         SENT.append((time.time(), title))
@@ -1896,34 +1958,251 @@ async def set_presence(wanted: str) -> str:
 _ACTIVITY_ATTEMPTS = 3
 
 
+class ActivityUnavailable(NotFound):
+    """The Activity tab could not be opened, but the browser is alive: the page
+    goes home, it is not thrown away. 3 Oct: every miss relaunched Chrome."""
+
+
+class ActivityOffline(ActivityUnavailable):
+    """The app shell responds, but a live Teams connection could not be verified."""
+
+
+#: The Activity button — its label carries the shortcut ("Activity (⌃ ⇧ 1)").
+_ACTIVITY_BUTTON = 'button[aria-label^="Activity"]:visible'
+_ACTIVITY_LIST = '[data-tid="activity-list-container"], [data-tid="activity-feed-list-item"]'
+
+
+async def _page_state(page) -> dict:
+    """Bounded, non-message diagnostics for the Activity navigation."""
+    try:
+        return await asyncio.wait_for(page.evaluate("""markers => {
+            const t = (document.body && document.body.innerText || '').trim();
+            const d = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')]
+                .filter(e => e.offsetWidth || e.offsetHeight)
+                .map(e => e.getAttribute('aria-label') || e.getAttribute('role'));
+            const b = [...document.querySelectorAll('button[aria-label^="Activity"]')]
+                .find(e => e.getClientRects().length);
+            let top = '';
+            if (b) { const r = b.getBoundingClientRect();
+                     const e = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+                     top = e && !b.contains(e) && e !== b
+                        ? (e.tagName + ' ' + (e.getAttribute('aria-label') || e.getAttribute('data-tid') || '')).slice(0, 80) : ''; }
+            const url = location.origin + location.pathname;
+            const heading = [...document.querySelectorAll('h1')].map(e => e.innerText.trim()).join(' ');
+            return {url: url.slice(0, 120), title: document.title.slice(0, 80),
+                    app: !!document.querySelector(markers),
+                    oops: /app failed to load/i.test(t.slice(0, 400)),
+                    signin: /login\\.microsoftonline\\.com|\\/login\\b|\\/signin\\b/i.test(url)
+                        || /^(Pick an account|Sign in to your account)$/i.test(heading),
+                    offline: !navigator.onLine,
+                    button: !!b, covered_by: top, dialogs: d.slice(0, 3)};
+        }""", APP_MARKERS), timeout=5)
+    except Exception as exc:
+        return {"inspection_error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+
+
+def _activity_failure(state: dict, last: str) -> str:
+    store.record_outcome("teams", "activity_unavailable",
+                         detail=json.dumps({"last": last[:450], **state})[:900])
+    return (f"could not open the Teams Activity feed: {last[:250]} "
+            f"(page: {state.get('title') or state.get('url', '?')}"
+            + (f"; covered by {state['covered_by']}" if state.get("covered_by") else "")
+            + (f"; dialogs {state['dialogs']}" if state.get("dialogs") else "") + ")")
+
+
+async def _activity_connected(page) -> bool:
+    """Check the server, not cached page markup or Chromium's online hint."""
+    from urllib.parse import urlsplit
+
+    url = urlsplit(page.url)
+    if url.scheme != "https" or url.hostname not in (
+            "teams.microsoft.com", "teams.cloud.microsoft"):
+        return False
+    origin = f"{url.scheme}://{url.netloc}/"
+    try:
+        response = await page.context.request.get(
+            origin, headers={"Cache-Control": "no-store"},
+            params={"asta_connectivity": str(time.time_ns())},
+            max_redirects=0, timeout=5000)
+        try:
+            return response.ok and urlsplit(response.url).hostname == url.hostname
+        finally:
+            await response.dispose()
+    except Exception:
+        return False
+
+
 async def _open_activity(page) -> None:
     """Click through to the Activity feed, surviving Teams re-rendering under us.
 
-    This was `wait_for_selector(...)` followed by `handle.click()`, and it was
-    silently dead in production for an unknown length of time: Teams re-renders
-    its rail moments after load, so the handle resolved and was then DETACHED
-    before the click landed — "ElementHandle.click: Element is not attached to
-    the DOM", every poll, caught and discarded by the watcher's bare `except`.
-    Nobody could see it because a dead mention watcher and a quiet afternoon look
-    identical.
-
-    `page.click(selector)` re-resolves the selector and auto-retries instead of
-    holding a handle across a re-render, which is the whole reason Playwright
-    offers it. The retry loop on top covers the slower case where the rail itself
-    is still being replaced when the click is attempted.
+    History: a held element handle was DETACHED by Teams' re-render before the
+    click landed (dead for an unknown time); then `page.click('[aria-label*=
+    "Activity"]')` timed out whenever the page was not the app shell — a
+    sign-in redirect, "Oops, app failed to load", a dialog over the rail — and
+    every miss relaunched Chrome (3 Oct, ~15 times). Now: clear dialogs, click
+    the VISIBLE button or use Teams' own shortcut, recover "Oops" with its
+    Retry, and say what the page showed when none of that works.
     """
-    last: Exception | None = None
+    last = ""
     for attempt in range(_ACTIVITY_ATTEMPTS):
-        try:
-            await page.click('[aria-label*="Activity"]', timeout=10000)
-            await page.wait_for_selector('[data-tid="activity-list-container"]',
-                                         timeout=20000)
-            return
-        except Exception as exc:          # detached, still rendering, or not there yet
-            last = exc
+        if page.is_closed():
+            raise RuntimeError("the Teams page was closed under the Activity read")
+        state = await _page_state(page)
+        if state.get("signin"):
+            _activity_failure(state, "Teams is showing a sign-in page")
+            raise RuntimeError("SESSION_EXPIRED: Teams is showing a sign-in page")
+        if state.get("oops"):
+            try:
+                await page.get_by_role("button", name="Retry").click(timeout=5000)
+            except Exception as exc:
+                last = f"Teams Retry failed: {str(exc)[:350]}"
+            await asyncio.sleep(2)
+            continue
+        if not state.get("app"):
+            last = f"Teams app shell not ready: {state.get('inspection_error') or state.get('url', '?')}"
             await asyncio.sleep(2 * (attempt + 1))
-    raise RuntimeError(
-        f"could not open the Teams Activity feed after {_ACTIVITY_ATTEMPTS} tries: {last}")
+            continue
+        if state.get("dialogs"):
+            await page.keyboard.press("Escape")
+        try:
+            await page.locator(_ACTIVITY_BUTTON).first.click(timeout=8000)
+        except Exception as exc:
+            if page.is_closed():
+                raise
+            last = f"click: {str(exc)[:450]}"
+            try:
+                await page.keyboard.press("Control+Shift+1")
+            except Exception as shortcut_exc:
+                last += f"; shortcut: {str(shortcut_exc)[:150]}"
+        try:
+            await page.wait_for_selector(_ACTIVITY_LIST, timeout=15000)
+            if state.get("offline") and not await _activity_connected(page):
+                raise ActivityOffline(_activity_failure(
+                    state, "Teams reports offline; the visible feed may be cached"))
+            if state.get("offline"):
+                store.record_outcome("teams", "offline_signal_false",
+                                     detail="Activity opened; Teams origin answered a live request")
+            return
+        except ActivityOffline:
+            raise
+        except Exception as exc:
+            last = f"{last}; " if last else ""
+            last += f"no feed: {str(exc)[:350]}"
+            await asyncio.sleep(2 * (attempt + 1))
+    state = await _page_state(page)
+    problem = _activity_failure(state, last or "feed did not render")
+    if state.get("app") and not state.get("oops"):
+        if state.get("offline"):
+            raise ActivityOffline(problem)
+        raise ActivityUnavailable(problem)
+    raise RuntimeError(problem)
+
+
+async def _back_to_chat(page) -> None:
+    """Leave the page on Chat: the chat-list watcher reads that view, and an
+    Activity tab left open makes it think the rail went quiet."""
+    try:
+        await page.locator('button[aria-label^="Chat"]:visible').first.click(timeout=5000)
+        if await wait_for_rail(page, timeout=10):
+            return
+    except Exception:
+        pass
+    await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=30000)
+    await page.wait_for_selector(APP_MARKERS, timeout=15000)
+    if not await wait_for_rail(page, timeout=10):
+        raise RuntimeError("Teams chat rail did not return after the Activity read")
+
+
+_ACTIVITY_ROWS_JS = """() => {
+    const root = [...document.querySelectorAll('[data-tid="activity-list-container"]')]
+      .find(e => e.getClientRects().length);
+    const items = [...document.querySelectorAll('[data-tid="activity-feed-list-item"]')]
+      .filter(e => e.getClientRects().length);
+    let box = root && (root.matches('[role="listbox"]') ? root
+      : root.querySelector('[role="listbox"]') || root.closest('[role="listbox"]'));
+    if (!box && root && !items.length) {
+      const boxes = [...document.querySelectorAll('[role="listbox"]')]
+        .filter(b => !b.closest('[data-tid="ms-searchux-popup"]')
+          && b.getClientRects().length && b.innerText.trim().length > 20);
+      if (boxes.length === 1) box = boxes[0];
+    }
+    let nodes = items.length ? items : box ? [...box.querySelectorAll('[role="option"]')] : [];
+    if (!nodes.length && box) nodes = [...box.querySelectorAll(':scope > div > div')];
+    const empty = root && /you're all caught up|no activity|nothing to see here/i
+      .test(root.innerText || '');
+    if (!nodes.length) return {rows: [], valid: !!empty};
+    const out = [];
+    for (const n of nodes) {
+      const lines = n.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+      if (lines.length < 2) continue;
+      const label = (n.getAttribute('aria-label') || '') + ' ' +
+                    (n.getAttribute('aria-describedby') || '');
+      const marked = /unread/i.test(label)
+        || !!n.querySelector('[data-tid*="unread" i], [class*="unread" i]');
+      out.push({text: lines.slice(0, 4).join(' — '), unread: marked});
+    }
+    return {rows: out, valid: !!out.length};
+}"""
+
+
+_ACTIVITY_SCROLL_JS = """() => {
+    const root = document.querySelector('[data-tid="activity-list-container"]')
+        || document.querySelector('[data-tid="activity-feed-list-item"]');
+    const first = root && (root.querySelector('[role="listbox"]') || root);
+    for (let node = first; node; node = node.parentElement) {
+        if (node.scrollHeight <= node.clientHeight + 4) continue;
+        const before = node.scrollTop;
+        node.scrollTop += Math.max(200, node.clientHeight - 80);
+        return node.scrollTop > before;
+    }
+    return false;
+}"""
+
+ACTIVITY_BACKLOG_KEY = "teams_activity_backlog_anchor"
+
+
+class ActivityRows(list):
+    def __init__(self, rows: list[dict], *, complete: bool = True):
+        super().__init__(rows)
+        self.complete = complete
+
+
+async def _activity_catch_up(page, rows: list[dict], limit: int) -> ActivityRows:
+    """Walk a bounded virtualized feed until a previously processed row appears."""
+    raw = store.kv_get(ACTIVITY_BACKLOG_KEY) or store.kv_get(ACTIVITY_SEEN_KEY)
+    try:
+        seen = set(json.loads(raw)) if raw else set()
+    except (TypeError, ValueError):
+        seen = set()
+    if not seen or any(_activity_key(row["text"]) in seen for row in rows[:limit]):
+        store.kv_set(ACTIVITY_BACKLOG_KEY, "")
+        return ActivityRows(rows[:limit])
+    if len(rows) < 25 and not store.kv_get(ACTIVITY_BACKLOG_KEY):
+        return ActivityRows(rows[:limit])
+
+    rows = rows[:limit]
+    found = {_activity_key(row["text"]) for row in rows}
+    for _ in range(8):
+        if len(rows) >= limit or not await page.evaluate(_ACTIVITY_SCROLL_JS):
+            break
+        await asyncio.sleep(0.7)
+        batch = await page.evaluate(_ACTIVITY_ROWS_JS)
+        if not isinstance(batch, dict) or batch.get("valid") is not True:
+            break
+        for row in batch["rows"]:
+            key = _activity_key(row["text"])
+            if key not in found:
+                rows.append(row)
+                found.add(key)
+        if found & seen:
+            store.kv_set(ACTIVITY_BACKLOG_KEY, "")
+            return ActivityRows(rows[:limit])
+
+    if not store.kv_get(ACTIVITY_BACKLOG_KEY):
+        store.kv_set(ACTIVITY_BACKLOG_KEY, json.dumps(list(seen)))
+    store.record_outcome("teams", "activity_backlog_incomplete",
+                         detail=f"read {len(rows)} rows without reaching a previously seen row")
+    return ActivityRows(rows[:limit], complete=False)
 
 
 async def read_activity_rows(limit: int = 25) -> list[dict]:
@@ -1936,39 +2215,22 @@ async def read_activity_rows(limit: int = 25) -> list[dict]:
     async with teams_page() as page:
         await _open_activity(page)
         await asyncio.sleep(3)  # virtualized feed renders after the header
-        rows = await page.evaluate(
-            """() => {
-                const boxes = Array.from(document.querySelectorAll('[role="listbox"]'))
-                  .filter(b => !b.closest('[data-tid="ms-searchux-popup"]')
-                               && b.innerText.trim().length > 20);
-                if (!boxes.length) return [];
-                const box = boxes.sort((a, b) => b.innerText.length - a.innerText.length)[0];
-                let nodes = box.querySelectorAll('[role="option"]');
-                if (!nodes.length) nodes = box.querySelectorAll(':scope > div > div');
-                const out = [];
-                for (const n of nodes) {
-                  const lines = n.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
-                  if (lines.length < 2) continue;
-                  // Teams marks an unread row several ways depending on build:
-                  // the accessible name, an explicit unread test-id, or the
-                  // little dot. Any of them counts; none of them => unknown.
-                  const label = (n.getAttribute('aria-label') || '') + ' ' +
-                                (n.getAttribute('aria-describedby') || '');
-                  const marked = /unread/i.test(label)
-                    || !!n.querySelector('[data-tid*="unread" i], [class*="unread" i]');
-                  out.push({text: lines.slice(0, 4).join(' — '), unread: marked});
-                }
-                return out;
-            }""")
+        result = await page.evaluate(_ACTIVITY_ROWS_JS)
+        if not isinstance(result, dict) or result.get("valid") is not True:
+            raise ActivityUnavailable(_activity_failure(
+                await _page_state(page), "Activity rendered but its rows could not be read"))
+        rows = result["rows"]
+        collected = (await _activity_catch_up(page, rows, limit)
+                     if limit > 25 else ActivityRows(rows[:limit]))
+        await _back_to_chat(page)
         store.kv_set("teams_session_ok", "1")
-        rows = rows[:limit]
         # If NOTHING is marked unread the selectors probably just missed on this
         # build — that is unknown, not "he has read everything". Saying unknown
         # keeps the old behaviour (push it) instead of going silent on him.
-        if rows and not any(r.get("unread") for r in rows):
-            for r in rows:
+        if collected and not any(r.get("unread") for r in collected):
+            for r in collected:
                 r["unread"] = None
-        return rows
+        return collected
 
 
 async def read_activity(limit: int = 25) -> list[str]:
@@ -2048,11 +2310,9 @@ _FEED_ONLY = ("missed call", "invited you", "updated", "reacted to")
 def duplicates_chat_watch(item: str) -> bool:
     """Would `chat_watch` deliver this same message, with better text?
 
-    Two readers over one surface is two notifications. Once chat_watch reads the
-    conversations directly it sees every message the feed describes — and sees the
-    actual sentence rather than the feed's truncated rendering — so the feed
-    stepping in as well is the duplication he hit: the same line from Glen
-    arriving twice, in two different shapes.
+    The chat reader does not open channels. Only a feed row explicitly naming
+    a chat with Arun can be safely left to it; an ambiguous mention stays in
+    Activity rather than being silently lost.
 
     Missed calls, invites and reactions are NOT messages in any thread, so they
     stay with the feed, which is the only thing that can see them.
@@ -2068,7 +2328,10 @@ def duplicates_chat_watch(item: str) -> bool:
         return False                      # the feed is the only reader; keep it all
     if any(k in t for k in _FEED_ONLY):
         return False
-    return any(k in t for k in _A_MESSAGE)
+    if "in a channel" in t or "in the channel" in t:
+        return False
+    return (bool(re.search(r"(?:^| — )in chat with you(?:$| — )", t))
+            and any(k in t for k in _A_MESSAGE))
 
 
 def _outlook_reading(within: float = 3600.0) -> bool:
@@ -2179,27 +2442,71 @@ async def activity_watch_loop() -> None:
         # …or sooner: the moment "Mentions" turns bold on the rail (chat_watch
         # sets the event), the feed is read — a channel @mention is not left
         # for the next five-minute look.
-        await _activity_wait(ACTIVITY_POLL_SECONDS)
-        if not (enabled() and logged_in_once() and store.kv_get("teams_session_ok") != "0"):
+        retry_after = (min(ACTIVITY_POLL_SECONDS,
+                           min(300, 30 * 2 ** min(consecutive_failures - 1, 4)))
+                       if consecutive_failures else ACTIVITY_POLL_SECONDS)
+        await _activity_wait(retry_after)
+        if (in_a_call() or not enabled() or not logged_in_once()
+                or store.kv_get("teams_session_ok") == "0"):
             continue
         try:
-            rows = await read_activity_rows()
+            rows = await read_activity_rows(limit=200)
         except Exception as exc:
             # Still swallowed — a transient DOM hiccup must not kill the loop.
             # But the REASON is kept now. This handler ran silently every five
             # minutes while the watcher was dead, and nothing anywhere said so.
             attention.note_scrape_error("teams", exc)
             consecutive_failures += 1
+            if "SESSION_EXPIRED" in str(exc):
+                was_ok = store.kv_get("teams_session_ok") != "0"
+                try:
+                    session_ok = await check_session()
+                except Exception as session_exc:
+                    attention.note_scrape_error("teams", session_exc)
+                else:
+                    if not session_ok and was_ok:
+                        await notify.notify(
+                            "Teams session expired — run `.venv/bin/python -m app.teams_bridge login` "
+                            "to reconnect (your organisation's SSO).", "warn")
+                    if not session_ok:
+                        continue
+            # A failed Activity selector has already reloaded the Teams page;
+            # retry that page once, not Chrome every ten minutes. Only a broken
+            # browser or app shell justifies rebuilding the browser. Neither
+            # case is evidence that Teams' durable IndexedDB needs erasing.
+            async def verify_feed() -> bool:
+                await read_activity_rows()
+                return True
+
+            if isinstance(exc, ActivityUnavailable):
+                rungs = [("retry_activity", verify_feed)]
+            else:
+                rungs = repair_rungs()[:2]
             # …and keeping the reason is still not fixing it. Every previous round
             # on this bug added a better sensor; on 26 August the store held the
             # exact cause, the exact age and the exact subsystem, and nothing
             # happened for fourteen hours because every path ended in "tell Arun"
             # and Arun was asleep. This is the part that acts.
-            await recovery.ladder("teams", repair_rungs(), consecutive_failures,
-                                  notify=notify.notify)
+            repaired = await recovery.ladder("teams", rungs, consecutive_failures,
+                                             notify=notify.notify)
+            if repaired["healed"]:
+                mentioned().set()  # process the verified feed now, not five minutes later
             continue
-        consecutive_failures = 0
-        attention.note_scrape("teams")   # only on success — see attention.stale_sources
+        if getattr(rows, "complete", True):
+            consecutive_failures = 0
+            recovery.note_escalated("teams", False)
+            recovery.note_escalated("teams-activity-backlog", False)
+            attention.note_scrape("teams")
+        else:
+            consecutive_failures += 1
+            attention.note_scrape_error(
+                "teams", ActivityUnavailable("Activity backlog could not be verified"))
+            if consecutive_failures >= 3 and not recovery.already_escalated("teams-activity-backlog"):
+                recovery.note_escalated("teams-activity-backlog", True)
+                await notify.notify(
+                    "⚠️ Teams Activity is readable, but its older rows could not be "
+                    "checked after an interruption. Check channel mentions in Teams "
+                    "manually until the Activity backlog recovers.", "warn")
         if not rows:
             continue
         items = [r["text"] for r in rows]
@@ -2209,7 +2516,6 @@ async def activity_watch_loop() -> None:
         keys = [_activity_key(it) for it in items]
         if seen is not None:
             keys = keys + [k for k in seen if k not in keys][:300 - len(keys)]
-        store.kv_set(ACTIVITY_SEEN_KEY, _json.dumps(keys[:300]))
         # He reads Teams on his phone too — anything he has already opened is
         # settled, and pushing it again is exactly the noise he complained about.
         opened = {_activity_key(r["text"]) for r in rows if r.get("unread") is False}
@@ -2221,9 +2527,9 @@ async def activity_watch_loop() -> None:
             if r.get("unread") is False:
                 attention.note_read(attention.key_for(r["text"]))
         wanted = [it for it in fresh if _activity_wanted(it)]
-        if not wanted:
-            continue
-        await _push_activity(notify, wanted)
+        for offset in range(0, len(wanted), 12):
+            await _push_activity(notify, wanted[offset:offset + 12])
+        store.kv_set(ACTIVITY_SEEN_KEY, _json.dumps(keys[:300]))
 
 
 async def check_session() -> bool:

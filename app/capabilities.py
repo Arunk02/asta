@@ -164,10 +164,11 @@ _TABLE: tuple[Capability, ...] = (
                     "Use it instead of asking 'shall I?' in prose — prose is lost when the "
                     "turn ends. Not for anything leaving the chat: that is prepare_to_send."),
     Capability("prepare_to_send", "loop",
-               http='POST /api/loop/prepare-send {"what":"…","to":"…","channel":"teams|email|jira|pr|chat"}',
+               http='POST /api/loop/prepare-send {"what":"…","to":"…","channel":"teams|email|pr|chat"}',
                note="The ONLY approved way to send on Arun's behalf: it STAGES the draft "
-                    "and asks him to confirm — nothing goes out until he says yes. Never "
-                    "send outward through any other tool without staging it here first."),
+                    "and asks him to confirm — nothing goes out until he says yes. "
+                    "Jira is NOT a send channel: use jira_comment / jira_transition, "
+                    "which stage recorded operations for their own confirmation."),
     # --- workspace / code context -------------------------------------------
     Capability("resolve_context", "workspace",
                http="GET /api/workspaces/{workspace}/resolve?q={question}",
@@ -426,11 +427,17 @@ _TABLE: tuple[Capability, ...] = (
                     "stage it. A chat turn cannot run gh — this is how the PR changes."),
     Capability("refine_task", "tasks", http='POST /api/tasks/{id}/refine {"text":"…"}',
                write=True,
-               note="THE tool for any comment on work a task already delivered — a "
-                    "correction, 'also handle X', a review comment, a red PR build. "
+               note="For explicit implementation changes to work already delivered — "
+                    "a correction, 'also handle X', or a request to FIX a red PR build. "
+                    "Never use for a CI question, status check, or failure analysis: "
+                    "read the linked PR with task_ci_report instead. "
                     "NEVER spawn a new task for feedback: refine continues the original "
                     "task in its own session, so it keeps everything it already worked "
                     "out. A new task would re-derive it all and reimplement the change."),
+    Capability("task_ci_report", "tasks", http="GET /api/tasks/{id}/ci?historical=true|false",
+               note="Read current checks and review state for a task's linked PR; "
+                    "historical=true also checks past workflow runs and failed logs. "
+                    "Read-only: never resumes the code worker or repeats DONE."),
     Capability("task_pr_status", "tasks", http="GET /api/tasks/prs",
                note="Where shipped work stands — CI, review, merged or not. Use it for "
                     "'what's pending', 'did that merge', 'any PR blocked'."),
@@ -509,6 +516,20 @@ def names() -> tuple[str, ...]:
 #: awaits, with no flag threaded through five signatures — and the parent turn,
 #: created earlier, is unaffected.
 READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=False)
+SIDE_READS = frozenset({
+    "search_memory", "read_data_file", "search_knowledge", "conversation_status",
+    "grafana_logs", "temporal_workflows", "temporal_workflow", "app_recipes",
+    "facts_about", "resolve_context", "read_workspace_file", "list_services",
+    "jira_search", "jira_my_issues", "jira_issue", "jira_sprint",
+    "teams_activity", "teams_read_chat", "teams_search", "teams_history",
+    "teams_unread", "teams_resolve", "voice_check", "meeting_notes",
+    "outlook_mail", "outlook_meetings", "meeting_prep", "meeting_recap",
+    "debug_stack_health", "check_teams_selectors", "answer_quality",
+    "list_background_tasks", "task_result", "list_tracked", "task_pr_status",
+    "task_ci_report",
+    "list_my_reminders", "health_check", "ci_status", "trace_report",
+    "token_audit", "quality_report",
+})
 
 #: What Arun actually typed this turn, so a tool can check whether it is doing the
 #: thing he asked for or something else entirely.
@@ -521,6 +542,7 @@ READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=Fal
 #: route it does not control. Same ContextVar mechanism as READ_ONLY_TURN: set
 #: once at the turn boundary, copied into everything the turn awaits.
 TURN_TEXT: ContextVar[str] = ContextVar("asta_turn_text", default="")
+MCP_TURN: ContextVar[bool] = ContextVar("asta_mcp_turn", default=False)
 
 #: The task whose brain is calling, when it is a task and not the chat. An offer
 #: a task stages has not been shown to him by any reply — the chat brain says
@@ -541,6 +563,8 @@ def said_this_turn() -> str:
     said = TURN_TEXT.get()
     if said:
         return said
+    if MCP_TURN.get():
+        return ""
     from . import store, tasks
     cid = tasks.current_conversation()
     if not cid:
@@ -589,9 +613,10 @@ def tools_for(selected: list[str] | tuple[str, ...] | None = None) -> list[Calla
     reg = registry()
     read_only = READ_ONLY_TURN.get()
     if selected is None:
-        return [c.fn for c in reg.values() if not (read_only and c.write)]
+        return [c.fn for c in reg.values() if not read_only or c.name in SIDE_READS]
     keep = list(dict.fromkeys(list(selected) + [n for n in ALWAYS if n in reg]))
-    return [reg[n].fn for n in keep if n in reg and not (read_only and reg[n].write)]
+    return [reg[n].fn for n in keep if n in reg and
+            (not read_only or n in SIDE_READS)]
 
 
 def notes_block(selected: list[str] | tuple[str, ...] | None = None) -> str:

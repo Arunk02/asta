@@ -13,8 +13,10 @@ META = {
     "number": 123, "title": "Add retry to the payment call",
     "author": {"login": "someone"}, "body": "Adds a retry.",
     "baseRefName": "main", "headRefName": "feature/retry",
+    "headRefOid": "a" * 40,
     "url": "https://github.com/o/r/pull/123",
     "additions": 40, "deletions": 3, "changedFiles": 2, "state": "OPEN", "isDraft": False,
+    "statusCheckRollup": [{"name": "build", "conclusion": "SUCCESS"}],
     "files": [{"path": "src/Pay.java", "additions": 38, "deletions": 1},
               {"path": "src/PayTest.java", "additions": 2, "deletions": 2}],
 }

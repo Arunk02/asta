@@ -65,7 +65,10 @@ def _proxy(cap):
                 f"{_asta_url()}/api/_invoke",
                 json={"tool": cap.name, "args": kwargs,
                       "conv_id": os.environ.get("ASTA_MCP_CONV", ""),
-                      "task_id": os.environ.get("ASTA_MCP_TASK", "")},
+                      "task_id": os.environ.get("ASTA_MCP_TASK", ""),
+                      "message_id": int(os.environ["ASTA_MCP_MESSAGE_ID"])
+                      if os.environ.get("ASTA_MCP_MESSAGE_ID", "").isdigit() else None,
+                      "read_only": os.environ.get("ASTA_MCP_READ_ONLY") == "1"},
                 headers={"Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")},
             )
             if r.status_code >= 400:
@@ -102,6 +105,8 @@ def build_server():
     for cap in capabilities.registry().values():
         if allow is not None and cap.name not in allow:
             continue
+        if os.environ.get("ASTA_MCP_READ_ONLY") == "1" and cap.name not in capabilities.SIDE_READS:
+            continue
         server.add_tool(_proxy(cap), name=cap.name, description=_describe(cap))
     return server
 
@@ -122,7 +127,8 @@ def _describe(cap) -> str:
 
 
 def config_entry(tools: list[str] | None = None, conv_id: str = "",
-                 task_id: str = "") -> dict:
+                 task_id: str = "", read_only: bool = False,
+                 message_id: int | None = None) -> dict:
     """The mcpServers entry a CLI needs to spawn this server.
 
     The env is carried explicitly rather than left to inheritance: the spawned
@@ -154,6 +160,10 @@ def config_entry(tools: list[str] | None = None, conv_id: str = "",
         env["ASTA_MCP_CONV"] = conv_id
     if task_id:
         env["ASTA_MCP_TASK"] = str(task_id)
+    if read_only:
+        env["ASTA_MCP_READ_ONLY"] = "1"
+    if message_id is not None:
+        env["ASTA_MCP_MESSAGE_ID"] = str(message_id)
     return {
         "mcpServers": {
             SERVER_NAME: {

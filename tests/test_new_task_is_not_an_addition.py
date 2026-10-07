@@ -91,7 +91,7 @@ def test_the_running_work_is_left_alone_not_cancelled():
     from app import main
     src = inspect.getsource(main)
     branch = src[src.index('if intent == "new_task":'):src.index('if intent == "ambiguous":')]
-    assert "_followups" in branch, "queued as its own turn"
+    assert "_queue_followup" in branch, "persisted as its own turn"
     assert "cancel" not in branch, "the running work must not be cancelled"
 
 

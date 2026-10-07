@@ -110,7 +110,7 @@ class Offer:
             head = pending()
             behind = f" behind “{head.subject}”" if head else ""
             return (f"{body}\n\n⏳ Queued{behind} — I'll ask when that one is "
-                    f"answered. Say “{self.subject[:40]}” to jump to it.")
+                    "answered. This is not an approval request yet.")
         return f"{body}\n\n▶ {self.prompt}\n   reply “yes” to go ahead, “no” to drop it."
 
     def is_asked(self) -> bool:

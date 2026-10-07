@@ -40,7 +40,7 @@ TTL = {
     "incident": 15 * 60,       # production changes by the minute
     "debug": 15 * 60,
     "pr_review": 6 * 3600,     # holds until the PR changes
-    "review_request": 6 * 3600,
+    "review_request": 30 * 86400,  # only used with a verified repo, head and CI fingerprint
     "ask": 30 * 60,
 }
 DEFAULT_TTL = 30 * 60

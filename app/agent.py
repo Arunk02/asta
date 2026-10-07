@@ -1515,12 +1515,39 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
 
     Call this at the end of every review. Notes that stay in your answer reach
     nobody — that is the failure this path exists to fix."""
-    from . import offers, review
+    from . import offers, review, capabilities, store
+    import json
     findings = review.parse_findings(notes)
     action = review.verdict_of(notes)
     if not findings and action != "approve":
         return ("No finding named a file and a line, so there is nothing to attach. "
                 "Write each point as `path/to/File.ext:line — what is wrong → what to do`.")
+    task_id = capabilities.FROM_TASK.get()
+    try:
+        origin = json.loads(store.kv_get(f"review_origin:{task_id}") or "{}") if task_id else {}
+    except ValueError:
+        origin = {}
+    number, target = review.pr_target(pr)
+    if origin:
+        if number != origin["ref"].rsplit("#", 1)[-1] or (
+                target and f"{target.lower()}#{number}" != origin["ref"]):
+            return "Not staged: this review names a different PR than the verified task."
+        pr = origin["ref"]
+        target = origin["ref"].rsplit("#", 1)[0]
+        try:
+            current, good = await review.revision(origin["ref"])
+        except (RuntimeError, ValueError) as exc:
+            return f"Not staged: could not verify the PR — {exc}"
+        if current != origin["revision"]:
+            return "Not staged: the PR head or CI changed while the review was running."
+    else:
+        try:
+            verified, good = await review.revision(pr)
+        except (RuntimeError, ValueError) as exc:
+            return f"Not staged: verify the full PR link first — {exc}"
+        origin = {"ref": verified.rsplit("@", 1)[0], "revision": verified}
+    if action == "approve" and not good:
+        return "Not staged: approval needs an open PR with successful CI checks."
     head = (notes or "").strip().splitlines()
     summary = next((line for line in head if line.upper().startswith("VERDICT")), "")
     blocking = [f for f in findings if f["blocking"]]
@@ -1528,15 +1555,15 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
                          for f in findings[:6])
     if len(findings) > 6:
         preview += f"\n• …and {len(findings) - 6} more"
-    number, target = review.pr_target(pr)
     where = f" in {target}" if target else ""
     verb = {"approve": "Approve", "comment": "Comment on",
             "request_changes": "Request changes on"}[action]
     offers.staged_write(
         "pr_review_inline",
         {"pr": pr, "workspace": workspace, "repo": repo, "action": action,
-         "body": summary, "comments": findings},
-        f"🔎 {verb} PR #{number}{where} — {len(findings)} inline comment(s)",
+         "body": summary, "comments": findings, "review_origin": origin},
+        f"🔎 {verb} PR #{number}{where} @ {origin['revision'].split('@')[-1][:12]} "
+        f"— {len(findings)} inline comment(s)",
         (summary + "\n\n" + preview).strip()[:900],
         f"Post this review on PR #{number} as you?", kind="pr_write")
     return (f"Staged a {action.replace('_', ' ')} review on PR #{number}: "
@@ -1855,8 +1882,10 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     """Stage an outward-facing message for Arun to approve BEFORE it is sent.
 
     Use this whenever you've drafted something to send outside this chat — a Teams
-    reply, an email, a Jira comment, a PR description, a message to a person. `what` is
-    the full draft, `to` the recipient/target, `channel` one of teams|email|jira|pr|chat.
+    reply, an email, a PR description, a message to a person. Jira comments and
+    transitions use jira_comment / jira_transition instead: those stage recorded
+    operations that one approval can actually execute. `what` is the full draft,
+    `to` the recipient/target, `channel` one of teams|email|pr|chat.
     Asta shows Arun the draft and asks "can I send this?" — it is NEVER sent until he
     confirms. This is the ONLY approved way to send on his behalf; never send outward
     through any other tool without staging it here first.
@@ -1865,6 +1894,10 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     group or channel himself ("post it in the prod issue group") — never because a
     group happens to share a word with the name he used."""
     from . import capabilities, loop, policy, tasks, writing
+    if channel.strip().lower() == "jira":
+        return ("Not staged — Jira is not a send channel. Use jira_comment for the "
+                "exact comment and jira_transition for the status. Each creates "
+                "its own recorded approval; do not claim either was posted yet.")
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
@@ -2368,14 +2401,22 @@ async def refine_task(task_id: int, feedback: str) -> str:
 
     Use this — never delegate_task — whenever he comments on work a task already
     delivered: a correction, an addition, "also handle X", a review comment, or
-    a CI failure on its PR. The task keeps everything it learned; a new task
-    would start from nothing and re-implement what is already there.
+    an explicit request to fix a CI failure on its PR. Questions about CI are
+    read-only; use task_ci_report instead. The task keeps everything it learned;
+    a new task would start from nothing and re-implement what is already there.
     Works on tasks that are done, shipped, failed, or blocked on their PR."""
     from . import tasks
     try:
         return await tasks.refine(task_id, feedback)
     except ValueError as exc:
         return str(exc)
+
+
+async def task_ci_report(task_id: int, historical: bool = False) -> str:
+    """Read the linked PR's live checks and optional past failures, without
+    reopening or changing the implementation task."""
+    from . import tasks
+    return await tasks.ci_report(task_id, historical=historical)
 
 
 def task_pr_status(task_id: int = 0) -> str:

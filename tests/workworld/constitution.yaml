@@ -117,5 +117,5 @@ scenarios:
       - spawn: {title: "add the mapping", prompt: "add the mapping", kind: code, workspace: booking, as: work}
       - approve: work
     checks:
-      - push_count: {matching: "DONE", count: 1}
+      - push_count: {matching: "Local implementation ready", count: 1}
       - push_count: {matching: "PLAN #", count: 1}

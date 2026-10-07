@@ -89,8 +89,7 @@ scenarios:
     checks:
       - task_status: {task: job, is: done}
       - push_contains: "PLAN #"
-      - push_contains: "✅ DONE"
+      - push_contains: "Local implementation ready"
       - brain_flags: {kind: task, leg: 0, plan_only: true, effort: medium}
       - brain_flags: {kind: task, leg: 1, plan_only: false, effort: low}
       - scratch_file: {path: greet.py, text: "def greet"}
-

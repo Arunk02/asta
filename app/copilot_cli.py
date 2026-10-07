@@ -479,7 +479,12 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     if sk:
         parts.append(sk)
     port = os.environ.get("ASTA_PORT", "8321")
-    if mcp_cli_enabled():
+    if mcp_cli_enabled() and capabilities.READ_ONLY_TURN.get():
+        parts.append(
+            "This is a parallel read-only answer. Use only the available read tools "
+            "from Asta's MCP server. Do not send, delegate, schedule, stage, or edit "
+            "anything; the active implementation has its own separate session.")
+    elif mcp_cli_enabled():
         # Tools, descriptions and rules all arrive over MCP, so the ~2k-token
         # curl catalogue is dead weight — this is the orientation's biggest line.
         parts.append(
@@ -518,10 +523,14 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
         "know the next step, make your LAST action a call to POST /api/loop/continue "
         f'{{"conv_id":"{cid}","next_step":"<one line>"}} — Asta runs it immediately, with no '
         "message from Arun, and keeps looping until the work is done. Anything you would "
-        "send OUTSIDE this chat (a Teams reply, email, Jira comment, PR body, a message to a "
+        "send OUTSIDE this chat (a Teams reply, email, PR body, a message to a "
         "person) must NEVER be sent directly: POST /api/loop/prepare-send "
-        f'{{"conv_id":"{cid}","what":"<draft>","to":"<who>","channel":"teams|email|jira|pr|chat"}} '
-        "and Asta shows Arun the draft and asks before it goes out. Stop the loop only when "
+        f'{{"conv_id":"{cid}","what":"<draft>","to":"<who>","channel":"teams|email|pr|chat"}} '
+        "and Asta shows Arun the draft and asks before it goes out. For Jira, use "
+        "POST /api/jira/issue/{key}/comment or /api/jira/issue/{key}/transition "
+        "instead; each stages the exact "
+        "operation for approval, and a generic Jira draft is NOT sendable. Do not "
+        "claim a queued action is done. Stop the loop only when "
         "the task is done or you genuinely need his decision.")
     parts.append(
         "CODE WORK — the flow Arun expects, with a message to him at EVERY step:\n"
@@ -552,8 +561,10 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
         "bigger). Never plan the code change yourself in this chat. If an analysis task "
         'already investigated the topic, add "context_from": <that task id> so the worker '
         "reuses its evidence instead of re-discovering (big token saver).\n"
-        "2. Relay Arun's answer: 'approve task N' → approve_task. Any other feedback → "
-        'POST /api/tasks/N/reply with {"text":"…"} — the pipeline re-plans with it.\n'
+        "2. Relay Arun's answer: 'approve task N' → approve_task. Explicit changes "
+        'to code → POST /api/tasks/N/refine with {"text":"…"}; questions about '
+        "a task's CI → GET /api/tasks/N/ci (historical=true for earlier failures). "
+        "Never resume an implementation just to check it.\n"
         "3. After implementation the task finishes with the diff summary — the pipeline "
         "NEVER pushes or opens a PR. Show Arun the diff; only when he says ship, call "
         "ship_task.\n"
@@ -710,6 +721,8 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     if not capabilities.chat_may_write():
         for tool in _CHAT_DENY:
             cmd += ["--deny-tool", tool]
+    if capabilities.READ_ONLY_TURN.get():
+        cmd += ["--deny-tool", "shell"]
     # Native asta tools instead of curl, when enabled. Copilot takes the config
     # as inline JSON (its flag differs from Claude's --mcp-config). --allow-all-
     # tools above already clears the MCP tools. Kept in lockstep with the shared
@@ -721,7 +734,10 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
         # brains): the ~handful the message needs, or the full set when ambiguous.
         selected = tool_index.select_sticky(conv["id"], ranking_text)
         cmd += ["--additional-mcp-config",
-                _json.dumps(mcp_server.config_entry(tools=selected, conv_id=conv["id"]))]
+                _json.dumps(mcp_server.config_entry(
+                    tools=selected, conv_id=conv["id"],
+                    read_only=capabilities.READ_ONLY_TURN.get(),
+                    message_id=conv.get("_turn_message_id")))]
     model = os.environ.get("COPILOT_CLI_MODEL")
     if model:
         cmd += ["--model", model]

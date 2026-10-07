@@ -439,6 +439,69 @@ def test_nothing_is_said_once_he_has_answered_himself(monkeypatch):
                                        since=now - 10)) is True
 
 
+def test_automatic_ack_does_not_hide_a_finished_answer(monkeypatch, told):
+    now = time.time()
+    chat = "Vinish Kumar"
+    store.kv_set("wa_conversation", _conv()["id"])
+    store.save_teams_messages([{"key": "question", "chat": chat, "sender": chat,
+                                "text": "Please review my PR", "sent_at": now - 120}])
+    store.record_automatic_teams_message("asta-ack", chat)
+
+    async def read(name, limit=0, max_scrolls=0):
+        return [{"key": "asta-ack", "sender": "Arunkumar K",
+                 "text": "Checking, will update you", "sent_at": now - 60}]
+
+    monkeypatch.setattr(tb, "enabled", lambda: True)
+    monkeypatch.setattr(tb, "read_history", read)
+    monkeypatch.setattr(chat_watch, "their_last", lambda name: now - 120)
+    assert asyncio.run(answers.present(who=chat, need="review", chat=chat, group=False,
+                                       analysis="All good", reply="Looks good to me."))
+    assert loop.awaiting(answers.phone_conversation())["to"] == chat
+    assert not any("already answered" in msg for msg in told)
+
+
+def test_automatic_receipt_survives_restart_but_real_reply_still_counts(monkeypatch):
+    now = time.time()
+    chat = "Vinish Kumar"
+    store.record_automatic_teams_message("ack-123", chat)
+    rows = [{"key": "ack-123", "sender": "Arunkumar K", "sent_at": now - 30}]
+    monkeypatch.setattr(tb, "enabled", lambda: True)
+
+    async def read(name, limit=0, max_scrolls=0):
+        return rows
+
+    monkeypatch.setattr(tb, "read_history", read)
+    assert not asyncio.run(chat_watch.he_replied_since(chat, now - 60))
+    rows.append({"key": "human-456", "sender": "Arunkumar K", "sent_at": now - 20})
+    assert asyncio.run(chat_watch.he_replied_since(chat, now - 60))
+    assert asyncio.run(chat_watch.he_replied_since("Other chat", now - 60))
+
+
+def test_automatic_send_records_only_the_fresh_verified_message(monkeypatch):
+    now = time.time()
+    from datetime import datetime, timezone
+
+    def msg(sender, text, at):
+        return {"sender": sender, "text": text,
+                "iso": datetime.fromtimestamp(at, timezone.utc).isoformat()}
+
+    older = msg("Arunkumar K", "Checking, will update you", now - 3600)
+    current = msg("Arunkumar K", "Checking, will update you", now)
+    assert not tb._automatic_receipt("Vinish", older["text"], [older], now)
+    assert tb._automatic_receipt("Vinish", current["text"], [older, current], now)
+    assert not store.is_automatic_teams_message(tb._msg_key("Vinish", older), "Vinish")
+    assert store.is_automatic_teams_message(tb._msg_key("Vinish", current), "Vinish")
+    assert not store.is_automatic_teams_message(tb._msg_key("Vinish", current), "Shabda")
+
+    async def fake_send(chat, text):
+        assert tb._automatic_send.get() == chat
+        return chat
+
+    monkeypatch.setattr(tb, "send_message", fake_send)
+    assert asyncio.run(tb.send_automatic("Vinish", "checking")) == "Vinish"
+    assert tb._automatic_send.get() == ""
+
+
 def test_an_answer_he_already_gave_is_not_staged_again(monkeypatch, told):
     now = time.time()
     chat = "Shabda Anubhav, Vinish, +2"

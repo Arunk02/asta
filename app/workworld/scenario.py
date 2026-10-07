@@ -207,6 +207,8 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
     for pr in s.get("prs", []) or []:
         world.prs[pr["url"]] = {"state": pr.get("state", "OPEN"),
                                 "url": pr["url"],
+                                "headRefOid": pr.get("head", ""),
+                                "isDraft": pr.get("draft", False),
                                 "mergedAt": pr.get("merged_at"),
                                 "reviewDecision": pr.get("review", ""),
                                 "comments": pr.get("comments", []),

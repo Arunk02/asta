@@ -96,6 +96,28 @@ def brief_rider(who: str) -> str:
 _SECTION = re.compile(r"^\W*(ANALYSIS|REPLY)\W*:?\W*$", re.I | re.M)
 
 
+#: A paragraph the brain wrote to itself after its report, not to anyone. A
+#: run that waited on background shells is woken once per shell that finishes,
+#: and each wake-up is one more turn printed after REPLY. 7 Oct: "Task already
+#: complete … nothing further needed from this shell" and two more like it
+#: went into Komal's draft as if they were the message.
+_AFTERTHOUGHT = re.compile(
+    r"\b(?:background\s+(?:shell|task|wait|job|command)s?|(?:this|these)\s+shells?|"
+    r"nothing\s+(?:further|new|more)\s+(?:needed|to\s+report|pending)|"
+    r"no\s+further\s+action|already\s+(?:complete|reported|staged|given)|"
+    r"task\s+#\d+\s+(?:finished|completed|is\s+done)|"
+    r"still\s+(?:running|in\s+progress))\b", re.I)
+#: "Also noticed: none …" is a line that says nothing.
+_NOTHING_NOTICED = re.compile(r"^\W*also noticed:\s*(?:none|nothing|n/?a)\b.*$\n?", re.I | re.M)
+
+
+def _without_afterthoughts(reply: str) -> str:
+    paragraphs = [p for p in re.split(r"\n\s*\n", reply) if p.strip()]
+    while len(paragraphs) > 1 and _AFTERTHOUGHT.search(paragraphs[-1]):
+        paragraphs.pop()
+    return "\n\n".join(paragraphs)
+
+
 def split(result: str) -> tuple[str, str]:
     """(analysis, reply) from a finished investigation. ('', '') if it did not
     use the format — the caller then falls back to the ordinary task report."""
@@ -105,8 +127,10 @@ def split(result: str) -> tuple[str, str]:
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
         found[m.group(1).upper()] = text[m.end():end].strip().strip("—-").strip()
-    reply = found.get("REPLY", "").strip().strip('"“”').strip()
-    return found.get("ANALYSIS", "").strip(), reply
+    reply = _without_afterthoughts(found.get("REPLY", "").strip())
+    reply = reply.strip().strip('"“”').strip()
+    analysis = _NOTHING_NOTICED.sub("", found.get("ANALYSIS", "")).strip()
+    return analysis, reply
 
 
 def phone_conversation() -> str:

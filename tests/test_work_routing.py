@@ -238,8 +238,8 @@ def test_a_failed_spawn_still_answers_him(monkeypatch):
     assert started.get("chat_turn"), "a spawn failure swallowed his message"
 
 
-def test_work_is_not_routed_while_a_task_is_already_live(monkeypatch):
-    """A live task owns the conversation — steering it beats spawning a rival."""
+def test_independent_work_is_routed_while_a_task_is_already_live(monkeypatch):
+    """An unrelated implementation gets its own worker instead of disappearing."""
     spawned = {"n": 0}
 
     def spawn(*a, **k):
@@ -249,7 +249,21 @@ def test_work_is_not_routed_while_a_task_is_already_live(monkeypatch):
     out, _sink, _started = _dispatch(
         "implement the retry logic in the mapper", monkeypatch,
         spawn=spawn, live=(7,))
-    assert spawned["n"] == 0, "spawned a second task while one was live"
+    assert spawned["n"] == 1
+
+
+@pytest.mark.parametrize("live", [(7,), (7, 8)])
+def test_add_code_work_without_a_reference_is_not_an_augmentation(monkeypatch, live):
+    spawned = []
+
+    def spawn(title, prompt, kind, ws):
+        spawned.append(prompt)
+        return {"id": 9, "title": title}
+
+    out, sink, _ = _dispatch("add a retry test in the AP mapper", monkeypatch,
+                             spawn=spawn, live=live)
+    assert spawned == ["add a retry test in the AP mapper"]
+    assert any("#9" in str(m) for m in sink.sent)
 
 
 # --- the chat brain cannot implement -----------------------------------------

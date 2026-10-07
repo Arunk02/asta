@@ -145,14 +145,28 @@ ASK_BACK = os.environ.get(
 PING_BACK = "Yes, tell me"
 
 
-def ack_line(chat: str) -> str:
-    """What a colleague hears the moment their ask is being worked on."""
+def ack_line(chat: str, text: str = "") -> str:
+    """A short receipt for the subject being checked, without claiming a result."""
     try:
         from . import writing
         terms = [t for t in writing.address_terms(chat) if t.lower() in ("bro", "da", "machi")]
     except Exception:                                          # noqa: BLE001
         terms = []
-    return f"checking {terms[0]}, will update you" if terms else "checking, will update you"
+    from . import chat_watch
+    body = chat_watch.clean_message(text).lower()
+    if re.search(r"/pull/\d+|\b(?:pr|pull request)\b", body):
+        line = "Looking into the PR details"
+    elif re.search(r"\b(?:build|pipeline|ci)\b", body):
+        line = "Checking the build"
+    elif re.search(r"\b(?:booking|order|shipment)\b", body):
+        line = "Looking into the booking"
+    elif re.search(r"\b(?:ticket|jira)\b", body):
+        line = "Checking the ticket details"
+    elif re.search(r"\b(?:failed?|failing|error|logs?|issue)\b", body):
+        line = "Looking into what went wrong"
+    else:
+        line = "Let me look into this"
+    return f"{line}, {terms[0]}" if terms else line
 
 
 def ping_back(chat: str) -> str:

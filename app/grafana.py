@@ -92,7 +92,8 @@ def resolve_namespace(given: str) -> str:
 
 
 async def logs_everywhere(service: str = "", terms: list[str] | None = None,
-                          minutes: int = 0, errors_only: bool = False) -> list[dict]:
+                          minutes: int = 0, errors_only: bool = False,
+                          end: datetime | None = None) -> list[dict]:
     """The same search in every environment — for an identifier whose
     environment nobody said. One result per env; a failed env says why."""
     import asyncio
@@ -103,7 +104,7 @@ async def logs_everywhere(service: str = "", terms: list[str] | None = None,
         while True:
             try:
                 got = await logs(service=service, terms=terms, minutes=span,
-                                 ns=f"{base}-{env}", errors_only=errors_only)
+                                 ns=f"{base}-{env}", errors_only=errors_only, end=end)
             except GrafanaError as exc:
                 # Prod over three days is ~300 GiB against a 200 GiB cap: read a
                 # shorter window rather than report the environment unreadable.
@@ -392,10 +393,81 @@ def signature(line: str, width: int = 80) -> str:
 _MILESTONE = re.compile(r"[A-Z]{2,}_[A-Z_]{2,}|eventName|signal|\bsent\b|\bsend|receiv|publish|"
                         r"feedback|\back\b|acknowledg|execution|status|complet|start\w* workflow|"
                         r"success", re.I)
+_ERROR_CODE = re.compile(
+    r'\b(errorCode|exceptionCode)\\?["\s:=]+\\?["\s]*([A-Za-z0-9_-]{3,30})', re.I)
+_NULL_FIELD = re.compile(r'\b([A-Za-z][A-Za-z0-9_]{2,60}\s+is\s+null)\b', re.I)
 #: The most a trail carries: an id's story, not its log.
 TRAIL_ROWS = 30
 #: Lines read when tracing one identifier.
 TRACE_LINES = 2000
+_LINKED_ID = re.compile(
+    r'\b(?:booking|order)[ _-]?(?:id|number|no)\b["\s:=]+["\s]*([A-Za-z0-9]{9,16})\b',
+    re.I)
+
+
+def identifiers(terms: list[str]) -> list[str]:
+    """IDs supplied as bare tokens or explicitly named booking/order fields."""
+    from . import booking_case
+    found = booking_case.ids(" ".join(terms))
+    found += [m.group(1).upper() for m in _LINKED_ID.finditer(" ".join(terms))]
+    found += [t for t in terms if re.fullmatch(r"[A-Za-z0-9-]{9,36}", t)
+              and (any(c.isdigit() for c in t) or t.isupper())]
+    return list(dict.fromkeys(i.upper() for i in found))
+
+
+def _linked_ids(records: list[dict], searched: list[str]) -> list[str]:
+    """Only follow a booking/order ID actually paired with a searched ID."""
+    linked = []
+    for record in records:
+        line = record["line"]
+        if not any(i.casefold() in line.casefold() for i in searched):
+            continue
+        for match in _LINKED_ID.finditer(line):
+            other = match.group(1).upper()
+            if other not in searched and other not in linked:
+                linked.append(other)
+    return linked[:2]
+
+
+async def trace_records(terms: list[str], ns: str, minutes: int = 4320,
+                        end: datetime | None = None) -> dict:
+    """Trace each ID independently, namespace-wide; follow observed ID mappings."""
+    ns = resolve_namespace(ns)
+    if not ns:
+        raise GrafanaError("no namespace to search — ASTA_GRAFANA_NAMESPACE, or say which")
+    seeds = identifiers(terms)
+    if not seeds:
+        raise ValueError("an identifier is required to trace")
+    end = end or datetime.now(timezone.utc)
+    start = end - timedelta(minutes=minutes)
+    searched, records, queries, fallbacks, matches = [], [], [], [], {}
+    limit_hit = False
+    pending = list(seeds)
+    while pending:
+        term = pending.pop(0)
+        if term in searched:
+            continue
+        query = build_query(ns, terms=[term], errors_only=False, excluded="")
+        try:
+            got = parse(await _get(QUERY_RANGE_PATH, query_params(query, start, end, TRACE_LINES)))
+        except GrafanaError as exc:
+            try:
+                got, fallback = await _via_mcp(query, start, end, TRACE_LINES, exc, ns)
+            except GrafanaError as failure:
+                raise GrafanaError(f"Could not trace {term} in {ns}: {failure}") from failure
+            fallbacks.append(fallback)
+        searched.append(term)
+        queries.append(query)
+        matches[term] = len(got)
+        records.extend(got)
+        limit_hit |= len(got) >= TRACE_LINES
+        if term in seeds:
+            pending.extend(i for i in _linked_ids(got, seeds) if i not in seeds)
+    unique = {(r["timestamp"], r["service"], r["line"]): r for r in records}
+    return {"records": sorted(unique.values(), key=lambda r: r["timestamp"]),
+            "ids": searched, "queries": queries, "via": "mcp fallback" if fallbacks else "api",
+            "fallback_reason": "; ".join(fallbacks), "matches": matches, "seeds": seeds,
+            "limit_hit": limit_hit}
 
 
 _EVENT_NAME = re.compile(r"\b[A-Z]{2,}(?:_[A-Z]{2,})+\b")
@@ -403,13 +475,17 @@ _EVENT_NAME = re.compile(r"\b[A-Z]{2,}(?:_[A-Z]{2,})+\b")
 
 def _trail_key(line: str, terms: list[str]) -> str:
     """The event a line records, with the traced ids kept readable."""
+    code = _ERROR_CODE.search(line)
+    missing = _NULL_FIELD.search(line)
+    reason = (f"{code.group(1)} {code.group(2)}: " if code else "") \
+             + (missing.group(1) if missing else "")
     marks = [f"ZQTERM{'abcdefgh'[i]}QZ" for i in range(min(len(terms), 8))]
     for t, m in zip(terms, marks):
         line = line.replace(t, m)
     sig = signature(line, 400)
     for t, m in zip(terms, marks):
         sig = sig.replace(m, t)
-    return sig[:150]
+    return (reason + " — " + sig)[:150] if reason else sig[:150]
 
 
 #: No one service fills the trail: an id's story crosses several.
@@ -428,7 +504,9 @@ def trail(records: list[dict], terms: list[str] | None = None) -> list[dict]:
         key = (r.get("service", ""), _trail_key(r["line"], terms))
         row = rows.setdefault(key, {"service": key[0], "signature": key[1], "count": 0,
                                     "first_seen": r["timestamp"], "last_seen": r["timestamp"],
-                                    "level": r.get("level", "info"), "events": set()})
+                                    "level": r.get("level", "info"), "events": set(),
+                                    "failure": bool(_ERROR_CODE.search(r["line"])
+                                                    or _NULL_FIELD.search(r["line"]))})
         row["count"] += 1
         row["last_seen"] = max(row["last_seen"], r["timestamp"])
         row["events"] |= set(_EVENT_NAME.findall(r["line"][:4000]))
@@ -441,13 +519,19 @@ def trail(records: list[dict], terms: list[str] | None = None) -> list[dict]:
         # Named events and failures first — the first burst of routine lines
         # otherwise fills the trail and the later send or ack is cut.
         def weight(x):
-            return (3 if _EVENT_NAME.search(x["signature"]) else 0) \
+            return (5 if x["failure"] else 0) \
+                + (3 if _EVENT_NAME.search(x["signature"]) else 0) \
                 + (2 if x["level"] in _BAD_LEVELS else 0) \
                 + (1 if _MILESTONE.search(x["signature"]) else 0)
         ranked = sorted(out, key=lambda x: (-weight(x), x["first_seen"]))
         # Every named event gets its first sighting — a send and its ack are
         # what the trail is read for.
         kept, per, named = [], {}, set()
+        for x in out:
+            if x["failure"] and len(kept) < TRAIL_ROWS:
+                kept.append(x)
+                named |= set(x["events"])
+                per[x["service"]] = per.get(x["service"], 0) + 1
         for x in out:
             new = [e for e in x["events"] if e not in named]
             if new and len(kept) < TRAIL_ROWS:
@@ -466,21 +550,8 @@ def trail(records: list[dict], terms: list[str] | None = None) -> list[dict]:
 
 
 async def records_for(term: str, ns: str, minutes: int = 4320) -> list[dict]:
-    """Every line for one identifier in one environment, all levels, oldest
-    first — the raw material for its trail. Raises GrafanaError."""
-    ns = resolve_namespace(ns)
-    end = datetime.now(timezone.utc)
-    span = minutes
-    while True:
-        query = build_query(ns, terms=[term], errors_only=False)
-        try:
-            return parse(await _get(QUERY_RANGE_PATH, query_params(
-                query, end - timedelta(minutes=span), end, TRACE_LINES)))
-        except GrafanaError as exc:
-            if "too many bytes" in str(exc) and span > 60:
-                span //= 4
-                continue
-            raise
+    """All services for one ID and any linked booking/order ID in this namespace."""
+    return (await trace_records([term], ns, minutes))["records"]
 
 
 def render_trail(rows: list[dict], at_most: int = TRAIL_ROWS) -> str:
@@ -568,6 +639,18 @@ async def logs(service: str = "", terms: list[str] | None = None, minutes: int =
         raise GrafanaError("no namespace to search — ASTA_GRAFANA_NAMESPACE, or say which")
     minutes = minutes or window_minutes()
     limit = limit or max_lines()
+    if not errors_only and terms and identifiers(terms):
+        began = time.monotonic()
+        traced = await trace_records(list(terms), ns, minutes, end)
+        records = traced["records"]
+        out = summarise(records)
+        out["trail"] = trail(records, traced["ids"])
+        out.update(query="; ".join(traced["queries"]), namespace=ns, service="",
+                   minutes=minutes, took_ms=int((time.monotonic() - began) * 1000),
+                   via=traced["via"], fallback_reason=traced["fallback_reason"],
+                   searched_ids=traced["ids"], id_matches=traced["matches"],
+                   seed_ids=traced["seeds"], limit_hit=traced["limit_hit"])
+        return out
     if not errors_only and terms:
         # An identifier's whole story, not its newest few hundred lines: the send
         # that started it is the OLDEST line, and backward reading cuts it first.
@@ -581,7 +664,7 @@ async def logs(service: str = "", terms: list[str] | None = None, minutes: int =
     try:
         records = parse(await _get(QUERY_RANGE_PATH, query_params(query, start, end, limit)))
     except GrafanaError as exc:
-        records, fallback = await _via_mcp(query, start, end, limit, exc)
+        records, fallback = await _via_mcp(query, start, end, limit, exc, ns)
     out = summarise(records)
     if not errors_only and terms:
         out["trail"] = trail(records, list(terms))
@@ -596,6 +679,15 @@ def render(found: dict, lines: int = 6, trail_rows: int = TRAIL_ROWS) -> str:
     an identifier was traced, its trail."""
     body = _render_errors(found, lines)
     story = render_trail(found.get("trail") or [], trail_rows)
+    if found.get("searched_ids"):
+        matches = found.get("id_matches") or {}
+        body += ("\nIDs searched independently across all services: "
+                 + ", ".join(f"{identifier} ({matches.get(identifier, 0)} lines"
+                             + (", linked in logs" if identifier not in found.get("seed_ids", [])
+                                else "") + ")"
+                             for identifier in found["searched_ids"]))
+        if found.get("limit_hit"):
+            body += "\nAt least one ID hit the 2000-line limit; earlier events may be missing."
     return f"{body}\n{story}" if story else body
 
 
@@ -609,6 +701,8 @@ def _render_errors(found: dict, lines: int = 6) -> str:
         head += " (via the MCP fallback — the API path failed: "
         head += f"{found.get('fallback_reason', '')[:120]})"
     if not found.get("signatures"):
+        if found.get("searched_ids") and not found.get("scanned"):
+            return head + ". No ID evidence in this window; this does not prove delivery succeeded."
         return head + ". No errors in that window."
     out = [head + f", {len(found['signatures'])} distinct error signature(s):"]
     for sig in found["signatures"][:lines]:
@@ -660,7 +754,7 @@ def mcp_enabled() -> bool:
 
 
 async def _via_mcp(query: str, start: datetime, end: datetime, limit: int,
-                   why: GrafanaError) -> tuple[list[dict], str]:
+                   why: GrafanaError, ns: str = "") -> tuple[list[dict], str]:
     """(records, reason the API path failed). Re-raises the ORIGINAL error when the
     fallback cannot answer either — the first failure is the one worth reporting."""
     if not mcp_enabled():
@@ -677,15 +771,20 @@ async def _via_mcp(query: str, start: datetime, end: datetime, limit: int,
                 "params": {"name": "query_loki_logs", "arguments": {
                     "datasourceUid": datasource_uid(), "logql": query,
                     "startRfc3339": start.isoformat(), "endRfc3339": end.isoformat(),
-                    "limit": limit, "env": _mcp_env()}}})
+                    "limit": limit, "env": _mcp_env(ns)}}})
         return _mcp_records(result), str(why)
     except Exception as exc:                               # noqa: BLE001
         raise GrafanaError(f"{why} — and the MCP fallback failed too: "
                            f"{str(exc)[:160]}") from exc
 
 
-def _mcp_env() -> str:
-    """The MCP server's own env name, from the namespace ("team-prod" → "prod")."""
+def _mcp_env(ns: str = "") -> str:
+    """Use the requested namespace's environment, not the configured default."""
+    if ns:
+        for env in envs():
+            if ns.endswith(f"-{env}") or f"-{env}-" in ns:
+                return env
+        return ns.rsplit("-", 1)[-1]
     named = (os.environ.get("ASTA_GRAFANA_MCP_ENV") or "").strip()
     if named:
         return named

@@ -140,8 +140,20 @@ _AN_INSTRUCTION = re.compile(
     r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|pls\s+|plz\s+)?"
     r"(?:send|share|forward|message|msg|ping|tell|reply|respond|post|comment|"
     r"email|mail|call|dial|ring|draft|write|raise|open|create|schedule|book|"
-    r"remind|delegate|assign|escalate|chase|follow\s*up)\b",
+    r"remind|delegate|assign|escalate|chase|follow\s*up|approve|reject|"
+    r"stop|cancel|push|ship|implement|fix|update|analyse|analyze|review)\b",
     re.I)
+
+_OTHER_WORK = re.compile(
+    r"\b(?:task\s*#?\d{1,5}|#\d{1,5}|(?:new|separate|another)\s+task)\b",
+    re.I)
+_ANSWER_OPENING = re.compile(
+    r"^\s*(?:yes|no|yeah|yep|nope|both|neither|option\b|the\b|"
+    r"first\b|second\b|third\b|one\b|two\b|\d+\b|"
+    r"it\b|that\b|this\b|booking\b|ap\b)",
+    re.I)
+_NEW_QUESTION = re.compile(r"\b(?:what|why|when|where|who|which|how)\b|"
+                           r"\b(?:update me|status of|progress on)\b", re.I)
 
 
 def reads_as_an_instruction(text: str) -> bool:
@@ -171,8 +183,12 @@ def pending_for_reply(text: str | None = None) -> dict | None:
     message unconditionally; it owns it now only when the message is not itself
     an instruction. Optional so callers with nothing to offer behave as before.
     """
-    if text is not None and (not text.strip() or reads_as_an_instruction(text)):
-        return None
+    if text is not None:
+        said = text.strip()
+        if (not said or len(said) > 200 or reads_as_an_instruction(said)
+                or _OTHER_WORK.search(said) or "?" in said or _NEW_QUESTION.search(said)
+                or not _ANSWER_OPENING.match(said)):
+            return None
     rows = [q for q in store.open_questions()
             if time.time() - q["created_at"] <= AUTO_ANSWER_WINDOW]
     return rows[0] if len(rows) == 1 else None

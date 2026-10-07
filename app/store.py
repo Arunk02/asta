@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS ui_messages (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ui_messages_conv ON ui_messages(conv_id);
+CREATE TABLE IF NOT EXISTS deferred_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conv_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deferred_messages_conv
+    ON deferred_messages(conv_id, status, id);
 CREATE TABLE IF NOT EXISTS usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conv_id TEXT NOT NULL,
@@ -125,6 +135,11 @@ CREATE TABLE IF NOT EXISTS teams_messages (
     sent_at REAL,
     stamp TEXT NOT NULL DEFAULT '',
     seen_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS teams_automatic_messages (
+    key TEXT PRIMARY KEY,
+    chat TEXT NOT NULL,
+    recorded_at REAL NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS teams_fts USING fts5(
     chat, sender, text, content=teams_messages, content_rowid=rowid
@@ -463,6 +478,7 @@ def delete_conversation(conv_id: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM conversations WHERE id=?", (conv_id,))
         conn.execute("DELETE FROM ui_messages WHERE conv_id=?", (conv_id,))
+        conn.execute("DELETE FROM deferred_messages WHERE conv_id=?", (conv_id,))
 
 
 def update_conversation(conv_id: str, **fields) -> None:
@@ -488,9 +504,9 @@ def stale_undigested_conversations(idle_seconds: float = 1800) -> list[dict]:
 
 # --- UI messages -------------------------------------------------------------
 
-def add_ui_message(conv_id: str, role: str, content: str, meta: dict | None = None) -> None:
+def add_ui_message(conv_id: str, role: str, content: str, meta: dict | None = None) -> int:
     with _connect() as conn:
-        conn.execute(
+        row = conn.execute(
             "INSERT INTO ui_messages (conv_id, role, content, meta, created_at) VALUES (?,?,?,?,?)",
             (conv_id, role, content, json.dumps(meta or {}), time.time()),
         )
@@ -500,6 +516,63 @@ def add_ui_message(conv_id: str, role: str, content: str, meta: dict | None = No
         # per call by 11 September, and a 48-second wait for the first word.
         conn.execute("UPDATE conversations SET updated_at=?, digested=0 WHERE id=?",
                      (time.time(), conv_id))
+        return row.lastrowid
+
+
+def user_message_by_id(conv_id: str, message_id: int) -> str | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT content FROM ui_messages WHERE id=? AND conv_id=? AND role='user'",
+            (message_id, conv_id),
+        ).fetchone()
+    return row["content"] if row else None
+
+
+def enqueue_followup(conv_id: str, content: str, channel: str) -> int:
+    with _connect() as conn:
+        row = conn.execute(
+            "INSERT INTO deferred_messages (conv_id, content, channel, created_at) "
+            "VALUES (?,?,?,?)", (conv_id, content, channel, time.time()))
+        return row.lastrowid
+
+
+def claim_followup(conv_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM deferred_messages WHERE conv_id=? AND status='queued' "
+            "ORDER BY id LIMIT 1", (conv_id,)).fetchone()
+        if row:
+            conn.execute("UPDATE deferred_messages SET status='running' WHERE id=?",
+                         (row["id"],))
+    return dict(row) if row else None
+
+
+def finish_followup(message_id: int, status: str = "done") -> None:
+    if status not in ("done", "failed", "cancelled"):
+        raise ValueError(f"invalid deferred message status: {status}")
+    with _connect() as conn:
+        conn.execute("UPDATE deferred_messages SET status=? WHERE id=?",
+                     (status, message_id))
+
+
+def pending_followup_conversations() -> list[str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT conv_id FROM deferred_messages WHERE status='queued' "
+            "ORDER BY conv_id").fetchall()
+    return [r[0] for r in rows]
+
+
+def orphaned_followups() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM deferred_messages WHERE status='running'").fetchall()
+    return [dict(r) for r in rows]
+
+
+def cancel_followups(conv_id: str) -> None:
+    with _connect() as conn:
+        conn.execute("UPDATE deferred_messages SET status='cancelled' "
+                     "WHERE conv_id=? AND status='queued'", (conv_id,))
 
 
 def last_user_message_at() -> float:
@@ -521,6 +594,31 @@ def list_ui_messages(conv_id: str) -> list[dict]:
         d["meta"] = json.loads(d["meta"])
         out.append(d)
     return out
+
+
+def latest_send_prompt(conv_id: str) -> dict | None:
+    """Most recent draft confirmation actually shown in this conversation."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT content, created_at FROM ui_messages "
+            "WHERE conv_id=? AND role='assistant' "
+            "AND json_extract(meta, '$.via')='loop-confirm-send' "
+            "ORDER BY id DESC LIMIT 1", (conv_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def latest_offer_clarification(conv_id: str, offer_id: str) -> float:
+    """When this offer was last shown after an unrelated draft prompt."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT created_at FROM ui_messages "
+            "WHERE conv_id=? AND role='assistant' "
+            "AND json_extract(meta, '$.via')='offer-clarification' "
+            "AND json_extract(meta, '$.offer_id')=? "
+            "ORDER BY id DESC LIMIT 1", (conv_id, offer_id),
+        ).fetchone()
+    return float(row[0]) if row else 0.0
 
 
 # --- usage -------------------------------------------------------------------
@@ -1044,6 +1142,22 @@ def save_teams_messages(rows: list[dict]) -> int:
         )
         after = conn.execute("SELECT COUNT(*) FROM teams_messages").fetchone()[0]
         return after - before
+
+
+def record_automatic_teams_message(key: str, chat: str) -> None:
+    """A verified outbound message Asta sent without Arun approving its words."""
+    with _connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO teams_automatic_messages (key, chat, recorded_at) "
+                     "VALUES (?, ?, ?)", (key, chat, time.time()))
+
+
+def is_automatic_teams_message(key: str, chat: str) -> bool:
+    if not key:
+        return False
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM teams_automatic_messages WHERE key=? AND chat=?",
+            (key, chat)).fetchone() is not None
 
 
 #: How stale a read may be and still count as covering a window that is still

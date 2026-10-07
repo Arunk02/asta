@@ -31,7 +31,7 @@ import time
 
 import pytest
 
-from app import answers, brains, go, main, store, tasks, understand
+from app import answers, brains, go, main, store, tasks, understand, worktrees
 
 PLAN_178 = """Same values on develop and release/3.1.6, matching prod-values.yml exactly on both.
 
@@ -225,7 +225,48 @@ def test_a_finished_task_he_did_not_say_go_on_stays_local(monkeypatch, quiet):
     monkeypatch.setattr(tasks, "_self_review", nothing)
     t = store.create_task("Enable MX", "code", "p", None)
     asyncio.run(tasks.complete(t["id"], t, "Added MX."))
-    assert any("nothing pushed" in p and "raise PR" in p for p in quiet)
+    assert any("Not shipped" in p and "raise PR" in p for p in quiet)
+
+
+def test_code_task_without_worktree_change_is_not_marked_implemented(monkeypatch, quiet, tmp_path):
+    async def git(*a, **k):
+        return 0, ""
+
+    async def no_pr(*a, **k):
+        return []
+
+    monkeypatch.setattr(tasks, "code_cwd", lambda workspace: str(tmp_path))
+    monkeypatch.setattr(tasks, "task_cwd", lambda *a: str(tmp_path))
+    monkeypatch.setattr(worktrees, "exists", lambda *a: True)
+    monkeypatch.setattr(worktrees, "repos_in", lambda *a: [tmp_path / "svc"])
+    monkeypatch.setattr(tasks, "committed_so_far", lambda *a: [])
+    monkeypatch.setattr(tasks, "_already_pushed", no_pr)
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    t = store.create_task("Fix booking mapper", "code", "p", "booking")
+    asyncio.run(tasks.complete(t["id"], t, "Implemented and verified."))
+    assert store.get_task(t["id"])["status"] == "failed"
+    assert any("not completed" in message for message in quiet)
+    assert not any("implementation ready" in message.lower() for message in quiet)
+
+
+def test_explicit_no_change_result_does_not_claim_implementation(monkeypatch, quiet, tmp_path):
+    async def git(*a, **k):
+        return 0, ""
+
+    async def no_pr(*a, **k):
+        return []
+
+    monkeypatch.setattr(tasks, "code_cwd", lambda workspace: str(tmp_path))
+    monkeypatch.setattr(tasks, "task_cwd", lambda *a: str(tmp_path))
+    monkeypatch.setattr(worktrees, "exists", lambda *a: True)
+    monkeypatch.setattr(worktrees, "repos_in", lambda *a: [tmp_path / "svc"])
+    monkeypatch.setattr(tasks, "committed_so_far", lambda *a: [])
+    monkeypatch.setattr(tasks, "_already_pushed", no_pr)
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    t = store.create_task("Check booking mapper", "code", "p", "booking")
+    asyncio.run(tasks.complete(t["id"], t, "No code changes needed; mapper is already correct."))
+    assert store.get_task(t["id"])["status"] == "done"
+    assert any("No change needed" in message and "No local changes" in message for message in quiet)
 
 
 def test_his_own_ask_saying_raise_the_pr_carries_the_go_ahead():
@@ -351,12 +392,18 @@ def test_porting_cherry_picks_onto_the_other_base_and_opens_its_pr(monkeypatch, 
         if args[:2] == ("git", "rev-list"):
             return 0, "c1\nc2\n"
         if args[:3] == ("gh", "pr", "create"):
-            return 0, "https://github.com/acme/svc/pull/77\n"
+            return 0, f"https://github.com/acme/{tmp_path.name}/pull/77\n"
+        if args[:3] == ("gh", "pr", "view"):
+            return 0, json.dumps({
+                "url": f"https://github.com/acme/{tmp_path.name}/pull/77",
+                "headRefName": "feature/asta-1-mx-release-3.1.6",
+                "baseRefName": "release/3.1.6",
+            })
         return 0, ""
 
     monkeypatch.setattr(tasks.repo_ops, "git", git)
     url = asyncio.run(tasks._port(tmp_path, "feature/asta-1-mx", "origin/develop", "release/3.1.6"))
-    assert url == "https://github.com/acme/svc/pull/77"
+    assert url == f"https://github.com/acme/{tmp_path.name}/pull/77"
     assert ("git", "cherry-pick", "c1", "c2") in ran
     create = next(a for a in ran if a[:3] == ("gh", "pr", "create"))
     assert create[create.index("--base") + 1] == "release/3.1.6"
@@ -375,8 +422,8 @@ def test_a_port_that_conflicts_says_so_and_does_not_push(monkeypatch, tmp_path):
         return 0, ""
 
     monkeypatch.setattr(tasks.repo_ops, "git", git)
-    out = asyncio.run(tasks._port(tmp_path, "feature/x", "origin/develop", "release/3.1.6"))
-    assert "does not apply cleanly" in out
+    with pytest.raises(RuntimeError, match="does not apply cleanly"):
+        asyncio.run(tasks._port(tmp_path, "feature/x", "origin/develop", "release/3.1.6"))
     assert not any(a[:2] == ("git", "push") for a in ran)
 
 
@@ -473,13 +520,15 @@ def test_a_waiting_colleague_is_investigated_without_asking_him_first(monkeypatc
 
 def test_the_brief_says_earlier_messages_are_not_evidence_and_carries_the_latest_finding():
     from app import responder
-    t = store.create_task("Vinish Kumar asked", "analysis", "p", None)
+    t = store.create_task("Vinish Kumar asked", "analysis",
+                          "Check booking MH12AB34CD56 in uat", None)
     store.update_task(t["id"], status="done", finished_at=time.time() - 600,
                       result="ANALYSIS:\nIt was the price-update save on an invoiced job, "
                              "not an ETA change.\n\nREPLY:\nIt was the price update.")
     answers.remember_meta(t["id"], who="Vinish Kumar", need="INC9702338", chat="Vinish Kumar",
                           group=False, thread="teams:Vinish Kumar")
-    brief = responder._waiting_brief("Vinish Kumar", "Can you share the whole text flow?",
+    brief = responder._waiting_brief("Vinish Kumar",
+                                     "Can you share the whole text flow for MH12AB34CD56 in uat?",
                                      "Arun: the ETA update triggered the cancellation")
     assert "What was SAID in the chat is not what is TRUE" in brief
     assert "price-update save" in brief and f"task #{t['id']}" in brief
@@ -856,6 +905,37 @@ def test_the_send_he_asked_for_goes_out_as_a_recorded_call(monkeypatch):
     assert not loop.awaiting(cid), "nothing is left waiting for a second yes"
 
 
+def test_the_private_one_to_one_rule_sends_only_to_the_named_recipient(monkeypatch):
+    from app import agent, guardrails, loop, notify, ops
+    monkeypatch.setattr(guardrails, "section",
+                        lambda name: "- Vinish Kumar" if name == "automatic teams replies" else "")
+    agent, cid = _asked(monkeypatch, "what did Vinish say?")
+    monkeypatch.setattr(tasks, "current_conversation", lambda: cid)
+    delivered = []
+
+    async def send(**kwargs):
+        delivered.append(kwargs)
+        return "✅ Sent to Vinish Kumar."
+
+    async def quiet(*args, **kwargs):
+        return None
+
+    monkeypatch.setitem(ops.REGISTRY, "teams_send", {"run": send})
+    monkeypatch.setattr(notify, "notify", quiet)
+
+    async def go():
+        result = agent.prepare_to_send("I checked it.", to="Vinish Kumar", channel="teams")
+        await asyncio.sleep(0.05)
+        return result
+
+    assert asyncio.run(go()).startswith("Sending to Vinish Kumar under the standing")
+    assert delivered == [{"to": "Vinish Kumar", "text": "I checked it.", "to_group": False}]
+    assert not loop.awaiting(cid)
+    assert agent.prepare_to_send("I checked it.", to="Vinish Kumar", channel="teams",
+                                 to_group=True).startswith("Draft staged")
+    assert len(delivered) == 1
+
+
 def test_a_group_is_never_sent_without_his_yes(monkeypatch):
     from app import ops
 
@@ -931,6 +1011,30 @@ def test_work_already_on_origin_is_not_reported_as_local_only(monkeypatch, quiet
     assert "Already pushed — the PR is updated" in quiet[-1] and "pull/1429" in quiet[-1]
     assert "nothing pushed" not in quiet[-1]
     assert store.get_task(t["id"])["status"] == "shipped", "and its CI is watched from here"
+
+
+def test_already_pushed_requires_a_matching_pr_receipt(monkeypatch, tmp_path):
+    repo = tmp_path / "booking-service"
+    monkeypatch.setattr(tasks, "task_cwd", lambda *a: str(tmp_path))
+    monkeypatch.setattr(tasks, "_repos_under", lambda *a: [repo])
+
+    async def base(*a):
+        return "parent"
+
+    monkeypatch.setattr(tasks, "_task_base", base)
+
+    async def git(cwd, *args, **kw):
+        if args[:3] == ("git", "rev-list", "--count"):
+            return 0, "0"
+        if args[:3] == ("git", "rev-parse", "--abbrev-ref"):
+            return 0, "feature/booking"
+        if args[:3] == ("gh", "pr", "view"):
+            return 0, json.dumps({"url": "https://github.com/acme/booking-service/pull/11",
+                                  "headRefName": "feature/other", "baseRefName": "develop"})
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    assert asyncio.run(tasks._already_pushed(1, {"workspace": "booking"})) == []
 
 
 def test_waiting_on_a_task_is_not_a_step_to_run():
@@ -1267,7 +1371,10 @@ def test_ship_pushes_the_existing_pr_branch_the_task_committed_to(monkeypatch, t
         if args[:2] == ("git", "rev-list"):
             return 0, "1\n"
         if args[:3] == ("gh", "pr", "view"):
-            return 0, "https://github.com/acme/booking/pull/1429\n"
+            return 0, json.dumps({
+                "url": "https://github.com/acme/telikos-booking-service/pull/1429",
+                "headRefName": "feature/rfp-mandatory-field-validation",
+            })
         return 0, ""
 
     monkeypatch.setattr(tasks.repo_ops, "git", git)
@@ -1276,8 +1383,98 @@ def test_ship_pushes_the_existing_pr_branch_the_task_committed_to(monkeypatch, t
     t = store.create_task("Add @NotBlank on facilityCityCode (PR #1429)", "code",
                           "On the existing PR #1429 (branch feature/rfp-mandatory-field-validation)", "booking")
     urls = asyncio.run(tasks._push_named_branches(t["id"], store.get_task(t["id"])))
-    assert urls == ["telikos-booking-service: https://github.com/acme/booking/pull/1429"]
+    assert urls == ["telikos-booking-service: "
+                    "https://github.com/acme/telikos-booking-service/pull/1429"]
     assert ("git", "push", "origin", "feature/rfp-mandatory-field-validation") in ran
+
+
+def test_existing_ap_pr_cannot_push_same_named_branch_from_booking(monkeypatch, tmp_path):
+    from app import worktrees
+    pushed = []
+
+    async def git(cwd, *args, **k):
+        if args[:2] == ("git", "push"):
+            pushed.append(args)
+        return 0, "1"
+
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
+    monkeypatch.setattr(worktrees, "repos_in",
+                        lambda root: [tmp_path / "telikos-booking-service"])
+    t = store.create_task(
+        "Fix AP PR #1429", "code",
+        "Update feature/ap-fix on https://github.com/acme/"
+        "telikos-activityplanworkflow-service/pull/1429", "booking")
+    with pytest.raises(RuntimeError, match="not in this workspace"):
+        asyncio.run(tasks._push_named_branches(t["id"], store.get_task(t["id"])))
+    assert pushed == []
+
+
+def test_requested_release_base_missing_is_not_silently_skipped(monkeypatch, tmp_path):
+    async def git(cwd, *args, **k):
+        return 1, "not found"
+
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    t = store.create_task("Update both develop and release/3.1.6", "code",
+                          "Update both branches", "booking")
+    with pytest.raises(RuntimeError, match="release/3.1.6 is not available"):
+        asyncio.run(tasks._other_bases(t["id"], store.get_task(t["id"]),
+                                       tmp_path, "origin/develop"))
+
+
+def test_primary_pr_does_not_mark_two_branch_task_shipped_without_release(
+        monkeypatch, tmp_path):
+    from app import worktrees
+    repo = tmp_path / "telikos-booking-service"
+    repo.mkdir()
+    primary = "https://github.com/acme/telikos-booking-service/pull/77"
+    t = store.create_task("Update both develop and release/3.1.6",
+                          "code", "Update both branches", "booking")
+    store.update_task(t["id"], status="done", result="develop implemented")
+    monkeypatch.setattr(tasks, "task_cwd", lambda tid, ws: str(tmp_path))
+    monkeypatch.setattr(worktrees, "repos_in", lambda root: [repo])
+
+    async def base(where):
+        return "origin/develop"
+
+    async def git(cwd, *args, **k):
+        if args[:3] == ("git", "rev-parse", "--abbrev-ref"):
+            return 0, "feature/asta-77\n"
+        if args[:2] == ("git", "log"):
+            return 0, "commit on develop"
+        return 0, ""
+
+    async def receipt(where, head, base="", **kwargs):
+        return primary
+
+    async def missing(tid, task, where, base):
+        raise RuntimeError("release/3.1.6 is not available")
+
+    monkeypatch.setattr(worktrees, "_base_branch", base)
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    monkeypatch.setattr(tasks, "_verified_pr", receipt)
+    monkeypatch.setattr(tasks, "_other_bases", missing)
+
+    with pytest.raises(RuntimeError, match="Already opened: .*pull/77"):
+        asyncio.run(tasks.ship(t["id"]))
+    assert store.get_task(t["id"])["status"] == "done"
+    assert not store.get_task(t["id"])["pr_urls"]
+
+
+def test_pr_receipt_must_match_exact_repo_head_and_base(monkeypatch, tmp_path):
+    repo = tmp_path / "telikos-booking-service"
+    repo.mkdir()
+
+    async def git(where, *args, **kw):
+        return 0, json.dumps({
+            "url": "https://github.com/acme/telikos-booking-service/pull/77",
+            "headRefName": "feature/other-task",
+            "baseRefName": "develop",
+        })
+
+    monkeypatch.setattr(tasks.repo_ops, "git", git)
+    with pytest.raises(RuntimeError, match="does not match"):
+        asyncio.run(tasks._verified_pr(repo, "feature/asta-77", "release/3.1.6"))
 
 
 # --- 1 Oct, later: the group call, the morning task, the PR in the wrong repo -----
@@ -1409,10 +1606,22 @@ def test_a_colleague_hears_checking_within_the_minute_once_an_hour(monkeypatch):
 
     monkeypatch.setattr(chat_watch, "_say", say)
     monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: ["bro"])
-    c = {"chat": "Vinish Kumar"}
+    c = {"chat": "Vinish Kumar", "last": "Please check booking H7JWWBZF5L9"}
     assert asyncio.run(chat_watch._acknowledge("teams:Vinish Kumar", c)) is True
     assert asyncio.run(chat_watch._acknowledge("teams:Vinish Kumar", c)) is False, "once an hour"
-    assert said == [("Vinish Kumar", "checking bro, will update you")]
+    assert said == [("Vinish Kumar", "Looking into the booking, bro")]
+
+
+def test_acknowledgement_reflects_the_actual_request_without_claiming_an_answer(monkeypatch):
+    from app import steward, writing
+    monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: ["bro"])
+    for request, expected in [
+        ("Can you review https://github.com/org/booking/pull/1466?", "Looking into the PR details, bro"),
+        ("What's the build status?", "Checking the build, bro"),
+        ("The error is happening again", "Looking into what went wrong, bro"),
+        ("Can you check this?", "Let me look into this, bro"),
+    ]:
+        assert steward.ack_line("Vinish Kumar", request) == expected
 
 
 def test_an_unclear_ask_is_asked_back_to_them_not_to_him(monkeypatch):

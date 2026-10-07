@@ -146,6 +146,60 @@ def test_the_decision_reads_like_a_person(phone):
     assert "———" not in text and "🔎" not in text
 
 
+def test_vinish_reply_sends_without_a_second_yes_but_not_to_a_group(phone, monkeypatch):
+    from app import answers, authority, chat_watch, guardrails, loop, ops
+    monkeypatch.setattr(guardrails, "section",
+                        lambda name: "- Vinish Kumar" if name == "automatic teams replies" else "")
+    monkeypatch.setattr(chat_watch, "he_replied_since", lambda chat, since: _no_reply())
+    sent = []
+
+    async def send(**kwargs):
+        sent.append(kwargs)
+        return "✅ Sent to Vinish Kumar."
+
+    async def _no_reply():
+        return False
+
+    monkeypatch.setitem(ops.REGISTRY, "teams_send", {"run": send})
+    assert authority.auto_reply_to("Vinish Kumar")
+    assert not authority.auto_reply_to("Vinish Kumar", group=True)
+    assert not authority.auto_reply_to("Vinish")
+    assert asyncio.run(answers.present(who="Vinish Kumar", need="check this",
+                                       chat="Vinish Kumar", group=False, analysis="Checked",
+                                       reply="I checked the logs.", task_id=1))
+    assert sent == [{"to": "Vinish Kumar", "text": "I checked the logs.", "to_group": False}]
+    assert loop.awaiting(phone["cid"]) is None
+    assert asyncio.run(answers.present(who="Vinish Kumar", need="check this",
+                                       chat="Vinish Kumar", group=False, analysis="New evidence",
+                                       reply="Correction: the email service failed.", task_id=3))
+    assert len(sent) == 2, "a corrected answer to the same question is not a duplicate"
+    assert asyncio.run(answers.present(who="Vinish Kumar", need="check in group",
+                                       chat="Defect Triage", group=True, analysis="",
+                                       reply="I checked the logs.", task_id=2,
+                                       source_text="Arun, please check in group"))
+    assert loop.awaiting(phone["cid"])["to"] == "Defect Triage"
+    assert len(sent) == 2
+
+
+def test_failed_automatic_reply_is_not_claimed_sent(phone, monkeypatch):
+    from app import answers, chat_watch, guardrails, loop, ops
+    monkeypatch.setattr(guardrails, "section",
+                        lambda name: "- Vinish Kumar" if name == "automatic teams replies" else "")
+
+    async def no_reply(chat, since):
+        return False
+
+    async def failed(**kwargs):
+        raise RuntimeError("Teams receipt not verified")
+
+    monkeypatch.setattr(chat_watch, "he_replied_since", no_reply)
+    monkeypatch.setitem(ops.REGISTRY, "teams_send", {"run": failed})
+    assert asyncio.run(answers.present(who="Vinish Kumar", need="booking", chat="Vinish Kumar",
+                                       group=False, analysis="", reply="Checked.", task_id=1))
+    assert loop.awaiting(phone["cid"])["to"] == "Vinish Kumar"
+    assert "delivery was not confirmed" in phone["pushed"][0]["text"]
+
+
 # --- 3. play means playing ---------------------------------------------------------------
 
 @pytest.mark.parametrize("text,query,browser", [

@@ -116,3 +116,47 @@ def test_side_turns_are_bounded():
     from app import main
     assert main.SIDE_TURNS_MAX >= 1
     assert main.SIDE_TURNS_MAX <= 5, "an unbounded-in-practice concurrency limit"
+
+
+def test_side_question_runs_without_the_primary_session_lock(monkeypatch):
+    from app import copilot_cli, main, store
+    monkeypatch.setattr(copilot_cli, "mcp_cli_enabled", lambda: True)
+    conv = store.create_conversation("copilot", None)
+    entered = set()
+
+    class Sink:
+        async def send(self, payload):
+            pass
+
+    async def fake_turn(sink, current, text, channel):
+        entered.add(current["id"])
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(main, "_run_turn", fake_turn)
+
+    async def go():
+        primary = main._start_turn(conv, "analyse the task", Sink(), "web")
+        side = main._start_side_turn(conv, "what is the CI status?", Sink(), "web")
+        assert side is not None
+        await asyncio.sleep(0.02)
+        assert len(entered) == 2, "side question waited on the primary session"
+        await asyncio.gather(primary, side)
+        assert store.get_conversation(conv["id"]) is not None
+        assert all(store.get_conversation(cid) is None for cid in entered - {conv["id"]})
+
+    asyncio.run(go())
+
+
+def test_cli_side_turns_cannot_use_an_unrestricted_shell(monkeypatch):
+    from app import claude_cli, copilot_cli
+    monkeypatch.setenv("ASTA_CLI_MCP", "1")
+    token = capabilities.READ_ONLY_TURN.set(True)
+    try:
+        copilot = copilot_cli._build_cmd({"id": "side-copilot"}, "CI status?")
+        claude = claude_cli._build_cmd({"id": "side-claude"}, "CI status?")
+    finally:
+        capabilities.READ_ONLY_TURN.reset(token)
+    assert any(copilot[i:i + 2] == ["--deny-tool", "shell"]
+               for i in range(len(copilot) - 1))
+    assert any(claude[i:i + 2] == ["--disallowed-tools", "Bash"]
+               for i in range(len(claude) - 1))

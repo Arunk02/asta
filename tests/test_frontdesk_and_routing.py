@@ -122,6 +122,36 @@ def test_a_leg_model_reaches_copilot(monkeypatch):
     assert "--model" not in _argv(monkeypatch, copilot_cli, _REAL_COPILOT)
 
 
+@pytest.mark.parametrize("model", ["", "auto", "AUTO"])
+def test_auto_copilot_task_skips_unsupported_effort_but_keeps_credit_cap(monkeypatch, model):
+    monkeypatch.setenv("COPILOT_MAX_CREDITS_TASK", "30")
+    cmd = _argv(monkeypatch, copilot_cli, _REAL_COPILOT, model=model, effort="high")
+    assert "--effort" not in cmd
+    assert cmd[cmd.index("--max-ai-credits") + 1] == "30"
+    if model:
+        assert cmd[cmd.index("--model") + 1] == model
+
+
+def test_pinned_copilot_task_keeps_its_effort(monkeypatch):
+    cmd = _argv(monkeypatch, copilot_cli, _REAL_COPILOT,
+                model="gpt-5.4", effort="high")
+    assert cmd[cmd.index("--effort") + 1] == "high"
+
+
+@pytest.mark.parametrize("model", ["", "auto", "gpt-5.4"])
+def test_chat_effort_requires_a_pinned_non_auto_model(monkeypatch, model):
+    monkeypatch.setenv("COPILOT_CLI_MODEL", model)
+    monkeypatch.setenv("COPILOT_EFFORT", "medium")
+    monkeypatch.setenv("COPILOT_MAX_CREDITS", "30")
+    monkeypatch.setattr(copilot_cli, "_session_id", lambda _cid: ("test-session", True))
+    monkeypatch.setattr(copilot_cli, "_first_turn_context", lambda *_a, **_k: "")
+    monkeypatch.setattr(copilot_cli, "turn_context", lambda _text: "")
+    monkeypatch.setattr(copilot_cli, "mcp_cli_enabled", lambda: False)
+    cmd = copilot_cli._build_cmd({"id": "test-conv"}, "hello")
+    assert ("--effort" in cmd) == (model == "gpt-5.4")
+    assert cmd[cmd.index("--max-ai-credits") + 1] == "30"
+
+
 def test_routing_off_leaves_a_leg_untouched(monkeypatch, tmp_path):
     seen: dict = {}
 
@@ -187,7 +217,7 @@ def test_a_card_shows_the_timeline():
 
 @pytest.mark.parametrize("text,named,want", [
     ("check the consumer lag on the AP side", False, "ambiguous"),   # never folded on a guess
-    ("check the consumer lag on the AP side", True, "augment"),      # he named the job
+    ("check the consumer lag on the AP side", True, "ambiguous"),    # a name alone cannot restart it
     ("also cover the amend path", False, "augment"),                 # the rule says addition
     ("stop, wrong repo", False, "redirect"),
     ("what's failing?", True, "independent"),                        # a question, even if named

@@ -107,5 +107,5 @@ scenarios:
       - task_status: {task: job, is: done}
       - push_contains: "restarted"
       - push_count: {matching: "PLAN #", count: 1}      # planned once, never again
-      - push_count: {matching: "✅ DONE", count: 1}
+      - push_count: {matching: "Local implementation ready", count: 1}
       - brain_prompt_contains: "this run stopped partway"

@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import os
 import re
+import json
+import hashlib
 
 from . import attention, store
 
@@ -250,6 +252,22 @@ def pr_number(text: str) -> str:
     return number if target and number.isdigit() else ""
 
 
+def review_scope(text: str) -> str:
+    """Keep extra review questions separate from an ordinary whole-PR review."""
+    from . import review
+    without_links = review._PR_LINK.sub(" ", text or "")
+    without_numbers = re.sub(r"\b(?:pr|pull\s+request)\s*#?\s*\d+\b",
+                             " ", without_links, flags=re.I)
+    routine = {"hi", "hello", "hey", "arun", "arunkumar", "please", "pls",
+               "can", "could", "would", "you", "your", "i", "me", "my", "our",
+               "the", "this", "it", "a", "an", "for", "if", "all", "good",
+               "review", "check", "look", "at", "approve", "approval", "pr",
+               "pull", "request", "code", "thanks", "thank", "and", "once",
+               "ready", "is", "up"}
+    return "|".join(sorted(set(re.findall(r"[a-z]{2,}", without_numbers.lower()))
+                           - routine))
+
+
 # --- the brief ----------------------------------------------------------------
 
 #: The worker has no chat context — `delegate_task` says so and means it. Every
@@ -274,13 +292,36 @@ _HOW = (
     "read-only pass' is never a reason to stop. The evidence for 'did it "
     "actually land?' is almost always in the service DOWNSTREAM of the one "
     "being asked about.\n"
+    "A completed milestone proves only that its own step advanced. For any "
+    "dispatch, delivery or integration claim, follow the same attempt across "
+    "all involved services to the receiving system's outcome. Report earlier "
+    "failures, retries and eventual success separately; do not substitute a "
+    "later milestone for proof that an earlier reported failure never occurred.\n"
+    "For a case ID, leave the service filter blank: the log tool searches every "
+    "service in the requested namespace and follows booking/order IDs paired "
+    "in the returned logs. Keep errorCode separate from orderId: a numeric "
+    "error code is NOT an order identifier. Do not transplant UAT evidence into "
+    "prod, or conclude from zero matching lines that a record does not exist.\n"
+    "If an incident time is known, center grafana_logs(at=ISO-time-with-zone, "
+    "minutes=10-30) on it. If a wide query hits its 2000-line limit, narrow "
+    "to the incident before declaring an event absent.\n"
+    "For 'no retry' or other absence claims, give the actual start and end "
+    "times searched, environment and services covered. A lookback window "
+    "does not prove that no retry occurred for days AFTER a recent failure; "
+    "limit the claim to the time observed.\n"
+    "If this task already includes log evidence or a prior case finding, use "
+    "it before querying. Fetch only an uncovered service, time window or "
+    "attempt; never repeat the same identifier/environment query just to "
+    "rediscover what is in the brief.\n"
     "The logs decide and the code explains: establish from the trail what "
     "actually happened, then use the code to say why. A cause read out of the "
     "code and never confirmed in logs is a hypothesis — label it as one.\n"
-    "Runtime behaviour is in the prod Helm values file your guardrails name, "
-    "which is already in the worktree. A key absent from it means the default in "
-    "application.yml applies (`${{VAR:default}}`) — that is an answer, not an "
-    "unknown, so never leave a config question open without opening the file."
+    "Answer plainly: the observed failure, service and time first; then its "
+    "verified cause or what is still unknown. Do not list every service or "
+    "speculate about unseen services unless the question asks for that detail.\n"
+    "For runtime configuration, read the deployed values for the named "
+    "environment, not prod's for a UAT case. A key absent there uses the "
+    "application.yml default (`${{VAR:default}}`); verify before concluding."
 )
 
 _CLOSING = _HOW + (
@@ -320,7 +361,9 @@ _BRIEFS = {
         "unhandled failure paths. Every point names a `path:line`.\n\n"
         "Finish by calling `propose_pr_review` with your notes — that stages one "
         "GitHub review with a comment on each line, for Arun's yes. Do not change "
-        "any code, and do not approve anything yourself."
+        "any code, and do not approve anything yourself. In the REPLY section, "
+        "write a neutral, addressee-free answer about this PR that Arun could "
+        "send unchanged to anyone who asked the same question."
     ),
     "debug": (
         "{who} is asking Arun to look into something on Teams:\n\n"
@@ -611,7 +654,10 @@ LOOK_FOR_WAITING_COLLEAGUE = True
 def respond(source: str, who: str, text: str, priority: int | None = None,
             key: str = "", workspace: str = "", sent_at: float | None = None,
             context: str = "", reply_to: str = "", group: bool = False,
-            need: str = "", thread: str = "", questions: list | None = None) -> dict | None:
+            need: str = "", thread: str = "", questions: list | None = None,
+            review_revision: str = "", review_question: str = "",
+            source_text: str = "", correction_of: int | None = None,
+            kind_override: str = "") -> dict | None:
     """Start the investigation this message deserves. The spawned task, or None.
 
     Deliberately synchronous and tiny: it decides and delegates. Everything slow
@@ -620,6 +666,12 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     import time
 
     from . import steward, tasks
+    if group and reply_to:
+        from . import chat_watch
+        if not chat_watch.mentions_him(source_text):
+            store.record_outcome("responder", "unaddressed group", subject=who[:80],
+                                 detail=(source_text or text)[:100])
+            return None
     # The same door `chat_watch` uses for the push decision. Two opinions about
     # whether "Hi" is a message is how one half of Asta holds a conversation
     # while the other half investigates it.
@@ -628,7 +680,15 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         return None
     if opening["opened_with"]:
         context = f"{opening['opened_with']}\n{context}".strip()
-    kind = what_it_asks(text)
+    original = store.get_task(correction_of) if correction_of else None
+    if correction_of and not original:
+        raise ValueError(f"correction task #{correction_of} not found")
+    if kind_override and kind_override not in _BRIEFS:
+        raise ValueError(f"unknown investigation kind: {kind_override}")
+    from . import answers
+    kind = (answers._meta(correction_of).get("ask_kind") or kind_override
+            or what_it_asks(text) or "ask") if original else (
+                kind_override or what_it_asks(text))
     key = key or attention.key_for(text)
     why_not = should_respond(kind, priority, key, now=time.time(),
                              broadcast=is_broadcast(who, text), sent_at=sent_at)
@@ -684,16 +744,41 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     # on what it is ABOUT, so two people asking about one booking in different
     # words share one investigation. See app/results_cache.py.
     from . import results_cache
-    ck = results_cache.key_for(kind or "ask", grounds)
-    hit = results_cache.lookup(ck)
+    # A PR number alone collides across repositories; even a full link says
+    # nothing about whether a new commit or failing CI invalidated the review.
+    # Only the live-verified revision supplied by the Teams sweep is reusable.
+    scope = review_scope(review_question)
+    if original:
+        ck = f"correction:{correction_of}:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+    elif kind == "review_request":
+        ck = (f"review_request:{review_revision}:"
+              f"{hashlib.sha256(scope.encode()).hexdigest()[:12]}" if review_revision else "")
+    else:
+        ck = "" if kind == "pr_review" else results_cache.key_for(kind or "ask", grounds)
+    hit = results_cache.lookup(ck) if ck else None
     if hit:
         done = hit["state"] == "done"
+        if not done and reply_to:
+            from . import answers
+            answers.remember_waiter(hit["task_id"], who=who, need=need or message_of(text)[:160],
+                                    chat=reply_to, group=group, thread=thread,
+                                    source_text=source_text or text, kind=kind)
         store.record_outcome("responder", "reused" if done else "joined",
                              subject=str(hit["task_id"]), detail=f"{who}: {text[:120]}")
         return {"id": hit["task_id"], "title": title_for(kind, who, text),
                 "reused": done, "joined": not done, "result": hit.get("result", ""),
                 "at": hit.get("at")}
     brief = brief_for(kind, who, grounds)
+    if original:
+        from . import answers
+        prior = answers._meta(correction_of)
+        brief += (
+            f"\n\nCorrection to task #{correction_of}. They rejected the prior answer. "
+            "Recheck the actual subject against the most recent exchange and current "
+            "evidence; do not treat the previous conclusion as fact. If the referent "
+            "is still unclear, ask them rather than guessing.\n"
+            f"Original request: {(prior.get('source_text') or '')[:500]}\n"
+            f"Disputed answer: {(original.get('result') or '')[:1200]}")
     if reply_to:
         brief += _waiting_brief(who, text, context, need=need, questions=questions or [])
     t = tasks.spawn(title_for(kind, who, text), brief,
@@ -708,8 +793,13 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     if reply_to:
         from . import answers
         answers.remember_meta(t["id"], who=who, need=need or message_of(text)[:160],
-                              chat=reply_to, group=group, thread=thread)
-    results_cache.start(ck, kind or "ask", t["id"])
+                              chat=reply_to, group=group, thread=thread,
+                              source_text=source_text or text, kind=kind)
+    if review_revision:
+        store.kv_set(f"review_origin:{t['id']}", json.dumps(
+            {"ref": review_revision.rsplit("@", 1)[0], "revision": review_revision}))
+    if ck:
+        results_cache.start(ck, kind or "ask", t["id"])
     return t
 
 
@@ -791,7 +881,7 @@ def _waiting_brief(who: str, text: str, context: str, need: str = "",
     if context.strip():
         parts.append("\n\nWhat has already been said with them (continue from it, do not "
                      "ask again for anything already given):\n" + context.strip())
-    parts.append(_said_is_not_proof(who))
+    parts.append(_said_is_not_proof(who, f"{text}\n{context}"))
     try:
         from . import project_knowledge
         passages = project_knowledge.lookup(text, channel="teams")
@@ -813,23 +903,27 @@ def _waiting_brief(who: str, text: str, context: str, need: str = "",
     return "".join(parts)
 
 
-def _latest_finding(who: str, now: float | None = None) -> tuple[int, str]:
-    """(task id, its ANALYSIS) of the newest finished investigation for them today."""
+def _latest_finding(who: str, text: str = "", now: float | None = None) -> tuple[int, str]:
+    """A recent finding for the same case AND environment, not merely the sender."""
     import time as _t
-    from . import answers
+    from . import answers, booking_case
     now = _t.time() if now is None else now
-    for t in store.list_tasks(limit=40):
+    scope = booking_case.case_scope(text)
+    if not scope:
+        return 0, ""
+    for t in store.list_tasks(limit=80):
         if t.get("status") != "done" or now - float(t.get("finished_at") or 0) > 24 * 3600:
             continue
-        if (answers._meta(t["id"]).get("who") or "").lower() != (who or "").lower():
+        if booking_case.case_scope(t.get("prompt") or "") != scope:
             continue
         analysis, _reply = answers.split(t.get("result") or "")
-        if analysis.strip():
-            return t["id"], analysis.strip()[:1200]
+        finding = analysis.strip() or (t.get("result") or "").strip()
+        if finding:
+            return t["id"], finding[:1800]
     return 0, ""
 
 
-def _said_is_not_proof(who: str) -> str:
+def _said_is_not_proof(who: str, text: str = "") -> str:
     """Old chat is context, never evidence.
 
     30 Sep, Vinish: asked for "the whole text flow", the investigation read the
@@ -837,16 +931,16 @@ def _said_is_not_proof(who: str) -> str:
     triggered the cancellation" — as the answer. That line had been corrected
     an hour later from the logs (it was the price-update save). His rule: old
     conversation is context, not proof — think, check, decide."""
-    tid, finding = _latest_finding(who)
+    tid, finding = _latest_finding(who, text)
     out = ("\n\nWhat was SAID in the chat is not what is TRUE. An earlier message — one of "
            "Arun's included — may have been corrected since. Before you repeat any earlier "
            "conclusion, check it against the evidence; where an earlier message and later "
            "evidence disagree, the evidence wins, and you say plainly that the earlier "
            "message was superseded rather than quoting it as the answer.")
     if finding:
-        out += (f"\nThe most recent finished analysis for {who} (task #{tid}) — this, not "
-                f"older chat messages, is where things stand unless you find evidence "
-                f"against it:\n{finding}")
+        out += (f"\nPrevious investigation for this case (task #{tid}) — a lead to "
+                "check, not proof. Reuse its evidence and investigate only the gaps "
+                f"or later attempts:\n{finding}")
     return out
 
 

@@ -121,7 +121,10 @@ def _no_machine_side_effects(monkeypatch):
     So both doors are pointed at nothing, for every test. A test ABOUT them
     patches the functions it needs, which states the dependency out loud.
     """
-    from app import call_audio, voice
+    from app import call_audio, guardrails, voice
+    section = guardrails.section
+    monkeypatch.setattr(guardrails, "section",
+                        lambda name: "" if name == "automatic teams replies" else section(name))
     monkeypatch.setattr(call_audio, "SWITCH_AUDIO", "/nonexistent/SwitchAudioSource")
     monkeypatch.setattr(voice, "BASE", "http://127.0.0.1:9")    # nothing listens on 9
     # The third door, and the only one that reaches a PERSON. `notify.wa_send`

@@ -1,8 +1,8 @@
 """What Asta may do without asking — explicit, capped, revocable, and earned.
 
-The other half of P5. Everything outward is staged for his yes, which is right
-for anything that matters and silly for the tenth identical nudge: "may nudge a
-colleague about a PR review once a day" is a decision he can make once.
+The other half of P5. Outward acts need his yes or an explicit, narrow standing
+exception. A grant has a daily cap; his private automatic Teams reply list is
+limited to exact 1:1 recipients, with no grant for groups or other operations.
 
 Three properties keep that from becoming a licence:
 
@@ -21,6 +21,7 @@ Three properties keep that from becoming a licence:
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 
@@ -108,6 +109,32 @@ def may(act: str, target: str, now: float | None = None) -> Grant | None:
                 and used_today(g.id, now) < g.per_day:
             return g
     return None
+
+
+def auto_reply_to(target: str, group: bool = False) -> bool:
+    """Exact 1:1 recipients Arun named in his private automatic-replies list."""
+    if group or not target:
+        return False
+    from . import guardrails, policy, senior
+    if senior.is_senior(target) or not policy.check("send", target).ok:
+        return False
+    names = [re.sub(r"^[-*]\s+", "", line.strip()).casefold()
+             for line in guardrails.section("automatic teams replies").splitlines()
+             if re.match(r"^\s*[-*]\s+", line)]
+    return target.strip().casefold() in names
+
+
+async def send_reply(target: str, text: str) -> str:
+    """Send under the narrow standing rule, without recording a fresh approval."""
+    if not auto_reply_to(target):
+        raise PermissionError(f"No automatic Teams reply permission for {target}")
+    from . import ops
+    line = await ops.REGISTRY["teams_send"]["run"](to=target, text=text, to_group=False)
+    if not line.startswith("✅ Sent to "):
+        raise RuntimeError(f"Teams send was not confirmed: {line}")
+    store.record_outcome("authority", "auto reply", subject=target[:80],
+                         detail=text[:200])
+    return line
 
 
 def note_use(g: Grant, what: str = "", now: float | None = None) -> None:

@@ -476,9 +476,13 @@ voice answers use the chat pipeline; Copilot calls resume a no-tool CLI session
 per turn, so their responses can be slower than the warm Claude call engine.
 An explicit Claude tier (Opus/Sonnet/Haiku) also follows the choice into voice
 and new calls.
-Voice turns retire an oversized CLI session above 24k context tokens, and a
-voice message after a two-hour gap starts a fresh sitting with a short recap.
-Both reuse the phone chat's existing memory/recap instead of dropping its history.
+Voice turns use their own conversation for each mic-on sitting, so old WhatsApp
+messages cannot steer a live voice exchange. Switching the mic off or restarting
+starts a fresh voice sitting; the selected model remains shared across channels.
+When speech crosses the helper's 30-second recording boundary, the previous
+audio is delivered before recognition restarts; the server waits for the next
+segment and transcribes the clips in recording order before deciding the complete utterance.
+Within a sitting, the CLI retires an oversized session above 24k context tokens.
 
 **Which model, not just which brain.** "use opus", "use sonnet" and "use haiku"
 switch the model inside the Claude CLI brain, from any channel, and the picker
@@ -1109,6 +1113,14 @@ you with the ask. Four rules keep it from becoming the noise it replaced:
   recently-sent messages are investigated (`ASTA_RESPOND_MAX_AGE_MIN`), and a thread
   you have already replied in is left alone. Feedback on work you finished months
   ago is unaffected: it arrived just now.
+- **Recent words beat an old summary.** A bounded excerpt of both sides' latest
+  exchange goes into the investigation brief. A singular "the PR", ticket or
+  booking with several recent candidates is clarified before investigating; an
+  explicit correction to a recent answer withdraws any unsent draft and either
+  asks which item they mean or starts a fresh check rather than repeating it.
+- **Acknowledge the actual ask.** A 1:1 investigation gets one short receipt
+  naming its subject (PR, build, booking, ticket or failure), without claiming
+  a finding or spending another model call on small talk.
 - **Broadcasts are not asks.** A company-wide "Action Required", a channel post
   opening "Everyone please review" — nobody is waiting on you, and an approval queue
   you never answer teaches you to ignore the queue.

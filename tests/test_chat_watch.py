@@ -163,6 +163,40 @@ def test_it_investigates_what_it_finds(wired, monkeypatch):
     assert spawned and spawned[0]["kind"] == "analysis"
 
 
+def test_one_to_one_acknowledges_automatically_without_approving_each_send(
+        wired, monkeypatch):
+    monkeypatch.setenv("ASTA_RESPOND", "1")
+    monkeypatch.setenv("ASTA_THREADS", "1")
+    monkeypatch.setattr(chat_watch, "ACKNOWLEDGE", True)
+    from app import responder, understand, writing
+    monkeypatch.setattr(responder, "respond",
+                        lambda *a, **k: {"id": 7, "title": "check production bookings"})
+    async def understood(convs):
+        return {c["id"]: {"state": "ask", "need": "check production temporal bookings",
+                          "summary": "", "subject": "known", "question": "",
+                          "work": "analysis", "source": "model"} for c in convs}
+
+    monkeypatch.setattr(understand, "read", understood)
+    async def message(chat):
+        return [{"key": "ack-k1", "sender": "Alex Kumar",
+                 "text": "Can you check why the Temporal workflow failed in prod?"}]
+
+    monkeypatch.setattr(chat_watch, "new_in", message)
+    monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: [])
+    sent = []
+
+    async def say(chat, line, group=False, since=None):
+        sent.append((chat, line, group))
+        return True
+
+    monkeypatch.setattr(chat_watch, "_say", say)
+    asyncio.run(chat_watch.sweep())
+    asyncio.run(chat_watch.sweep())
+    assert len(sent) == 1
+    assert sent[0][0] == "Alex Kumar" and sent[0][2] is False
+    assert sent[0][1] == "Looking into what went wrong"
+
+
 def test_his_own_messages_are_not_things_he_was_asked(monkeypatch):
     from app import meetings
     monkeypatch.setattr(meetings, "speaker_is_arun", lambda s: "arun" in s.lower())
@@ -219,15 +253,8 @@ def test_a_real_channel_is_still_watched():
 
 
 # --- who a message is for -----------------------------------------------------
-# "one to one related messages ... without tag bcoz there no point whether they
-# mention or not the message is for me only , need my attentation for group chats
-# that is valid my name tagged at first, follow up convo with or without tagging
-# as well.. but it should aware and follow up post the first tag message as well"
-
-@pytest.fixture(autouse=True)
-def _fresh_engagement():
-    store.kv_set(chat_watch._engaged_key("Prod Support"), "")
-
+# Every 1:1 counts without a tag; the later group rule requires a tag or his
+# name on each individual message.
 
 def test_a_one_to_one_needs_no_tag():
     assert chat_watch.addressed_to_him("Alex Kumar", "Alex Kumar",
@@ -245,25 +272,13 @@ def test_a_tag_makes_the_group_his():
                                        "arun can you look at this")
 
 
-def test_the_reply_after_the_tag_counts_without_a_second_tag():
-    """The substance of a thread is the replies, and nobody tags twice."""
+def test_the_reply_after_the_tag_needs_its_own_tag():
     chat_watch.addressed_to_him("Prod Support", "Dana", "arun can you look")
-    assert chat_watch.addressed_to_him("Prod Support", "Dana", "and also the ETA one")
-
-
-def test_the_window_closes():
-    """A tag last week does not make today's standup chatter his."""
-    import time
-    chat_watch.note_tagged("Prod Support", now=time.time(), by="Dana")
-    # `engaged` now reports WHO pulled him in as well as whether the window is
-    # open — being pulled into a thread is not subscribing to the room.
-    open_window, by = chat_watch.engaged(
-        "Prod Support", now=time.time() + (chat_watch.ENGAGED_HOURS + 1) * 3600)
-    assert not open_window
+    assert not chat_watch.addressed_to_him("Prod Support", "Dana", "and also the ETA one")
 
 
 def test_a_group_he_was_never_tagged_in_stays_quiet():
-    assert chat_watch.engaged("Some Other Channel") == (False, "")
+    assert not chat_watch.addressed_to_him("Some Other Channel", "Dana", "can you check?")
 
 
 @pytest.mark.parametrize("text", ["Arun can you check", "arunkumar please review",
@@ -274,6 +289,23 @@ def test_the_ways_he_is_tagged(text):
 
 def test_someone_elses_name_is_not_his_tag():
     assert not chat_watch.mentions_him("dana can you check this")
+    assert not chat_watch.mentions_him("Arundhati can you check this")
+
+
+def test_local_image_path_and_url_are_not_group_mentions():
+    message = ("triggered a restart - [image: /Users/arun.k.k/help/asta/data/media/x.png] "
+               "see https://example.test/users/arun/incident")
+    assert not chat_watch.addressed_to_him("Defect Triage", "Karthik B", message)
+    assert chat_watch.addressed_to_him("Defect Triage", "Karthik B",
+                                      "Arun, " + message)
+
+
+def test_a_name_only_in_the_quoted_message_is_not_a_new_tag():
+    quoted = ("Sankalp Grover\n06/10/2026 15:38\nHi Vinish / Arunkumar K\n\n"
+              "Can you please help check")
+    assert not chat_watch.addressed_to_him("Defect Triage", "Vinish Kumar", quoted)
+    assert chat_watch.addressed_to_him("Defect Triage", "Vinish Kumar",
+                                      quoted + " Arunkumar K")
 
 
 # --- the shared page is not always showing the chat list ----------------------
@@ -466,11 +498,10 @@ def test_a_one_to_one_is_always_forwarded(monkeypatch):
     assert sent and "code atlas" in sent[0]
 
 
-def test_the_follow_up_after_a_tag_is_still_forwarded(monkeypatch):
-    """Nobody tags twice, and the replies are the substance."""
+def test_the_follow_up_after_a_tag_is_not_forwarded_without_a_new_tag(monkeypatch):
     _sweep_with(monkeypatch, "Prod Support", "Dana", "arun please look")
     sent = _sweep_with(monkeypatch, "Prod Support", "Dana", "and the ETA one too")
-    assert sent, "lost the untagged follow-up inside a conversation he was pulled into"
+    assert not sent
 
 
 def test_unforwarded_group_traffic_is_still_recorded(monkeypatch):
@@ -591,29 +622,20 @@ def test_a_long_message_is_cut_rather_than_sent_whole():
 
 
 # --- being pulled into a thread is not subscribing to the room ----------------
-# Alex tagged him once in a release channel. For the next twelve hours every
-# message in that room reached his phone: Peyton's schema question, Hayden's "22nd
-# September ko release hai", and "Alex Kumar what do you say", which is
-# addressed to Alex. The window was right; its breadth was not.
+# A previous tag must not carry later room traffic into his inbox.
 
 CHAT = "Prod Support till 11th September"
 
 
-@pytest.fixture(autouse=True)
-def _clear_window():
-    store.kv_set(chat_watch._engaged_key(CHAT), "")
-
-
-def test_the_tag_opens_the_window():
+def test_the_tag_addresses_only_that_message():
     assert chat_watch.addressed_to_him(CHAT, "Alex Kumar",
                                        "Arunkumar, could you look into these issues")
 
 
-def test_the_follow_up_from_whoever_pulled_him_in_still_counts():
-    """His ask: "follow up convo with or without tagging as well"."""
+def test_the_follow_up_from_whoever_pulled_him_in_does_not_count():
     chat_watch.addressed_to_him(CHAT, "Alex Kumar", "Arunkumar, could you look")
-    assert chat_watch.addressed_to_him(CHAT, "Alex Kumar",
-                                       "also the duplicate key one is still open")
+    assert not chat_watch.addressed_to_him(CHAT, "Alex Kumar",
+                                           "also the duplicate key one is still open")
 
 
 def test_the_rest_of_the_room_does_not_come_with_it():
@@ -637,12 +659,6 @@ def test_anyone_naming_him_still_reaches_him():
     chat_watch.addressed_to_him(CHAT, "Alex Kumar", "Arunkumar, could you look")
     assert chat_watch.addressed_to_him(CHAT, "Peyton R",
                                        "Arunkumar can you confirm the topic name")
-
-
-def test_the_window_is_hours_not_a_working_day():
-    """A tag at breakfast should not make the room his until the evening. A
-    conversation that resumes tomorrow gets tagged again — that is what people do."""
-    assert chat_watch.ENGAGED_HOURS <= 4
 
 
 def test_naming_himself_is_not_naming_someone_else():

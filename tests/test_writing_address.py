@@ -242,10 +242,11 @@ def test_staging_to_alex_keeps_it(staged):
     assert staged["what"] == "all merged bro"
 
 
-def test_a_jira_comment_is_not_rewritten(staged):
-    """A ticket has no term of address to get wrong, and it is read by the team."""
-    agent.prepare_to_send("all merged bro", to="BEPTELIKOS-10159", channel="jira")
-    assert staged["what"] == "all merged bro"
+def test_a_jira_draft_cannot_be_staged_as_a_generic_send(staged):
+    result = agent.prepare_to_send("all merged bro", to="BEPTELIKOS-10159",
+                                   channel="jira")
+    assert "Not staged" in result and "jira_comment" in result
+    assert staged == {}
 
 
 def test_a_pr_body_is_not_rewritten(staged):

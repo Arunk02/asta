@@ -139,7 +139,15 @@ async def _pr_review(pr: str = "", workspace: str = "", repo: str = "",
                                   f"{len(a.get('comments') or [])} inline comment(s)")
 async def _pr_review_inline(pr: str = "", workspace: str = "", repo: str = "",
                             action: str = "comment", body: str = "",
-                            comments: list | None = None) -> str:
+                            comments: list | None = None,
+                            review_origin: dict | None = None) -> str:
+    if review_origin:
+        number, target = review.pr_target(pr)
+        if f"{target.lower()}#{number}" != review_origin["ref"]:
+            raise RuntimeError("review target differs from the approved repository and PR")
+        current, good = await review.revision(review_origin["ref"])
+        if current != review_origin["revision"] or (action == "approve" and not good):
+            raise RuntimeError("PR head or CI changed since approval; review again")
     return "✅ " + await review.post_inline_review(pr, workspace, repo, action,
                                                   body, comments or [])
 

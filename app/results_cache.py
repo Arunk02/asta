@@ -40,7 +40,7 @@ TTL = {
     "incident": 15 * 60,       # production changes by the minute
     "debug": 15 * 60,
     "pr_review": 6 * 3600,     # holds until the PR changes
-    "review_request": 6 * 3600,
+    "review_request": 30 * 86400,  # only used with a verified repo, head and CI fingerprint
     "ask": 30 * 60,
 }
 DEFAULT_TTL = 30 * 60
@@ -55,11 +55,22 @@ _DONE = ("done", "completed", "awaiting_approval")
 
 
 def key_for(kind: str, text: str) -> str:
-    """Same kind + same subject = same key, however it was worded."""
-    from . import knowledge, threads
+    """The same case, environment and question may share a finding."""
+    from . import booking_case, knowledge, threads
     ents = threads.entities_in(text or "")
     if ents:
         subject = "|".join(ents)
+        scope = booking_case.case_scope(text)
+        if scope:
+            subject += f"|env:{scope[1]}"
+            generic = knowledge._CHATTER | {
+                "look", "see", "tell", "know", "quick", "now", "booking", "bookings",
+                "check", "why", "how", "can", "could", "please", "failed", "failure",
+                "done", "status", "in", *booking_case._ENV_NAMES,
+            }
+            topics = {w for w in knowledge.terms(text[:350])
+                      if w not in generic and w.upper() not in booking_case.ids(text)}
+            subject += "|topic:" + "|".join(sorted(topics))
     else:
         chatter = knowledge._CHATTER | {"look", "see", "tell", "know", "quick", "now"}
         subject = "|".join(sorted({w for w in knowledge.terms(text or "") if w not in chatter}))

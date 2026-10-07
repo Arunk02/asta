@@ -133,7 +133,7 @@ def hold_max_minutes() -> int:
 
 
 def _held_items() -> list[dict]:
-    """Held entries as {at, text}. Tolerates the old bare-string format."""
+    """Held entries as {at, text, keys}. Tolerates the old bare-string format."""
     try:
         raw = json.loads(store.kv_get(HELD_KEY) or "[]")
     except Exception:
@@ -141,7 +141,8 @@ def _held_items() -> list[dict]:
     out = []
     for it in raw:
         if isinstance(it, dict) and it.get("text"):
-            out.append({"at": float(it.get("at") or 0), "text": it["text"]})
+            out.append({"at": float(it.get("at") or 0), "text": it["text"],
+                        "keys": [k for k in (it.get("keys") or []) if isinstance(k, str)]})
         elif isinstance(it, str) and it:
             out.append({"at": 0.0, "text": it})   # legacy: age unknown → overdue
     return out
@@ -156,9 +157,9 @@ def _stale(items: list[dict], now: float | None = None) -> bool:
     return any(now - it["at"] >= limit * 60 for it in items)
 
 
-def _hold(text: str) -> None:
+def _hold(text: str, keys=()) -> None:
     held = _held_items()
-    held.append({"at": time.time(), "text": text})
+    held.append({"at": time.time(), "text": text, "keys": list(keys or ())})
     store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))
 
 
@@ -287,7 +288,7 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     # wait for morning rather than for him to walk away — at 2am he has already
     # walked away, and a departure-released hold would fire instantly.
     if delivery.hold_for_quiet(urgency, priority):
-        _hold(text)
+        _hold(text, keys)
         return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
     # A direct Teams message while he is at the laptop: he may be answering it
     # in Teams right now, and a WhatsApp push a minute later is the same news
@@ -301,7 +302,7 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
         from . import presence
         if await presence.at_laptop():
             held = _held_items()
-            held.append({"at": time.time(), "text": text})
+            held.append({"at": time.time(), "text": text, "keys": list(keys)})
             held = held[-HELD_MAX:]
             # Holding is a courtesy with an expiry. If something has now waited out
             # the window, release the whole batch rather than keeping it hostage to
@@ -359,6 +360,16 @@ async def flush_held(reason: str = "while you were at the laptop") -> dict:
     if not held or delivery.quiet_now():
         return {"held": bool(held), "whatsapp": False, "telegram": False}
     store.kv_set(HELD_KEY, "[]")
+    # Anything he has answered while it waited is his already — dropped, not
+    # pushed after the fact. Only the Teams grace and quiet holds did this.
+    still = [it for it in held if not answered(it.get("keys"))]
+    for it in held:
+        if it not in still:
+            store.record_outcome("attention", "answered while held — not pushed",
+                                 detail=(it.get("text") or "")[:160])
+    held = still
+    if not held:
+        return {"held": False, "whatsapp": False, "telegram": False, "answered": True}
     texts = [it["text"] for it in held]
     head = f"🔕 Held ({len(texts)}) — {reason}:\n\n"
     body = "\n\n".join(texts[-10:])

@@ -542,3 +542,53 @@ async def test_feedback_on_shipped_work_resumes_it(monkeypatch):
     await main._dispatch(conv, f"task {tid} - {DOMAIN_FEEDBACK}", sink, "whatsapp")
     assert "continuing the open PR" in sink.text
     assert store.get_task(tid)["status"] == "running"
+
+
+def _failed_email_fix(conv):
+    while store.create_task("filler", "analysis", "x", None)["id"] < 250:
+        pass                     # real task numbers have three digits
+    t = store.create_task("Fix CT failure on email PR 675 (awaitility timeout)", "code",
+                          "fix", "booking")
+    store.update_task(t["id"], status="failed", finished_at=time.time(),
+                      pr_urls="telikos-email-service: "
+                              "https://github.com/work/telikos-email-service/pull/676")
+    tasks.link_task(conv["id"], t["id"])
+    return t["id"]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_task_number_continues_that_task(monkeypatch):
+    """7 Oct: "in email CT fix 251, …" started task #263 on another brain."""
+    conv = conversation()
+    tid = _failed_email_fix(conv)
+    monkeypatch.setattr(tasks, "spawn", lambda *_a, **_k: pytest.fail("new task spawned"))
+    resumed = []
+
+    async def resume(task_id, text, approved=False):
+        resumed.append((task_id, text))
+    monkeypatch.setattr(tasks, "_resume_worker", resume)
+    sink = Sink()
+    text = (f"in email CT fix {tid}, u shouldnt add booking jaas config and enable it , "
+            "email not even using thne why we have to enable , remove that changes , fix it propelry")
+    assert await main._dispatch(conv, text, sink, "whatsapp") is None
+    await asyncio.sleep(0)
+    assert "continuing" in sink.text and store.get_task(tid)["status"] == "running"
+    assert resumed and "jaas" in resumed[0][1]
+
+
+def test_a_number_that_is_a_pr_or_build_is_not_a_task():
+    conv = conversation()
+    tid = _failed_email_fix(conv)
+    for text in (f"check PR {tid}", f"see pull/{tid} please", f"build {tid} failed again"):
+        assert main._named_recent_task(text, conv["id"]) is None, text
+    assert main._named_recent_task(f"fix {tid} properly", conv["id"]) == tid
+
+
+def test_a_new_code_task_that_continues_an_old_one_is_refused(monkeypatch):
+    conv = conversation()
+    tid = _failed_email_fix(conv)
+    monkeypatch.setattr(tasks, "spawn", lambda *_a, **_k: pytest.fail("spawned a duplicate"))
+    out = agent.delegate_task("Remove unneeded booking JAAS config from email PR 676",
+                              f"This continues task #{tid} (Fix CT failure on email PR 675)…",
+                              kind="code", workspace="email")
+    assert f"refine_task({tid}" in out

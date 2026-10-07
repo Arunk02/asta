@@ -523,12 +523,15 @@ def paused_tasks_for(conv_id: str) -> list[int]:
             if (store.get_task(i) or {}).get("status") == "paused"]
 
 
-def augment(task_id: int, text: str) -> str:
+def augment(task_id: int, text: str, *, code_change: bool = False) -> str:
     """Fold a follow-up into a live code task WITHOUT restarting its session.
     It's buffered and delivered as part of the instructions the moment Arun acts
     on the task's next gate — the mandatory approval stays intact and there's no
     expensive Claude/Copilot session re-cache."""
-    from . import activity
+    from . import activity, frontdesk
+    if not code_change and frontdesk.task_intent(text) in ("read", "external"):
+        raise ValueError(f"task #{task_id} was not amended: this is a question or "
+                         "external action, not code feedback")
     if activity.classify_interjection(text) == "new_task":
         # He said it is a separate piece of work. Absorbing it anyway is how
         # task #117 — the BookingEquipment equals/hashCode fix — ended up
@@ -3157,7 +3160,8 @@ async def ship(task_id: int) -> str:
 #: spends rate limit.
 PR_POLL_SECONDS = int(os.environ.get("ASTA_PR_POLL", "300"))
 
-_PR_FIELDS = "state,mergedAt,statusCheckRollup,reviewDecision,url,title,reviews,comments"
+_PR_FIELDS = ("state,mergedAt,statusCheckRollup,reviewDecision,url,title,reviews,comments,"
+              "headRefName,headRefOid,createdAt")
 
 #: Review noise that is not a request for a change. Approvals with no body and
 #: bot chatter would otherwise arrive as "someone wants something from you".
@@ -3266,14 +3270,14 @@ def _repo_of(url: str) -> str:
     return m.group(1) if m else ""
 
 
-async def _why_red(pr: dict, url: str) -> str:
+async def _why_red(pr: dict, url: str, *, timeout: float = 120) -> str:
     """What actually failed, read from the failed run's own log — so "CI red"
     arrives as "this test, this assertion", not as a link to go and open."""
     repo = _repo_of(url)
     found: list[str] = []
     for run in _failed_runs(pr)[:2]:
         rc, out = await repo_ops.git(ROOT, "gh", "run", "view", run, "--repo", repo,
-                                     "--log-failed", timeout=120)
+                                     "--log-failed", timeout=timeout)
         if rc != 0:
             continue
         for line in out.splitlines():
@@ -3286,6 +3290,117 @@ async def _why_red(pr: dict, url: str) -> str:
             if len(found) >= 4:
                 break
     return ("\nFailed: " + "; ".join(found)) if found else ""
+
+
+_CI_REPORTS: dict[tuple[int, bool], asyncio.Task[str]] = {}
+_CI_FAILED = {"FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "CANCELLED"}
+_GITHUB_PR = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+/?")
+
+
+async def _ci_report(task_id: int, historical: bool) -> str:
+    """Read GitHub's current checks and, if asked, past runs. Never update the task."""
+    t = store.get_task(task_id)
+    if not t:
+        return f"There's no task #{task_id}."
+    links = _pr_links(t)
+    if not links:
+        return f"Task #{task_id} has no linked PR to check."
+    lines = []
+    for url in links:
+        if not _GITHUB_PR.fullmatch(url):
+            lines.append(f"Task #{task_id} has an invalid PR link; CI was not checked.")
+            continue
+        try:
+            pr = await _pr_state(url)
+        except (OSError, RuntimeError, asyncio.TimeoutError):
+            lines.append(f"Could not read {url} from GitHub (authentication or network error); "
+                         "CI is unverified.")
+            continue
+        if not pr:
+            lines.append(f"Could not read {url} from GitHub; CI is unverified.")
+            continue
+        checks = _latest_checks(pr)
+        state = (pr.get("state") or "unknown").lower()
+        decision = (pr.get("reviewDecision") or "none").upper()
+        head = (pr.get("headRefOid") or "")[:8]
+        summary = (f"{url} ({state}, head {head or 'unknown'}): "
+                   f"CI {_checks_verdict(pr)} ({len(checks)} checks); review {decision}.")
+        not_green = [c for c in checks if (c.get("conclusion") or c.get("state") or "").upper()
+                     not in ("SUCCESS", "NEUTRAL", "SKIPPED")]
+        if not_green:
+            summary += " Not passing: " + "; ".join(
+                f"{(c.get('name') or 'unnamed')[:70]}: "
+                f"{(c.get('conclusion') or c.get('state') or 'pending')[:30]}"
+                for c in not_green[:6]) + "."
+        lines.append(summary)
+        if not historical:
+            continue
+        branch = pr.get("headRefName") or ""
+        if not branch:
+            lines.append("Cannot inspect earlier runs: GitHub did not provide the PR branch.")
+            continue
+        repo = _repo_of(url)
+        try:
+            rc, out = await repo_ops.git(
+                ROOT, "gh", "run", "list", "-R", repo, "--branch", branch,
+                "--limit", "100", "--json",
+                "databaseId,conclusion,status,event,workflowName,headSha,createdAt,url",
+                timeout=45)
+        except (OSError, RuntimeError, asyncio.TimeoutError):
+            lines.append(f"Could not read historical workflow runs for {url} "
+                         "(authentication or network error); earlier failures are unverified.")
+            continue
+        if rc:
+            lines.append(f"Could not read historical workflow runs for {url}; "
+                         "the cause of earlier failures is unverified.")
+            continue
+        try:
+            runs = _json.loads(out)
+            if not isinstance(runs, list):
+                raise ValueError("GitHub did not return a run list")
+        except (ValueError, TypeError):
+            lines.append(f"Could not parse historical workflow runs for {url}.")
+            continue
+        created = pr.get("createdAt") or ""
+        failed = [r for r in runs if isinstance(r, dict)
+                  and (r.get("conclusion") or "").upper() in _CI_FAILED
+                  and (r.get("createdAt") or "") >= created]
+        if not failed:
+            lines.append("No failed runs found among the latest 100 runs on this PR branch "
+                         "since the PR opened; an earlier cause is not established.")
+            continue
+        for run in failed[:5]:
+            lines.append(f"Earlier {run.get('conclusion') or 'failed'}: "
+                         f"{(run.get('workflowName') or 'workflow')[:70]} "
+                         f"({run.get('event') or 'unknown event'}, "
+                         f"{(run.get('headSha') or '')[:8] or 'unknown head'}) "
+                         f"{run.get('url') or ''}")
+        checks_for_logs = [
+            {"conclusion": "FAILURE", "detailsUrl": r.get("url")}
+            for r in failed[:2] if r.get("url")
+        ]
+        try:
+            detail = await _why_red({"statusCheckRollup": checks_for_logs}, url, timeout=45)
+        except (OSError, RuntimeError, asyncio.TimeoutError):
+            detail = ""
+        lines.append(detail.strip() if detail else
+                     "Failed-run logs did not identify a specific test; "
+                     "a root cause cannot be confirmed from these results.")
+        if len(failed) > 5:
+            lines.append(f"{len(failed) - 5} other failed runs in the last 100 omitted.")
+    return f"Task #{task_id}:\n" + "\n".join(lines)
+
+
+async def ci_report(task_id: int, historical: bool = False) -> str:
+    """Share one in-flight GitHub read, not an implementation worker or cached status."""
+    key = (task_id, historical)
+    job = _CI_REPORTS.get(key)
+    if job is None or job.done():
+        job = asyncio.create_task(_ci_report(task_id, historical))
+        _CI_REPORTS[key] = job
+        job.add_done_callback(lambda done: _CI_REPORTS.pop(key, None)
+                              if _CI_REPORTS.get(key) is done else None)
+    return await asyncio.shield(job)
 
 
 #: The first red CI on his task PR is re-run once by itself. Tests may set it.
@@ -3579,22 +3694,33 @@ def refinable_match(title: str, prompt: str, workspace: str = "",
     return best if best_score >= 0.6 else None
 
 
-async def refine(task_id: int, feedback: str) -> str:
+async def refine(task_id: int, feedback: str, *, code_change: bool = False) -> str:
     """Continue a finished task with feedback, in the session it already has.
 
     This is the whole point of REFINABLE. The alternative — and what used to
     happen — is a new task with a new session, which starts by re-deriving
     everything the original one already worked out, and answers feedback about
     a change by writing a different change.
+
+    `code_change` is for callers whose text is already a code change by
+    construction (walkthrough review notes): "Review notes … add a comment"
+    reads as a review or an outward action to the intent rules, not as edits.
     """
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
     if t["kind"] != "code":
         raise ValueError(f"task #{task_id} is not a code task (kind={t['kind']})")
+    from . import frontdesk
+    intent = "edit" if code_change else frontdesk.task_intent(feedback)
+    if intent in ("read", "external"):
+        raise ValueError(f"task #{task_id} was not resumed: that is "
+                         + ("a read-only question" if intent == "read"
+                            else "a request for a different action")
+                         + ", not an instruction to change its implementation")
     if t["status"] in LIVE_STATUSES:
         # Still running: augment() is the right door, and it needs no restart.
-        return augment(task_id, feedback)
+        return augment(task_id, feedback, code_change=code_change)
     if t["status"] not in REFINABLE:
         raise ValueError(f"task #{task_id} cannot be continued (status={t['status']})")
 

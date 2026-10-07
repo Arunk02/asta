@@ -1882,8 +1882,10 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     """Stage an outward-facing message for Arun to approve BEFORE it is sent.
 
     Use this whenever you've drafted something to send outside this chat — a Teams
-    reply, an email, a Jira comment, a PR description, a message to a person. `what` is
-    the full draft, `to` the recipient/target, `channel` one of teams|email|jira|pr|chat.
+    reply, an email, a PR description, a message to a person. Jira comments and
+    transitions use jira_comment / jira_transition instead: those stage recorded
+    operations that one approval can actually execute. `what` is the full draft,
+    `to` the recipient/target, `channel` one of teams|email|pr|chat.
     Asta shows Arun the draft and asks "can I send this?" — it is NEVER sent until he
     confirms. This is the ONLY approved way to send on his behalf; never send outward
     through any other tool without staging it here first.
@@ -1892,6 +1894,10 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     group or channel himself ("post it in the prod issue group") — never because a
     group happens to share a word with the name he used."""
     from . import capabilities, loop, policy, tasks, writing
+    if channel.strip().lower() == "jira":
+        return ("Not staged — Jira is not a send channel. Use jira_comment for the "
+                "exact comment and jira_transition for the status. Each creates "
+                "its own recorded approval; do not claim either was posted yet.")
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
@@ -2395,14 +2401,22 @@ async def refine_task(task_id: int, feedback: str) -> str:
 
     Use this — never delegate_task — whenever he comments on work a task already
     delivered: a correction, an addition, "also handle X", a review comment, or
-    a CI failure on its PR. The task keeps everything it learned; a new task
-    would start from nothing and re-implement what is already there.
+    an explicit request to fix a CI failure on its PR. Questions about CI are
+    read-only; use task_ci_report instead. The task keeps everything it learned;
+    a new task would start from nothing and re-implement what is already there.
     Works on tasks that are done, shipped, failed, or blocked on their PR."""
     from . import tasks
     try:
         return await tasks.refine(task_id, feedback)
     except ValueError as exc:
         return str(exc)
+
+
+async def task_ci_report(task_id: int, historical: bool = False) -> str:
+    """Read the linked PR's live checks and optional past failures, without
+    reopening or changing the implementation task."""
+    from . import tasks
+    return await tasks.ci_report(task_id, historical=historical)
 
 
 def task_pr_status(task_id: int = 0) -> str:

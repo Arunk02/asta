@@ -523,10 +523,14 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
         "know the next step, make your LAST action a call to POST /api/loop/continue "
         f'{{"conv_id":"{cid}","next_step":"<one line>"}} — Asta runs it immediately, with no '
         "message from Arun, and keeps looping until the work is done. Anything you would "
-        "send OUTSIDE this chat (a Teams reply, email, Jira comment, PR body, a message to a "
+        "send OUTSIDE this chat (a Teams reply, email, PR body, a message to a "
         "person) must NEVER be sent directly: POST /api/loop/prepare-send "
-        f'{{"conv_id":"{cid}","what":"<draft>","to":"<who>","channel":"teams|email|jira|pr|chat"}} '
-        "and Asta shows Arun the draft and asks before it goes out. Stop the loop only when "
+        f'{{"conv_id":"{cid}","what":"<draft>","to":"<who>","channel":"teams|email|pr|chat"}} '
+        "and Asta shows Arun the draft and asks before it goes out. For Jira, use "
+        "POST /api/jira/issue/{key}/comment or /api/jira/issue/{key}/transition "
+        "instead; each stages the exact "
+        "operation for approval, and a generic Jira draft is NOT sendable. Do not "
+        "claim a queued action is done. Stop the loop only when "
         "the task is done or you genuinely need his decision.")
     parts.append(
         "CODE WORK — the flow Arun expects, with a message to him at EVERY step:\n"
@@ -557,8 +561,10 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
         "bigger). Never plan the code change yourself in this chat. If an analysis task "
         'already investigated the topic, add "context_from": <that task id> so the worker '
         "reuses its evidence instead of re-discovering (big token saver).\n"
-        "2. Relay Arun's answer: 'approve task N' → approve_task. Any other feedback → "
-        'POST /api/tasks/N/reply with {"text":"…"} — the pipeline re-plans with it.\n'
+        "2. Relay Arun's answer: 'approve task N' → approve_task. Explicit changes "
+        'to code → POST /api/tasks/N/refine with {"text":"…"}; questions about '
+        "a task's CI → GET /api/tasks/N/ci (historical=true for earlier failures). "
+        "Never resume an implementation just to check it.\n"
         "3. After implementation the task finishes with the diff summary — the pipeline "
         "NEVER pushes or opens a PR. Show Arun the diff; only when he says ship, call "
         "ship_task.\n"

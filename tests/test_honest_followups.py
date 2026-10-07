@@ -108,3 +108,134 @@ def test_a_ci_fix_starts_from_the_failed_logs_asta_read(monkeypatch):
     assert asyncio.run(tasks._ci_failure_for(store.get_task(t["id"]), "rename the flag")) == ""
     monkeypatch.setenv("ASTA_CI_PREFETCH", "0")
     assert asyncio.run(tasks._ci_failure_for(store.get_task(t["id"]), "fix the CI failure")) == ""
+
+
+# --- the task owns its red CI until merge -------------------------------------------
+
+LOG_END = ("2026-10-07T13:38:35.7604587Z [ERROR] Tests run: 53, Failures: 1, Errors: 0, "
+           "Skipped: 0 <<< FAILURE! -- in booking.events.processor.TestRunner\n"
+           "2026-10-07T13:38:35.7607168Z org.junit.ComparisonFailure: Work Process Name in "
+           "Booking DB do not match expected:<[JOB_OPENED]> but was:<[SEND_TO_TMS]>\n"
+           "2026-10-07T13:38:35.8082884Z [ERROR] BUILD FAILURE\n"
+           "2026-10-07T13:38:35.9Z some ordinary line\n")
+
+
+def test_a_failed_jobs_log_is_read_from_its_end(monkeypatch, tmp_path):
+    """153 MB for booking's component test: only the tail is fetched."""
+    import httpx
+    asked = []
+
+    class _R:
+        def __init__(self, status=200, headers=None, text=""):
+            self.status_code, self.headers, self.text = status, headers or {}, text
+            self.is_redirect = status in (301, 302, 307)
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, follow_redirects=True):
+            asked.append(("GET", url, (headers or {}).get("Range")))
+            if "api.github.com" in url:
+                return _R(302, {"location": "https://blob.example/log"})
+            return _R(206, text=LOG_END)
+
+        async def head(self, url):
+            return _R(200, {"content-length": "153460815"})
+
+    async def token(repo):
+        return "t"
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(tasks, "_github_token", token)
+    path, hits = asyncio.run(tasks._job_log_tail("acme/booking", "112816764094", tmp_path))
+    assert ("GET", "https://blob.example/log", f"bytes={153460815 - 3000000}-153460814") in asked
+    assert any("expected:<[JOB_OPENED]> but was:<[SEND_TO_TMS]>" in h for h in hits)
+    assert not any("ordinary line" in h for h in hits)
+    assert path.endswith("ci-job-112816764094-tail.log")
+
+
+def test_red_ci_after_the_rerun_is_analysed_and_planned_for_approval(monkeypatch):
+    monkeypatch.setenv("ASTA_CI_AUTOFIX", "1")
+    t = store.create_task("Booking job open", "code", "p", "booking")
+    store.update_task(t["id"], status="shipped", pr_urls="r: https://github.com/o/r/pull/7")
+    store.kv_set(f"task_ci_rerun:{t['id']}", "1")             # the one re-run already happened
+
+    async def red(url):
+        return {"state": "OPEN", "statusCheckRollup": [{"conclusion": "FAILURE"}]}
+    fixes = []
+
+    async def propose(task_id, feedback):
+        fixes.append((task_id, feedback))
+        return "planning"
+
+    async def must_not_fix(*a, **k):
+        raise AssertionError("changed code without his approval")
+    monkeypatch.setattr(tasks, "_pr_state", red)
+    monkeypatch.setattr(tasks, "propose_change", propose)
+    monkeypatch.setattr(tasks, "refine", must_not_fix)
+    note = asyncio.run(tasks.check_pr(t["id"]))
+    assert fixes and fixes[0][0] == t["id"] and "do not download CI logs" in fixes[0][1]
+    assert "working out why" in note and "nothing changes before you do" in note
+    assert "Say *rerun ci" not in note
+    store.kv_set(f"task_ci_autofix:{t['id']}", str(tasks.CI_AUTOFIX_MAX))
+    store.update_task(t["id"], pr_state="")
+    store.kv_del(f"pr_told:https://github.com/o/r/pull/7")
+    note = asyncio.run(tasks.check_pr(t["id"]))
+    assert "it needs you" in note and len(fixes) == 1
+
+
+def test_a_test_change_is_planned_then_applied_only_after_approval(pushed, monkeypatch):
+    """"Show the plan for a CT upfront" (7 Oct) — and only then write it."""
+    t = pushed["task"]
+    store.update_task(t["id"], status="shipped")
+    legs = []
+
+    async def leg(task_id, prompt, cwd, **k):
+        legs.append((tasks.plan_approved(task_id), prompt))
+        return "1. CAUSE: step checks the booking work process\n2. PLAN: assert the finance work process"
+    resumed = []
+
+    async def resume(task_id, text, approved=False):
+        resumed.append(text)
+    monkeypatch.setattr(tasks, "_run_code_leg", leg)
+    monkeypatch.setattr(tasks, "_resume_worker", resume)
+
+    async def go():
+        out = await tasks.refine(t["id"], "add the JOB_OPENED CT in the existing scenario")
+        await asyncio.sleep(0.05)
+        return out
+    out = asyncio.run(go())
+    assert "you'll approve it" in out
+    assert legs and legs[0][0] is False and "PLAN ONLY" in legs[0][1], "the planning leg cannot write"
+    assert store.get_task(t["id"])["status"] == "awaiting_approval"
+    assert "proposed change (nothing changed yet)" in pushed["said"][-1]
+    assert not resumed
+
+    async def approve():
+        out = await tasks.approve(t["id"])
+        await asyncio.sleep(0.05)
+        return out
+    asyncio.run(approve())
+    assert resumed and "assert the finance work process" in resumed[0]
+    assert tasks.plan_approved(t["id"])
+
+
+def test_a_bare_ship_with_two_possible_tasks_asks_which(monkeypatch):
+    """22:31 — "ship" was for #257 (finished on its open PR); it approved #263."""
+    from app import go
+    plan = store.create_task("Remove unneeded booking JAAS config", "code", "p", "email")
+    store.update_task(plan["id"], status="awaiting_approval")
+    fix = store.create_task("Booking job open", "code", "p", "booking")
+    store.update_task(fix["id"], status="done",
+                      pr_urls="r: https://github.com/acme/booking/pull/1470")
+    t, problem = go.target(None)
+    assert t is None and "Which one" in problem
+    assert f"#{plan['id']}" in problem and f"#{fix['id']}" in problem
+    t, problem = go.target(fix["id"])
+    assert t["id"] == fix["id"] and not problem

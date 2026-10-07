@@ -2183,26 +2183,104 @@ _ABOUT_CI = re.compile(r"\b(?:ci|build|pipeline|checks?|component\s+tests?|ct|re
                        r"fail(?:ed|ing|ure|ures)?)\b", re.I)
 
 
+#: A failed job's log is read from its END: the failure summary is there, and
+#: the whole log was 153 MB for booking's component test (7 Oct) — the worker's
+#: own download never finished, so it stopped "waiting on the log fetch".
+CI_LOG_TAIL_BYTES = 3_000_000
+_JOB_ID = re.compile(r"/actions/runs/\d+/job/(\d+)")
+_CI_SIGNAL = re.compile(
+    r"ComparisonFailure|AssertionError|AssertionFailedError|expected:\s*<|Expected:|"
+    r"Tests run:.*(?:Failures|Errors): [1-9]|BUILD FAILURE|Failed scenarios|"
+    r"\bFAILED\b|Caused by:|Exception:", re.I)
+_LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z\s?")
+
+
+async def _github_token(repo: str) -> str:
+    env = await repo_ops.github_env(ROOT, "-R", repo)
+    if env and env.get("GH_TOKEN"):
+        return env["GH_TOKEN"]
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "auth", "token", env=env, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL)
+    raw, _ = await asyncio.wait_for(proc.communicate(), 15)
+    return raw.decode().strip()
+
+
+async def _job_log_tail(repo: str, job_id: str, dest: Path | None = None) -> tuple[str, list[str]]:
+    """(saved path, failure lines) from the last few MB of one failed job's log."""
+    import httpx
+    token = await _github_token(repo)
+    if not token:
+        return "", []
+    async with httpx.AsyncClient(timeout=60) as client:
+        first = await client.get(
+            f"https://api.github.com/repos/{repo}/actions/jobs/{job_id}/logs",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json"}, follow_redirects=False)
+        where = first.headers.get("location") if first.is_redirect else ""
+        if not where:
+            return "", []
+        size = int((await client.head(where)).headers.get("content-length") or 0)
+        start = max(0, size - CI_LOG_TAIL_BYTES)
+        got = await client.get(where, headers={"Range": f"bytes={start}-{size - 1}"} if size else {})
+    lines = [_LOG_STAMP.sub("", line) for line in got.text.splitlines()]
+    hits: list[str] = []
+    for line in lines:
+        line = line.strip()
+        if line and _CI_SIGNAL.search(line) and line not in hits:
+            hits.append(line[:300])
+    path = ""
+    if dest is not None:
+        with contextlib.suppress(OSError):
+            dest.mkdir(parents=True, exist_ok=True)
+            target = dest / f"ci-job-{job_id}-tail.log"
+            target.write_text("\n".join(lines))
+            path = str(target)
+    return path, hits[-15:]
+
+
 async def _ci_failure_for(t: dict, feedback: str) -> str:
     """For "fix the CI": the failed jobs and what their logs say, read by Asta
     before the worker starts — so the worker does not download logs itself."""
     if os.environ.get("ASTA_CI_PREFETCH", "1") == "0" or not _ABOUT_CI.search(feedback or ""):
         return ""
+    dest = None
+    with contextlib.suppress(Exception):
+        dest = Path(task_cwd(t["id"], t.get("workspace"))) / ".asta-ci"
     out = []
     for url in _pr_links(t)[:2]:
         try:
             pr = await asyncio.wait_for(_pr_state(url), 70)
-            if _checks_verdict(pr) != "red":
-                continue
-            why = await asyncio.wait_for(_why_red(pr, url, timeout=60), 130)
         except Exception:                                      # noqa: BLE001
             continue
-        failed = [f"{c.get('name')}: {c.get('detailsUrl') or c.get('targetUrl') or ''}"
-                  for c in _latest_checks(pr)
+        if _checks_verdict(pr) != "red":
+            continue
+        failed = [c for c in _latest_checks(pr)
                   if (c.get("conclusion") or c.get("state") or "").upper() in _CI_FAILED]
-        out.append(f"{url}\nFailed checks:\n" + "\n".join(f"- {f}" for f in failed[:6])
-                   + (f"\nFrom the failed logs:{why}" if why else
-                      "\n(The failed logs named no test; read the job log above in the foreground.)"))
+        part = [f"{url}\nFailed checks:"] + [
+            f"- {c.get('name')}: {c.get('detailsUrl') or c.get('targetUrl') or ''}"
+            for c in failed[:6]]
+        seen_jobs: set[str] = set()
+        for c in failed[:4]:
+            m = _JOB_ID.search(c.get("detailsUrl") or "")
+            if not m or m.group(1) in seen_jobs:
+                continue
+            seen_jobs.add(m.group(1))
+            try:
+                path, hits = await asyncio.wait_for(
+                    _job_log_tail(_repo_of(url), m.group(1), dest), 150)
+            except Exception:                                  # noqa: BLE001
+                continue
+            if hits:
+                part.append(f"From {c.get('name')} (end of its log"
+                            + (f", saved at {path}" if path else "") + "):\n"
+                            + "\n".join(f"  {h}" for h in hits))
+        if len(part) == 1 + len(failed[:6]):
+            with contextlib.suppress(Exception):
+                why = await asyncio.wait_for(_why_red(pr, url, timeout=60), 130)
+                if why:
+                    part.append(f"From the failed logs:{why}")
+        out.append("\n".join(part))
     return ("[CI failure Asta read from GitHub before you started — start from it; "
             "do not download logs in the background]\n" + "\n\n".join(out)) if out else ""
 
@@ -2717,6 +2795,14 @@ def reply(task_id: int, text: str) -> str:
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
+    if t["status"] == "awaiting_approval" and store.kv_get(f"task_gate:{task_id}") == "change":
+        raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
+        store.update_task(task_id, status=raw.get("status") or "done")
+        store.kv_del(f"task_gate:{task_id}")
+        asyncio.get_running_loop().create_task(propose_change(
+            task_id, f"{raw.get('feedback', '')}\n\nArun on your earlier plan:\n{text}\n\n"
+                     f"Your earlier plan:\n{readable_outcome(raw.get('plan') or '')[:2500]}"))
+        return f"Task #{task_id}: re-planning with your changes — you'll see the new plan first."
     if t["kind"] != "code" or t["status"] != "awaiting_approval":
         raise ValueError(f"task #{task_id} is not a code task awaiting approval "
                          f"(kind={t['kind']}, status={t['status']})")
@@ -3067,6 +3153,11 @@ async def approve(task_id: int) -> str:
         # 'approve' at the early context gate means "your reading is right, go" —
         # not a plan approval (no plan exists yet). At the plan gate it means
         # implement.
+        if store.kv_get(f"task_gate:{task_id}") == "change":
+            plan, back = _apply_proposal(task_id)
+            store.update_task(task_id, status=back if back in REFINABLE else "done")
+            mark_approved(task_id)
+            return await refine(task_id, plan, code_change=True, approved_plan=True)
         if store.kv_get(f"task_gate:{task_id}") == "context":
             return reply(task_id, "Your understanding is correct — proceed to "
                                   "discovery and planning.")
@@ -3562,6 +3653,17 @@ def _auto_rerun() -> bool:
     return CI_AUTO_RERUN
 
 
+#: Fix attempts a task makes on its own red PR before it hands it to him.
+CI_AUTOFIX_MAX = 2
+CI_FIX_BRIEF = (
+    "The CI on this task's PR is red. Work out WHY. Start from the failed checks and "
+    "log lines Asta read for you below — do not download CI logs yourself.")
+
+
+def _auto_fix_ci() -> bool:
+    return os.environ.get("ASTA_CI_AUTOFIX", "1") != "0"
+
+
 async def rerun_ci(task_id: int) -> str:
     """Re-run the failed jobs on a task's PR. His "rerun it", done rather than
     described."""
@@ -3706,6 +3808,8 @@ async def check_pr(task_id: int) -> str | None:
         # whatever the stored state string says. #180 sat at "pr_ci_failed" with
         # every check passing, and he was never told it had recovered (30 Sep).
         recovered = checks == "green" and t["status"] == "pr_ci_failed"
+        if checks == "green":
+            store.kv_del(f"task_ci_autofix:{task_id}")
         # Two tasks on one PR (#185 and #187 both on booking PR 1429) must not
         # each report the same change: "CI green" arrived twice at 12:49.
         told_key = f"pr_told:{url}"
@@ -3739,10 +3843,27 @@ async def check_pr(task_id: int) -> str | None:
                     await rerun_ci(task_id)
                     return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}{why}\n"
                             f"Re-running the failed jobs once — I'll tell you how it ends.")
+            # Still red after the re-run: the task that wrote the change owns it
+            # until merge — it works out WHY and proposes the fix; nothing is
+            # changed until he approves the plan. (7 Oct: "analyse, get
+            # approval — agents push random things to make a test pass.")
+            tries = int(store.kv_get(f"task_ci_autofix:{task_id}") or 0)
+            if _auto_fix_ci() and tries < CI_AUTOFIX_MAX:
+                store.kv_set(f"task_ci_autofix:{task_id}", str(tries + 1))
+                try:
+                    await propose_change(task_id, CI_FIX_BRIEF)
+                except Exception as exc:                       # noqa: BLE001
+                    store.record_outcome("task", "ci_analysis_failed", subject=str(task_id),
+                                         detail=str(exc)[:200])
+                else:
+                    return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}{why}\n"
+                            f"#{task_id} is working out why. You'll get the cause and a fix "
+                            f"plan to approve — nothing changes before you do.")
             return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}{why}\n"
-                    f"Say *rerun ci {task_id}* to run the failed jobs again, or "
-                    f"*fix #{task_id}* and I'll pick the task back up with everything "
-                    f"it already knows.")
+                    + (f"Still red after {CI_AUTOFIX_MAX} analysed fixes — it needs you. "
+                       if tries >= CI_AUTOFIX_MAX and _auto_fix_ci() else "")
+                    + f"Say *rerun ci {task_id}* to run the failed jobs again, or "
+                    f"*fix #{task_id}* for a fix plan.")
         if decision == "CHANGES_REQUESTED":
             store.update_task(task_id, status="pr_changes_requested")
             # Carry what they actually said. "Changes requested" on its own is
@@ -3845,7 +3966,84 @@ def refinable_match(title: str, prompt: str, workspace: str = "",
     return best if best_score >= 0.6 else None
 
 
-async def refine(task_id: int, feedback: str, *, code_change: bool = False) -> str:
+#: Feedback that changes tests, or fixes a red build, is planned before it is
+#: done: an agent told "make CI pass" can weaken the assertion instead of fixing
+#: the cause. He sees the plan for a CT/test first (7 Oct).
+_PLAN_FIRST = re.compile(
+    r"\b(?:ct|component\s+tests?|cucumber|feature\s+files?|scenarios?|test\s*cases?|"
+    r"unit\s+tests?|uts?|tests?|ci|build|pipeline|checks?)\b", re.I)
+_PLAN_ONLY_BRIEF = (
+    "\n\nPLAN ONLY — change NO file in this step. Report:\n"
+    "1. CAUSE: the failing line or the gap, and its root cause, with file:line evidence.\n"
+    "2. PLAN: each file to change, what changes, and why it fixes the cause (not the "
+    "symptom). For tests: which existing scenario/test, the exact steps and assertions, "
+    "and what each asserts against in the code. Never weaken, skip or delete an "
+    "assertion, and never change the expected value to the observed one, unless the "
+    "cause shows the expectation itself was wrong — say so explicitly.\n"
+    "3. RISK: what else it touches.\n"
+    "Arun approves the plan before anything is changed.")
+
+
+async def propose_change(task_id: int, feedback: str) -> str:
+    """Analyse and plan a change to finished work, in the task's own session,
+    without editing anything; the plan waits for his approval."""
+    t = store.get_task(task_id)
+    if not t or t["kind"] != "code":
+        raise ValueError(f"task #{task_id} is not a code task")
+    if t["status"] in LIVE_STATUSES:
+        raise ValueError(f"task #{task_id} is still running — I'll plan this when it stops")
+    ci_read = await _ci_failure_for(t, feedback)
+    store.kv_set(f"task_approved:{task_id}", "")          # this leg cannot write
+    store.kv_set(f"task_proposal:{task_id}", _json.dumps(
+        {"feedback": feedback, "status": t["status"], "at": time.time()}))
+    store.update_task(task_id, status="running")
+    store.record_outcome("task", "proposal", subject=str(task_id), detail=feedback[:200])
+    prompt = (f"FOLLOW-UP ON YOUR OWN TASK — this is not a new task.\n"
+              f"Arun's request:\n{feedback}\n\n" + (f"{ci_read}\n\n" if ci_read else "")
+              + _PLAN_ONLY_BRIEF)
+    job = asyncio.create_task(_propose_worker(task_id, prompt))
+    _running[task_id] = job
+    job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
+    return (f"Task #{task_id}: working out the cause and a plan — you'll approve it "
+            f"before anything changes.")
+
+
+async def _propose_worker(task_id: int, prompt: str) -> None:
+    from . import notify
+    t = store.get_task(task_id) or {}
+    try:
+        async with _ws_lock(t.get("workspace")):
+            result = await _run_code_leg(task_id, prompt, task_cwd(task_id, t["workspace"]),
+                                         resume=True, effort=_effort_for("code", _resolve_executor(task_id)),
+                                         workspace=t.get("workspace"))
+    except Exception as exc:                                    # noqa: BLE001
+        raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
+        store.update_task(task_id, status=raw.get("status") or "done")
+        await notify.notify(f"❌ #{task_id} could not plan the change: {str(exc)[:200]}", "task")
+        return
+    raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
+    raw["plan"] = result
+    store.kv_set(f"task_proposal:{task_id}", _json.dumps(raw))
+    store.kv_set(f"task_gate:{task_id}", "change")
+    store.update_task(task_id, status="awaiting_approval")
+    await notify.notify(
+        f"📋 #{task_id} {t.get('title', '')} — proposed change (nothing changed yet):\n\n"
+        f"{_phone_text(readable_outcome(result), 1500)}\n\n"
+        f"Reply *approve task {task_id}* to apply it, or tell me what to change.", "task")
+
+
+def _apply_proposal(task_id: int) -> tuple[str, str]:
+    """(the plan he approved, the status to resume from)."""
+    raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
+    store.kv_del(f"task_proposal:{task_id}")
+    store.kv_del(f"task_gate:{task_id}")
+    return (f"Arun approved this plan — implement exactly it, nothing else:\n"
+            f"{readable_outcome(raw.get('plan') or '')}\n\nHis request was: {raw.get('feedback', '')}",
+            raw.get("status") or "done")
+
+
+async def refine(task_id: int, feedback: str, *, code_change: bool = False,
+                 approved_plan: bool = False) -> str:
     """Continue a finished task with feedback, in the session it already has.
 
     This is the whole point of REFINABLE. The alternative — and what used to
@@ -3872,6 +4070,8 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False) -> s
     if t["status"] in LIVE_STATUSES:
         # Still running: augment() is the right door, and it needs no restart.
         return augment(task_id, feedback, code_change=code_change)
+    if not approved_plan and t["status"] in REFINABLE and _PLAN_FIRST.search(feedback or ""):
+        return await propose_change(task_id, feedback)
     if t["status"] not in REFINABLE:
         raise ValueError(f"task #{task_id} cannot be continued (status={t['status']})")
 

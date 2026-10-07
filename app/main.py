@@ -4482,7 +4482,7 @@ def _task_awaiting_answer(cid: str, text: str) -> int | None:
     t = store.get_task(named) or {}
     if t.get("kind") != "code" or t.get("status") != "awaiting_approval":
         return None
-    if store.kv_get(f"task_gate:{named}") not in ("context", "plan", "verify"):
+    if store.kv_get(f"task_gate:{named}") not in ("context", "plan", "verify", "change"):
         return None
     said = _strip_task_ref(text or "").strip()
     if not said or (said.endswith("?") and frontdesk.task_intent(said) == "read"

@@ -321,11 +321,19 @@ async def _speak_reply(mind, theirs: str, said: list[str], lines: list[dict], rt
     """
     from . import call_mind, voice
     queue: asyncio.Queue = asyncio.Queue()
+    asked_at = asyncio.get_event_loop().time()
+    log = meetings._CALL.get("log")
 
     async def produce() -> None:
+        first_sentence = True
         try:
             async for sentence in mind.sentences(theirs, elapsed=elapsed, limit=limit,
                                                  **({"note": note} if note else {})):
+                if first_sentence:
+                    first_sentence = False
+                    if log:
+                        log({"first_sentence_after_s": round(asyncio.get_event_loop().time() - asked_at, 2),
+                             "first": sentence[:80]})
                 text = spoken_form(sentence.replace(call_mind.END, "").strip())
                 made = (asyncio.get_event_loop().create_task(
                     meetings.synth(voice.strip_voice_instruction(text))) if text else None)
@@ -342,8 +350,6 @@ async def _speak_reply(mind, theirs: str, said: list[str], lines: list[dict], rt
 
     asyncio.get_event_loop().create_task(produce())
     meetings._CALL["last_said"] = ""          # echo is judged against this reply
-    asked_at = asyncio.get_event_loop().time()
-    log = meetings._CALL.get("log")
     ended = interrupted = spoke = covered = False
     reacted = False
     ahead: list = []
@@ -373,9 +379,6 @@ async def _speak_reply(mind, theirs: str, said: list[str], lines: list[dict], rt
             break
         text, last, _made = item
         ended = ended or last
-        if log and not spoke:
-            log({"first_sentence_after_s": round(asyncio.get_event_loop().time() - asked_at, 2),
-                 "first": text[:80]})
         if not text:
             continue
         if reacted:
@@ -795,6 +798,10 @@ async def converse(who: str, topic: str, workspace: str = "", seconds: float = 0
         # otherwise the plain one, which is ready. Never wait here: they spoke.
         if ready.done() and not ready.cancelled() and ready.exception() is None:
             opener = ready.result() or opener
+        else:
+            ready.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ready
         # The greeting plays to the end: people say "hello?" over it as they pick
         # up. After it they may talk over Asta, and it stops and listens.
         meetings._CALL["barge_in"] = False

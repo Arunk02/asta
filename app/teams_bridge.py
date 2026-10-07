@@ -2349,6 +2349,11 @@ def _activity_wanted(item: str) -> bool:
     t = item.lower()
     if "reacted to your message" in t:
         return False
+    if ("in a channel" in t or "in the channel" in t) \
+            and "mentioned you" not in t:
+        from . import chat_watch
+        if not chat_watch.mentions_him(item.partition(" — ")[2]):
+            return False
     if duplicates_chat_watch(item):
         return False
     if any(p in t for p in _ACTIVITY_INTERESTING):
@@ -2372,6 +2377,8 @@ async def _push_activity(notify, wanted: list[str]) -> None:
     started: list[str] = []
     keys: list[str] = []            # the ledger items this push is about
     for it in wanted[:12]:
+        if not _activity_wanted(it):
+            continue
         who, _, rest = it.partition(" — ")
         addressed = any(m in it.lower() for m in _DIRECT_MARKERS)
         v = triage.classify(who, rest or it, addressed=addressed)

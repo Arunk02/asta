@@ -101,6 +101,14 @@ def test_the_worker_is_told_the_logs_come_first():
     assert "logs decide" in brief and "hypothesis" in brief
 
 
+def test_negative_findings_are_bounded_by_the_observed_window():
+    brief = responder.brief_for("debug", "Alex Kumar", "was there a retry?")
+    assert "actual start and end" in brief
+    assert "AFTER a recent failure" in brief
+    assert "grafana_logs(at=ISO-time-with-zone" in brief
+    assert "2000-line limit" in brief
+
+
 def test_staging_the_reply_is_still_the_last_word():
     """The discipline is prepended, so the send rule must not have been pushed
     out of the brief."""
@@ -169,3 +177,32 @@ def test_a_read_only_pass_does_not_stop_at_the_service_boundary():
     brief = responder.brief_for("debug", "Alex Kumar", "why is STF not done?")
     assert "EVERY service in that namespace is in scope" in brief
     assert "DOWNSTREAM" in brief
+
+
+def test_dispatch_needs_downstream_outcome_not_a_completed_milestone():
+    brief = responder.brief_for("debug", "Colleague", "check invoice dispatch")
+    assert "receiving system's outcome" in brief
+    assert "earlier failures, retries and eventual success separately" in brief
+    assert "never repeat the same identifier/environment query" in brief
+
+
+def test_prior_case_finding_matches_identifier_and_environment_not_sender(monkeypatch):
+    import time
+    from app import tasks, booking_case, store
+    now = time.time()
+    case = "MH12AB34CD56"
+    rows = [
+        {"id": 3, "kind": "analysis", "status": "done", "finished_at": now,
+         "prompt": f"Booking {case} in preprod", "result": "preprod 502"},
+        {"id": 2, "kind": "analysis", "status": "done", "finished_at": now - 60,
+         "prompt": f"Booking {case} in UAT", "result": "UAT downstream failure"},
+        {"id": 1, "kind": "analysis", "status": "done", "finished_at": now - 120,
+         "prompt": "Another booking MH34CD56EF78 in UAT", "result": "unrelated"}]
+    monkeypatch.setattr(store, "list_tasks", lambda limit=80: rows)
+    assert booking_case.case_scope(f"Booking {case} in UAT") == (case, "uat")
+    finding = tasks._prior_case_finding(f"Investigate booking {case} in UAT")
+    assert "task #2" in finding and "UAT downstream failure" in finding
+    assert "preprod 502" not in finding
+    assert responder._latest_finding("Colleague", f"Booking {case} in UAT")[0] == 2
+    assert not tasks._prior_case_finding(f"Investigate booking {case} without an environment")
+    assert responder._latest_finding("Colleague", "can you check?") == (0, "")

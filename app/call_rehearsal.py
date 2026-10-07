@@ -18,10 +18,16 @@ and the colleague's own ears time every gap and hear every word Asta sends.
 
     .venv/bin/python -m app.call_rehearsal            # every scenario
     .venv/bin/python -m app.call_rehearsal quick-yes  # one
+    ASTA_SELF_TALK_TEST=1 .venv/bin/pytest -s tests/test_call_rehearsal.py \
+        tests/test_voice_mode.py -k 'asta_to_asta_call or two_asta_brains or asta_voice_speaks'
 
 Isolated like WorkWorld: its own temporary database, nothing reaches his phone,
 his Teams, or his microphone. It does use the real voice server and a real
-brain, because those are exactly the parts a live call exercises.
+brain, because those are exactly the parts a live call exercises. The opt-in
+two-minds scenario replaces the scripted colleague with a second independent
+call brain, using recorded WebRTC audio for both directions. Reports distinguish
+first sound (which may be an acknowledgment) from the first audible useful
+answer; the partner's answer_after includes speech generation and playback.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -54,6 +61,7 @@ COLLEAGUE_JS = r"""
       src.buffer = buf; src.connect(C.dest);
       src.onended = () => done(Date.now());
       src.start();
+      C.lastStart = Date.now();
     });
   };
 
@@ -72,6 +80,7 @@ COLLEAGUE_JS = r"""
   C.dest.stream.getTracks().forEach(t => C.pc.addTrack(t, C.dest.stream));
   C.pc.ontrack = (e) => {
     const ms = new MediaStream([e.track]);
+    C.inbound = ms;
     const el = new Audio(); el.muted = true; el.srcObject = ms; el.play().catch(() => {});
     C.sink = el;
     const src = C.ctx.createMediaStreamSource(ms);
@@ -81,6 +90,7 @@ COLLEAGUE_JS = r"""
     src.connect(tap); tap.connect(silent); silent.connect(C.ctx.destination);
     tap.onaudioprocess = (ev) => {
       const x = ev.inputBuffer.getChannelData(0);
+      if (C.capturing) C.chunks.push(new Float32Array(x));
       let s = 0; for (let i = 0; i < x.length; i++) s += x[i] * x[i];
       const level = Math.sqrt(s / x.length), now = Date.now();
       if (level > 0.01) {
@@ -92,6 +102,44 @@ COLLEAGUE_JS = r"""
       }
     };
     if (C.echoGain) C.echo(C.echoGain);
+  };
+
+  C.record = () => {
+    C.chunks = [];
+    C.recordedAt = Date.now();
+    C.capturing = true;
+  };
+  C.take = (since) => {
+    C.capturing = false;
+    const rate = C.ctx.sampleRate, step = rate / 16000;
+    const skip = Math.max(0, Math.floor((since - C.recordedAt - 200) * rate / 1000 / 4096));
+    const chunks = C.chunks.slice(skip);
+    const n = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const pcm = new Float32Array(n);
+    let offset = 0;
+    for (const chunk of chunks) { pcm.set(chunk, offset); offset += chunk.length; }
+    C.chunks = [];
+    const samples = Math.floor(n / step), buf = new ArrayBuffer(44 + samples * 2);
+    const v = new DataView(buf);
+    const label = (at, text) => {
+      for (let i = 0; i < text.length; i++) v.setUint8(at + i, text.charCodeAt(i));
+    };
+    label(0, 'RIFF'); v.setUint32(4, 36 + samples * 2, true); label(8, 'WAVE');
+    label(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+    v.setUint16(22, 1, true); v.setUint32(24, 16000, true);
+    v.setUint32(28, 32000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    label(36, 'data'); v.setUint32(40, samples * 2, true);
+    let peak = 0;
+    for (let i = 0; i < samples; i++) {
+      const sample = Math.max(-1, Math.min(1, pcm[Math.floor(i * step)]));
+      peak = Math.max(peak, Math.abs(sample));
+      v.setInt16(44 + i * 2, sample * 0x7fff, true);
+    }
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192)
+      binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    return {wav: btoa(binary), seconds: samples / 16000, peak};
   };
 
   // A speakerphone with no echo cancelling: what it hears goes back out.
@@ -148,8 +196,9 @@ class Scenario:
 
     Steps are (trigger, action) pairs. Triggers: "connected" (the call is up),
     "asta_done" (Asta spoke and then went quiet), "asta_speaking" (Asta started a
-    line). Actions: {"say": text} with optional "after" seconds and "then"/"pause"
-    for a two-part line, {"silence": seconds}, {"hang_up": True}.
+    line). Actions: {"say": text} with optional "after" seconds, "when" to name
+    the line to interrupt, and "then"/"pause" for a two-part line;
+    {"silence": seconds}; or {"hang_up": True}.
     """
     name: str
     title: str
@@ -167,13 +216,15 @@ SCENARIOS: list[Scenario] = [
         ("asta_done", {"say": "Yes."}),
         ("asta_done", {"say": "Sounds good. Okay, bye!"}),
     ], expect={"greeting_within": 2.5, "reply_within": 2.5, "sound_within": 2.2,
-               "greeting_whole": True, "asta_ends": True}),
+               "greeting_whole": True, "asta_ends": True, "audio_only": True}),
     Scenario("interrupts", "Talks over Asta's second line with a question", [
         ("connected", {"say": "Hello?", "after": 0.3}),
         ("asta_done", {"say": "Yes, go ahead."}),
-        ("asta_speaking", {"say": "Sorry, wait, who is this?", "after": 1.5}),
+        ("asta_speaking", {"say": "Sorry, wait, who is this?", "when": "can you hear me",
+                            "after": 1.5}),
         ("asta_done", {"say": "Okay, got it. Bye."}),
-    ], expect={"stops_within": 1.5, "reply_within": 2.5, "sound_within": 2.2}),
+    ], expect={"stops_within": 1.5, "must_hear": "who is this", "audio_only": True,
+               "reply_within": 2.5, "sound_within": 2.2}),
     Scenario("goes-quiet", "Answers once, then says nothing", [
         ("connected", {"say": "Hello?", "after": 0.3}),
         ("asta_done", {"say": "Yes."}),
@@ -233,20 +284,36 @@ async def _wait_asta(page, since: float, done: bool, timeout: float) -> float | 
     return None
 
 
+async def _wait_saying(events: list[tuple[float, str]], phrase: str, since: float,
+                       timeout: float) -> float | None:
+    """Wait for a named line, or for any full line when phrase is empty."""
+    end = time.time() + timeout
+    while time.time() < end:
+        for at, text in events:
+            if at >= since and (phrase.lower() in text.lower() if phrase else len(text.strip()) >= 20):
+                return at
+        await asyncio.sleep(0.1)
+    return None
+
+
 async def _say(page, wav: bytes) -> float:
     return float(await page.evaluate("(b) => window.__colleague.say(b)",
                                      base64.b64encode(wav).decode()))
+
+
+TWO_MINDS = Scenario("two-minds", "Two independent Asta brains hear each other", [],
+                     minutes=1.5)
 
 
 async def run(sc: Scenario, keep_dir: Path) -> dict:
     """One rehearsal. Returns the measurements and the verdict."""
     from playwright.async_api import async_playwright
 
-    from . import call_rtc, conversation, meetings, store, voice
+    from . import call_mind, call_rtc, conversation, meetings, store, voice
     tmp = Path(tempfile.mkdtemp(prefix=f"asta-rehearsal-{sc.name}-"))
     store.DB_PATH = tmp / "asta.db"
     store.init()
-    who = "Riya Test"
+    who = "Asta Test" if sc.name == TWO_MINDS.name else "Riya Test"
     lines: dict[str, bytes] = {}
 
     async def line(text: str) -> bytes:
@@ -260,11 +327,21 @@ async def run(sc: Scenario, keep_dir: Path) -> dict:
                 await line(act[key])
 
     timeline: list[dict] = []
+    saying_events: list[tuple[float, str]] = []
+    partner_turns: list[dict] = []
+    partner = None
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             channel=os.environ.get("ASTA_BROWSER_CHANNEL", "chrome") or None, headless=True,
             args=["--autoplay-policy=no-user-gesture-required", "--use-fake-ui-for-media-stream"])
         try:
+            if sc.name == TWO_MINDS.name:
+                partner = await call_mind.start(
+                    "Asta", "a self-test of our audio", minutes=1.5,
+                    agenda="You are talking to another Asta in an isolated audio test. "
+                           "Discuss only whether you can hear each other. Ask one short question, "
+                           "wait for their answer, respond to it, then say goodbye. Do not mark "
+                           "the call ended while asking a question. No projects, PRs or external actions.")
             asta_ctx = await browser.new_context(permissions=["microphone"])
             await call_rtc.install(asta_ctx)
             asta_page = await asta_ctx.new_page()
@@ -286,20 +363,70 @@ async def run(sc: Scenario, keep_dir: Path) -> dict:
                 offer = await col_page.evaluate("window.__colleague.offer()")
                 answer = await asta_page.evaluate("(s) => window.__answer(s)", offer)
                 await col_page.evaluate("(s) => window.__colleague.accept(s)", answer)
+                flight_log = call_rtc.recorder(f"rehearsal-{sc.name}")
+
+                def log(event):
+                    flight_log(event)
+                    if "saying" in event:
+                        saying_events.append((time.time() * 1000, event["saying"]))
+
                 meetings._CALL.clear()
                 meetings._CALL.update(ctx=asta_ctx, page=asta_page, pw=None, rtc=True,
                                       url="rehearsal", joined_at=meetings._now(), captions=[],
                                       answered_at=0.0, speaks=True, who=name, mic_proven=1.0,
-                                      log=call_rtc.recorder(f"rehearsal-{sc.name}"))
+                                      log=log)
                 store.kv_set("teams_in_call", f"call:{name}")
+                if partner is not None:
+                    timeline.append({"event": "connected", "at": time.time() * 1000})
                 connected.set()
                 return name
 
             real_call_person = meetings.call_person
+            real_with_history = conversation.with_history
             meetings.call_person = call_person
+            conversation.with_history = lambda _who, agenda: agenda
             try:
                 async def colleague() -> None:
                     await connected.wait()
+                    if partner is not None:
+                        await col_page.wait_for_function("window.__colleague.inbound", timeout=10000)
+                        await col_page.evaluate("window.__colleague.record()")
+                        mark = time.time() * 1000
+                        for turn in range(2):
+                            next_line = mark
+                            if turn:
+                                next_line = await _wait_saying(saying_events, "", mark, 40)
+                                if next_line is None:
+                                    raise RuntimeError("first Asta gave no full reply after partner spoke")
+                            done = await _wait_asta(col_page, next_line, True, 40)
+                            if done is None:
+                                raise RuntimeError(f"Asta did not speak on partner turn {turn + 1}")
+                            captured = await col_page.evaluate(
+                                "(at) => window.__colleague.take(at)", next_line)
+                            if captured["seconds"] < 0.2 or captured["peak"] < 0.01:
+                                raise RuntimeError(f"second Asta captured no speech on turn {turn + 1}: "
+                                                   f"{captured['seconds']:.1f}s, peak {captured['peak']:.3f}")
+                            heard_text = await voice.transcribe(
+                                base64.b64decode(captured["wav"]), filename="asta-partner.wav")
+                            if not heard_text:
+                                raise RuntimeError(f"the second Asta heard no words on turn {turn + 1}")
+                            reply, ended = await partner.reply(heard_text, timeout=25)
+                            if not reply:
+                                raise RuntimeError(f"the second Asta had no answer on turn {turn + 1}")
+                            finish = await _say(col_page, await line(reply))
+                            start = float(await col_page.evaluate("window.__colleague.lastStart"))
+                            await col_page.evaluate("window.__colleague.record()")
+                            partner_turns.append({"heard": heard_text, "said": reply,
+                                                  "answer_after": round((start - done) / 1000, 2),
+                                                  "ended": ended})
+                            timeline.append({"event": "colleague", "text": reply,
+                                             "start": start, "end": finish})
+                            mark = finish
+                            if ended:
+                                if turn == 0:
+                                    raise RuntimeError("second Asta ended the call after its first answer")
+                                break
+                        return
                     await col_page.evaluate(f"window.__colleague.noise({sc.noise})")
                     if sc.echo:
                         await col_page.evaluate(f"window.__colleague.echo({sc.echo})")
@@ -312,8 +439,12 @@ async def run(sc: Scenario, keep_dir: Path) -> dict:
                                 timeline.append({"event": "asta never finished", "at": time.time() * 1000})
                                 return
                         elif trigger == "asta_speaking":
-                            started = await _wait_asta(col_page, mark, False, 40)
+                            started = (await _wait_saying(saying_events, act["when"], mark, 40)
+                                       if act.get("when") else
+                                       await _wait_asta(col_page, mark, False, 40))
                             if started is None:
+                                timeline.append({"event": "asta never spoke the expected line",
+                                                 "at": time.time() * 1000})
                                 return
                         await asyncio.sleep(act.get("after", 0.4))
                         if act.get("silence"):
@@ -336,23 +467,48 @@ async def run(sc: Scenario, keep_dir: Path) -> dict:
                         mark = ended
 
                 bot = asyncio.ensure_future(colleague())
-                started = time.time()
-                outcome = await asyncio.wait_for(conversation.converse(
-                    who, "a quick rehearsal call", seconds=sc.minutes * 60,
-                    agenda="check they can hear you; ask one or two easy questions"),
-                    timeout=sc.minutes * 60 + 90)
-                took = time.time() - started
-                bot.cancel()
-                heard = await col_page.evaluate("window.__colleague.state()")
+                try:
+                    started = time.time()
+                    outcome = await asyncio.wait_for(conversation.converse(
+                        who, "a quick rehearsal call", seconds=sc.minutes * 60,
+                        agenda=("This is an audio check with another Asta. Ask if they can hear "
+                                "you, answer their question, and keep the call open until they "
+                                "reply again. Do not mention work or external actions."
+                                if partner is not None else
+                                "This is only an audio check with a simulated voice. Ask if they can "
+                                "hear you, then respond to their answers until they say goodbye. "
+                                "Do not mention projects, PRs, bookings, or Arun's work.")),
+                        timeout=sc.minutes * 60 + 90)
+                    took = time.time() - started
+                    heard = await col_page.evaluate("window.__colleague.state()")
+                finally:
+                    bot.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await bot
             finally:
                 meetings.call_person = real_call_person
+                conversation.with_history = real_with_history
         finally:
             with contextlib.suppress(Exception):
                 await browser.close()
+            if partner is not None:
+                await partner.close()
 
     log = sorted((tmp / "calls").glob("*.jsonl"))
     saying = _lines_said(log[-1]) if log else []
-    report = _judge(sc, timeline, heard["spans"], outcome, took, saying)
+    heard_lines = _lines_heard(log[-1]) if log else []
+    report = _judge(sc, timeline, heard["spans"], outcome, took, saying, heard_lines)
+    if partner is not None:
+        report["partner_turns"] = partner_turns
+        report["primary_said"] = [text for _, text in saying]
+        report["primary_heard"] = [text for text in heard_lines if text.strip()]
+        if len(partner_turns) < 2:
+            report["passed"] = False
+            report["fails"].append(f"only {len(partner_turns)} of 2 partner replies were heard")
+        if len(report["primary_heard"]) < 2:
+            report["passed"] = False
+            report["fails"].append(
+                f"the first Asta heard only {len(report['primary_heard'])} of 2 partner replies")
     report["flight_recorder"] = str(log[-1]) if log else ""
     keep_dir.mkdir(parents=True, exist_ok=True)
     (keep_dir / f"{sc.name}.json").write_text(json.dumps(report, indent=1))
@@ -374,18 +530,34 @@ def _lines_said(path: Path) -> list[tuple[float, str]]:
     return out
 
 
+def _lines_heard(path: Path) -> list[str]:
+    with path.open() as log:
+        return [row["heard"] for line in log if "heard" in (row := json.loads(line))]
+
+
 def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
-           took: float, saying: list[tuple[float, str]] | None = None) -> dict:
+           took: float, saying: list[tuple[float, str]] | None = None,
+           heard_lines: list[str] | None = None) -> dict:
     """Latencies and the verdict, from what the colleague's own ears measured —
     and, where Asta's own record says which line was which, from that."""
     connected = next((t["at"] for t in timeline if t["event"] == "connected"), None)
     said = [t for t in timeline if t["event"] == "colleague"]
-    gaps, sounds = [], []
+    gaps, sounds, content_sounds = [], [], []
+    from . import call_mind, conversation
+    fillers = {line.strip(" .!").lower() for line in (
+        *call_mind.REACTIONS, *conversation._ACKS, *conversation._MOMENTS,
+        conversation._STILL_THERE)}
     for s in said:
         after = [sp for sp in spans if sp["start"] > s["end"] - 200]
         first_sp = after[0] if after else None
         sounds.append(round((first_sp["start"] - s["end"]) / 1000, 2) if first_sp else None)
         if saying:
+            content = next((at for at, text in saying if at > s["end"] - 200
+                            and text.strip(" .!").lower() not in fillers), None)
+            content_sp = next((sp for sp in spans if content is not None
+                               and sp["start"] >= content - 100), None)
+            content_sounds.append(round((content_sp["start"] - s["end"]) / 1000, 2)
+                                  if content_sp else None)
             reply = next((at for at, text in saying if at > s["end"] - 200
                           and text.strip(" .!").lower() not in _ACK_LINES), None)
             gaps.append(round((reply - s["end"]) / 1000, 2) if reply else None)
@@ -394,6 +566,7 @@ def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
         if first_sp and first_sp["end"] - first_sp["start"] < ACK_MS and len(after) > 1:
             first_sp = after[1]
         gaps.append(round((first_sp["start"] - s["end"]) / 1000, 2) if first_sp else None)
+        content_sounds.append(None)
     first = spans[0]["start"] if spans else None
     fails: list[str] = []
     ex = sc.expect
@@ -407,7 +580,8 @@ def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
             fails.append("never spoke")
         elif ex.get("greeting_within") and greeting_at > ex["greeting_within"]:
             fails.append(f"greeting started {greeting_at}s after pick-up")
-        replies = [g for g, s in zip(gaps, said) if s is not said[0] or sc.steps[0][0] != "connected"]
+        replies = [g for g, s in zip(gaps, said)
+                   if s is not said[0] or not sc.steps or sc.steps[0][0] != "connected"]
         late = [g for g in replies if g is None or (ex.get("reply_within") and g > ex["reply_within"])]
         # the last line is often a goodbye Asta closes on; missing reply there is fine
         if late and not (len(late) == 1 and late[-1] is None and said and "bye" in said[-1]["text"].lower()):
@@ -426,6 +600,12 @@ def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
             talking = [sp for sp in spans if sp["start"] < inter["start"] < sp["end"]]
             if talking and (talking[0]["end"] - inter["start"]) / 1000 > ex["stops_within"]:
                 fails.append(f"kept talking {(talking[0]['end'] - inter['start']) / 1000:.1f}s over them")
+    if ex.get("must_hear") and ex["must_hear"].lower() not in " ".join(heard_lines or []).lower():
+        fails.append(f"never heard the interruption: {ex['must_hear']}")
+    if ex.get("audio_only") and any(
+            re.search(r"\b(?:booking|project|PR\s*#?\d+)\b", text, re.I)
+            for _, text in saying or []):
+        fails.append("audio-only rehearsal drifted into Arun's work")
     if ex.get("no_self_talk") and outcome.lower().count("didn't catch") > 1:
         fails.append("answered its own echo")
     firsts = [g for g, s in zip(sounds[1:], said[1:]) if g is not None]
@@ -433,6 +613,7 @@ def _judge(sc: Scenario, timeline: list[dict], spans: list[dict], outcome: str,
         fails.append(f"silence after they stopped: {sounds}")
     return {"scenario": sc.name, "title": sc.title, "passed": not fails, "fails": fails,
             "greeting_after": greeting_at, "reply_gaps": gaps, "first_sound": sounds,
+            "meaningful_sound": content_sounds,
             "asta_spans": len(spans),
             "seconds": round(took, 1), "outcome": outcome[:1500]}
 

@@ -59,6 +59,8 @@ def test_an_instruction_is_not_filed_as_the_answer(said):
     "release/3.1.6 is still missing — implement it in the booking service",
     "why is the AP PR not updated yet?",
     "Komal asked for the AP change in telikos-activityplanworkflow-service; please fix it",
+    "No, no, what are you working on and update me that",
+    "No first, what are you doing",
 ])
 def test_other_work_and_explicit_task_commands_do_not_answer_a_question(said):
     _open_question("Which VTS approach should I use: 1 or 2?")

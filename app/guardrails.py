@@ -56,6 +56,7 @@ AUDIENCES: dict[str, tuple[str, ...]] = {
     "investigation": ("chat", "analysis"),
     "git and accounts": ("chat", "code", "analysis"),
     "standing instructions": ("chat", "analysis", "draft"),
+    "automatic teams replies": ("chat", "draft"),
     # The names, read by app/senior.py, which enforces them in the send path.
     "manager and above": ("chat", "draft"),
 }

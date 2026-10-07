@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import os
 import re
 import time
@@ -37,7 +36,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 from . import quiet, store
-from . import call_audio, call_rtc, call_screen
+from . import call_audio, call_rtc, call_screen, call_speech
 from .call_audio import (  # noqa: F401  (constants only — the FUNCTIONS are
     AUDIO_DEVICE, HIS_MIC, SWITCH_AUDIO,   # called through `call_audio.` so the
     current_mic, set_call_mic, _restore_mic)  # borrow and the restore share one
@@ -695,7 +694,7 @@ def speaker_is_arun(speaker: str) -> bool:
 # speech uses the assistant voice; the clone is for words he composed in advance,
 # where ten seconds costs nothing.
 
-_VOICE_CACHE: dict[str, bytes] = {}
+_VOICE_CACHE = call_speech._VOICE_CACHE
 
 #: Said the moment somebody asks for something Asta cannot answer on the spot.
 #: A fixed set precisely so they can be synthesised once and replayed instantly —
@@ -708,26 +707,9 @@ HOLDING_LINES = {
 }
 
 
-def _cache_key(text: str, voice_name: str) -> str:
-    return f"{voice_name}:{hashlib.sha1(text.encode()).hexdigest()[:16]}"
-
-
 async def synth(text: str, voice_name: str = "") -> bytes:
-    """Speech for `text`, from memory when it has been said before.
-
-    The holding lines are said in most calls and never change, so synthesising
-    them more than once is buying the same 1.1 seconds over and over.
-    """
-    from . import voice
-    chosen = voice_name or voice.in_voice()
-    key = _cache_key(text, chosen)
-    cached = _VOICE_CACHE.get(key)
-    if cached:
-        return cached
-    audio = await voice.speak(text, voice=chosen)
-    if audio:
-        _VOICE_CACHE[key] = audio
-    return audio
+    """Cached call audio; the cache is shared with the call-speech module."""
+    return await call_speech.synth(text, voice_name)
 
 
 def warm_the_voice() -> None:

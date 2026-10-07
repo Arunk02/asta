@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -20,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from app import main, notify, store, voice_mode as vm
+from app.voice import speak as real_voice_speak
 
 
 class _Helper:
@@ -44,7 +46,8 @@ def helper(monkeypatch):
     vm._HEARD.clear()
     vm._SPOKEN.clear()
     vm._STATE["barge_heard"] = 0.0
-    vm._TURN.update(parts=[], gen=0, first_at=0.0, speaking=False, pending=0)
+    vm._TURN.update(parts=[], gen=0, first_at=0.0, speaking=False, pending=0,
+                    continued=False)
 
     async def speak(text, **k):
         return b"RIFFfake"
@@ -65,8 +68,10 @@ def run(coro):
 def test_both_switches_start_off_and_he_hears_if_they_had_been_on():
     vm._STATE.update(speaker=True, mic=True)
     store.kv_set(vm._KV, json.dumps({"speaker": True, "mic": True}))
+    store.kv_set("voice_conversation", "old-sitting")
     assert vm.startup() is True
     assert vm.state()["speaker"] is False and vm.state()["mic"] is False
+    assert not store.kv_get("voice_conversation")
     assert vm.startup() is False, "already off: nothing to tell"
 
 
@@ -323,6 +328,13 @@ def test_the_websocket_wants_the_token_and_speaks_the_protocol(monkeypatch):
     from fastapi.testclient import TestClient
     monkeypatch.setenv("ASTA_TOKEN", "t0k")
     vm._STATE.update(speaker=False, mic=False, helper=None)
+    notices = []
+
+    async def notify_mic_error(text, *args, **kwargs):
+        notices.append(text)
+        return {}
+
+    monkeypatch.setattr(notify, "notify", notify_mic_error)
     client = TestClient(main.app)
     with pytest.raises(Exception):
         with client.websocket_connect("/ws/voice-mode?token=wrong") as ws:
@@ -346,6 +358,17 @@ def test_the_websocket_wants_the_token_and_speaks_the_protocol(monkeypatch):
         assert heard == {"type": "heard", "text": "what is pending", "did": "dry"}
         ws.send_text(json.dumps({"type": "locked"}))
         assert json.loads(ws.receive_text())["mic"] is False, "screen locked: mic off"
+        ws.send_text(json.dumps({"type": "toggle", "what": "mic"}))
+        assert json.loads(ws.receive_text())["mic"] is True
+        ws.send_text(json.dumps({"type": "mic_error", "reason": "no audio after retry"}))
+        assert json.loads(ws.receive_text())["mic"] is False, "failed input: mic off"
+        assert notices and "no audio reached Asta" in notices[0]
+        ws.send_text(json.dumps({"type": "toggle", "what": "mic"}))
+        assert json.loads(ws.receive_text())["mic"] is True
+        ws.send_text(json.dumps({"type": "mic_error", "reason":
+                                 "Microphone could not start: CoreAudio error 1937010544"}))
+        assert json.loads(ws.receive_text())["mic"] is False
+        assert "Restart the Mac" in notices[-1] and "Switching it on again" in notices[-1]
     assert vm.state()["helper"] is False
     vm._STATE.update(speaker=False, mic=False, helper=None)
 
@@ -366,6 +389,8 @@ def test_the_menu_bar_helper_builds(tmp_path):
     assert "setVoiceProcessingEnabled(useVoiceProcessing)" in src, "echo cancelling on the input"
     assert "firstChannel" in src, "the 9-channel echo-cancelled input is reduced to its first channel"
     assert "reopening the mic without echo cancelling" in src, "and falls back when it cannot start"
+    assert "mic produced no usable audio after retry" in src, "no input frames must stop the mic"
+    assert "Microphone could not start:" in src, "engine start failure must not look like quiet"
     assert "AVSpeechSynthesizer" in src, "the Mac's voice when Asta's is down"
 
 
@@ -389,7 +414,7 @@ def test_a_question_is_acknowledged_within_a_second_with_audio_made_beforehand(h
     vm._CACHE.clear()
 
 
-def test_the_first_sentence_is_said_while_the_rest_is_still_being_written(helper, monkeypatch):
+def test_the_first_sentence_is_said_while_the_rest_is_still_being_written(helper, chat, monkeypatch):
     monkeypatch.setattr(vm, "ACK_SECONDS", 5)
     said_at: list[float] = []
 
@@ -408,6 +433,34 @@ def test_the_first_sentence_is_said_while_the_rest_is_still_being_written(helper
     assert said_at == [1], "said before the answer was finished"
     assert helper.said() == ["Booking PR 1429 is still waiting on Vinish.",
                              "AP PR 1252 is mergeable. The details are in the chat."]
+    assert chat
+
+
+def test_voice_has_its_own_session_and_keeps_the_selected_model(helper, monkeypatch):
+    phone = store.create_conversation(model="copilot", workspace="booking")
+    store.kv_set("wa_conversation", phone["id"])
+    store.kv_set("voice_conversation", "")
+    monkeypatch.setattr(main, "_channel_model", lambda conv: conv["model"])
+    seen = []
+
+    async def dispatch(conv, text, sink, channel):
+        seen.append((conv["id"], conv["model"], conv.get("workspace"), text, channel))
+        await sink.send({"type": "delta", "text": "I heard you."})
+        return None
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+    run(vm.turn("First voice question?"))
+    run(vm.turn("Follow-up?"))
+    assert seen[0][0] == seen[1][0] != phone["id"]
+    assert seen[0][1:] == ("copilot", None, "First voice question?", "voice")
+    assert seen[1][3] == "Follow-up?"
+    assert store.kv_get("wa_conversation") == phone["id"]
+    run(vm.set_mode(mic=False, why="finished talking"))
+    assert not store.kv_get("voice_conversation")
+    run(vm.set_mode(mic=True, why="new sitting"))
+    run(vm.turn("New topic?"))
+    assert seen[-1][0] not in (phone["id"], seen[0][0])
 
 
 def test_talking_over_asta_drops_the_rest_of_that_answer(helper, monkeypatch):
@@ -471,6 +524,37 @@ def test_a_voice_turn_answers_even_when_no_brain_can_be_chosen(helper, monkeypat
     vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
     assert run(vm.handle("what is pending?"))["did"] == "answered"
     assert helper.said() == ["Nothing pending right now."]
+
+
+def test_voice_acknowledges_while_dispatch_is_still_starting(helper, monkeypatch):
+    monkeypatch.setattr(main, "_channel_model", lambda conv: "copilot")
+    monkeypatch.setattr(vm, "ACK_SECONDS", 0.02)
+    entered = asyncio.Event()
+    continue_dispatch = asyncio.Event()
+
+    async def dispatch(conv, text, sink, channel):
+        assert conv["model"] == "copilot" and channel == "voice"
+        entered.set()
+        await continue_dispatch.wait()
+        await sink.send({"type": "delta", "text": "The booking PR is ready for review."})
+        return None
+
+    monkeypatch.setattr(main, "_dispatch", dispatch)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+
+    async def check():
+        answer = asyncio.create_task(vm.turn("Asta, is the booking PR ready?"))
+        await entered.wait()
+        for _ in range(100):
+            if helper.said():
+                break
+            await asyncio.sleep(0.01)
+        assert helper.said() == ["Let me check."], "the dispatcher must not delay first words"
+        continue_dispatch.set()
+        await answer
+        assert helper.said() == ["Let me check.", "The booking PR is ready for review."]
+
+    run(check())
 
 
 @pytest.mark.parametrize("heard", ["موسيقى موسيقى موسيقى موسيقى", "[Music]", "♪ la la la ♪",
@@ -838,6 +922,88 @@ def test_a_turn_waits_for_a_piece_still_being_transcribed(helper, decided):
         return held
 
     assert run(go()) == [] and decided == ["Check the booking."]
+
+
+def test_a_30_second_clip_waits_for_the_rest_even_past_the_normal_hold(helper, decided, monkeypatch):
+    monkeypatch.setattr(vm, "HOLD_MAX_SECONDS", 0.1)
+    monkeypatch.setattr(vm, "TURN_MAX_SECONDS", 0.1)
+
+    async def go():
+        vm._TURN["continued"] = True
+        vm._TURN["speaking"] = True
+        first = asyncio.create_task(vm.assemble("Check the Activityplan service and"))
+        await asyncio.sleep(0.25)
+        assert not first.done() and decided == []
+        vm._TURN["speaking"] = False
+        second = await vm.assemble("tell me whether Vinish received my reply.")
+        return await first, second
+
+    first, second = run(go())
+    assert first["did"] == "joined" and second["did"] == "decided"
+    assert decided == ["Check the Activityplan service and tell me whether Vinish received my reply."]
+    assert vm._TURN["continued"] is False
+
+
+def test_segments_are_joined_in_recording_order_when_transcription_finishes_out_of_order(
+        helper, decided, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import voice
+
+    monkeypatch.setenv("ASTA_TOKEN", "voice-test-token")
+
+    async def transcribe(data, filename="", language=""):
+        if data == b"RIFFfirst":
+            await asyncio.sleep(0.2)
+            return "Check the Activityplan service and"
+        assert data == b"RIFFlast"
+        await asyncio.sleep(0.01)
+        return "tell me whether Vinish received my reply."
+
+    monkeypatch.setattr(voice, "transcribe", transcribe)
+    with TestClient(main.app).websocket_connect("/ws/voice-mode?token=voice-test-token") as ws:
+        assert json.loads(ws.receive_text())["type"] == "state"
+        assert json.loads(ws.receive_text())["type"] == "vocab"
+        ws.send_text(json.dumps({"type": "toggle", "what": "mic"}))
+        assert json.loads(ws.receive_text())["mic"] is True
+        for wav, continued in ((b"RIFFfirst", True), (b"RIFFlast", False)):
+            ws.send_text(json.dumps({"type": "utterance", "wav": base64.b64encode(wav).decode(),
+                                     "continued": continued, "asta": False}))
+        for _ in range(40):
+            if decided:
+                break
+            time.sleep(0.05)
+    assert decided == ["Check the Activityplan service and tell me whether Vinish received my reply."]
+
+
+@pytest.mark.skipif(os.environ.get("ASTA_SELF_TALK_TEST") != "1",
+                    reason="uses the local Voicebox to let Asta speak to Asta")
+def test_asta_voice_speaks_hears_and_answers_its_other_voice(helper, monkeypatch):
+    from app import voice
+
+    monkeypatch.setattr(voice, "BASE", voice.CONFIGURED_BASE)
+    monkeypatch.setattr(voice, "DEFAULT_PROFILE", "Asta (male)")
+    monkeypatch.setattr(voice, "speak", real_voice_speak)
+    monkeypatch.delitem(vm._CACHE, vm.ACKS["listening"], raising=False)
+    vm._STATE.update(speaker=True, mic=True, mic_on_at=time.time())
+
+    async def exchange():
+        prompt = await voice.speak("Hello, hello.", profile="Asta (male)")
+        assert prompt, "Asta's test voice produced no audio"
+        started = time.monotonic()
+        result = await vm.heard(prompt, asta=False)
+        took = time.monotonic() - started
+        replies = [m for m in helper.sent if m.get("type") == "say"]
+        assert result["did"] == "listening", (result, [
+            r["detail"] for r in store.recent_outcomes(5) if r["outcome"] == "stt_failed"])
+        assert len(replies) == 1 and replies[0]["text"] == "I'm listening."
+        assert replies[0]["audio"], "Asta replied with text, but produced no voice"
+        words = await voice.transcribe(base64.b64decode(replies[0]["audio"]),
+                                       filename="asta-answer.wav")
+        assert "listening" in words.lower(), f"Asta's reply was not intelligible: {words!r}"
+        return result["text"], words, took
+
+    heard, answered, seconds = run(exchange())
+    print(f"Asta-to-Asta voice: heard {heard!r}, replied {answered!r} in {seconds:.2f}s")
 
 
 def test_a_finished_sentence_is_decided_at_once(helper, decided, monkeypatch):
@@ -1254,6 +1420,24 @@ def test_said_to_be_in_the_chat_means_it_is_in_the_chat(helper, chat):
     assert helper.said()[-1] == vm.IN_CHAT and chat == ["🎙 " + LONG]
 
 
+def test_a_failed_chat_delivery_is_not_claimed_aloud(helper, monkeypatch):
+    from app import notify
+
+    async def unavailable(text, done=False):
+        return False
+
+    monkeypatch.setattr(notify, "wa_send", unavailable)
+    vm._STATE.update(speaker=True)
+    run(vm.say_lines(LONG))
+    assert vm.IN_CHAT not in helper.said()
+    assert "couldn't send" in helper.said()[-1]
+
+    helper.sent.clear()
+    run(vm.say(LONG))
+    assert vm.IN_CHAT not in helper.said()[0]
+    assert "couldn't send" in helper.said()[0]
+
+
 def test_a_short_answer_is_not_also_pushed(helper, chat):
     vm._STATE.update(speaker=True)
 
@@ -1426,6 +1610,42 @@ def test_a_lone_hello_is_him_calling_not_noise():
         assert not vm.is_noise(word), word
 
 
+@pytest.mark.parametrize("greeting", ["Hello", "Hello?", "Hello Aastha", "hello, hello, hello, hello",
+                                      "Hey Asta!", "Asta"])
+def test_a_greeting_answers_locally_even_when_voice_router_is_down(helper, monkeypatch, greeting):
+    from app import voice_talker
+
+    async def no_router(*args, **kwargs):
+        raise AssertionError("wake-only greetings must not consult the voice router")
+
+    async def no_dispatch(*args, **kwargs):
+        raise AssertionError("wake-only greetings must not start a chat turn")
+
+    monkeypatch.setattr(voice_talker, "route", no_router)
+    monkeypatch.setattr(main, "_dispatch", no_dispatch)
+    vm._STATE.update(speaker=True, mic=True)
+    assert run(vm.handle(greeting))["did"] == "listening"
+    assert helper.said() == ["I'm listening."]
+
+
+def test_repeated_greeting_survives_utterance_assembly(helper, monkeypatch):
+    from app import voice_talker
+
+    async def no_router(*args, **kwargs):
+        raise AssertionError("wake-only greeting must not consult the router")
+
+    monkeypatch.setattr(voice_talker, "route", no_router)
+    vm._STATE.update(speaker=True, mic=True)
+    assert run(vm.assemble("Hello, hello, hello, hello"))["did"] == "listening"
+    assert helper.said() == ["I'm listening."]
+
+
+@pytest.mark.parametrize("utterance", ["Hello Asta, check the booking PR", "Hey, how is the CI?",
+                                        "Hello, can you hear me?"])
+def test_a_greeting_with_a_request_is_not_wake_only(utterance):
+    assert not vm.wake_only(utterance)
+
+
 def test_a_command_inside_a_long_sentence_is_not_a_command(helper, decide, talker):
     from app import voice_talker
     decide["next"] = voice_talker.QUIET
@@ -1562,6 +1782,20 @@ def test_a_greeting_is_never_the_question_asked_again():
 def test_echo_cancelling_is_tried_again_each_time_the_mic_opens():
     src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
     assert "if !useVoiceProcessing && !retriedProcessing { useVoiceProcessing = true }" in src
+
+
+def test_helper_does_not_release_its_hold_while_speech_is_detected():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    assert "self.heldAt == mine && self.isUserSpeaking?() != true" in src
+    assert "mouth.isUserSpeaking = { [weak self] in self?.ears.inSpeechNow ?? false }" in src
+
+
+def test_helper_delivers_pending_segment_before_restarting_recognition():
+    src = (Path(main.__file__).resolve().parents[1] / "deploy" / "voice" / "AstaVoice.swift").read_text()
+    start = src.index("    func begin(_ samples: [Int16]) {")
+    body = src[start:src.index("    func feed(_ samples:", start)]
+    assert body.index("if waiting != nil {") < body.index("complete()") < body.index("guard let r = recognizer")
+    assert '"continued": continued' in src
 
 
 def test_a_voice_job_reads_the_project_he_means(monkeypatch):

@@ -161,8 +161,11 @@ def test_his_actual_words_reach_the_shortcut():
     from app import activity
     for q in ("got it what u doing ?", "what u doing", "whats the update",
               "what are you doing?", "still working?", "u there", "how long",
-              "anything yet", "ok what is happening", "progress"):
+              "anything yet", "ok what is happening", "progress",
+              "no first, what are you working on?", "no, what are you doing?",
+              "no no what are you working on and update me that"):
         assert activity.is_status_ask(q), q
+        assert activity.classify_interjection(q) == "status", q
 
 
 def test_a_real_question_is_still_not_swallowed():
@@ -170,5 +173,5 @@ def test_a_real_question_is_still_not_swallowed():
     from app import activity
     for q in ("what are you doing about the PR?", "any update on alex",
               "status of the booking service", "how long does the build take",
-              "what is happening to the email service"):
+              "what is happening to the email service", "no, stop that task"):
         assert not activity.is_status_ask(q), q

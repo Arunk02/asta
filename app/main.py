@@ -4176,6 +4176,10 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     # when the phone conversation has another live task or the six-hour
     # implicit-follow-up window has expired.
     explicit = _explicit_task(user_text)
+    named_recent = None if explicit is not None else _named_recent_task(user_text, cid)
+    if explicit is None and named_recent is not None \
+            and frontdesk.task_intent(user_text) == "edit":
+        explicit = named_recent
     if explicit is not None and frontdesk.task_intent(user_text) == "edit":
         existing = store.get_task(explicit)
         if existing and existing["kind"] == "code" and \
@@ -4438,6 +4442,26 @@ def _remember_if_asked(feedback: str, task: dict) -> str:
         quiet.note("remember.task_feedback", exc)
         return " I could not save it for future work."
     return " Saved it for future work too."
+
+
+#: A number that is something else's: "PR 676", "pull/676", "build 251".
+_NOT_A_TASK_NUMBER = re.compile(
+    r"(?:\b(?:pr|pull|mr|build|run|version|v|release|line|port|ticket|jira)\s*[#/:-]?\s*|/)$", re.I)
+
+
+def _named_recent_task(text: str, cid: str) -> int | None:
+    """A bare number that IS one of this conversation's recent or live code
+    tasks: "in email CT fix 251, remove that change…" (7 Oct) meant task #251
+    and started task #263 instead."""
+    candidates = set(tasks.refinable_for(cid)) | set(tasks.live_tasks_for(cid))
+    if not candidates:
+        return None
+    hits = []
+    for m in re.finditer(r"(?<![\w#/.-])(\d{2,5})(?![\w/.-])", text or ""):
+        n = int(m.group(1))
+        if n in candidates and not _NOT_A_TASK_NUMBER.search((text or "")[:m.start()].rstrip()):
+            hits.append(n)
+    return hits[0] if len(set(hits)) == 1 else None
 
 
 def _task_inquiry_target(cid: str, text: str) -> int | None:

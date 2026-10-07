@@ -2435,6 +2435,20 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
                 f"so it continues in that task's own session with everything it "
                 f"already knows. If it really IS unrelated new work, say so and "
                 f"spawn it with a title that does not restate the old one.")
+    if kind == "code":
+        # Its own brief says which task it continues ("This continues task
+        # #251…", 7 Oct) — then it is that task's feedback, whatever workspace
+        # the old one was filed under.
+        import re as _re
+        for n in dict.fromkeys(_re.findall(
+                r"\b(?:continu\w*|follow[- ]?up\s+(?:on|to)|fix(?:es)?|redo|amend)\s+"
+                r"(?:on\s+|to\s+)?task\s*#?\s*(\d{1,5})\b", f"{title}\n{prompt}", _re.I)):
+            prior = store.get_task(int(n))
+            if prior and prior["kind"] == "code" and \
+                    prior["status"] in tasks.REFINABLE + tasks.LIVE_STATUSES:
+                return (f"Not spawned: this continues task #{n} (“{prior['title'][:60]}”, "
+                        f"{prior['status']}). Call refine_task({n}, \"<his feedback, verbatim>\") "
+                        f"so it carries on in that task's own session and branch.")
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
     return (f"Task #{t['id']} ({kind}) spawned — running in the background. "
             f"Arun will be notified when it finishes.")

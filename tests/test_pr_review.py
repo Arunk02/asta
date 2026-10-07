@@ -169,6 +169,10 @@ def test_a_review_is_staged_for_his_yes_and_posts_nothing(monkeypatch):
         return "posted"
 
     monkeypatch.setattr(review, "post_inline_review", never)
+    async def revision(pr):
+        return ("acme/booking#1409@" + "a" * 40 + ":green", True)
+
+    monkeypatch.setattr(review, "revision", revision)
     said = asyncio.run(agent.propose_pr_review(
         "https://github.com/acme/booking/pull/1409", _NOTES))
     assert "Staged" in said and "5 inline comment" in said and "2 blocking" in said

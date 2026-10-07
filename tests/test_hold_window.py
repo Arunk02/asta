@@ -159,3 +159,37 @@ def test_flush_reports_the_count_and_keeps_the_overflow_in_the_app(monkeypatch, 
     text = pushed[0][1]
     assert "Held (14)" in text
     assert "+4 more in the app" in text
+
+
+# --- what he already answered is not pushed after the fact ----------------------
+
+def test_a_held_item_he_answered_meanwhile_is_dropped_on_release(monkeypatch, pushed):
+    """"If I responded to them, drop it silently" (7 Oct). The Teams grace and
+    the quiet rule already did; the laptop and night holds kept only the text."""
+    from app import attention
+    monkeypatch.setenv("ASTA_ATTENTION", "1")
+    _at_laptop(monkeypatch, True)
+    attention.consider("teams", "k-answered", who="Sam", what="Sam: can you check?")
+    attention.consider("teams", "k-open", who="Ravi", what="Ravi: any update?")
+    asyncio.run(notify.notify("Sam: can you check?", "teams", urgency="ambient",
+                              key="k-answered", considered=True))
+    asyncio.run(notify.notify("Ravi: any update?", "teams", urgency="ambient",
+                              key="k-open", considered=True))
+    attention.mark_acted("k-answered", why="he replied")
+    out = asyncio.run(notify.flush_held(reason="you stepped away"))
+    sent = "\n".join(t for _, t in pushed)
+    assert "Ravi: any update?" in sent
+    assert "Sam: can you check?" not in sent
+    assert out["whatsapp"]
+
+
+def test_a_release_with_everything_answered_sends_nothing(monkeypatch, pushed):
+    from app import attention
+    monkeypatch.setenv("ASTA_ATTENTION", "1")
+    _at_laptop(monkeypatch, True)
+    attention.consider("teams", "k-only", who="Sam", what="Sam: ping")
+    asyncio.run(notify.notify("Sam: ping", "teams", urgency="ambient",
+                              key="k-only", considered=True))
+    attention.mark_acted("k-only", why="he replied")
+    out = asyncio.run(notify.flush_held())
+    assert not pushed and out.get("answered")

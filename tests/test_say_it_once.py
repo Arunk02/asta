@@ -228,6 +228,29 @@ def test_a_finished_task_he_did_not_say_go_on_stays_local(monkeypatch, quiet):
     assert any("Not shipped" in p and "raise PR" in p for p in quiet)
 
 
+def test_feedback_on_work_with_an_open_pr_offers_to_update_that_pr(monkeypatch, quiet):
+    """7 Oct, #257: booking PR 1470 was open; the update said "say *raise PR*"."""
+    async def nothing(*a, **k):
+        return ""
+
+    async def ship(tid):
+        raise AssertionError("pushed without being asked")
+
+    async def not_pushed(tid, t):
+        return []
+
+    monkeypatch.setattr(tasks, "_self_review", nothing)
+    monkeypatch.setattr(tasks, "_already_pushed", not_pushed)
+    monkeypatch.setattr(tasks, "ship", ship)
+    t = store.create_task("Booking job open", "code", "p", None)
+    store.update_task(t["id"], pr_urls="telikos-booking-service: "
+                      "https://github.com/acme/telikos-booking-service/pull/1470")
+    asyncio.run(tasks.complete(t["id"], store.get_task(t["id"]), "Added FINANCE_MILESTONE."))
+    said = quiet[-1]
+    assert "Update ready" in said and "pull/1470" in said and "*ship*" in said
+    assert "raise PR" not in said
+
+
 def test_code_task_without_worktree_change_is_not_marked_implemented(monkeypatch, quiet, tmp_path):
     async def git(*a, **k):
         return 0, ""

@@ -2347,6 +2347,18 @@ async def complete(task_id: int, t: dict, result: str) -> None:
             f"not calling them shipped until GitHub confirms.{waste}", "task")
         await ship_as_told(task_id)
         return
+    open_prs = _pr_links(store.get_task(task_id) or t)
+    if open_prs:
+        # Feedback on work that already has its PR: the new commits are on that
+        # PR's branch, and "ship" pushes them onto it. 7 Oct, #257: booking PR
+        # 1470 was open and the update still said "say *raise PR*".
+        await notify.notify(
+            f"🛠 Update ready — #{task_id} {t['title']}\n\n"
+            f"{_phone_text(result, 700)}{own}\n\n"
+            f"Committed on the PR branch, not pushed yet. Say *ship* and it goes onto "
+            + ", ".join(prname.name_links(u) for u in open_prs)
+            + f" — no new PR.{waste}", "task")
+        return
     await notify.notify(
         f"🛠 Local implementation ready — #{task_id} {t['title']}\n\n"
         f"{_phone_text(result, 700)}{own}\n\n"

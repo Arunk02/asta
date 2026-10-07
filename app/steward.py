@@ -154,7 +154,12 @@ def ack_line(chat: str, text: str = "") -> str:
         terms = []
     from . import chat_watch
     body = chat_watch.clean_message(text).lower()
-    if re.search(r"/pull/\d+|\b(?:pr|pull request)\b", body):
+    from . import responder
+    port = responder.counterpart(text or "")
+    if port:
+        line = (f"Got it, checking what {port['side']} needs for this" if port["side"]
+                else "Got it, checking what our side needs for this")
+    elif re.search(r"/pull/\d+|\b(?:pr|pull request)\b", body):
         line = "Looking into the PR details"
     elif re.search(r"\b(?:build|pipeline|ci)\b", body):
         line = "Checking the build"

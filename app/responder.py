@@ -194,8 +194,70 @@ from_bulk_sender = attention.from_bulk_sender
 is_broadcast = attention.is_broadcast
 
 
+#: "Use this and work from booking side <AP PR link>": the PR is the REFERENCE,
+#: and the ask is the same change on another service. 7 Oct, Vinish and AP PR
+#: 1260 (job reopen): Asta read it as a review, then as "check booking consumes
+#: it", told him twice there was nothing to do, and started three reviews.
+_COUNTERPART = re.compile(
+    r"\b(?:work|do|implement|build|handle|add|make|replicate|port|mirror|copy|"
+    r"apply|bring|follow)\b[^.?!\n]{0,40}\b(?:from|on|in|at|for|to)\s+(?:the\s+)?"
+    r"(?P<side>[\w-]+)\s+(?:side|service|repo|module|end)\b"
+    r"|\b(?:same|similar)\s+(?:change|changes|logic|thing|way|handling|fix)?\s*"
+    r"(?:in|on|for)\s+(?:the\s+)?(?P<side2>[\w-]+)\b"
+    r"|\b(?:use|take)\s+(?:this|it|that)\s+(?:as\s+(?:a\s+)?reference|and\s+"
+    r"(?:work|do|implement|build|make))\b"
+    r"|\b(?:replicate|port|mirror)\s+(?:this|it|that|the\s+(?:change|logic|same))\b",
+    re.I)
+
+
+_SIDE = re.compile(r"\b(?:from|on|in|at|for|to)\s+(?:the\s+)?([\w-]+)\s+"
+                   r"(?:side|service|repo|module|end)\b", re.I)
+
+
+def counterpart(text: str) -> dict | None:
+    """{pr, side} when a message hands over a PR as the reference for the same
+    change elsewhere — work to plan, not a PR to review."""
+    from . import review
+    link = review._PR_LINK.search(text or "")
+    if not link:
+        return None
+    blob = _URL_IN_TEXT.sub(" ", text or "")
+    found = list(_COUNTERPART.finditer(blob))
+    if not found or _THEIR_FEEDBACK.search(blob) or re.search(r"\breview\b", blob, re.I):
+        return None
+    owner = link.group(1) or link.group(4)
+    repo = link.group(2) or link.group(5)
+    number = link.group(3) or link.group(6)
+    sides = [x.lower() for x in _SIDE.findall(blob)]
+    sides += [(m.group("side") or m.group("side2") or "").lower() for m in found]
+    side = next((x for x in sides if x and x not in ("this", "that", "it", "the")), "")
+    return {"pr": f"https://github.com/{owner}/{repo}/pull/{number}", "repo": repo,
+            "number": number, "side": side}
+
+
+#: How to carry a change across a service boundary. Shared by the plan offer
+#: and the investigation brief, so both work the same way.
+COUNTERPART_METHOD = (
+    "Method — the referenced PR is the other side of the contract:\n"
+    "1. Read the reference PR as a CONTRACT change: every value that crosses the "
+    "service boundary and is new or changed (status, workProcessName/eventName, "
+    "enum value, topic, payload field, API), each with file:line.\n"
+    "2. For each, find its closest EXISTING sibling (a new JOB_OPENED → the "
+    "existing JOB_CLOSURE) and trace how the target service handles the sibling "
+    "end to end: enums and mappers, the consumer/feedback branch, milestones, "
+    "event history, status updates, tests. Search the target repo for the "
+    "sibling's name, not only for the new one.\n"
+    "3. The work is the difference: everywhere the sibling is handled explicitly "
+    "and the new value is not. \"Falls through a generic path\" counts only if "
+    "the sibling takes that same path — show it in code.\n"
+    "4. Where a lower environment has it, confirm from the logs how the sibling "
+    "arrives and what the target does with it.\n"
+    "Name each file to change and the sibling line it mirrors."
+)
+
+
 def what_it_asks(text: str) -> str:
-    """'incident' | 'pr_review' | 'debug' | 'ask' | '' — what a worker could check.
+    """'incident' | 'port' | 'pr_review' | 'review_request' | 'debug' | 'ask' | ''.
 
     `ask` is the catch-all, and it is the important one. The first version
     recognised three shapes and shrugged at everything else, which meant a
@@ -212,6 +274,8 @@ def what_it_asks(text: str) -> str:
     blob = _URL_IN_TEXT.sub(" ", text or "")
     if _INCIDENT.search(blob):
         return "incident"
+    if counterpart(text or ""):
+        return "port"
     if _PR.search(blob) or _REVIEW_ASK.search(blob):
         # Their feedback on his change, or their change wanting his eyes. The
         # words decide here; the review itself confirms from the PR's author.
@@ -371,6 +435,19 @@ _BRIEFS = {
         "Go and find the answer using the workspace, the logs, and the running "
         "systems. Answer the question that was actually asked."
     ),
+    "port": (
+        "{who} is handing Arun a pull request as the REFERENCE for the same change "
+        "on another service:\n\n"
+        "  \"{text}\"\n\n"
+        "This is not a review of that PR and not a question about it. Work out "
+        "what the target service needs so it handles what the reference PR now "
+        "sends or expects.\n\n" + COUNTERPART_METHOD + "\n\n"
+        "Read only: do not change code. The ANALYSIS is the gap list for Arun "
+        "(file:line in the target, the sibling line it mirrors). The REPLY "
+        "confirms the scope you understood in one or two plain lines — what "
+        "arrives, which existing case it mirrors, where it goes — without "
+        "promising when it is done."
+    ),
     "ask": (
         "{who} is asking Arun for something on Teams:\n\n"
         "  \"{text}\"\n\n"
@@ -426,6 +503,12 @@ def title_for(kind: str, who: str, text: str) -> str:
             else f"{who}'s PR feedback: is it right?"
     if kind == "review_request":
         return f"Review {who}'s PR #{pr}" if pr else f"Review {who}'s pull request"
+    if kind == "port":
+        from . import prname
+        found = counterpart(text) or {}
+        side = f" to {found['side']}" if found.get("side") else ""
+        named = prname.from_url(found.get("pr", "")) or f"PR #{found.get('number', pr)}"
+        return f"{who} asked: carry {named}{side}"
     gist = _gist(message_of(text))
     if kind == "incident":
         return f"{who} asked: is that really happening in prod? — {gist}"
@@ -689,6 +772,12 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     kind = (answers._meta(correction_of).get("ask_kind") or kind_override
             or what_it_asks(text) or "ask") if original else (
                 kind_override or what_it_asks(text))
+    if original and kind != "port" and counterpart(
+            answers._meta(correction_of).get("source_text") or ""):
+        # The first reading was the wrong JOB, not a wrong detail: the request
+        # handed over a reference PR. Rechecking the same reading again is how
+        # Vinish was told "nothing to do" twice (7 Oct).
+        kind = "port"
     key = key or attention.key_for(text)
     why_not = should_respond(kind, priority, key, now=time.time(),
                              broadcast=is_broadcast(who, text), sent_at=sent_at)
@@ -772,13 +861,22 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     if original:
         from . import answers
         prior = answers._meta(correction_of)
+        was_analysis, was_reply = answers.split(original.get("result") or "")
+        disputed = (f"{was_analysis}\nREPLY they rejected: {was_reply}".strip()
+                    if was_reply else (original.get("result") or "")[-1200:])
         brief += (
             f"\n\nCorrection to task #{correction_of}. They rejected the prior answer. "
-            "Recheck the actual subject against the most recent exchange and current "
-            "evidence; do not treat the previous conclusion as fact. If the referent "
-            "is still unclear, ask them rather than guessing.\n"
+            "First name the reading of their request the disputed answer took — that "
+            "reading is what they rejected, so do NOT re-check it and do not offer it "
+            "back to them. Start from the other readings, and test first whether they "
+            "want something BUILT (for instance a referenced PR's change carried into "
+            "this service) rather than reviewed or explained. Check each reading "
+            "against the code and the most recent exchange; do not treat the previous "
+            "conclusion as fact. If one reading survives, answer it; ask them only "
+            "when the evidence leaves it genuinely open — one open question, never "
+            "a choice between your own guesses.\n"
             f"Original request: {(prior.get('source_text') or '')[:500]}\n"
-            f"Disputed answer: {(original.get('result') or '')[:1200]}")
+            f"Disputed answer: {disputed[:1500]}")
     if reply_to:
         brief += _waiting_brief(who, text, context, need=need, questions=questions or [])
     t = tasks.spawn(title_for(kind, who, text), brief,

@@ -128,10 +128,15 @@ async def send_reply(target: str, text: str) -> str:
     """Send under the narrow standing rule, without recording a fresh approval."""
     if not auto_reply_to(target):
         raise PermissionError(f"No automatic Teams reply permission for {target}")
-    from . import ops
-    line = await ops.REGISTRY["teams_send"]["run"](to=target, text=text, to_group=False)
+    from . import chat_watch, ops, teams_bridge
+    token = teams_bridge._automatic_send.set(target)
+    try:
+        line = await ops.REGISTRY["teams_send"]["run"](to=target, text=text, to_group=False)
+    finally:
+        teams_bridge._automatic_send.reset(token)
     if not line.startswith("✅ Sent to "):
         raise RuntimeError(f"Teams send was not confirmed: {line}")
+    chat_watch.note_asta_said(target, text)
     store.record_outcome("authority", "auto reply", subject=target[:80],
                          detail=text[:200])
     return line

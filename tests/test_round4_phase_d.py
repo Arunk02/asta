@@ -55,6 +55,32 @@ def test_markdown_headings_are_read_too():
     assert a == "found it" and r == "here you go"
 
 
+def test_turns_after_the_report_are_not_part_of_the_reply():
+    """7 Oct, task #253: the run waited on background shells, and each one that
+    finished woke it for one more turn — printed after REPLY, and staged as
+    part of Komal's draft."""
+    from app import answers
+    result = ("Still running — I'll check back shortly.\n\n"
+              "ANALYSIS:\n1. Not fully correct — Applier.java:58 rewrites on empty refs.\n"
+              "Also noticed: none bearing on her question beyond the above.\n\n"
+              "REPLY:\nReviewed — requesting changes, the rewrite fires on empty refs.\n\n"
+              "Left line comments on the three spots.\n\n"
+              "Task already complete and reported above — nothing further needed from this shell.\n\n"
+              "All done — the review for PR #1459 is already staged and I've given you the "
+              "analysis and reply above. No further action pending on these background shells.\n\n"
+              "Confirmed — all background waits are closed out; task #254 finished earlier.")
+    analysis, reply = answers.split(result)
+    assert reply == ("Reviewed — requesting changes, the rewrite fires on empty refs.\n\n"
+                     "Left line comments on the three spots.")
+    assert "Also noticed" not in analysis and analysis.startswith("1. Not fully correct")
+
+
+def test_a_reply_that_only_reads_like_chatter_is_kept():
+    from app import answers
+    _, reply = answers.split("ANALYSIS:\nx\n\nREPLY:\nThe job is still running, will update you.")
+    assert reply == "The job is still running, will update you."
+
+
 def test_a_result_without_a_reply_is_not_presented_as_one():
     from app import answers
     assert answers.split("just a normal report")[1] == ""

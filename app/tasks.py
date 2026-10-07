@@ -523,13 +523,13 @@ def paused_tasks_for(conv_id: str) -> list[int]:
             if (store.get_task(i) or {}).get("status") == "paused"]
 
 
-def augment(task_id: int, text: str) -> str:
+def augment(task_id: int, text: str, *, code_change: bool = False) -> str:
     """Fold a follow-up into a live code task WITHOUT restarting its session.
     It's buffered and delivered as part of the instructions the moment Arun acts
     on the task's next gate — the mandatory approval stays intact and there's no
     expensive Claude/Copilot session re-cache."""
     from . import activity, frontdesk
-    if frontdesk.task_intent(text) in ("read", "external"):
+    if not code_change and frontdesk.task_intent(text) in ("read", "external"):
         raise ValueError(f"task #{task_id} was not amended: this is a question or "
                          "external action, not code feedback")
     if activity.classify_interjection(text) == "new_task":
@@ -3694,13 +3694,17 @@ def refinable_match(title: str, prompt: str, workspace: str = "",
     return best if best_score >= 0.6 else None
 
 
-async def refine(task_id: int, feedback: str) -> str:
+async def refine(task_id: int, feedback: str, *, code_change: bool = False) -> str:
     """Continue a finished task with feedback, in the session it already has.
 
     This is the whole point of REFINABLE. The alternative — and what used to
     happen — is a new task with a new session, which starts by re-deriving
     everything the original one already worked out, and answers feedback about
     a change by writing a different change.
+
+    `code_change` is for callers whose text is already a code change by
+    construction (walkthrough review notes): "Review notes … add a comment"
+    reads as a review or an outward action to the intent rules, not as edits.
     """
     t = store.get_task(task_id)
     if not t:
@@ -3708,7 +3712,7 @@ async def refine(task_id: int, feedback: str) -> str:
     if t["kind"] != "code":
         raise ValueError(f"task #{task_id} is not a code task (kind={t['kind']})")
     from . import frontdesk
-    intent = frontdesk.task_intent(feedback)
+    intent = "edit" if code_change else frontdesk.task_intent(feedback)
     if intent in ("read", "external"):
         raise ValueError(f"task #{task_id} was not resumed: that is "
                          + ("a read-only question" if intent == "read"
@@ -3716,7 +3720,7 @@ async def refine(task_id: int, feedback: str) -> str:
                          + ", not an instruction to change its implementation")
     if t["status"] in LIVE_STATUSES:
         # Still running: augment() is the right door, and it needs no restart.
-        return augment(task_id, feedback)
+        return augment(task_id, feedback, code_change=code_change)
     if t["status"] not in REFINABLE:
         raise ValueError(f"task #{task_id} cannot be continued (status={t['status']})")
 

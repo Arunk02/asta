@@ -262,6 +262,28 @@ async def test_a_failed_task_can_be_continued(monkeypatch):
     assert store.get_task(tid)["status"] == "running"
 
 
+@pytest.mark.asyncio
+async def test_walkthrough_notes_resume_the_task_though_they_read_like_review(monkeypatch):
+    """"Review notes … add a comment" is classified as a review or an outward
+    action by the intent rules; the walkthrough's notes are code changes by
+    construction and must still reach the task (6 Oct regression)."""
+    tid = _task(status="done")
+    resumed = {}
+
+    async def spy(task_id, text, approved=False):
+        resumed["text"] = text
+
+    monkeypatch.setattr(tasks, "_resume_worker", spy)
+    spec = ("Review notes from Arun's walkthrough — apply each, nothing else:\n"
+            "1. A.java:5 — add a comment explaining the retry")
+    with pytest.raises(ValueError, match="not resumed"):
+        await tasks.refine(tid, spec)
+    out = await tasks.refine(tid, spec, code_change=True)
+    await asyncio.sleep(0)
+    assert "add a comment explaining the retry" in resumed["text"]
+    assert "same session" in out
+
+
 # --- the guard that stops a respawn ------------------------------------------
 
 def test_a_restated_title_is_recognised_as_feedback():

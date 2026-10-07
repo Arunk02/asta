@@ -2025,7 +2025,11 @@ async def _activity_connected(page) -> bool:
             params={"asta_connectivity": str(time.time_ns())},
             max_redirects=0, timeout=5000)
         try:
-            return response.ok and urlsplit(response.url).hostname == url.hostname
+            # Any answer from the Teams server is connectivity. Its front page
+            # answers 302 (to /v2 or "unsupported-browser"), so requiring 2xx
+            # reported Teams "offline" all evening on 7 Oct while chats were
+            # being read and sent normally.
+            return response.status < 500 and urlsplit(response.url).hostname == url.hostname
         finally:
             await response.dispose()
     except Exception:

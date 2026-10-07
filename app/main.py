@@ -2202,6 +2202,11 @@ def unproven_schedule(reply: str, since: float) -> str:
     return ""
 
 
+_INTERNAL_RELAY = re.compile(
+    r"\b(?:sent|passed|handed|forwarded|relayed|added|given)\s+(?:it\s+|that\s+|your\s+\w+\s+)?"
+    r"(?:to|on)\s+(?:the\s+)?task\s*#?\s*\d+", re.I)
+
+
 async def _correct_claims(out, conv: dict, reply: str, since: float) -> None:
     """"Already staged and ready — … is sent now with your confirm" (1 Oct, 14:40):
     nothing had been sent. Whatever the brain, a claim that something went out
@@ -2216,7 +2221,9 @@ async def _correct_claims(out, conv: dict, reply: str, since: float) -> None:
         store.add_ui_message(conv["id"], "assistant", line, {"via": "claim-check"})
         await out.send({"type": "note", "text": line})
     claim = unproven_send(reply, since)
-    if not claim:
+    if not claim or _INTERNAL_RELAY.search(claim):
+        # "Sent to task #263 — it'll strip…" (7 Oct) is Asta handing his answer
+        # to its own task, not a message to anyone; "corrected" as a false send.
         return
     line = ("⚠️ Correction: nothing was actually sent or posted just now — the line "
             f"above (“{claim[:120]}”) is wrong. Tell me what to send and to whom, and "

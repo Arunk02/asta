@@ -361,6 +361,7 @@ class _Page:
 
         class _Response:
             ok = page.state.get("network", False)
+            status = page.state.get("status", 200 if page.state.get("network") else 503)
             url = page.state.get("network_url", page.url)
 
             async def dispose(self):
@@ -684,6 +685,12 @@ def test_a_login_redirect_does_not_verify_cached_activity(monkeypatch):
     with pytest.raises(teams_bridge.ActivityOffline):
         asyncio.run(teams_bridge.read_activity_rows())
     assert page.probes == 1
+
+
+def test_a_redirect_from_teams_is_still_teams_answering():
+    """Its front page answers 302; that is not "offline" (7 Oct, all evening)."""
+    page = _Page(state={"offline": True, "network": False, "status": 302})
+    assert asyncio.run(teams_bridge._activity_connected(page)) is True
 
 
 def test_connectivity_probe_never_calls_a_non_teams_origin():

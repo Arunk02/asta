@@ -147,6 +147,11 @@ CODE_OVERRIDES = """
   Ask each thing at most once: intent/scope ambiguity HERE (pre-discovery);
   code-grounded questions LATER at the plan gate. Never double-ask, never ask
   here anything you could learn by reading the code.
+- Never run a command in the background or wait for one to land later (no `&`,
+  no run_in_background, no "I'll analyse when it finishes"). Run it in the
+  foreground with a timeout. When you stop, this run ENDS — nothing that is
+  still downloading or running comes back to you, and "waiting on X" is
+  reported to Arun as no change made.
 - ONE BRANCH, ONE WORKTREE. You work on the branch Asta cut for this task. If
   he wants the same change on a second base branch too ("develop as well as
   release 3.1.6"), make it ONCE here and say in your summary which other base
@@ -2168,6 +2173,115 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     await complete(task_id, t, result)
 
 
+_OUTCOME_FENCE = re.compile(r"```\s*outcome\s*\n(.*?)```", re.S | re.I)
+
+
+_FOLLOWUP = "task_refine_from:"
+
+
+_ABOUT_CI = re.compile(r"\b(?:ci|build|pipeline|checks?|component\s+tests?|ct|red|"
+                       r"fail(?:ed|ing|ure|ures)?)\b", re.I)
+
+
+async def _ci_failure_for(t: dict, feedback: str) -> str:
+    """For "fix the CI": the failed jobs and what their logs say, read by Asta
+    before the worker starts — so the worker does not download logs itself."""
+    if os.environ.get("ASTA_CI_PREFETCH", "1") == "0" or not _ABOUT_CI.search(feedback or ""):
+        return ""
+    out = []
+    for url in _pr_links(t)[:2]:
+        try:
+            pr = await asyncio.wait_for(_pr_state(url), 70)
+            if _checks_verdict(pr) != "red":
+                continue
+            why = await asyncio.wait_for(_why_red(pr, url, timeout=60), 130)
+        except Exception:                                      # noqa: BLE001
+            continue
+        failed = [f"{c.get('name')}: {c.get('detailsUrl') or c.get('targetUrl') or ''}"
+                  for c in _latest_checks(pr)
+                  if (c.get("conclusion") or c.get("state") or "").upper() in _CI_FAILED]
+        out.append(f"{url}\nFailed checks:\n" + "\n".join(f"- {f}" for f in failed[:6])
+                   + (f"\nFrom the failed logs:{why}" if why else
+                      "\n(The failed logs named no test; read the job log above in the foreground.)"))
+    return ("[CI failure Asta read from GitHub before you started — start from it; "
+            "do not download logs in the background]\n" + "\n\n".join(out)) if out else ""
+
+
+async def _record_followup_start(task_id: int, t: dict) -> None:
+    """Where a follow-up run starts: each repo's HEAD and the status it left."""
+    heads: dict[str, str] = {}
+    with contextlib.suppress(Exception):
+        from . import worktrees as _wt
+        for repo in _wt.repos_in(Path(task_cwd(task_id, t.get("workspace")))):
+            rc, sha = await repo_ops.git(repo, "git", "rev-parse", "HEAD")
+            if rc == 0 and sha.strip():
+                heads[str(repo)] = sha.strip()
+    store.kv_set(_FOLLOWUP + str(task_id), _json.dumps(
+        {"status": t.get("status", ""), "heads": heads}))
+
+
+async def _followup_changed_nothing(task_id: int, t: dict, result: str) -> bool:
+    """A follow-up run that ended without a commit or an edit is not DONE.
+
+    7 Oct, #257: asked to fix the red CI on booking PR 1470, it started the log
+    download in the background and stopped — "Waiting on both gh run view
+    --log-failed fetches" — and was announced as "✅ DONE … Already pushed — the
+    PR is updated", with CI still red and nothing changed."""
+    raw = store.kv_get(_FOLLOWUP + str(task_id))
+    if not raw:
+        return False
+    try:
+        start = _json.loads(raw)
+    except ValueError:
+        return False
+    heads = start.get("heads") or {}
+    if not heads:
+        return False
+    for repo, sha in heads.items():
+        rc, now = await repo_ops.git(Path(repo), "git", "rev-parse", "HEAD")
+        if rc != 0 or now.strip() != sha:
+            return False
+        rc, dirty = await repo_ops.git(Path(repo), "git", "status", "--porcelain")
+        if rc != 0 or dirty.strip():
+            return False
+    from . import notify, prname
+    store.kv_del(_FOLLOWUP + str(task_id))
+    back = start.get("status") or "done"
+    store.update_task(task_id, status=back if back in REFINABLE else "done",
+                      result=result, finished_at=time.time())
+    tail = [line.strip() for line in (readable_outcome(result) or "").splitlines() if line.strip()]
+    stopped = tail[-1][:300] if tail else "(no report)"
+    prs = _pr_links(store.get_task(task_id) or t)
+    where = (" " + ", ".join(prname.name_links(u) for u in prs) + " is unchanged"
+             + (" and still red." if back == "pr_ci_failed" else ".")) if prs else ""
+    await notify.notify(
+        f"⚠️ #{task_id} {t['title']} — no change made. It stopped at: “{stopped}”."
+        f"{where} Say 'fix #{task_id}' to try again.", "task")
+    store.record_outcome("task", "followup_no_change", subject=str(task_id), detail=stopped[:200])
+    return True
+
+
+def readable_outcome(result: str) -> str:
+    """The worker's report as he should read it: its ```outcome``` block turned
+    into its summary, never raw JSON — and its question kept even when the prose
+    only says "the two options above" (7 Oct, #263: the options were in the
+    block, the message showed neither)."""
+    text = result or ""
+    found = _OUTCOME_FENCE.search(text)
+    if not found:
+        return text
+    summary = ""
+    try:
+        data = _json.loads(found.group(1))
+        summary = " ".join(str(data.get(k) or "") for k in ("summary", "notes")).strip()
+    except (ValueError, TypeError, AttributeError):
+        summary = ""
+    prose = _OUTCOME_FENCE.sub("", text).strip()
+    if summary and summary not in prose:
+        prose = f"{prose}\n\n{summary}".strip()
+    return prose
+
+
 async def announce_context_check(task_id: int, t: dict, result: str) -> None:
     """The cheap early gate — intent unclear, asked before any discovery spend.
     Shared by both task engines, so the question reads the same either way."""
@@ -2176,7 +2290,7 @@ async def announce_context_check(task_id: int, t: dict, result: str) -> None:
     store.update_task(task_id, status="awaiting_approval", result=result)
     await notify.notify(
         f"❓ #{task_id} {t['title']} — quick context check before I dig in:\n\n"
-        f"{_phone_text(result, 900)}\n\n"
+        f"{_phone_text(readable_outcome(result), 900)}\n\n"
         f"Reply with the answer, or 'reject task {task_id}'.", "task")
 
 
@@ -2258,6 +2372,8 @@ async def complete(task_id: int, t: dict, result: str) -> None:
     """The one way a code task is marked done and announced — both engines."""
     from . import go, notify
     if (store.get_task(task_id) or {}).get("status") in _ALREADY_REPORTED:
+        return
+    if await _followup_changed_nothing(task_id, t, result):
         return
     # The branch the work is ACTUALLY on, read from git rather than from the name
     # Asta chose. Both were unpushed for #88/#89 while the pushed branch —
@@ -3763,6 +3879,8 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False) -> s
     # Feedback on a diff he has already seen is approval to keep working on it.
     mark_approved(task_id)
     was_shipped = t["status"] in SHIPPED_STATUSES
+    await _record_followup_start(task_id, t)
+    ci_read = await _ci_failure_for(t, feedback)
     store.update_task(task_id, status="running")
     prompt = (
         f"FOLLOW-UP ON YOUR OWN TASK — this is not a new task.\n"
@@ -3772,7 +3890,8 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False) -> s
            else "You already implemented this; the diff is in the working tree"
            + (" and a PR is open for it.\n" if was_shipped else ".\n"))
         + f"Arun's feedback:\n{feedback}\n\n"
-        f"Apply it to the EXISTING change. Do not start over, do not re-plan "
+        + (f"{ci_read}\n\n" if ci_read else "")
+        + f"Apply it to the EXISTING change. Do not start over, do not re-plan "
         f"from scratch, and do not revert what is already correct."
         + ("\nThe branch is already pushed — commit on top of it so the open PR "
            "picks the change up.\n" if was_shipped else "")

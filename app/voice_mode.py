@@ -24,6 +24,8 @@ Rules that do not bend:
   * A voice turn is an ordinary turn: same brain, guardrails, approvals. A
     send is read back and goes on "send it"; merges, group posts and anyone on
     his manager-and-above list still need a tap — voice can only prepare them.
+  * Voice has its own conversation for each mic-on sitting. It uses the same
+    selected model as chat, without carrying old WhatsApp messages into speech.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ import contextlib
 import json
 import re
 import time
+from collections.abc import Callable
 
 from . import store
 
@@ -106,7 +109,8 @@ REPEAT_SECONDS = 90.0
 _QUEUE: list[str] = []
 #: The turn being assembled: his pieces so far, a counter that moves when more
 #: comes, whether he is talking right now, and transcriptions still in flight.
-_TURN: dict = {"parts": [], "gen": 0, "first_at": 0.0, "speaking": False, "pending": 0}
+_TURN: dict = {"parts": [], "gen": 0, "first_at": 0.0, "speaking": False,
+               "pending": 0, "continued": False}
 #: The conversation, newest last: (when, "Arun" | "Asta", words).
 _HEARD: list[tuple[float, str, str]] = []
 _KV = "voice_mode"
@@ -154,6 +158,8 @@ async def set_mode(speaker: bool | None = None, mic: bool | None = None,
         _STATE["mic"] = bool(mic)
         if not mic:
             _TURN["speaking"] = False
+            _TURN["continued"] = False
+            store.kv_set("voice_conversation", "")
     store.kv_set(_KV, json.dumps({"speaker": _STATE["speaker"], "mic": _STATE["mic"], "at": now}))
     # Warm what is about to be used. The first transcription loads the model —
     # 9.8 s measured, then 1.4 s — and his first sentence must not be the one
@@ -190,6 +196,7 @@ def startup() -> bool:
         was = {}
     _STATE.update(speaker=False, mic=False, busy=False)
     store.kv_set(_KV, json.dumps({"speaker": False, "mic": False, "at": time.time()}))
+    store.kv_set("voice_conversation", "")
     return bool(was.get("speaker") or was.get("mic"))
 
 
@@ -266,11 +273,19 @@ async def _to_helper(msg: dict) -> bool:
         return False
 
 
-async def to_chat(text: str) -> None:
+async def to_chat(text: str) -> bool:
     """The whole answer, in his WhatsApp — what "the details are in the chat" promises."""
-    with contextlib.suppress(Exception):
-        from . import notify
-        await notify.wa_send("🎙 " + text.strip())
+    from . import notify
+    try:
+        delivered = await notify.wa_send("🎙 " + text.strip())
+    except Exception as exc:
+        store.record_outcome("voice", "chat_failed", detail=str(exc)[:200])
+        return False
+    if not delivered:
+        store.record_outcome("voice", "chat_failed", detail="WhatsApp delivery unavailable")
+    else:
+        store.record_outcome("voice", "chat_sent", detail=f"{len(text.strip())} characters")
+    return bool(delivered)
 
 
 async def say_lines(text: str) -> bool:
@@ -279,14 +294,15 @@ async def say_lines(text: str) -> bool:
     words = speakable(text)
     if not words:
         return False
-    if IN_CHAT in words:
-        asyncio.ensure_future(to_chat(text))
+    chat = asyncio.create_task(to_chat(text)) if IN_CHAT in words else None
     parts = [p for p in re.split(r"(?<=[.!?।])\s+", words) if p.strip()]
     started = time.time()
     ok = False
     for part in parts:
         if _STATE["barged_at"] > started:
             break                               # he talked over it: the rest is in the chat
+        if part == IN_CHAT and chat is not None and not await chat:
+            part = "I couldn't send the details to chat."
         ok = await say(part, kind="answer", since=started) or ok
     return ok
 
@@ -302,7 +318,8 @@ async def say(text: str, kind: str = "answer", since: float = 0.0) -> bool:
     if not words:
         return False
     if IN_CHAT in words and IN_CHAT not in (text or "") and kind == "answer":
-        asyncio.ensure_future(to_chat(text))        # cut short here: the rest goes to the chat
+        if not await to_chat(text):
+            words = words.replace(IN_CHAT, "I couldn't send the details to chat.")
     if kind == "answer" and words not in ACKS.values() and said_lately(words):
         store.record_outcome("voice", "not_repeated", detail=words[:120])
         return True                             # already said: once is enough
@@ -454,6 +471,15 @@ _NOISE = re.compile(r"^\W*(?:um+|uh+|hmm+|ah+|oh+|thank you|thanks|you|bye)\W*$"
 _ONE_WORD = re.compile(r"^\W*(?:send|yes|no|approve|approved|stop|cancel|retry|hello|hi|hey)\W*$", re.I)
 
 
+def wake_only(text: str) -> bool:
+    """A greeting or name alone calls Asta; it is not a chat or work request."""
+    words = re.findall(r"[^\W_]+", text or "")
+    return bool(words) and len(words) <= 5 and all(
+        word.lower() in ("hello", "hi", "hey") or bool(_NAME.fullmatch(word))
+        for word in words
+    ) and sum(bool(_NAME.fullmatch(word)) for word in words) <= 1
+
+
 #: Scripts he speaks: Latin (English, romanised Hindi) and Devanagari.
 _HIS_SCRIPTS = re.compile(r"[A-Za-z\u0900-\u097F]")
 _MUSIC = re.compile(r"\b(?:music|♪|♫)\b|[♪♫]|موسيقى", re.I)
@@ -532,7 +558,7 @@ def mac_words(said: str, confidence: float) -> str:
 
 
 async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float = 0.0,
-                asta: bool | None = None) -> dict:
+                asta: bool | None = None, appended: Callable[[], None] | None = None) -> dict:
     """One utterance from the helper: transcribe, decide, act. Returns what happened.
 
     `said` is the helper's own on-device transcription, made while he talked —
@@ -588,6 +614,8 @@ async def heard(wav: bytes, dry: bool = False, said: str = "", confidence: float
         _STATE["barged_at"] = time.time()
         store.record_outcome("voice", "barge", detail=mine[:120])
         await _to_helper({"type": "hush"})
+    if appended:
+        return await assemble(mine, appended=appended)
     return await assemble(mine)
 
 
@@ -681,21 +709,27 @@ def unfinished(text: str) -> bool:
     return not re.search(r"[.।]$", t) or bool(_TRAILING.search(t))
 
 
-async def assemble(text: str) -> dict:
+async def assemble(text: str, appended: Callable[[], None] | None = None) -> dict:
     """His pieces joined into one turn, decided once he has finished.
 
     The helper ends a piece at a short pause; people pause mid-sentence. So a
     piece waits a moment for the next — longer when it reads unfinished, for as
     long as he is still talking, and while another piece is being transcribed —
     and the turn is decided once, whole."""
-    if is_noise(text):
+    if is_noise(text) and not wake_only(text):
+        if not _TURN["parts"] and not _TURN["speaking"] and not _TURN["pending"]:
+            _TURN["continued"] = False
+        if appended:
+            appended()
         return {"text": text, "did": "ignored"}     # a waiting turn goes on waiting
     if not _TURN["parts"]:
         _TURN["first_at"] = time.time()
     _TURN["parts"].append(text)
     _TURN["gen"] += 1
+    if appended:
+        appended()
     gen = _TURN["gen"]
-    calling = len(_tokens(text)) <= 4 and (named(text) or _ONE_WORD.match(text))
+    calling = wake_only(text) or (len(_tokens(text)) <= 4 and (named(text) or _ONE_WORD.match(text)))
     hold = 0.0 if calling else HOLD_UNFINISHED_SECONDS if unfinished(text) else HOLD_SECONDS
     arrived = time.time()
     deadline = arrived + hold
@@ -703,6 +737,9 @@ async def assemble(text: str) -> dict:
         await asyncio.sleep(0.05)
         if _TURN["gen"] != gen:
             return {"text": text, "did": "joined"}  # more came: the newest piece decides
+        if (_TURN["continued"] and (_TURN["speaking"] or _TURN["pending"])
+                and time.time() - _TURN["first_at"] < MIC_IDLE_SECONDS):
+            continue
         if time.time() - _TURN["first_at"] > TURN_MAX_SECONDS or time.time() - arrived > HOLD_MAX_SECONDS:
             break
         if time.time() < deadline or (not calling and (_TURN["speaking"] or _TURN["pending"])):
@@ -710,6 +747,7 @@ async def assemble(text: str) -> dict:
         break
     whole = " ".join(_TURN["parts"])
     _TURN["parts"] = []
+    _TURN["continued"] = False
     return await handle(whole)
 
 
@@ -746,7 +784,7 @@ def in_conversation(now: float | None = None) -> bool:
 
 async def handle(text: str) -> dict:
     """What he said, already as text."""
-    if not listening() or is_noise(text):
+    if not listening() or (is_noise(text) and not wake_only(text)):
         return {"text": text, "did": "ignored"}
     command = len(_tokens(text)) <= 7     # a switch is said on its own, not inside a long sentence
     if command and _GO_OFF.search(text):
@@ -896,6 +934,11 @@ async def converse(text: str) -> dict:
     if done is not None:
         remember("Arun", text)
         return done
+    if wake_only(text):
+        _STATE["last_heard"] = time.time()
+        remember("Arun", text)
+        await say(ACKS["listening"], kind="answer")
+        return {"text": text, "did": "listening"}
     started = time.time()
     context = recent(started)
     decided = await voice_talker.route(text, context)
@@ -1309,16 +1352,15 @@ def _job_conversation(text: str) -> dict:
     conv = store.create_conversation(model="claude_cli", workspace=None)
     store.update_conversation(conv["id"], title=f"🎙 {text[:50]}")
     phone = store.get_conversation(store.kv_get("wa_conversation") or "") or conv
+    voice = store.get_conversation(store.kv_get("voice_conversation") or "") or conv
     with contextlib.suppress(Exception):
         conv["model"] = main._channel_model(phone)
-    ws = phone.get("workspace") or ""
+    ws = ""
+    with contextlib.suppress(Exception):
+        from .workspace import registry
+        ws = registry.infer(text) or ""
     if not ws:
-        # The project he is talking about, else his stated default. 2 Oct: every
-        # voice job ran with NO workspace — "what is Telikos Inland Booking" had
-        # no project knowledge to read, and was asked about four times.
-        with contextlib.suppress(Exception):
-            from .workspace import registry
-            ws = registry.infer(text) or ""
+        ws = voice.get("workspace") or ""
         if not ws:
             with contextlib.suppress(Exception):
                 from . import policy
@@ -1517,36 +1559,46 @@ def _kind_of(text: str) -> str:
 
 
 async def turn(text: str) -> str:
-    """Run what he said through the same pipeline as WhatsApp, and say the answer.
+    """Run what he said through the shared chat pipeline in a voice conversation.
 
     He hears something within about a second — the acknowledgement, or the
     answer's first sentence the moment the brain writes it — and the rest when
     it is done. Whatever he says meanwhile is its own turn: a comment on work in
     progress is folded into it by the dispatcher, as it is on WhatsApp."""
     from . import main
-    cid = store.kv_get("wa_conversation") or ""
+    cid = store.kv_get("voice_conversation") or ""
     conv = store.get_conversation(cid) if cid else None
+    phone = store.get_conversation(store.kv_get("wa_conversation") or "") or {}
     if conv is None:
-        conv = store.create_conversation(model="claude_cli", workspace=None)
-        store.kv_set("wa_conversation", conv["id"])
-    # The brain his phone conversation uses; if that cannot be worked out, the
-    # conversation's own — never no answer.
+        conv = store.create_conversation(model=phone.get("model") or "claude_cli", workspace=None)
+        store.update_conversation(conv["id"], title="Voice")
+        store.kv_set("voice_conversation", conv["id"])
+    # Use the phone's selected brain, not its old conversation history.
     with contextlib.suppress(Exception):
-        conv["model"] = main._channel_model(conv)
+        conv["model"] = main._channel_model(phone or conv)
     sink = VoiceSink()
     started = time.time()
-    job = await main._dispatch(conv, text, sink, "voice")
-    if job is not None:
-        done, _ = await asyncio.wait({job}, timeout=ACK_SECONDS)
-        if not done and sink.spoken == 0 and not sink.cut():
+    async def acknowledge() -> None:
+        await asyncio.sleep(ACK_SECONDS)
+        if sink.spoken == 0 and not sink.cut():
             await say(ACKS[_kind_of(text)], kind="answer")
-        if not done:
+
+    ack = asyncio.create_task(acknowledge())
+    try:
+        job = await main._dispatch(conv, text, sink, "voice")
+        if job is not None:
             # No timed "still on it": he called that nagging (2 Oct). He heard
             # the acknowledgement; the answer comes when it comes.
             await asyncio.wait({job}, timeout=TURN_SECONDS)
+    finally:
+        ack.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ack
     reply = sink.text()
     rest = "" if sink.cut() else speakable(reply, skip=sink.spoken)
     if rest:
+        if IN_CHAT in rest and not await to_chat(reply):
+            rest = rest.replace(IN_CHAT, "I couldn't send the details to chat.")
         await say(rest, kind="answer")
     store.record_outcome("voice", "turn", detail=f"{time.time() - started:.1f}s · {text[:120]}")
     return reply
@@ -1565,12 +1617,22 @@ async def idle_loop() -> None:
 
 
 async def _heard_quietly(wav: bytes, said: str = "", confidence: float = 0.0,
-                         asta: bool | None = None) -> None:
+                         asta: bool | None = None, previous: asyncio.Future[None] | None = None,
+                         ready: asyncio.Future[None] | None = None) -> None:
+    def mark_ready() -> None:
+        if ready is not None and not ready.done():
+            ready.set_result(None)
+
     try:
-        await heard(wav, said=said, confidence=confidence, asta=asta)
+        if previous is not None:
+            await previous
+        await heard(wav, said=said, confidence=confidence, asta=asta,
+                    appended=mark_ready if ready is not None else None)
     except Exception as exc:                                    # noqa: BLE001
         from . import quiet
         quiet.note("voice.heard", exc)
+    finally:
+        mark_ready()
 
 
 # --- the helper's connection ----------------------------------------------------------
@@ -1585,6 +1647,7 @@ async def serve(ws) -> None:
     store.record_outcome("voice", "helper", detail="connected")
     await _to_helper({"type": "state", **state(), "why": "connected"})
     await _to_helper({"type": "vocab", "words": vocabulary()})
+    previous_assembled: asyncio.Future[None] | None = None
     try:
         while True:
             msg = json.loads(await ws.receive_text())
@@ -1596,7 +1659,10 @@ async def serve(ws) -> None:
                 # waits while he talks.
                 _TURN["speaking"] = bool(msg.get("value"))
             elif kind == "utterance":
-                _TURN["speaking"] = False
+                if msg.get("continued") is True:
+                    _TURN["continued"] = True
+                else:
+                    _TURN["speaking"] = False
                 wav = base64.b64decode(msg.get("wav") or "")
                 said = str(msg.get("text") or "")
                 confidence = float(msg.get("confidence") or 0)
@@ -1607,8 +1673,11 @@ async def serve(ws) -> None:
                     # In the background: a turn can take minutes, and the hotkeys
                     # must keep working while it does.
                     asta = msg.get("asta")
+                    ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
                     asyncio.ensure_future(_heard_quietly(
-                        wav, said, confidence, asta if isinstance(asta, bool) else None))
+                        wav, said, confidence, asta if isinstance(asta, bool) else None,
+                        previous=previous_assembled, ready=ready))
+                    previous_assembled = ready
             elif kind == "transcript":
                 transcript(msg)
             elif kind == "barge":
@@ -1622,6 +1691,23 @@ async def serve(ws) -> None:
             elif kind == "locked":
                 if _STATE["mic"]:
                     await set_mode(mic=False, why="screen locked")
+            elif kind == "mic_error":
+                if _STATE["mic"]:
+                    reason = str(msg.get("reason") or "Microphone input failed")[:200]
+                    await set_mode(mic=False, why=reason)
+                    from . import notify
+                    if reason.startswith("Microphone could not start:"):
+                        notice = ("🎙 Mic stopped — macOS could not start the microphone. "
+                                  "Switching it on again will not help until system audio recovers. "
+                                  "Restart the Mac when safe, then check Sound > Input.")
+                    else:
+                        notice = ("🎙 Mic stopped — no audio reached Asta. Check the Mac microphone "
+                                  "and restart it with ⌃⌥M.")
+                    try:
+                        await notify.notify(notice, "voice", urgency="direct", considered=True)
+                    except Exception as exc:
+                        from . import quiet
+                        quiet.note("voice.mic_error_notify", exc)
             elif kind == "hello":
                 await _to_helper({"type": "state", **state(), "why": "hello"})
     except Exception:                                          # noqa: BLE001

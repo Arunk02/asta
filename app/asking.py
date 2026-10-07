@@ -152,6 +152,8 @@ _ANSWER_OPENING = re.compile(
     r"first\b|second\b|third\b|one\b|two\b|\d+\b|"
     r"it\b|that\b|this\b|booking\b|ap\b)",
     re.I)
+_NEW_QUESTION = re.compile(r"\b(?:what|why|when|where|who|which|how)\b|"
+                           r"\b(?:update me|status of|progress on)\b", re.I)
 
 
 def reads_as_an_instruction(text: str) -> bool:
@@ -184,7 +186,7 @@ def pending_for_reply(text: str | None = None) -> dict | None:
     if text is not None:
         said = text.strip()
         if (not said or len(said) > 200 or reads_as_an_instruction(said)
-                or _OTHER_WORK.search(said) or "?" in said
+                or _OTHER_WORK.search(said) or "?" in said or _NEW_QUESTION.search(said)
                 or not _ANSWER_OPENING.match(said)):
             return None
     rows = [q for q in store.open_questions()

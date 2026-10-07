@@ -979,6 +979,27 @@ def _already_live(title: str, prompt: str, workspace: str | None) -> dict | None
     return None
 
 
+def _prior_case_finding(prompt: str) -> str:
+    """Carry a recent same-case, same-env finding into a new read-only task."""
+    from . import answers, booking_case
+    scope = booking_case.case_scope(prompt)
+    if not scope:
+        return ""
+    for row in store.list_tasks(limit=80):
+        if row.get("kind") != "analysis" or row.get("status") != "done" \
+                or time.time() - float(row.get("finished_at") or 0) > 24 * 3600 \
+                or booking_case.case_scope(row.get("prompt") or "") != scope:
+            continue
+        analysis, _ = answers.split(row.get("result") or "")
+        finding = analysis.strip() or (row.get("result") or "").strip()
+        if finding:
+            return (f"\n\n[Prior task #{row['id']} for {scope[0]} in {scope[1]}: "
+                    "use its evidence, but verify the conclusion. Do not redo the "
+                    "same log query; investigate missing downstream steps, another "
+                    "attempt or newer events.]\n" + finding[:1800])
+    return ""
+
+
 #: A brief that asks to FIND something out, not to write to someone.
 _NOT_A_DRAFT = re.compile(
     r"\bdo\s+not\s+draft\b|\bdon'?t\s+draft\b|\bno\s+draft\b|\bjust\s+report\b|"
@@ -1025,8 +1046,8 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
         if prev and prev.get("result"):
             # Anchors from the earlier investigation — paying for discovery
             # twice was ~half of a code task's boot cost.
-            prompt += (f"\n\n[Prior investigation (task #{context_from}) — trust "
-                       "these anchors, do NOT re-discover them]\n"
+            prompt += (f"\n\n[Prior investigation (task #{context_from}) — use "
+                       "these anchors, verify the conclusion rather than re-discovering]\n"
                        + prev["result"][-2500:])
     same = _already_live(title, prompt, workspace)
     if same:
@@ -1041,6 +1062,8 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
         # perfectly ordinary request ("do that again"), and refusing it would be
         # the more annoying failure.
         return same
+    if kind == "analysis" and not context_from:
+        prompt += _prior_case_finding(prompt)
     t = store.create_task(title, kind, prompt, workspace or None, teams_chat)
     # Where it stands in the investigation queue: 0 = he asked for it himself,
     # 1 = urgent, then the attention ranks. Lower goes first.

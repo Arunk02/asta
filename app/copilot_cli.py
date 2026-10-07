@@ -742,21 +742,19 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     if model:
         cmd += ["--model", model]
     cmd += _budget_flags(os.environ.get("COPILOT_EFFORT", "medium"),
-                         os.environ.get("COPILOT_MAX_CREDITS", ""))
+                         os.environ.get("COPILOT_MAX_CREDITS", ""), model=model or "")
     return cmd
 
 
-def _budget_flags(effort: str, credits: str) -> list[str]:
+def _budget_flags(effort: str, credits: str, model: str = "") -> list[str]:
     """Reasoning effort and a hard credit ceiling.
 
-    Copilot was running at the provider default (`reasoningEffort: null`), which
-    on Sonnet-5 means it thinks hard about everything — a two-word status
-    question cost the same per turn as a refactor. Effort is the single biggest
-    dial on spend; credits are the seatbelt, so a confused run can't quietly
-    burn a chunk of the monthly quota before anyone notices.
+    The CLI's auto model rejects any explicit effort, including the default
+    stage setting. Only set effort with a pinned model; credits still apply to
+    auto so a confused run cannot quietly burn the monthly quota.
     """
     flags: list[str] = []
-    if effort and effort != "default":
+    if model and model.lower() != "auto" and effort and effort != "default":
         flags += ["--effort", effort]
     if credits:
         flags += ["--max-ai-credits", credits]
@@ -974,7 +972,7 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     # Headless workers are where the money goes — one ran 22 minutes
     # unchallenged. Their own effort/credit ceiling, separate from chat.
     cmd += _budget_flags(effort or os.environ.get("COPILOT_EFFORT_TASK", "medium"),
-                         os.environ.get("COPILOT_MAX_CREDITS_TASK", ""))
+                         os.environ.get("COPILOT_MAX_CREDITS_TASK", ""), model=model)
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         # Never inherit stdin. The CLI appends piped stdin to the prompt, so a

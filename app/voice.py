@@ -1033,24 +1033,24 @@ async def _self_test_in_browser() -> dict:
     would make a call silent.
     """
     from . import call_rtc, teams_bridge
-    out: dict = {"device": "Asta's microphone (in the browser)", "restored": True}
-    pw = ctx = None
+    out: dict = {"device": "Asta's microphone (in the browser)", "restored": True,
+                 "heard": False}
+    if teams_bridge.in_a_call():
+        out["error"] = "a Teams call is in progress — microphone test would send a tone"
+        return out
     try:
-        await teams_bridge.close_pool()          # one writer per profile
-        pw, ctx = await teams_bridge._launch(headless=False)
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        await page.goto("https://teams.microsoft.com/v2/",
-                        wait_until="domcontentloaded", timeout=60000)
-        peak = await call_rtc.mic_ready(page)
-        out.update(peak=peak, heard=peak > 0.01, label=out["device"])
+        async with teams_bridge.teams_page() as page:
+            if teams_bridge.in_a_call():
+                out["error"] = "a Teams call started — microphone test would send a tone"
+                return out
+            try:
+                peak = await call_rtc.mic_ready(page)
+            except RuntimeError as exc:
+                out["error"] = str(exc)
+            else:
+                out.update(peak=peak, heard=peak > 0.01, label=out["device"])
     except Exception as exc:                                     # noqa: BLE001
         out["error"] = f"{type(exc).__name__}: {exc}"
-    finally:
-        with contextlib.suppress(Exception):
-            if ctx is not None:
-                await ctx.close()
-            if pw is not None:
-                await pw.stop()
     return out
 
 

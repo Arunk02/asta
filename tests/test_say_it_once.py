@@ -520,13 +520,15 @@ def test_a_waiting_colleague_is_investigated_without_asking_him_first(monkeypatc
 
 def test_the_brief_says_earlier_messages_are_not_evidence_and_carries_the_latest_finding():
     from app import responder
-    t = store.create_task("Vinish Kumar asked", "analysis", "p", None)
+    t = store.create_task("Vinish Kumar asked", "analysis",
+                          "Check booking MH12AB34CD56 in uat", None)
     store.update_task(t["id"], status="done", finished_at=time.time() - 600,
                       result="ANALYSIS:\nIt was the price-update save on an invoiced job, "
                              "not an ETA change.\n\nREPLY:\nIt was the price update.")
     answers.remember_meta(t["id"], who="Vinish Kumar", need="INC9702338", chat="Vinish Kumar",
                           group=False, thread="teams:Vinish Kumar")
-    brief = responder._waiting_brief("Vinish Kumar", "Can you share the whole text flow?",
+    brief = responder._waiting_brief("Vinish Kumar",
+                                     "Can you share the whole text flow for MH12AB34CD56 in uat?",
                                      "Arun: the ETA update triggered the cancellation")
     assert "What was SAID in the chat is not what is TRUE" in brief
     assert "price-update save" in brief and f"task #{t['id']}" in brief
@@ -901,6 +903,37 @@ def test_the_send_he_asked_for_goes_out_as_a_recorded_call(monkeypatch):
     assert out.startswith("Sending to Vinish Kumar now")
     assert sent and sent[0]["name"] == "teams_send" and sent[0]["args"]["to_group"] is False
     assert not loop.awaiting(cid), "nothing is left waiting for a second yes"
+
+
+def test_the_private_one_to_one_rule_sends_only_to_the_named_recipient(monkeypatch):
+    from app import agent, guardrails, loop, notify, ops
+    monkeypatch.setattr(guardrails, "section",
+                        lambda name: "- Vinish Kumar" if name == "automatic teams replies" else "")
+    agent, cid = _asked(monkeypatch, "what did Vinish say?")
+    monkeypatch.setattr(tasks, "current_conversation", lambda: cid)
+    delivered = []
+
+    async def send(**kwargs):
+        delivered.append(kwargs)
+        return "✅ Sent to Vinish Kumar."
+
+    async def quiet(*args, **kwargs):
+        return None
+
+    monkeypatch.setitem(ops.REGISTRY, "teams_send", {"run": send})
+    monkeypatch.setattr(notify, "notify", quiet)
+
+    async def go():
+        result = agent.prepare_to_send("I checked it.", to="Vinish Kumar", channel="teams")
+        await asyncio.sleep(0.05)
+        return result
+
+    assert asyncio.run(go()).startswith("Sending to Vinish Kumar under the standing")
+    assert delivered == [{"to": "Vinish Kumar", "text": "I checked it.", "to_group": False}]
+    assert not loop.awaiting(cid)
+    assert agent.prepare_to_send("I checked it.", to="Vinish Kumar", channel="teams",
+                                 to_group=True).startswith("Draft staged")
+    assert len(delivered) == 1
 
 
 def test_a_group_is_never_sent_without_his_yes(monkeypatch):
@@ -1573,10 +1606,22 @@ def test_a_colleague_hears_checking_within_the_minute_once_an_hour(monkeypatch):
 
     monkeypatch.setattr(chat_watch, "_say", say)
     monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: ["bro"])
-    c = {"chat": "Vinish Kumar"}
+    c = {"chat": "Vinish Kumar", "last": "Please check booking H7JWWBZF5L9"}
     assert asyncio.run(chat_watch._acknowledge("teams:Vinish Kumar", c)) is True
     assert asyncio.run(chat_watch._acknowledge("teams:Vinish Kumar", c)) is False, "once an hour"
-    assert said == [("Vinish Kumar", "checking bro, will update you")]
+    assert said == [("Vinish Kumar", "Looking into the booking, bro")]
+
+
+def test_acknowledgement_reflects_the_actual_request_without_claiming_an_answer(monkeypatch):
+    from app import steward, writing
+    monkeypatch.setattr(writing, "address_terms", lambda chat, limit=400: ["bro"])
+    for request, expected in [
+        ("Can you review https://github.com/org/booking/pull/1466?", "Looking into the PR details, bro"),
+        ("What's the build status?", "Checking the build, bro"),
+        ("The error is happening again", "Looking into what went wrong, bro"),
+        ("Can you check this?", "Let me look into this, bro"),
+    ]:
+        assert steward.ack_line("Vinish Kumar", request) == expected
 
 
 def test_an_unclear_ask_is_asked_back_to_them_not_to_him(monkeypatch):

@@ -505,9 +505,10 @@ def test_automatic_send_records_only_the_fresh_verified_message(monkeypatch):
 def test_an_answer_he_already_gave_is_not_staged_again(monkeypatch, told):
     now = time.time()
     chat = "Shabda Anubhav, Vinish, +2"
+    request = "Arunkumar, please review the email service issue"
     store.kv_set("wa_conversation", _conv()["id"])
     store.save_teams_messages([{"key": "s1", "chat": chat, "sender": "Shabda Anubhav Dev",
-                                "text": "please review the email service issue", "sent_at": now - 240,
+                                "text": request, "sent_at": now - 240,
                                 "stamp": ""}])
 
     async def read(c, limit=0, max_scrolls=0, since=None):
@@ -518,7 +519,8 @@ def test_an_answer_he_already_gave_is_not_staged_again(monkeypatch, told):
     monkeypatch.setattr(tb, "read_history", read)
     assert asyncio.run(answers.present(who="Shabda Anubhav Dev", need="review email CT", chat=chat,
                                        group=True, analysis="Root cause: the 3.2.25 bump",
-                                       reply="checked, it's the bump")) is True
+                                       reply="checked, it's the bump",
+                                       source_text=request)) is True
     assert not loop.awaiting(answers.phone_conversation()), "no second reply staged"
     assert told and "already answered Shabda" in told[0] and "3.2.25" in told[0]
 

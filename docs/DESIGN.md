@@ -470,6 +470,12 @@ your phone, so the ability to act on it belongs there too. The choice sticks to 
 conversation; the default only fills in when you haven't picked one or the one you
 picked has since stopped being available. Resolved through the shared registry, so
 a brain added to the spec table is switchable from your phone the same day.
+Voice uses the selected phone brain but has its own conversation for each mic-on
+sitting, so old WhatsApp messages cannot steer live speech. Switching the mic off
+or restarting starts a fresh sitting.
+When speech crosses the helper's 30-second recording boundary, the previous
+audio is delivered before recognition restarts; the server waits for the next
+segment and transcribes the clips in recording order before deciding the complete utterance.
 
 **Which model, not just which brain.** "use opus", "use sonnet" and "use haiku"
 switch the model inside the Claude CLI brain, from any channel, and the picker
@@ -1100,6 +1106,14 @@ you with the ask. Four rules keep it from becoming the noise it replaced:
   recently-sent messages are investigated (`ASTA_RESPOND_MAX_AGE_MIN`), and a thread
   you have already replied in is left alone. Feedback on work you finished months
   ago is unaffected: it arrived just now.
+- **Recent words beat an old summary.** A bounded excerpt of both sides' latest
+  exchange goes into the investigation brief. A singular "the PR", ticket or
+  booking with several recent candidates is clarified before investigating; an
+  explicit correction to a recent answer withdraws any unsent draft and either
+  asks which item they mean or starts a fresh check rather than repeating it.
+- **Acknowledge the actual ask.** A 1:1 investigation gets one short receipt
+  naming its subject (PR, build, booking, ticket or failure), without claiming
+  a finding or spending another model call on small talk.
 - **Broadcasts are not asks.** A company-wide "Action Required", a channel post
   opening "Everyone please review" — nobody is waiting on you, and an approval queue
   you never answer teaches you to ignore the queue.

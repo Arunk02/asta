@@ -26,6 +26,8 @@ import time
 
 import pytest
 
+from test_round4_phase_d import phone  # noqa: F401
+
 from app import store
 
 
@@ -237,7 +239,8 @@ def rail(monkeypatch):
         return {}
 
     def _respond(source, who, text, **k):
-        asked.append({"who": who, "text": text, "context": k.get("context", "")})
+        asked.append({"who": who, "text": text, "context": k.get("context", ""),
+                      "correction_of": k.get("correction_of")})
         return None
 
     monkeypatch.setattr(chat_watch, "candidates", _candidates)
@@ -420,6 +423,13 @@ def test_different_bookings_are_different_work():
     assert rc.key_for("ask", "check booking 88271234") != rc.key_for("ask", "check booking 99999999")
 
 
+def test_same_booking_in_another_environment_or_for_another_flow_is_not_reused():
+    from app import results_cache as rc
+    base = rc.key_for("debug", "check invoice dispatch booking MH12AB34CD56 in uat")
+    assert base != rc.key_for("debug", "check invoice dispatch booking MH12AB34CD56 in preprod")
+    assert base != rc.key_for("debug", "check customs booking MH12AB34CD56 in uat")
+
+
 def test_a_running_investigation_is_joined_not_repeated(monkeypatch):
     from app import results_cache as rc
     tid = store.create_task("Check booking 88271234", "analysis", "brief", None)["id"]
@@ -544,3 +554,179 @@ def test_vinish_answering_your_question_reaches_you_at_once(rail):
     assert direct and "Vinish replied to you" in direct[0]["text"]
     assert "10 to 11" in direct[0]["text"] and "when ru free" in direct[0]["text"]
     assert rail.sent == [], "a time agreed is his to agree — Asta does not answer it"
+
+
+def test_implicit_reference_to_two_recent_prs_is_clarified_before_investigating(rail):
+    now = time.time()
+    chat = "Vinish Kumar"
+    for n, who, text in [
+        (3, "Arunkumar K", "RFP: https://github.com/org/booking/pull/1429"),
+        (2, "Arunkumar K", "NAM: https://github.com/org/booking/pull/1466"),
+        (1, chat, "Then merging both, bro"),
+    ]:
+        store.save_teams_messages([{"key": f"pr{n}", "chat": chat, "sender": who,
+                                    "text": text, "sent_at": now - 60 * n, "stamp": ""}])
+    from app import threads
+    threads.open("teams", chat, chat=chat, now=now - 3600)
+    threads.update("teams:Vinish Kumar", summary="Previously discussed PR 1257")
+    rail.rows[chat] = [_msg(chat, "Bro, merge the PR. Share ticket and build.", now)]
+    rail.script["teams:Vinish Kumar"] = {
+        "state": "ask", "need": "Share the ticket and build", "closing_confidence": 0.1,
+        "summary": "PR 1257 needs a build", "entities": [], "work": "check"}
+    rail.sweep()
+    assert not rail.asked
+    assert len(rail.sent) == 1
+    assert "1429" in rail.sent[0][1] and "1466" in rail.sent[0][1]
+    assert "1257" not in rail.sent[0][1]
+    rail.rows[chat] = [_msg(chat, "The second one, bro.", now + 30)]
+    rail.script["teams:Vinish Kumar"] = {
+        "state": "status", "need": "", "closing_confidence": 0.8,
+        "summary": "Vinish clarified which PR", "entities": []}
+    rail.sweep()
+    assert len(rail.asked) == 1
+    assert "/pull/1466" in rail.asked[0]["text"]
+    assert "merge the PR" in rail.asked[0]["text"]
+    assert "PR 1257" not in rail.asked[0]["context"]
+
+
+@pytest.mark.parametrize("text,history,wanted", [
+    ("Please check the ticket",
+     ["Arun: BEPTELIKOS-11249", "Arun: BEPTELIKOS-11300"], "BEPTELIKOS-11300"),
+    ("Check that booking",
+     ["Arun: H7JWWBZF5L9", "Vinish: H65ZMWX52B2"], "H65ZMWX52B2"),
+])
+def test_other_implicit_references_are_clarified_without_another_model(
+        text, history, wanted):
+    from app import chat_watch
+    assert wanted in chat_watch._reference_question(text, history)
+
+
+def test_explicit_reference_or_plural_request_does_not_trigger_clarification():
+    from app import chat_watch
+    history = ["Arun: https://github.com/org/booking/pull/1429",
+               "Arun: https://github.com/org/booking/pull/1466"]
+    assert not chat_watch._reference_question("Merge PR #1466", history)
+    assert not chat_watch._reference_question("Please check both PRs", history)
+    assert not chat_watch._reference_question(
+        "Merge the PR", ["Arun: https://github.com/org/booking/pull/1429",
+                         "Vinish: PR #1429"])
+    assert not chat_watch._resolved_reference("Not the first one", ["#1429", "#1466"])
+    assert chat_watch._resolved_reference("First and second", ["#1429", "#1466"]) \
+        == "#1429 and #1466"
+
+
+def test_recent_exchange_reaches_worker_even_when_thread_summary_is_old(rail):
+    now = time.time()
+    chat = "Vinish Kumar"
+    store.save_teams_messages([{"key": "recent-pr", "chat": chat, "sender": "Arunkumar K",
+                                "text": "https://github.com/org/booking/pull/1466",
+                                "sent_at": now - 90, "stamp": ""}])
+    from app import threads
+    threads.open("teams", chat, chat=chat, now=now - 3600)
+    threads.update("teams:Vinish Kumar", summary="Previously discussed PR 1257")
+    rail.rows[chat] = [_msg(chat, "Can you check the PR build?", now)]
+    rail.script["teams:Vinish Kumar"] = {
+        "state": "ask", "need": "Check the build", "closing_confidence": 0.1,
+        "summary": "PR 1257 needs a build", "entities": [], "work": "check"}
+    rail.sweep()
+    assert len(rail.asked) == 1
+    context = rail.asked[0]["context"]
+    assert "Recent exchange" in context and "/pull/1466" in context
+    assert "PR 1257" not in context, "a conflicting older summary must not enter the task"
+
+
+def test_new_request_does_not_get_trapped_behind_an_old_clarification(rail):
+    from app import chat_watch
+    now = time.time()
+    chat = "Vinish Kumar"
+    store.kv_set(chat_watch._REFERENCE_KEY + "teams:Vinish Kumar", json.dumps({
+        "at": now, "original": "Merge the PR", "candidates": ["#1429", "#1466"],
+        "exchange": ["Arun: PR #1429", "Arun: PR #1466"], "correction_of": None}))
+    rail.rows[chat] = [_msg(chat, "Can you check booking H7JWWBZF5L9 in UAT?", now)]
+    rail.script["teams:Vinish Kumar"] = {
+        "state": "ask", "need": "Check the UAT booking", "closing_confidence": 0.1,
+        "summary": "Vinish asked about a booking", "entities": [], "work": "check"}
+    rail.sweep()
+    assert rail.asked and "H7JWWBZF5L9" in rail.asked[0]["text"]
+    assert not rail.sent
+    assert not store.kv_get(chat_watch._REFERENCE_KEY + "teams:Vinish Kumar")
+
+
+def test_rejected_answer_with_ambiguous_reference_is_clarified_not_reused(rail, phone):
+    from app import answers, loop
+    now = time.time()
+    chat = "Vinish Kumar"
+    task = store.create_task("Answer Vinish", "analysis", "Earlier request", None)
+    store.update_task(task["id"], status="done", result="ANALYSIS:\nWrong PR\nREPLY:\nOld",
+                      finished_at=now - 60)
+    answers.remember_meta(task["id"], who=chat, need="merge", chat=chat,
+                          group=False, thread="teams:Vinish Kumar",
+                          source_text="Bro, merge the PR. Share ticket and build.")
+    loop.stage(phone["cid"], {"type": "answer", "to": chat, "task_id": task["id"]})
+    for n, number in enumerate((1429, 1466), 2):
+        store.save_teams_messages([{"key": f"prior{number}", "chat": chat, "sender": "Arunkumar K",
+                                    "text": f"https://github.com/org/booking/pull/{number}",
+                                    "sent_at": now - 60 * n, "stamp": ""}])
+    rail.rows[chat] = [_msg(
+        chat, "Arunkumar K\n06/10/2026 17:56\nOld PR answer\n\nNot correct Asta.", now)]
+    rail.script["teams:Vinish Kumar"] = {
+        "state": "closing", "need": "", "closing_confidence": 0.9,
+        "summary": "Everything resolved", "entities": []}
+    rail.sweep()
+    assert not rail.asked
+    assert len(rail.sent) == 1 and "1429" in rail.sent[0][1] and "1466" in rail.sent[0][1]
+    assert loop.awaiting(phone["cid"]) is None
+    assert any("withdrew the pending draft" in p["text"] for p in phone["pushed"])
+    rail.rows[chat] = [_msg(chat, "I meant #1466.", now + 30)]
+    rail.script["teams:Vinish Kumar"] = {
+        "state": "status", "need": "", "closing_confidence": 0.7,
+        "summary": "Vinish clarified", "entities": []}
+    rail.sweep()
+    assert rail.asked and rail.asked[0]["correction_of"] == task["id"]
+    assert "/pull/1466" in rail.asked[0]["text"]
+    assert sum("says my previous answer was wrong" in p["text"] for p in phone["pushed"]) == 1
+
+
+def test_specific_correction_reopens_work_instead_of_filing_status(rail):
+    from app import answers
+    now = time.time()
+    chat = "Vinish Kumar"
+    task = store.create_task("Booking check", "analysis", "Earlier request", None)
+    store.update_task(task["id"], status="done", result="Email sent",
+                      finished_at=now - 60)
+    answers.remember_meta(task["id"], who=chat, need="email status", chat=chat,
+                          group=False, thread="teams:Vinish Kumar",
+                          source_text="Check booking H7JWWBZF5L9")
+    rail.rows[chat] = [_msg(chat, "No, that's wrong: email delivery failed in UAT.", now)]
+    rail.script["teams:Vinish Kumar"] = {
+        "state": "status", "need": "", "closing_confidence": 0.7,
+        "summary": "Follow-up", "entities": []}
+    rail.sweep()
+    assert rail.asked and rail.asked[0]["correction_of"] == task["id"]
+    assert "email delivery failed" in rail.asked[0]["text"]
+    assert not rail.sent
+
+
+def test_explicit_correction_spawns_fresh_work_without_reusing_old_answer(monkeypatch):
+    from app import answers, responder, tasks
+    monkeypatch.setenv("ASTA_RESPOND", "1")
+    old = store.create_task("Check earlier answer", "analysis", "previous investigation", None)
+    store.update_task(old["id"], status="done", result="Old result", finished_at=time.time())
+    answers.remember_meta(old["id"], who="Ravi", need="the booking", chat="Ravi",
+                          group=False, thread="teams:Ravi",
+                          source_text="check booking H7JWWBZF5L9", kind="ask")
+    monkeypatch.setattr(responder, "familiar", lambda _: (True, "previous work"))
+    spawned = []
+
+    def spawn(title, prompt, kind, workspace, **kwargs):
+        spawned.append(prompt)
+        return store.create_task(title, kind, prompt, workspace)
+
+    monkeypatch.setattr(tasks, "spawn", spawn)
+    task = responder.respond("teams-chat", "Ravi", "Correction to the answer: wrong environment",
+                             key="new-correction", priority=1, reply_to="Ravi",
+                             correction_of=old["id"],
+                             context="Recent exchange: Arun: check UAT / Ravi: not prod")
+    assert task and task["id"] != old["id"] and len(spawned) == 1
+    assert "Old result" in spawned[0] and "Recent exchange" in spawned[0]
+    assert answers._meta(task["id"])["ask_kind"] == "ask"

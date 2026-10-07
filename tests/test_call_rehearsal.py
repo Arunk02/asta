@@ -1,14 +1,20 @@
 """The rehearsal's judge: turning what the simulated colleague heard into a verdict.
 
 The rehearsal itself needs Chrome, the voice server and a brain, so it runs by
-hand (`python -m app.call_rehearsal`). What it CONCLUDES is plain arithmetic
-over timestamps, and a wrong conclusion would pass a call that was not good
-enough — so that part is held here.
+hand (`python -m app.call_rehearsal`) or as an opt-in integration test. What it
+CONCLUDES is plain arithmetic over timestamps, and a wrong conclusion would
+pass a call that was not good enough — so that part is held here.
 """
 
 from __future__ import annotations
 
-from app import call_rehearsal as R
+import asyncio
+import os
+from pathlib import Path
+
+import pytest
+
+from app import call_rehearsal as R, store
 
 
 def _sc(**expect):
@@ -39,6 +45,32 @@ def test_a_slow_reply_fails_even_when_the_mm_hm_was_quick():
     spans = [_span(1500, 6000), _span(9900, 10250), _span(14400, 16000)]
     r = R._judge(_sc(reply_within=3.0, sound_within=1.2), timeline, spans, "Talked to", 20)
     assert not r["passed"] and r["reply_gaps"][1] == 5.0
+
+
+def test_a_quick_reaction_does_not_count_as_a_meaningful_answer():
+    timeline = [{"event": "connected", "at": 0},
+                {"event": "colleague", "text": "Can you hear me?", "start": 4000, "end": 5000}]
+    spans = [_span(100, 3000), _span(5400, 5800), _span(11000, 12500)]
+    saying = [(5300, "Mm."), (10800, "Yes, I hear you clearly.")]
+    r = R._judge(_sc(), timeline, spans, "Talked to Riya Test", 13, saying)
+    assert r["first_sound"] == [0.4]
+    assert r["meaningful_sound"] == [6.0]
+
+
+def test_a_fast_reply_does_not_pass_if_asta_missed_the_interruption():
+    timeline = [{"event": "connected", "at": 0},
+                {"event": "colleague", "text": "Sorry, wait, who is this?", "start": 1000, "end": 2300}]
+    spans = [_span(200, 2200), _span(2800, 4500)]
+    r = R._judge(_sc(stops_within=1.5, must_hear="who is this"), timeline, spans,
+                 "Talked to Riya Test", 10, heard_lines=["Okay, got it. Bye."])
+    assert not r["passed"] and "never heard the interruption" in r["fails"][0]
+
+
+def test_an_audio_check_does_not_pass_if_asta_brings_up_old_work():
+    r = R._judge(_sc(audio_only=True), [{"event": "connected", "at": 0}],
+                 [_span(100, 1800)], "Talked to Riya Test", 3,
+                 saying=[(100, "Any update on booking PR 1409?")])
+    assert "audio-only rehearsal drifted into Arun's work" in r["fails"]
 
 
 def test_speaking_into_a_voicemail_fails():
@@ -79,3 +111,46 @@ def test_a_rehearsal_from_days_ago_does_not_speak_for_today():
     path.write_text(json.dumps({"at": time.time() - 5 * 86400, "results": [
         {"scenario": "interrupts", "passed": False}]}))
     assert R.latest_failures() == ""
+
+
+@pytest.mark.skipif(os.environ.get("ASTA_SELF_TALK_TEST") != "1",
+                    reason="uses two local browser endpoints, Voicebox and a real call brain")
+def test_asta_to_asta_call_hears_and_answers_an_interruption(tmp_path, monkeypatch):
+    from app import voice
+
+    if not (Path(__file__).resolve().parents[1] / ".env").is_file():
+        pytest.skip("real call brain needs a configured local Asta checkout")
+    monkeypatch.setattr(voice, "BASE", voice.CONFIGURED_BASE)
+    monkeypatch.setattr(voice, "DEFAULT_PROFILE", "Asta (male)")
+    original_db = store.DB_PATH
+    try:
+        scenario = next(s for s in R.SCENARIOS if s.name == "interrupts")
+        report = asyncio.run(R.run(scenario, tmp_path))
+    finally:
+        store.DB_PATH = original_db
+    assert report["passed"], report["fails"]
+    assert report["reply_gaps"] and all(g is not None for g in report["reply_gaps"])
+    print(f"Asta-to-Asta call: heard interruption; reply gaps {report['reply_gaps']}s")
+
+
+@pytest.mark.skipif(os.environ.get("ASTA_SELF_TALK_TEST") != "1",
+                    reason="starts two no-tool call brains on isolated browser endpoints")
+def test_two_asta_brains_hear_and_answer_each_other_over_audio(tmp_path, monkeypatch):
+    from app import voice
+
+    if not (Path(__file__).resolve().parents[1] / ".env").is_file():
+        pytest.skip("two call brains need a configured local Asta checkout")
+    monkeypatch.setattr(voice, "BASE", voice.CONFIGURED_BASE)
+    monkeypatch.setattr(voice, "DEFAULT_PROFILE", "Asta (male)")
+    original_db = store.DB_PATH
+    try:
+        report = asyncio.run(R.run(R.TWO_MINDS, tmp_path))
+    finally:
+        store.DB_PATH = original_db
+    assert report["passed"], report["fails"]
+    assert len(report["partner_turns"]) == 2
+    assert len(report["primary_heard"]) >= 2
+    assert "hear" in report["partner_turns"][1]["heard"].lower()
+    assert "hear" in " ".join(report["primary_heard"]).lower()
+    print("Two Asta brains over WebRTC: partner reply delays "
+          f"{[turn['answer_after'] for turn in report['partner_turns']]}s")

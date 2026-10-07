@@ -83,6 +83,7 @@ def test_the_check_rule_puts_the_logs_over_the_documents():
     assert ID in r and "preprod" in r
     assert "what SHOULD happen" in r and "what DID happen" in r and "grafana_logs" in r and "Temporal" in r
     assert "the logs win" in r and "not confirmed in the logs" in r
+    assert "observed start/end, env and services" in r and "never extrapolate" in r
 
 
 def test_an_unnamed_environment_is_searched_everywhere_and_said_never_prod():
@@ -584,4 +585,48 @@ def test_the_event_log_lists_entries_with_their_source_and_billing_only_when_ask
 
 def test_the_rule_asks_for_milestones_and_the_event_log():
     r = booking_case.rule(f"what happened to {ID} in uat?")
-    assert "Milestones and the event log are how the UI tracks a booking" in r
+    assert "Milestones and the event log show upstream progress" in r
+    assert "not proof of downstream completion" in r
+    assert "failure, retry and eventual success" in r
+
+
+def test_an_unrelated_preprod_message_cannot_change_this_cases_environment():
+    from app import chat_watch
+    other = "MH34CD56EF78"
+    conversation = [f"Someone: {other} failed in preprod",
+                    f"Vinish: booking {ID} failed in uat",
+                    "Someone: the preprod issue is different"]
+    answer = chat_watch._with_the_case(f"can you check booking {ID}?", "", conversation)
+    assert "(environment: uat)" in answer
+    assert "preprod" not in answer
+    unknown = chat_watch._with_the_case(f"can you check booking {ID}?",
+                                        "", [conversation[0]])
+    assert "environment:" not in unknown
+
+
+def test_existing_case_finding_skips_repeating_the_automatic_log_fetch(monkeypatch):
+    import asyncio
+    from app import grafana
+    monkeypatch.setattr(grafana, "enabled", lambda: True)
+
+    async def unexpected(*args):
+        raise AssertionError("same identifier queried twice")
+
+    monkeypatch.setattr(grafana, "records_for", unexpected)
+    prompt = (booking_case.rule(f"check {ID} in uat") +
+              "\n\n[Prior task #2 for this case: use the finding]")
+    assert asyncio.run(booking_case.evidence(prompt)) == ""
+
+
+def test_log_query_failure_is_not_reported_as_no_matching_logs(monkeypatch):
+    import asyncio
+    from app import grafana
+    monkeypatch.setattr(grafana, "enabled", lambda: True)
+
+    async def failed(*args):
+        raise RuntimeError("Loki unavailable")
+
+    monkeypatch.setattr(grafana, "records_for", failed)
+    result = asyncio.run(booking_case.evidence(booking_case.rule(f"check {ID} in uat")))
+    assert "Query failed: uat: RuntimeError: Loki unavailable" in result
+    assert "no log lines returned" in result

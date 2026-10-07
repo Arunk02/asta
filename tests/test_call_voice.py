@@ -17,10 +17,55 @@ from __future__ import annotations
 import asyncio
 import io
 import wave
+from contextlib import asynccontextmanager
 
 import pytest
 
 from app import conversation, meetings, store, voice
+
+
+@pytest.mark.parametrize("peak,error", [(0.5, None), (None, "microphone is silent")])
+def test_call_mic_check_reuses_the_shared_browser(monkeypatch, peak, error):
+    from app import call_rtc, teams_bridge
+
+    page = object()
+    seen = []
+
+    @asynccontextmanager
+    async def shared_page():
+        seen.append("opened")
+        yield page
+        seen.append("released")
+
+    async def mic_ready(current_page):
+        assert current_page is page
+        if error:
+            raise RuntimeError(error)
+        return peak
+
+    async def must_not_close():
+        pytest.fail("a call mic check must not close the live Teams browser")
+
+    monkeypatch.setattr(teams_bridge, "teams_page", shared_page)
+    monkeypatch.setattr(teams_bridge, "close_pool", must_not_close)
+    monkeypatch.setattr(teams_bridge, "in_a_call", lambda: False)
+    monkeypatch.setattr(call_rtc, "mic_ready", mic_ready)
+    result = asyncio.run(voice._self_test_in_browser())
+    assert seen == ["opened", "released"]
+    assert result.get("heard") is (error is None)
+    assert result.get("error") == error
+
+
+def test_call_mic_check_does_not_inject_a_tone_into_an_active_call(monkeypatch):
+    from app import call_rtc, teams_bridge
+
+    monkeypatch.setattr(teams_bridge, "in_a_call", lambda: True)
+    monkeypatch.setattr(teams_bridge, "teams_page",
+                        lambda: pytest.fail("must not touch the active call browser"))
+    monkeypatch.setattr(call_rtc, "mic_ready",
+                        lambda _: pytest.fail("must not inject a test tone into the call"))
+    result = asyncio.run(voice._self_test_in_browser())
+    assert result["heard"] is False and "call is in progress" in result["error"]
 
 
 def _wav(seconds: float = 0.2, rate: int = 24000, hz: int = 220) -> bytes:

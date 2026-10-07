@@ -370,3 +370,34 @@ def test_a_long_prompt_cannot_dilute_its_way_past_the_guard():
         "Skip vessel schedule updates for cancelled bookings",
         "also handle EXECUTED " + " ".join(f"unrelated{i}" for i in range(200)))
     assert m and m["id"] == tid
+
+
+@pytest.mark.asyncio
+async def test_his_prs_green_result_reaches_him_even_at_the_laptop(monkeypatch):
+    """7 Oct 22:59: "✅ CI green on booking PR 1470" was held as ambient news
+    while he sat at the laptop asking whether it had passed."""
+    from app import notify, wake
+
+    class _Stop(Exception):
+        pass
+    calls = {"n": 0}
+
+    async def sleep(_seconds):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise _Stop
+
+    async def green(_tid):
+        return "✅ CI green on booking PR 1470 (#257 x)\nhttps://github.com/o/r/pull/1470\nWaiting on review."
+    sent = []
+
+    async def _notify(text, level="info", urgency="direct", *a, **k):
+        sent.append(urgency)
+        return {}
+    monkeypatch.setattr(wake, "sleep", sleep)
+    monkeypatch.setattr(tasks, "open_prs", lambda: [257])
+    monkeypatch.setattr(tasks, "check_pr", green)
+    monkeypatch.setattr(notify, "notify", _notify)
+    with pytest.raises(_Stop):
+        await tasks.pr_watch_loop()
+    assert sent == ["direct"]

@@ -3905,11 +3905,11 @@ async def pr_watch_loop() -> None:
                 continue      # a transient gh failure is not worth a report
             if not note:
                 continue
-            # Red CI and a change request are both "you are blocked" — those
-            # interrupt. A merge is good news, and good news can wait.
-            good = note.startswith(("🎉", "✅"))
-            await notify.notify(note, "task",
-                                urgency="ambient" if good else "direct")
+            # His own PR's result is the thing he is waiting for, good news
+            # included. "Good news can wait" held "✅ CI green on booking PR
+            # 1470" while he sat at the laptop asking whether it had passed
+            # (7 Oct, 22:59) — and he had asked the same three times on 30 Sep.
+            await notify.notify(note, "task", urgency="direct")
 
 
 #: How long after a task finishes its work is still "the thing we were just

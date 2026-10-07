@@ -83,7 +83,8 @@ def fake(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _instant_brain(monkeypatch):
-    from app import call_mind
+    from app import call_mind, main
+    monkeypatch.setattr(main, "_channel_model", lambda conv: "claude_cli")
     monkeypatch.setattr(call_mind, "start", lambda *a, **k: _done(None))
     monkeypatch.setattr(conversation, "answer_from_knowledge",
                         lambda *a, **k: _done("that's a fair point, I'll note it"))

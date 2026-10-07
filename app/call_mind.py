@@ -7,12 +7,11 @@ also read the workspace, which is the right machinery for a code question and
 the wrong one for "yes, go on". On a call, a pause of a few seconds is the line
 going dead.
 
-So a call gets its own brain, started while the phone is still ringing and kept
-for the whole call: each thing they say is one more message into a process that
-is already running (measured: ~3-4 s a turn, against 6-9 s to start a new one).
-No tools — nothing a call brain says can act on anything — and one job: say the
-next one or two sentences, never commit Arun to anything, and mark the end of
-the call when its purpose is done.
+With Claude selected, a warm process handles the whole call (measured: ~3-4 s
+per turn). With Copilot selected, each turn resumes a no-tool CLI session; it
+streams the reply but starts a new process, so it is slower. Both are primed
+before the call rings and have one job: say the next one or two sentences,
+never commit Arun to anything, and mark the end of the call when done.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ import json
 import os
 import re
 import tempfile
+import uuid
 
 #: The model a call talks with. Speed matters more than depth here: anything
 #: that needs real digging is "I'll check with Arun and come back".
@@ -271,6 +271,92 @@ class Mind:
                 self.proc.kill()
 
 
+class CopilotMind(Mind):
+    """A no-tool Copilot call session; each turn resumes the same conversation."""
+
+    def __init__(self, system: str):
+        self.system = system
+        self.session_id = str(uuid.uuid4())
+        self.primed = False
+        self.lock = asyncio.Lock()
+        self.proc = None
+
+    async def _ask(self, text: str, timeout: float) -> str:
+        return "".join([piece async for piece in self._stream(text, timeout)
+                        if piece is not _COMPLETE]).strip()
+
+    async def _stream(self, text: str, timeout: float):
+        async with self.lock:
+            command = ["copilot", "-p", (text if self.primed else self.system + "\n\n" + text),
+                       "--resume" if self.primed else "--session-id", self.session_id,
+                       "--output-format=json", "--stream=on", "--no-ask-user",
+                       "--no-color", "--no-custom-instructions", "--disable-builtin-mcps",
+                       "--dynamic-retrieval", "skills=off", "--available-tools=none"]
+            self.proc = await asyncio.create_subprocess_exec(
+                *command, stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                cwd=tempfile.gettempdir(), env={**os.environ, "CI": "1"})
+            streamed = False
+            seen = False
+            opening = ""
+            released = False
+            complete = False
+            try:
+                while True:
+                    line = await asyncio.wait_for(self.proc.stdout.readline(), timeout)
+                    if not line:
+                        break
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if complete:
+                        continue
+                    data = event.get("data") or {}
+                    if event.get("type") == "assistant.message_delta":
+                        chunk = data.get("deltaContent") or ""
+                        if chunk:
+                            streamed = seen = True
+                            if not released:
+                                opening += chunk
+                                if _refusal(opening):
+                                    raise Unavailable("Copilot's usage limit is reached")
+                                if _SENTENCE_END.search(opening) or len(opening) > 100:
+                                    yield opening
+                                    opening = ""
+                                    released = True
+                            else:
+                                yield chunk
+                    elif event.get("type") == "assistant.message" and not streamed:
+                        whole = data.get("content") or ""
+                        if whole:
+                            if _refusal(whole):
+                                raise Unavailable("Copilot's usage limit is reached")
+                            seen = True
+                            yield whole
+                    elif event.get("type") == "result":
+                        if event.get("exitCode") not in (None, 0):
+                            raise Unavailable("Copilot could not answer the call")
+                        complete = True
+                if await asyncio.wait_for(self.proc.wait(), 2) != 0 or not seen:
+                    raise Unavailable("Copilot could not answer the call")
+                if opening:
+                    yield opening
+                self.primed = True
+                yield _COMPLETE
+            finally:
+                if self.proc.returncode is None:
+                    self.proc.kill()
+                    with contextlib.suppress(Exception):
+                        await self.proc.wait()
+
+    async def close(self) -> None:
+        if self.proc and self.proc.returncode is None:
+            self.proc.kill()
+            with contextlib.suppress(Exception):
+                await self.proc.wait()
+
+
 #: Added when the call is spoken in HIS cloned voice. His voice reading
 #: assistant-register English is the uncanny part — the voice is his and the
 #: words are nobody's. The idiom below is taken from the same Teams history
@@ -362,5 +448,22 @@ async def spawn(system: str, model: str = "") -> Mind:
 
 async def start(who: str, topic: str, agenda: str = "", minutes: float = 0,
                 as_him: bool = False) -> Mind:
-    """Spawn the call's brain and prime it while the phone rings."""
-    return await spawn(persona(who, topic, agenda, minutes, as_him))
+    """Prime the selected chat brain while the phone rings; keep it for this call."""
+    from . import agent, main, store
+    selected = main._preferred_model()
+    phone = store.get_conversation(store.kv_get("wa_conversation") or "") or {}
+    brain = main._channel_model(phone)
+    if selected and selected != brain:
+        raise Unavailable(f"{selected} is unavailable")
+    if brain == "copilot":
+        mind = CopilotMind(persona(who, topic, agenda, minutes, as_him))
+        try:
+            await mind._ask("Reply with just: ready", 40)
+        except Exception as exc:
+            await mind.close()
+            raise Unavailable("Copilot could not start the call") from exc
+        return mind
+    if brain != "claude_cli":
+        raise Unavailable(f"{brain} cannot answer a live call")
+    return await spawn(persona(who, topic, agenda, minutes, as_him),
+                       agent.tier_of("claude_cli") or MODEL)

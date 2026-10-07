@@ -5,7 +5,7 @@ to 115 seconds, while the voice layer waited and filled the silence: "very
 delay", "on it, on it every interval", and casual words and music turned into
 actions. He asked for a Jarvis-level benchmark.
 
-So two brains, the shape real voice assistants use:
+When Claude CLI is selected, two brains are used:
 
   talker  a warm Claude (the call engine's — first words in about a second),
           no tools, briefed with his live work. It answers what it can, stays
@@ -13,7 +13,8 @@ So two brains, the shape real voice assistants use:
   worker  the existing pipeline, unchanged, run in the background. Its answer
           comes back to the talker, which says the outcome once.
 
-The talker's reply protocol, kept deliberately small:
+When Copilot is selected, voice answers run through the shared chat brain
+instead; this Claude-only talker is not started. The talker's reply protocol:
   [QUIET]  not meant for Asta — say nothing
   [DO]     needs the worker — what is said before it is the one acknowledgement
 """
@@ -146,10 +147,12 @@ async def mind():
 
 
 async def _start():
-    from . import call_mind
+    from . import agent, call_mind
     try:
-        m = await call_mind.spawn(PERSONA, MODEL)
+        m = await call_mind.spawn(PERSONA, agent.tier_of("claude_cli") or MODEL)
     except Exception as exc:                                    # noqa: BLE001
+        if agent.transient_limit(str(exc)):
+            agent.mark_quota_down("claude_cli", str(exc))
         _TALKER["failed_at"] = time.time()
         store.record_outcome("voice", "talker_failed", detail=str(exc)[:200])
         return None
@@ -175,8 +178,8 @@ async def _refresh() -> None:
         return
     _TALKER["refreshing"] = True
     try:
-        from . import call_mind
-        new = await call_mind.spawn(PERSONA, MODEL)
+        from . import agent, call_mind
+        new = await call_mind.spawn(PERSONA, agent.tier_of("claude_cli") or MODEL)
         brief = await _brief(new)
         old = _TALKER["mind"]
         _TALKER.update(mind=new, briefed=brief, briefed_at=time.time() if brief else 0.0, turns=0, fresh=True)
@@ -185,6 +188,9 @@ async def _refresh() -> None:
             with contextlib.suppress(Exception):
                 await old.close()
     except Exception as exc:                                    # noqa: BLE001
+        from . import agent
+        if agent.transient_limit(str(exc)):
+            agent.mark_quota_down("claude_cli", str(exc))
         store.record_outcome("voice", "talker_failed", detail=f"refresh: {exc}"[:200])
     finally:
         _TALKER["refreshing"] = False

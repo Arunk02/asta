@@ -22,7 +22,7 @@ import time
 from . import store
 
 #: Channels that are one endless thread. The web UI has its own chats.
-_PHONE = ("whatsapp", "telegram")
+_PHONE = ("whatsapp", "telegram", "voice")
 
 
 def applies_to(channel: str) -> bool:

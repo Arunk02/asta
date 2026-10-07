@@ -92,6 +92,7 @@ def test_what_is_a_question_for_the_knowledge_and_check_is_work():
 
 def test_a_voice_question_is_answered_from_the_knowledge_without_a_job(world, monkeypatch):
     from app import frontdesk, main, voice, voice_talker
+    monkeypatch.setattr(vm, "_talker_selected", lambda: True)
     monkeypatch.setattr(frontdesk, "answer_from_state", lambda text: None)
 
     async def route(text, context=None):

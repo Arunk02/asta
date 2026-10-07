@@ -464,18 +464,25 @@ with per-conversation continuity, at zero personal API cost. If it hits a quota
 error mid-conversation the turn is handed to whichever brain is actually up, with a
 note in the chat saying who took over and that the work carried across.
 
-**Switch from anywhere.** "use claude_cli", "switch to copilot", "which model" work
-on WhatsApp and Telegram, not just the web picker — the quota warning arrives on
-your phone, so the ability to act on it belongs there too. The choice sticks to the
-conversation; the default only fills in when you haven't picked one or the one you
-picked has since stopped being available. Resolved through the shared registry, so
-a brain added to the spec table is switchable from your phone the same day.
-Voice uses the selected phone brain but has its own conversation for each mic-on
-sitting, so old WhatsApp messages cannot steer live speech. Switching the mic off
-or restarting starts a fresh sitting.
+**Switch from anywhere.** "use Claude" selects the Claude CLI subscription;
+"use Copilot" selects Copilot CLI. Commands on web/phone/voice and the web picker
+save one preference for subsequent text, voice, and new calls, including after a
+restart. The preference takes precedence over older conversations' model fields;
+the default is used only until a preference is set. If the selected brain is
+unavailable, text/voice announces the fallback; a new call does not ring on a
+different brain. An ongoing call finishes on the brain selected when it started.
+Claude's warm voice talker is used only when Claude CLI is selected. Copilot
+voice answers use the chat pipeline; Copilot calls resume a no-tool CLI session
+per turn, so their responses can be slower than the warm Claude call engine.
+An explicit Claude tier (Opus/Sonnet/Haiku) also follows the choice into voice
+and new calls.
+Voice turns use their own conversation for each mic-on sitting, so old WhatsApp
+messages cannot steer a live voice exchange. Switching the mic off or restarting
+starts a fresh voice sitting; the selected model remains shared across channels.
 When speech crosses the helper's 30-second recording boundary, the previous
 audio is delivered before recognition restarts; the server waits for the next
 segment and transcribes the clips in recording order before deciding the complete utterance.
+Within a sitting, the CLI retires an oversized session above 24k context tokens.
 
 **Which model, not just which brain.** "use opus", "use sonnet" and "use haiku"
 switch the model inside the Claude CLI brain, from any channel, and the picker

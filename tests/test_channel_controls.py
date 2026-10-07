@@ -16,9 +16,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from fastapi import HTTPException
 
 from app import agent as agent_mod
-from app import main, offers, resume, store
+from app import main, offers, resume, store, tasks
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +49,8 @@ def _reg(monkeypatch, **avail):
     monkeypatch.setattr(agent_mod, "model_registry", lambda: {
         name: {"label": name.title(), "available": ok, "detail": "" if ok else "add a key"}
         for name, ok in avail.items()})
+    monkeypatch.setattr(agent_mod, "available", lambda name: avail.get(name, False))
+    monkeypatch.setattr(agent_mod, "quota_down", lambda name: False)
 
 
 def _say(conv, text, sink=None, channel="whatsapp"):
@@ -121,12 +124,70 @@ def test_a_phone_channel_honours_his_choice(monkeypatch):
     assert main._channel_model({"model": "claude_cli"}) == "claude_cli"
 
 
+def test_selecting_an_available_cli_does_not_probe_local_model(monkeypatch):
+    monkeypatch.setattr(agent_mod, "model_registry",
+                        lambda: pytest.fail("local model probe on a voice turn"))
+    monkeypatch.setattr(agent_mod, "available", lambda name: name == "copilot")
+    monkeypatch.setattr(agent_mod, "quota_down", lambda name: False)
+    store.kv_set("chat_model_preference", "copilot")
+    assert main._channel_model({"model": "claude_cli"}) == "copilot"
+
+
 def test_a_choice_that_has_since_broken_falls_back_rather_than_failing(monkeypatch):
     """He closed LM Studio. Answering on something that works beats not answering."""
     _reg(monkeypatch, copilot=True, local=False)
     monkeypatch.setattr(agent_mod, "default_chat_model", lambda: "copilot")
     assert main._channel_model({"model": "local"}) == "copilot"
     assert main._channel_model({}) == "copilot"
+
+
+def test_switching_brains_applies_to_every_chat_and_voice_after_reload(monkeypatch):
+    _reg(monkeypatch, copilot=True, claude_cli=True, claude=False)
+    first, other = _conv("copilot"), _conv("copilot")
+    assert "chat and voice" in main._switch_model(first, "claude")
+    assert first["model"] == "claude_cli", "the spoken name uses the CLI subscription"
+    assert store.kv_get("chat_model_preference") == "claude_cli"
+    assert main._channel_model(store.get_conversation(other["id"])) == "claude_cli"
+    assert main._preferred_model() == "claude_cli"
+    main._switch_model(other, "copilot")
+    assert main._channel_model(store.get_conversation(first["id"])) == "copilot"
+
+
+def test_an_unavailable_shared_preference_announces_the_fallback(monkeypatch):
+    _reg(monkeypatch, copilot=True, claude_cli=False)
+    monkeypatch.setattr(agent_mod, "default_chat_model", lambda: "copilot")
+    store.kv_set("chat_model_preference", "claude_cli")
+    conv, sink = _conv("copilot"), _Sink()
+    monkeypatch.setattr(main, "_start_turn", lambda *a: None)
+    _say(conv, "a regular question", sink)
+    assert conv["model"] == "copilot"
+    assert store.kv_get("chat_model_preference") == "claude_cli"
+    assert "claude_cli is unavailable; using copilot" in str(sink.sent)
+
+
+def test_web_picker_updates_the_same_model_as_spoken_commands(monkeypatch):
+    _reg(monkeypatch, copilot=True, claude_cli=True)
+    moved = []
+    async def use_brain(brain):
+        moved.append(brain)
+    monkeypatch.setattr(tasks, "use_brain", use_brain)
+    class Request:
+        async def json(self):
+            return {"model": "claude_cli"}
+    assert asyncio.run(main.api_model_preference(Request())) == {"model": "claude_cli"}
+    assert main._channel_model(_conv("copilot")) == "claude_cli"
+    assert moved == ["claude"]
+
+
+def test_web_picker_rejects_unavailable_model(monkeypatch):
+    _reg(monkeypatch, copilot=True, claude_cli=False)
+    class Request:
+        async def json(self):
+            return {"model": "claude_cli"}
+    with pytest.raises(HTTPException) as failure:
+        asyncio.run(main.api_model_preference(Request()))
+    assert failure.value.status_code == 400
+    assert not main._preferred_model()
 
 
 # --- switching does not answer a question -----------------------------------

@@ -85,6 +85,29 @@ def repos_in(workspace_root: Path) -> list[Path]:
     return [root] if (root / ".git").exists() else []
 
 
+#: Where repos outside his workspaces live — a library the services depend on.
+#: 8 Oct, #268: told to fix telikos-event-router-library, the task found only the
+#: three booking-workspace services and stopped; the library was in ~/Projects.
+REPO_DIRS = os.environ.get("ASTA_REPO_DIRS", "~/Projects")
+
+
+def outside(*hints: str) -> list[Path]:
+    """Repos outside the workspace that these words name EXACTLY (full repo
+    name) — never a guess, so a task only reaches a repo it said it needs."""
+    text = " ".join(h or "" for h in hints).lower()
+    found: list[Path] = []
+    for folder in (REPO_DIRS or "").split(":"):
+        base = Path(folder.strip()).expanduser() if folder.strip() else None
+        if base is None or not base.is_dir():
+            continue
+        for repo in sorted(base.iterdir()):
+            if (repo / ".git").exists() and re.search(
+                    rf"(?<![\w-]){re.escape(repo.name.lower())}(?![\w-])", text) \
+                    and all(r.name != repo.name for r in found):
+                found.append(repo)
+    return found
+
+
 def all_repos_in(workspace_root: Path) -> list[Path]:
     """Every repo a task could have touched, including a workspace-level one.
 
@@ -169,7 +192,14 @@ async def create(workspace_root: Path, task_id: int, branch: str,
     root = root_for(workspace_root, task_id)
     root.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
-    for repo in repos_for(workspace_root, *hints):
+    inside = repos_in(workspace_root)
+    extra = [r for r in outside(*hints) if all(r.name != x.name for x in inside)]
+    text = " ".join(h or "" for h in hints)
+    named = [r for r in inside if _names(r.name) & _tokens(text)]
+    # A repo outside the workspace was named and nothing inside was: prepare
+    # just that one, not every service by the "nothing matched" fallback.
+    chosen = named if extra else repos_for(workspace_root, *hints)
+    for repo in chosen + extra:
         out: dict = {"repo": repo.name, "branch": branch, "base": "", "ok": False,
                      "note": "", "path": str(root / repo.name)}
         # Fetch so the branch is cut from what origin has now, not from whatever
@@ -219,7 +249,7 @@ async def remove(workspace_root: Path, task_id: int, force: bool = False) -> lis
     if not root.is_dir():
         return []
     notes: list[str] = []
-    for repo in repos_in(workspace_root):
+    for repo in repos_in(workspace_root) + outside(*[p.name for p in root.iterdir()]):
         target = root / repo.name
         if not target.exists():
             continue

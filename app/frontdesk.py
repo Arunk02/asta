@@ -281,6 +281,12 @@ _TASK_EDIT = re.compile(
     r"|\bfix\s+(?:it|this|the\s+(?:code|test|failure|bug))\b"
     # "…like job closure, now update it correctly" (7 Oct, #257): the order
     # comes last, after the domain facts — "update" there is not "any update?".
+    # Narrowing what it does (8 Oct, #268): "dont revert the whole changes of
+    # him, only the changes related to startup flag issue".
+    r"|\b(?:don'?t|do\s+not|never)\s+(?:revert|undo|change|touch|remove|delete|modify|"
+    r"rewrite|refactor|bump)\b"
+    r"|\bonly\s+(?:revert|undo|change|fix|touch|keep|bump|the\s+(?:changes?|part|fix))\b"
+    r"|^\s*(?:revert|undo|roll\s*back|keep)\b"
     r"|\b(?:update|change|fix|correct|modify|rework|redo|apply)\s+"
     r"(?:it|this|that|them|accordingly|the\s+(?:code|change|logic|implementation|"
     r"mapping|enum|handling))\b", re.I)

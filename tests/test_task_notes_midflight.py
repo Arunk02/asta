@@ -126,3 +126,21 @@ def test_a_run_stopped_by_a_missing_checkout_gets_the_checkout(library):
     assert tasks._repos_still_needed(t["id"], t, BLOCKED) == ["telikos-event-router-library"]
     state = {"task_id": t["id"], "text": BLOCKED, "outcome": {"kind": "blocked"}}
     assert code_graph.after_implement(state) == "hop"
+
+
+def test_every_route_a_gate_can_take_is_wired():
+    """after_wait_verify said "implement" for a blocked run; the graph had no such
+    route, so resuming #268 with a direction crashed with KeyError 'implement'."""
+    g = code_graph.build()
+    for node, branches in g.branches.items():
+        for branch in branches.values():
+            assert branch.ends is None or set(branch.ends) >= _returns(branch.path), node
+    state = {"task_id": 1, "answer": {"text": "do it"}, "outcome": {"kind": "blocked"}}
+    assert code_graph.after_wait_verify(state) in g.branches["wait_verify"]["after_wait_verify"].ends
+
+
+def _returns(path) -> set:
+    import inspect
+    import re
+    fn = getattr(path, "func", path)
+    return set(re.findall(r'return\s+"(\w+)"', inspect.getsource(fn)))

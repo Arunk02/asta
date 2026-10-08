@@ -3079,15 +3079,21 @@ async def resume_task(task_id: int, switch_to: str = "") -> str:
         _running[task_id] = job
         job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
         return f"Task #{task_id}: running it again{note}."
-    if _graph().manages(task_id):
-        # The checkpoint knows where it stopped; the leg that was cut short
-        # knows to continue rather than start again (code_graph._leg).
-        _graph().carry_on(task_id)
-        return f"Task #{task_id}: resuming{note} from its last checkpoint."
     prompt = ("Resume: your session was paused mid-task when the brain hit a usage "
               "limit — this is the same task continuing, not a new one. Check "
               "`git log --oneline -5` and `git status` first so you don't redo "
               "finished work, then carry on from the next unfinished step.")
+    if _graph().manages(task_id):
+        if await _graph().ended(task_id):
+            # A failed task's thread has run to its end: there is no checkpoint
+            # to carry on from, and carrying on ran nothing at all (8 Oct, #268).
+            # The same session continues instead, as a follow-up does.
+            _graph().revisit(task_id, prompt)
+            return f"Task #{task_id}: continuing{note} in its own session."
+        # The checkpoint knows where it stopped; the leg that was cut short
+        # knows to continue rather than start again (code_graph._leg).
+        _graph().carry_on(task_id)
+        return f"Task #{task_id}: resuming{note} from its last checkpoint."
     job = asyncio.create_task(_resume_worker(task_id, prompt, approved=True))
     _running[task_id] = job
     job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))

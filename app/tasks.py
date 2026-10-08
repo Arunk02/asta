@@ -147,6 +147,10 @@ CODE_OVERRIDES = """
   Ask each thing at most once: intent/scope ambiguity HERE (pre-discovery);
   code-grounded questions LATER at the plan gate. Never double-ask, never ask
   here anything you could learn by reading the code.
+- This is Arun's office work. Never write "Asta", an assistant, an AI tool or a
+  task number in a commit message, a code comment, a test name or anything that
+  ends up in a PR — the PR title is taken from your first commit's subject, so
+  make that subject say what the change does.
 - Never run a command in the background or wait for one to land later (no `&`,
   no run_in_background, no "I'll analyse when it finishes"). Run it in the
   foreground with a timeout. When you stop, this run ENDS — nothing that is
@@ -3281,7 +3285,7 @@ async def _port(repo: Path, cur: str, base: str, other: str) -> str:
         rc, out = await repo_ops.git(where, "git", "push", "-u", "origin", branch, timeout=300)
         if rc != 0:
             raise RuntimeError(f"{repo.name}: push to {other} failed: {out[:160]}")
-        rc, out = await repo_ops.git(where, "gh", "pr", "create", "--fill", "--base", other,
+        rc, out = await repo_ops.git(where, "gh", "pr", "create", "--fill-first", "--base", other,
                                      "--head", branch, timeout=300)
         if rc != 0 and "already exists" not in out:
             raise RuntimeError(f"{repo.name}: pushed {branch}, PR failed: {out[:160]}")
@@ -3399,7 +3403,7 @@ async def ship(task_id: int) -> str:
         rc, out = await repo_ops.git(repo, "git", "push", "-u", "origin", cur, timeout=300)
         if rc != 0:
             raise RuntimeError(f"{repo.name}: push failed: {out[:300]}")
-        rc, out = await repo_ops.git(repo, "gh", "pr", "create", "--fill", "--head", cur,
+        rc, out = await repo_ops.git(repo, "gh", "pr", "create", "--fill-first", "--head", cur,
                                      "--base", base.removeprefix("origin/"), timeout=300)
         if rc != 0 and "already exists" not in out:
             raise RuntimeError(f"{repo.name}: gh pr create failed: {out[:300]}")

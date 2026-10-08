@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import time
 
 import httpx
@@ -32,6 +33,9 @@ async def wa_send(text: str, done: bool = False) -> bool:
                 json={"text": wa_format.for_whatsapp(text), "done": bool(done)},
                 headers={"Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")},
             )
+            if r.status_code == 200:
+                with contextlib.suppress(Exception):
+                    _note_on_phone(text)
             return r.status_code == 200
     except Exception:
         return False
@@ -157,6 +161,77 @@ def _stale(items: list[dict], now: float | None = None) -> bool:
     return any(now - it["at"] >= limit * 60 for it in items)
 
 
+# --- the same words never reach his phone twice ---------------------------------
+# 8 Oct: "Ship task 268" was answered in his chat, ship() had also pushed the same
+# "🔀 Task #268 shipped" line, it rode the batch and arrived again two minutes
+# later. Across two days: "#257 shipped", a meeting heads-up twice in one minute.
+# Every path to his phone ends in `deliver`, and every release path filters its
+# items here first, so one check covers them all.
+
+#: How long the same words count as already on his phone.
+SAID_WINDOW = int(os.environ.get("ASTA_SAID_WINDOW_SECONDS", "1800"))
+_ON_PHONE_KEY = "on_phone_recent"
+
+
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"[^\w#:/.@-]+", " ", (text or "").lower()).split())
+
+
+def _note_on_phone(text: str) -> None:
+    try:
+        seen = json.loads(store.kv_get(_ON_PHONE_KEY) or "[]")
+    except ValueError:
+        seen = []
+    cutoff = time.time() - SAID_WINDOW
+    seen = [s for s in seen if float(s.get("at") or 0) >= cutoff][-60:]
+    seen.append({"at": time.time(), "n": _norm(text)[:4000]})
+    store.kv_set(_ON_PHONE_KEY, json.dumps(seen))
+
+
+def note_reply(text: str) -> None:
+    """A chat reply that went back to his phone (the bridge's HTTP answer)."""
+    with contextlib.suppress(Exception):
+        if (text or "").strip():
+            _note_on_phone(text)
+
+
+def _said_recently(now: float) -> list[str]:
+    """What actually reached his phone in the window — every push and every chat
+    reply, recorded at the moment it was sent. Not the chat history: that also
+    holds drafts and notes stored for him that were never pushed."""
+    try:
+        return [s.get("n") or "" for s in json.loads(store.kv_get(_ON_PHONE_KEY) or "[]")
+                if float(s.get("at") or 0) >= now - SAID_WINDOW]
+    except (ValueError, TypeError):
+        return []
+
+
+def already_on_phone(text: str, now: float | None = None) -> bool:
+    """These words, or a message containing them, already reached him lately.
+
+    Only the NEW text being inside something said counts — never the reverse,
+    so a longer message carrying news beyond an earlier line still goes."""
+    if SAID_WINDOW <= 0:
+        return False
+    n = _norm(text)
+    if len(n) < 20:
+        return False                      # "Done." twice is not a duplicate worth hiding
+    now = time.time() if now is None else now
+    return any(n == s or (len(n) >= 40 and n in s) for s in _said_recently(now) if s)
+
+
+def _fresh(items: list, text_of=lambda it: it) -> list:
+    """Drop the items already on his phone; each drop is on the record."""
+    keep = []
+    for it in items:
+        if already_on_phone(text_of(it)):
+            store.record_outcome("attention", "already on his phone — not repeated",
+                                 detail=(text_of(it) or "")[:160])
+            continue
+        keep.append(it)
+    return keep
+
+
 def _hold(text: str, keys=()) -> None:
     held = _held_items()
     held.append({"at": time.time(), "text": text, "keys": list(keys or ())})
@@ -181,6 +256,8 @@ async def deliver(text: str, *, force: bool = False, keys: tuple = ()) -> dict:
         return {"bell": True, "held": True, "quiet": True, "whatsapp": False, "telegram": False}
     wa = await wa_send(text)
     tg = await telegram.send(text)
+    if tg and not wa:
+        _note_on_phone(text)
     delivery.note_sent()
     budget.note_push()          # one buzz, one unit — a batch of four costs one
     if not (wa or tg):
@@ -222,6 +299,12 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     """
     store.add_notification(text, level)  # the bell always gets everything
     keys = tuple(keys or ()) + ((key,) if key else ())
+    if not asked and already_on_phone(text):
+        # A reminder he set may ring the same words again; nothing else may.
+        store.record_outcome("attention", "already on his phone — not repeated",
+                             detail=text[:160])
+        return {"bell": True, "held": False, "duplicate": True,
+                "whatsapp": False, "telegram": False}
 
     # The ledger decides WHETHER, the same way `delivery` below decides WHEN.
     # It used to be consulted by three call sites out of fifty-six, so the
@@ -367,7 +450,7 @@ async def flush_held(reason: str = "while you were at the laptop") -> dict:
         if it not in still:
             store.record_outcome("attention", "answered while held — not pushed",
                                  detail=(it.get("text") or "")[:160])
-    held = still
+    held = _fresh(still, lambda it: it.get("text") or "")
     if not held:
         return {"held": False, "whatsapp": False, "telegram": False, "answered": True}
     texts = [it["text"] for it in held]
@@ -494,6 +577,8 @@ async def release_grace(now: float | None = None) -> int:
                                  detail=it["text"][:120])
             continue
         if now - float(it.get("at") or 0) >= REPLY_GRACE:
+            if not _fresh([it["text"]]):
+                continue
             await deliver(it["text"], keys=tuple(it.get("keys") or ()))
             sent += 1
             continue

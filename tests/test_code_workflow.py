@@ -75,8 +75,8 @@ def test_a_ticket_id_in_the_prompt_is_found_too():
 
 def test_without_a_ticket_a_generic_name_is_used():
     got = tasks.task_branch({"title": "tidy the mapper", "prompt": "x"}, 65)
-    assert got.startswith("feature/asta-65-")
-    assert "tidy-the-mapper" in got
+    assert got == "feature/tidy-the-mapper-65"
+    assert "asta" not in got, "his office repos never see the assistant's name"
 
 
 def test_a_messy_title_still_yields_a_valid_branch():
@@ -509,5 +509,6 @@ def test_the_suite_cannot_move_this_repos_branch():
     head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                           cwd=tasks.ROOT, capture_output=True, text=True).stdout.strip()
     assert head != "", "could not read HEAD"
-    assert not head.startswith("feature/asta-"), (
+    import re
+    assert not re.match(r"feature/(asta-|.+-\d+$)", head), (
         f"the suite branched this repo to {head!r} — _prepare_branches escaped its guard")

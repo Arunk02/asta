@@ -430,6 +430,7 @@ def test_porting_cherry_picks_onto_the_other_base_and_opens_its_pr(monkeypatch, 
     assert ("git", "cherry-pick", "c1", "c2") in ran
     create = next(a for a in ran if a[:3] == ("gh", "pr", "create"))
     assert create[create.index("--base") + 1] == "release/3.1.6"
+    assert "--fill-first" in create, "titled from the change, never from the branch name"
     assert any(a[:3] == ("git", "worktree", "remove") for a in ran), "the temp checkout is cleaned up"
 
 

@@ -1712,7 +1712,9 @@ async def api_wa_incoming(request: Request):
         if not done:
             sink.handoff()
             return {"reply": _working_note(conv["id"], text), "working": True}
-    return {"reply": (sink.text() or "")[:3500]}
+    reply = (sink.text() or "")[:3500]
+    notify.note_reply(reply)          # on his phone now: never pushed again as news
+    return {"reply": reply}
 
 
 def _working_note(cid: str, text: str) -> str:
@@ -4027,10 +4029,13 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                 await sink.send({"type": "done", "tools": []})
             return None
         if _affirmation(user_text)[0] and not open_offer.shown:
-            # Staged by a task a moment ago and never shown to him: this yes was
-            # meant for something else. Show it; the NEXT yes may answer it.
+            # Staged by a task a moment ago and never shown to him, or set aside
+            # when he moved on: this yes may have been meant for something else.
+            # Show it; the NEXT yes may answer it.
             await sink.send({"type": "note", "text": (
-                "Nothing you've seen is waiting on a yes — this just came in:\n\n"
+                ("Still open from earlier — say yes again if this is what you mean:\n\n"
+                 if open_offer.aside else
+                 "Nothing you've seen is waiting on a yes — this just came in:\n\n")
                 + open_offer.render())})
             if channel == "web":
                 await sink.send({"type": "done", "tools": []})
@@ -4080,13 +4085,16 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             offers.accept()
             return _start_turn(conv, _offer_prompt(open_offer, where=user_text.strip()),
                                sink, channel)
-        # Anything else: he moved on. Drop the whole set instead of holding stale
-        # questions that would misread a much later "yes" — and promoting a queued
-        # one here would be worse: it would silently arm a question he has never
-        # read, which is the exact failure the queue was added to prevent.
-        # One he has not been shown yet is not one he moved on from.
+        # Anything else: he moved on. Not dropped — on 8 Oct that silently lost
+        # Vinish's request for PRs because Arun wrote about PR titles two minutes
+        # later. It stays open, set aside: a much later bare "yes" shows it again
+        # before it can count, and he is told once that it is still there. The
+        # queue behind it is untouched and never promoted here.
         if open_offer.shown:
-            offers.drop_all()
+            offers.set_aside(open_offer.id)
+            await sink.send({"type": "note", "text": (
+                f"↪︎ Still open: {open_offer.subject} — say *yes* to it when you want, "
+                f"or *no* to drop it.")})
 
     # Only a compatible bare reply may implicitly answer an open question.
     # …but only when the message is an ANSWER. "send this feedback to swamy",

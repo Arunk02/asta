@@ -1684,3 +1684,42 @@ def test_an_answer_still_waits_for_his_send(monkeypatch):
                           group=False, thread="teams:Vinish Kumar")
     result = "ANALYSIS:\nfound it\n\nREPLY:\nit is in prod since 12:40, the topic is refreshed"
     assert asyncio.run(answers.present_task(t["id"], store.get_task(t["id"]), result)) is True
+
+
+def test_a_draft_that_denies_what_he_just_said_waits_for_his_yes(monkeypatch):
+    """7 Oct: "yes tell him updated CT as well, ask him to review" went to Vinish,
+    automatically, as "…since there's no CT coverage for this"."""
+    from app import agent, guardrails, loop, notify, ops
+    monkeypatch.setattr(guardrails, "section",
+                        lambda name: "- Vinish Kumar" if name == "automatic teams replies" else "")
+    agent, cid = _asked(monkeypatch, "yes tell him updated CT as well, ask him to review")
+    monkeypatch.setattr(tasks, "current_conversation", lambda: cid)
+    delivered = []
+
+    async def send(**kwargs):
+        delivered.append(kwargs)
+        return "✅ Sent to Vinish Kumar."
+
+    async def quiet(*args, **kwargs):
+        return None
+    monkeypatch.setitem(ops.REGISTRY, "teams_send", {"run": send})
+    monkeypatch.setattr(notify, "notify", quiet)
+
+    async def go():
+        out = agent.prepare_to_send(
+            "bro updated the PR — added a unit test for JOB_OPENED since there's no CT "
+            "coverage for this. 1470 is ready, take a look", to="Vinish Kumar", channel="teams")
+        await asyncio.sleep(0.05)
+        return out
+    out = asyncio.run(go())
+    assert out.startswith("Draft staged") and "no CT" in out
+    assert not delivered and loop._next.get(cid, {}).get("kind") == "send"
+    loop._next.pop(cid, None)
+    async def agrees():
+        out = agent.prepare_to_send("bro updated the PR — CT and unit test added for "
+                                    "JOB_OPENED, please review 1470", to="Vinish Kumar",
+                                    channel="teams")
+        await asyncio.sleep(0.05)
+        return out
+    assert asyncio.run(agrees()).startswith("Sending to Vinish Kumar")
+    assert len(delivered) == 1

@@ -1901,6 +1901,25 @@ _LABEL_NOT_MESSAGE = re.compile(
     r"explaining|summari[sz]ing|asking|saying\s+that|with)\b", re.I)
 
 
+_NEGATION = r"(?:no|not|without|never|zero|lacks?|missing|isn'?t|aren'?t|wasn'?t|didn'?t)"
+_PLAIN = {"the", "a", "an", "and", "or", "to", "him", "her", "them", "it", "as", "well", "ask",
+          "tell", "send", "for", "on", "in", "of", "is", "are", "was", "be", "this", "that",
+          "yes", "ok", "okay", "please", "review", "pr", "bro", "also", "with", "me", "my"}
+
+
+def contradicts_him(said: str, draft: str) -> str:
+    """The phrase in `draft` that negates something he asserted in `said`, or ''."""
+    said, draft = said or "", draft or ""
+    terms = {w for w in re.findall(r"[A-Za-z][A-Za-z0-9_]{1,}", said)
+             if w.lower() not in _PLAIN}
+    for term in sorted(terms, key=len, reverse=True):
+        neg = re.compile(rf"\b{_NEGATION}\b[^.!?\n]{{0,25}}\b{re.escape(term)}\b", re.I)
+        hit = neg.search(draft)
+        if hit and not neg.search(said):
+            return hit.group(0)[:80]
+    return ""
+
+
 def prepare_to_send(what: str, to: str = "", channel: str = "chat",
                     to_group: bool = False) -> str:
     """Stage an outward-facing message for Arun to approve BEFORE it is sent.
@@ -1913,6 +1932,10 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     Asta shows Arun the draft and asks "can I send this?" unless the exact 1:1
     recipient has a standing automatic-reply rule. Never send outward
     through any other tool without staging it here first.
+
+    When the message says what a PR or task contains, read its CURRENT state first
+    (task_pr_status, the PR's files) — an earlier task report can be out of date —
+    and never contradict what Arun just told you.
 
     `to` on Teams means a PERSON's 1:1 chat. Set to_group=True ONLY when Arun named a
     group or channel himself ("post it in the prod issue group") — never because a
@@ -1951,7 +1974,13 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # after, and count it against the day's allowance for that permission.
     from . import authority, senior
     above = channel in ("teams", "chat") and senior.is_senior(to)
-    if channel == "teams" and not to_group and authority.auto_reply_to(to):
+    # Words that deny what he just said never go out on their own. 7 Oct: "tell
+    # him updated CT as well" was sent to Vinish as "…since there's no CT
+    # coverage for this", from an out-of-date task report.
+    clash = contradicts_him(capabilities.said_this_turn(), what)
+    if clash:
+        above = True                    # every automatic path below is skipped
+    if channel == "teams" and not to_group and not clash and authority.auto_reply_to(to):
         import asyncio
         body = writing.fit_address(writing.tidy_links(what), to)
         try:
@@ -2011,6 +2040,10 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     loop.set_pending_send(cid, what, to, channel, to_group=to_group)
     tgt = f" to {'group ' if to_group else ''}{to}" if to else ""
     staged = f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
+    if clash:
+        staged += (f" Held for his yes: the draft says “{clash}”, which contradicts what he "
+                   f"just told you. Check the current facts (the PR's files, the task) and "
+                   f"tell him the mismatch in one line.")
     # The length backstop. `guidance()` already tells the model how short he
     # writes; this is what notices when it did not listen. Reported to the BRAIN
     # here — the draft is staged either way, because it is his to approve, but a

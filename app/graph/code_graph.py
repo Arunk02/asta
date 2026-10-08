@@ -482,7 +482,11 @@ def build() -> StateGraph:
     g.add_conditional_edges("fix", after_fix, checking)
     g.add_conditional_edges("stronger", after_fix, checking)
     g.add_edge("park", "wait_verify")
+    # "implement": a blocked run he gave a direction to goes back to building.
+    # after_wait_verify has returned it since #100; without the route every such
+    # resume crashed with KeyError 'implement' (8 Oct, #268).
     g.add_conditional_edges("wait_verify", after_wait_verify,
-                            {"complete": "complete", "fix": "fix", "end": END})
+                            {"complete": "complete", "fix": "fix", "implement": "implement",
+                             "end": END})
     g.add_edge("complete", END)
     return g

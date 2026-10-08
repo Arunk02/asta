@@ -33,8 +33,9 @@ STALE_SECONDS, is retired and he is told, in one line, what was dropped.
 
 from __future__ import annotations
 
-import json
+import contextlib
 import hashlib
+import json
 import os
 import re
 import time
@@ -562,8 +563,34 @@ async def next_after(cid: str = "") -> bool:
             continue
         if await _deliver_approved_review(item):
             continue
+        if await _answered_while_queued(item):
+            continue
         await _show(cid, item)
         return True
+    return False
+
+
+async def _answered_while_queued(item: dict) -> bool:
+    """He wrote to them after their last message while this waited in the queue.
+
+    `present` checks this when an answer is ready; a queued one was shown later
+    without it. 8 Oct: his "sure connect now" reached Swamy at 11:37:05 and two
+    seconds later the queued "let's connect at 3:30" draft was put in front of
+    him — so his next words were read as edits to a reply already overtaken."""
+    from . import chat_watch
+    chat = item.get("to") or ""
+    if item.get("type") != "answer" or item.get("to_group") or not chat:
+        return False
+    with contextlib.suppress(Exception):
+        since = chat_watch.their_last(chat)
+        if since and (chat_watch._he_had_the_last_word(chat, since)
+                      or await chat_watch.he_replied_since(chat, since)):
+            store.record_outcome("answer", "he answered", subject=str(item.get("task_id") or ""),
+                                 detail=f"{item.get('who')}: queued draft dropped"[:200])
+            if item.get("thread"):
+                from . import threads
+                threads.update(item["thread"], status="answered")
+            return True
     return False
 
 

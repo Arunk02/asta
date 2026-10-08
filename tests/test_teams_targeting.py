@@ -293,14 +293,15 @@ def test_calling_is_staged_and_nothing_rings(monkeypatch):
     out = asyncio.run(agent.teams_call("Alex"))
     assert "waiting for Arun's yes" in out
     assert offers.pending().op == {"name": "teams_call",
-                                   "args": {"who": "Alex", "video": False}}
+                                   "args": {"who": "Alex", "video": False, "topic": "",
+                                            "agenda": ""}}
 
 
 def test_a_call_that_never_connected_is_reported_as_not_called(monkeypatch):
-    async def never_connects(who, video=False):
+    async def never_connects(who, video=False, **k):
         raise RuntimeError(f"clicked audio call for '{who}' but no call ever started "
                            f"— treat as NOT called")
 
     monkeypatch.setattr("app.meetings.call_person", never_connects)
     with pytest.raises(RuntimeError, match="NOT called"):
-        asyncio.run(ops.run({"name": "teams_call", "args": {"who": "Alex"}}))
+        asyncio.run(ops.run({"name": "teams_call", "args": {"who": "Alex", "group": True}}))

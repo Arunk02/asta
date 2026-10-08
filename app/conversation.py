@@ -535,6 +535,29 @@ async def _close_mind(task: "asyncio.Task") -> None:
             task.cancel()
 
 
+#: "booking PR 1470", "AP PR 1260", "PR 1470".
+_PR_NAMED = re.compile(r"\b(?:([A-Za-z][\w-]{1,30})\s+)?PR\s*#?(\d{2,6})\b")
+
+
+def topic_for(who: str) -> str:
+    """A few speakable words for why Asta is ringing `who`, when the call came
+    without a topic. It is said in the greeting ("is now a good time for …?"),
+    so it must be short and theirs: what they asked, else the PR the two of them
+    were on, else plainly that it is about their message."""
+    from . import threads
+    t: dict = {}
+    with contextlib.suppress(Exception):
+        t = threads.get(threads.tid("teams", who)) or {}
+    need = " ".join((t.get("need") or "").split()).rstrip(".")
+    if need and len(need) <= 80:
+        return need
+    m = _PR_NAMED.search(" ".join([need, t.get("summary") or ""]))
+    if m:
+        svc = m.group(1) if m.group(1) and m.group(1).lower() not in ("the", "a", "his", "this", "to") else ""
+        return f"{svc + ' ' if svc else ''}PR {m.group(2)}"
+    return "your message to Arun"
+
+
 def with_history(who: str, agenda: str) -> str:
     """The call's agenda, with what Asta already knows about this person.
 
@@ -555,6 +578,10 @@ def with_history(who: str, agenda: str) -> str:
         parts.append(copilot_cli._his_prs())
         parts.append(copilot_cli._teams_with(who))
     with contextlib.suppress(Exception):
+        found = _found_for(who)
+        if found:
+            parts.append("What Asta already looked into for them (explain from this):\n" + found)
+    with contextlib.suppress(Exception):
         from . import prname
         mine = prname.his_open_prs()
         if mine:
@@ -566,6 +593,23 @@ def with_history(who: str, agenda: str) -> str:
             f"When they mention a piece of his work, match it to THIS by what it changed "
             f"(the service, the field, the feature); if nothing here matches, say you will "
             f"check with Arun — never pick the nearest one:\n{known}").strip()
+
+
+def _found_for(who: str, days: float = 2) -> str:
+    """The latest finished look into what `who` asked — the facts a call about it
+    explains. 8 Oct: Swamy wanted PR 1470 explained; task #266 had already worked
+    it out (JOB_OPENED, why AP sends it, the milestone), and the call knew none of it."""
+    import time as _t
+
+    from . import answers, store
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT result FROM tasks WHERE teams_chat=? AND status='done' AND created_at>=? "
+            "ORDER BY created_at DESC LIMIT 1", (who, _t.time() - days * 86400)).fetchone()
+    if not row or not row[0]:
+        return ""
+    analysis, _reply = answers.split(row[0])
+    return " ".join((analysis or row[0]).split())[:1500]
 
 
 # --- a booking asked about on the call: checked in the logs, live ------------

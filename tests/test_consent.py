@@ -230,7 +230,8 @@ def test_a_call_he_asked_for_rings_instead_of_asking_him_again(monkeypatch, _tea
     _turn(ASKED_TO_CALL)
     out = asyncio.run(agent_mod.teams_call("Alex"))
     assert dialled["name"] == "teams_call"
-    assert dialled["args"] == {"who": "Alex", "video": False}
+    assert dialled["args"] == {"who": "Alex", "video": False, "topic": "",
+                               "agenda": ASKED_TO_CALL}
     assert "Calling" in out
 
 

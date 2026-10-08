@@ -2672,11 +2672,23 @@ if __name__ == "__main__":
             print(f"ERROR: {'session expired — rerun login' if 'SESSION_EXPIRED' in str(exc) else exc}")
             sys.exit(1)
     elif cmd == "call" and len(sys.argv) > 2:
-        from . import meetings
+        # Through the running server, which holds the call and talks in it. Dialled
+        # from this short-lived process the call died with it, or rang in silence.
+        import httpx
+
+        from . import mcp_server
+        rest = [a for a in sys.argv[3:] if not a.startswith("--")]
         try:
-            who = asyncio.run(meetings.call_person(sys.argv[2], video="--video" in sys.argv[3:]))
-            print(f"calling: {who}")
-        except RuntimeError as exc:
+            r = httpx.post(f"{mcp_server._asta_url()}/api/_invoke", timeout=120,
+                           json={"tool": "teams_call",
+                                 "args": {"who": sys.argv[2], "video": "--video" in sys.argv[3:],
+                                          "topic": rest[0] if rest else "",
+                                          "agenda": rest[1] if len(rest) > 1 else ""},
+                                 "conv_id": os.environ.get("ASTA_MCP_CONV", "")},
+                           headers={"Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")})
+            r.raise_for_status()
+            print(r.json().get("result"))
+        except Exception as exc:                               # noqa: BLE001
             print(f"ERROR: {exc}")
             sys.exit(1)
     elif cmd == "send" and len(sys.argv) > 3:

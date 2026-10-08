@@ -788,7 +788,10 @@ def committed_so_far(task_id: int, t: dict) -> list[dict]:
             head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                                   cwd=repo, capture_output=True, text=True,
                                   timeout=10).stdout.strip()
-            log = subprocess.run(["git", "log", "--oneline", "origin/develop..HEAD"],
+            base = repo_ops.base_ref(repo)
+            if not base:
+                continue
+            log = subprocess.run(["git", "log", "--oneline", f"{base}..HEAD"],
                                  cwd=repo, capture_output=True, text=True,
                                  timeout=10).stdout.strip()
         except (OSError, subprocess.SubprocessError):
@@ -3185,7 +3188,11 @@ async def approve(task_id: int) -> str:
             plan, back = _apply_proposal(task_id)
             store.update_task(task_id, status=back if back in REFINABLE else "done")
             mark_approved(task_id)
-            return await refine(task_id, plan, code_change=True, approved_plan=True)
+            await refine(task_id, plan, code_change=True, approved_plan=True)
+            # His word was an approval, so he hears that — the same line as at the
+            # plan gate. "continuing the existing diff with your feedback" read
+            # as if his "approve" had been taken as feedback (8 Oct, #268).
+            return f"Task #{task_id}: plan approved — implementing now."
         if store.kv_get(f"task_gate:{task_id}") == "context":
             return reply(task_id, "Your understanding is correct — proceed to "
                                   "discovery and planning.")

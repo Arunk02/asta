@@ -37,6 +37,26 @@ BASE_BRANCHES = ("main", "master", "develop")
 BASE_PREFERENCE = ("develop", "main", "master")
 
 
+def base_ref(repo: Path | str) -> str:
+    """The remote branch this repo's work is measured against: origin/develop,
+    else origin/main, else origin/master — "" when none exists.
+
+    One answer for every "what has this branch added" question. 8 Oct, #268:
+    the library's base is main, the count was taken against origin/develop
+    alone, git failed quietly, and a real commit read as "no changes" — the
+    finished task was marked failed."""
+    for candidate in BASE_PREFERENCE:
+        try:
+            rc = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
+                                 f"origin/{candidate}"], cwd=str(repo),
+                                capture_output=True, timeout=10).returncode
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if rc == 0:
+            return f"origin/{candidate}"
+    return ""
+
+
 def office_login(repo: str) -> str:
     """The saved gh account for a configured work owner, never a token on disk."""
     user = os.environ.get("ASTA_GITHUB_WORK_USER", "").strip()

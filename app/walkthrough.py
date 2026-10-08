@@ -329,7 +329,8 @@ def _workspace_roots(preferred: str) -> list[Path]:
 
 async def _local_diff(cwd: Path) -> str:
     from . import repo_ops
-    for args in (("git", "diff", "origin/develop...HEAD"), ("git", "diff", "HEAD~1"),
+    base = repo_ops.base_ref(cwd) or "origin/develop"
+    for args in (("git", "diff", f"{base}...HEAD"), ("git", "diff", "HEAD~1"),
                  ("git", "diff")):
         rc, out = await repo_ops.git(cwd, *args)
         if rc == 0 and out.strip():

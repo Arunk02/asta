@@ -2673,6 +2673,10 @@ def _workspace_repos(workspace: str) -> tuple[str, ...]:
 _WAITS_ON_A_TASK = re.compile(
     r"\b(?:wait(?:ing)?\s+(?:for|on)|check(?:ing)?\s+(?:on\s+)?(?:the\s+)?(?:status\s+of\s+)?|"
     r"poll(?:ing)?|monitor(?:ing)?|re-?check)\s*(?:the\s+)?task\s*#?\d+"
+    # "Check if task #268 has finished; once done, call refine_task…" (8 Oct).
+    r"|\bcheck(?:ing)?\s+(?:if|whether)\s+(?:the\s+)?task\s*#?\d+"
+    r"|\b(?:once|when|after)\s+(?:it\s+|task\s*#?\d+\s+|it'?s\s+)?(?:is\s+|has\s+)?"
+    r"(?:done|finished|finishes|completes?|completed)\b"
     # …and waiting on anything else that reports by itself: a call's outcome,
     # a reply, a notification (1 Oct: "Wait for the discuss_in_call outcome").
     r"|^\s*(?:wait(?:ing)?|keep\s+(?:checking|waiting)|poll(?:ing)?|monitor(?:ing)?)\b"

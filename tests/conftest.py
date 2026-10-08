@@ -34,6 +34,13 @@ from app import store  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _no_repos_outside_the_workspace(monkeypatch):
+    """This machine's ~/Projects is not a fixture: a test names the repos it has."""
+    from app import worktrees
+    monkeypatch.setattr(worktrees, "REPO_DIRS", "")
+
+
+@pytest.fixture(autouse=True)
 def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "asta-test.db", raising=False)
     store.init()

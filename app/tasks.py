@@ -758,7 +758,7 @@ def _repos_still_needed(task_id: int, t: dict, result: str) -> list[str]:
     try:
         root = Path(code_cwd(t.get("workspace")))
         have = {r.name for r in _wt.repos_in(Path(task_cwd(task_id, t.get("workspace"))))}
-        every = {r.name for r in _wt.repos_in(root)}
+        every = {r.name for r in _wt.repos_in(root)} | {r.name for r in _wt.outside(result)}
     except Exception:                                          # noqa: BLE001
         # `code_cwd` refuses an unregistered workspace by raising, which is a
         # state a finishing task is legitimately in. Continuing to the next repo
@@ -2372,6 +2372,16 @@ async def announce_context_check(task_id: int, t: dict, result: str) -> None:
         f"Reply with the answer, or 'reject task {task_id}'.", "task")
 
 
+def note_waiting(task_id: int) -> str:
+    """What he told this task after it started, not yet delivered to it."""
+    return (store.kv_get(f"task_addenda:{task_id}") or "").strip('"').strip()
+
+
+#: Sent with his buffered note when a plan written without it comes back.
+REPLAN_WITH_NOTE = ("Revise the plan: Arun told you this after you started, so the plan "
+                    "above was written without it. Follow it.")
+
+
 async def announce_plan(task_id: int, t: dict, result: str) -> None:
     """Park the task at its plan gate and put the plan on his phone."""
     from . import notify
@@ -2381,6 +2391,24 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
     # row, the first one unactionable, is exactly the clutter he pointed at.
     result = _ASK_LINE.sub("", result).rstrip()
     store.update_task(task_id, status="awaiting_approval", result=result)
+    note = note_waiting(task_id)
+    if note:
+        # 8 Oct, #268: "dont revert the whole changes of him, only the startup
+        # flag ones" arrived while it planned a full revert — and a "go" task's
+        # plan goes ahead on its own. A plan that predates his note goes back.
+        await notify.notify(f"📋 #{task_id}: the plan came back before your note — "
+                            f"re-planning with it: “{clip.clip(note, 200)}”", "task")
+        if _graph().manages(task_id):
+            store.kv_set(f"task_goes_on:{task_id}", "1")   # go_on re-plans, see there
+        else:
+            def _replan() -> None:
+                try:
+                    reply(task_id, REPLAN_WITH_NOTE)
+                except ValueError as exc:
+                    store.record_outcome("task", "replan with note failed",
+                                         subject=str(task_id), detail=str(exc)[:200])
+            asyncio.get_running_loop().call_soon(_replan)
+        return
     from . import go
     why = go.no_ask(task_id, result)
     if why:

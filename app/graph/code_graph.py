@@ -191,7 +191,13 @@ def go_on(state: JobState) -> dict:
     (1 Oct: that raced, and the finished work came back as a plan)."""
     tid = state["task_id"]
     store.kv_del(f"task_goes_on:{tid}")
-    approved, text = _tasks().record_answer(tid, _task(tid), "PLAN APPROVED")
+    tasks = _tasks()
+    if tasks.note_waiting(tid):
+        # His note arrived while it planned: back to planning with it, not ahead.
+        approved, text = tasks.record_answer(tid, _task(tid), tasks.REPLAN_WITH_NOTE)
+        store.update_task(tid, status="running")
+        return {"answer": {"approved": False, "text": text}}
+    approved, text = tasks.record_answer(tid, _task(tid), "PLAN APPROVED")
     store.update_task(tid, status="running")
     return {"answer": {"approved": approved, "text": text}}
 
@@ -268,11 +274,14 @@ def after_implement(state: JobState) -> str:
     tasks = _tasks()
     tid = state["task_id"]
     t = store.get_task(tid) or {}
-    if (state.get("outcome") or {}).get("kind") in _STOPPING:
-        return "park"
+    # A run that stopped only because a repo it needs has no checkout is not
+    # blocked on him: prepare the checkout and carry on (8 Oct, #268 parked
+    # "telikos-event-router-library isn't checked out" as a question for him).
     unfinished = tasks._repos_still_needed(tid, t, (state.get("text") or "")[-2500:])
     if unfinished and state.get("hops", 0) < tasks._MAX_REPO_HOPS:
         return "hop"
+    if (state.get("outcome") or {}).get("kind") in _STOPPING:
+        return "park"
     return "verify"
 
 

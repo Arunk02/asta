@@ -2502,14 +2502,19 @@ def draft_voice(person: str) -> str:
 
 
 async def refine_task(task_id: int, feedback: str) -> str:
-    """Continue a FINISHED code task with Arun's feedback, in its own session.
+    """Give a code task Arun's feedback — RUNNING or finished. Call it at once.
+
+    A running task takes it as a note, delivered at its next step (a plan
+    written before the note is redone with it); never wait for the task to
+    finish, and never poll it — it reports by itself. A finished task continues
+    in its own session.
 
     Use this — never delegate_task — whenever he comments on work a task already
     delivered: a correction, an addition, "also handle X", a review comment, or
     an explicit request to fix a CI failure on its PR. Questions about CI are
     read-only; use task_ci_report instead. The task keeps everything it learned;
     a new task would start from nothing and re-implement what is already there.
-    Works on tasks that are done, shipped, failed, or blocked on their PR."""
+    Works on tasks that are running, done, shipped, failed, or blocked on their PR."""
     from . import tasks
     try:
         return await tasks.refine(task_id, feedback)

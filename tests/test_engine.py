@@ -48,7 +48,7 @@ def test_shared_helpers_live_outside_both_engines():
 
 @pytest.mark.parametrize("jira,title,tid,expected", [
     ("ABC-1", "anything", 7, "feature/ABC-1"),
-    ("", "Fix the thing!", 7, "feature/asta-7-fix-the-thing"),
+    ("", "Fix the thing!", 7, "feature/fix-the-thing-7"),
 ])
 def test_branch_naming(jira, title, tid, expected):
     assert repo_ops.branch_name(jira, title, tid) == expected

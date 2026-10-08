@@ -221,14 +221,25 @@ def test_naming_a_destination_answers_the_share_step(monkeypatch):
     assert "Priya" in started["prompt"]                 # his words became the destination
 
 
-def test_changing_the_subject_drops_the_offer_instead_of_holding_it(monkeypatch):
-    """Otherwise a 'yes' to something unrelated an hour later would fire it."""
+def test_changing_the_subject_keeps_the_offer_but_a_later_yes_sees_it_first(monkeypatch):
+    """8 Oct: dropping it on a change of subject lost Vinish's request for PRs.
+    It stays open — and a 'yes' an hour later re-shows it rather than firing it."""
     import asyncio
-    monkeypatch.setattr(main, "_start_turn", lambda *a: "task")
+    started = []
+    monkeypatch.setattr(main, "_start_turn", lambda conv, prompt, *a: started.append(prompt) or "task")
     offers.for_ci_failure("Arunk02/asta", "build.yml", "main", "https://gh/run/1")
+    sink = _Sink()
     asyncio.run(main._dispatch({"id": "c1", "model": "claude"},
-                               "what meetings do I have tomorrow?", _Sink(), "whatsapp"))
-    assert offers.pending() is None
+                               "what meetings do I have tomorrow?", sink, "whatsapp"))
+    assert offers.pending() is not None, "a colleague's or a CI ask is not lost"
+    assert any("Still open" in str(p) for p in sink.sent), "he is told once"
+    started.clear()
+    later = _Sink()
+    asyncio.run(main._dispatch({"id": "c1", "model": "claude"}, "yes", later, "whatsapp"))
+    assert not started and offers.pending() is not None, "a later yes does not fire it blind"
+    assert any("Still open from earlier" in str(p) for p in later.sent)
+    asyncio.run(main._dispatch({"id": "c1", "model": "claude"}, "yes", _Sink(), "whatsapp"))
+    assert started and offers.pending() is None, "the next yes answers what he just saw"
 
 
 # --- the general form: any flow, not just the CI chain ----------------------

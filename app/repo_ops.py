@@ -208,8 +208,12 @@ async def git(cwd: Path, *args: str, timeout: float = 120,
 def branch_name(jira_key: str = "", title: str = "", task_id: int | str = "") -> str:
     if jira_key:
         return f"feature/{jira_key}"
-    slug = re.sub(r"[^a-z0-9]+", "-", (title or "change").lower()).strip("-")[:40]
-    return f"feature/asta-{task_id}-{slug}" if task_id != "" else f"feature/asta-{slug}"
+    # Never "asta": the branch name ends up in his office repo's history and in
+    # the PR's default title (8 Oct, PR 95 "feature/asta 268 …" — his standing
+    # rule since). The task id stays, at the end, so two tasks with one title
+    # can never share a branch and mix their work.
+    slug = re.sub(r"[^a-z0-9]+", "-", (title or "change").lower()).strip("-")[:40].strip("-")
+    return f"feature/{slug}-{task_id}" if task_id != "" else f"feature/{slug}"
 
 
 def playbook_block(repo_dir: Path) -> str:

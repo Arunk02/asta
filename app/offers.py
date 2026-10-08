@@ -76,6 +76,8 @@ class Offer:
     #: as a request for changes on Komal's PR (1 Oct). Only a shown offer can
     #: be answered by a yes.
     shown: bool = True
+    #: Set aside when he moved on without answering — still open, re-shown first.
+    aside: bool = False
 
     def expired(self, now: float | None = None) -> bool:
         ttl = ttl_seconds()
@@ -192,6 +194,17 @@ def _from_task() -> bool:
         return bool(capabilities.FROM_TASK.get())
     except Exception:                                          # noqa: BLE001
         return False
+
+
+def set_aside(oid: str) -> None:
+    """He moved on without answering: keep it open, but a later bare yes must
+    see it again before it counts. Dropping it lost colleagues' asks — 8 Oct,
+    Vinish's request for PRs vanished when Arun wrote about something else."""
+    raw = store.kv_get(KEY)
+    o = _load(raw) if raw else None
+    if o is not None and o.id == oid and o.shown:
+        o.shown, o.aside = False, True
+        store.kv_set(KEY, json.dumps(asdict(o)))
 
 
 def mark_shown(oid: str) -> None:

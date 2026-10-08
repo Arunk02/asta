@@ -238,7 +238,7 @@ async def flush_buffered() -> dict:
     from . import notify
     if not enabled() or quiet_now():
         return {"sent": False, "items": 0}
-    texts = take_buffered()
+    texts = notify._fresh(take_buffered())
     if not texts:
         return {"sent": False, "items": 0}
     await notify.deliver(render_batch(texts))
@@ -258,7 +258,7 @@ async def flush_loop() -> None:
             # night, and leaving them queued means they go out in the morning.
             if not enabled() or quiet_now():
                 continue
-            texts = take_buffered()
+            texts = notify._fresh(take_buffered())
             if texts:
                 await notify.deliver(render_batch(texts))
         except Exception:

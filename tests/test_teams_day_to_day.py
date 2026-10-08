@@ -338,13 +338,13 @@ async def _true():
 
 
 def test_a_call_button_that_was_clicked_is_not_a_call_that_connected(monkeypatch):
-    async def never_connects(who, video=False):
+    async def never_connects(who, video=False, **k):
         raise RuntimeError("clicked audio call for 'Alex Kumar' but no call ever "
                            "started — treat as NOT called")
 
     monkeypatch.setattr(meetings, "call_person", never_connects)
     with pytest.raises(RuntimeError, match="NOT called"):
-        asyncio.run(ops.run({"name": "teams_call", "args": {"who": "Alex"}}))
+        asyncio.run(ops.run({"name": "teams_call", "args": {"who": "Alex", "group": True}}))
 
 
 def test_hanging_up_when_not_in_a_call_is_not_an_error():

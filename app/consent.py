@@ -127,13 +127,29 @@ def _asked(pattern: re.Pattern, text: str, person: bool = False) -> bool:
     return False
 
 
+#: "Connect" is how he says call. 8 Oct: "Connect with swamy if he wants to connect
+#: now and … clarify" was drafted as a text, and "Go ahead and connect" staged the
+#: call back to him — the call he had asked for twice. Only a person, or no object
+#: at all after an imperative ("go ahead and connect"), counts: "connect to the DB"
+#: is not a phone call.
+_NOT_CONNECTABLE = (r"the|a|an|it|this|that|db|database|vpn|server|api|kafka|redis|mongo\w*|"
+                    r"cosmos\w*|postgres\w*|cluster|prod|dev|staging|vault|network|wifi|"
+                    r"internet|host|port|jira|github|grafana|temporal|teams|outlook|repo")
+_CONNECT = re.compile(
+    rf"\bconnect\s+(?:with|to)\s+(?!(?:{_NOT_CONNECTABLE})\b)[a-z][\w.'-]*"
+    rf"|(?:^|\b(?:and|please|pls|plz|just|then|so|now|ok|okay|yes|yeah|confirm)\s+)"
+    rf"connect\b(?!\s+(?:with|to)\b)(?!\s+(?:{_NOT_CONNECTABLE})\b)"
+    rf"|\b(?:get|hop|jump)\s+on\s+(?:a\s+)?call\b",
+    re.I | re.M)
+
+
 def asked_to_call(text: str) -> bool:
     """Did Arun, in these words, ask for someone to be rung?
 
     This is the whole of rule one. When it is true a call needs no confirmation,
     because the confirmation already happened — he typed it.
     """
-    return _asked(_CALL, text or "", person=True)
+    return _asked(_CALL, text or "", person=True) or _asked(_CONNECT, text or "")
 
 
 def asked_to_talk(text: str) -> bool:

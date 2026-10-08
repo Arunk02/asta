@@ -277,11 +277,12 @@ async def test_an_unreadable_call_is_kept_but_silenced(call, pushed, monkeypatch
 @pytest.mark.asyncio
 async def test_a_placed_call_gets_a_watcher(monkeypatch):
     """The hole this whole suite exists for. `join` has always spawned a watcher;
-    `_teams_call` never did, so a placed call was never ended or reported."""
+    `_teams_call` never did, so a placed call was never ended or reported.
+    (A group call; a call to one person is a conversation — test_calls_talk.)"""
     from app import ops
     watched = []
 
-    async def fake_call(who, video=False):
+    async def fake_call(who, video=False, **k):
         return who
 
     async def fake_watch(title=""):
@@ -289,7 +290,7 @@ async def test_a_placed_call_gets_a_watcher(monkeypatch):
 
     monkeypatch.setattr(meetings, "call_person", fake_call)
     monkeypatch.setattr(meetings, "call_watch", fake_watch)
-    await ops._teams_call(who="Alex")
+    await ops._teams_call(who="Alex", group=True)
     await asyncio.sleep(0.05)               # the watcher is spawned, not awaited
     assert watched == ["Alex"], "nothing was watching the call"
 

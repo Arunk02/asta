@@ -3076,8 +3076,16 @@ async def teams_resolve(chat: str, to_group: bool = False) -> str:
         return f"Would NOT send: {exc}"
 
 
-async def teams_call(who: str, video: bool = False, group: bool = False) -> str:
-    """Ring someone on Teams. Places the call; use discuss_in_call to actually talk.
+async def teams_call(who: str, video: bool = False, group: bool = False,
+                     topic: str = "", agenda: str = "") -> str:
+    """Ring someone on Teams. For ONE person, Asta talks: it greets them, explains,
+    answers their questions and hangs up — the same conversation as discuss_in_call.
+
+    `topic` is what the call is about in a few speakable words ("the JOB_OPENED
+    change in booking PR 1470"); `agenda` is what to explain or find out — the
+    facts they need, taken from the chat. Fill both: they are all the call knows
+    beyond their chat history. A ringing phone with nobody speaking is what made
+    Swamy hang up on 8 Oct.
 
     To call SEVERAL people together, call the group chat they share, by its
     name, with group=True — "connect a Fake Internal Team call with Vinish and
@@ -3099,16 +3107,21 @@ async def teams_call(who: str, video: bool = False, group: bool = False) -> str:
     if group and not _names_the_group(who, said):
         return (f"Not calling {who!r} as a group — Arun did not name that group. Call a "
                 f"group only when he names it.")
+    args = {"who": who, "video": video, **({"group": True} if group else {})}
+    if not group:
+        # His own words are the agenda when the brain gave none: "help him with
+        # the issues he asked" is exactly what the call is for.
+        args.update(topic=(topic or "").strip(),
+                    agenda=((agenda or "").strip() or (said or "").strip())[:1500])
     if consent.asked_to_call(said):
         # The same recorded call an approval would run — one execution path, so a
         # dialled call and an approved call cannot drift apart.
         try:
-            return await ops.run({"name": "teams_call",
-                                  "args": {"who": who, "video": video, **({"group": True} if group else {})}})
+            return await ops.run({"name": "teams_call", "args": args})
         except RuntimeError as exc:
             return f"Didn't place the {kind} to {who} — {exc}. Nothing rang."
     offers.staged_write(
-        "teams_call", {"who": who, "video": video, **({"group": True} if group else {})},
+        "teams_call", args,
         f"📞 {kind.title()} {who}", f"Teams {kind} to {who}.",
         f"Ring {who} on Teams?", kind="teams_write")
     return f"Staged the {kind} to {who} — waiting for Arun's yes. Nothing is ringing yet."

@@ -242,8 +242,11 @@ _TABLE: tuple[Capability, ...] = (
                     "sending to a short or common name, and for any group. An ambiguous "
                     "name is refused here rather than delivered to the wrong person."),
     Capability("teams_call", "teams", write=True,
-               shell='python -m app.teams_bridge call "<person>" [--video]',
-               note="DIALS when Arun asked for a call in his own words — asking IS "
+               shell='python -m app.teams_bridge call "<person>" "<topic>" "<agenda>"',
+               note="Rings ONE person and TALKS — greets, explains, answers, hangs up. "
+                    "Pass `topic` (a few spoken words) and `agenda` (what to explain, "
+                    "with the facts). 'connect with X' / 'go ahead and connect' is a "
+                    "call. DIALS when Arun asked for it in his own words — asking IS "
                     "the consent, do not stage it back to him. Stages only when the "
                     "call is Asta's idea. Never answer 'I can't call' — say which "
                     "part failed."),

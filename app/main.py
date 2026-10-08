@@ -2136,6 +2136,24 @@ _MAIL = re.compile(r"\b(?:the|an?|your|that)\s+(?:mail|email|e-mail|invite)\b|"
                    r"\b(?:mail|email|e-mail|invite)\s+(?:is|was|has\s+been|got)\b|\boutlook\b", re.I)
 
 
+#: A question to Asta about what happened, not a change to a draft's wording.
+_ASKS_WHAT_HAPPENED = re.compile(
+    r"^\s*(?:what|why|did|have|has|was|were|where|when|who|is|are)\b[^?\n]*\?", re.I)
+_EDITS_A_DRAFT = re.compile(
+    r"\b(?:shorter|longer|short|add|remove|drop|change|rephrase|reword|tone|mention|"
+    r"include|instead|say\s+(?:it|that)|tell\s+him|tell\s+her|ask\s+him|ask\s+her)\b", re.I)
+
+
+def _moves_on_from_draft(text: str) -> bool:
+    """His reply to a waiting draft is a new ask, not an edit: a call, or a
+    question about what happened."""
+    from . import consent
+    text = text or ""
+    if consent.asked_to_call(text):
+        return True
+    return bool(_ASKS_WHAT_HAPPENED.search(text)) and not _EDITS_A_DRAFT.search(text)
+
+
 def unproven_send(reply: str, since: float) -> str:
     """The sentence claiming a send that nothing performed since `since`, or ""."""
     claim = ""
@@ -2151,6 +2169,11 @@ def unproven_send(reply: str, since: float) -> str:
         line_end = text.find("\n", m.end())
         line = text[line_start:line_end if line_end != -1 else len(text)]
         if _NEGATED.search(before) or _MAIL.search(near):
+            continue
+        # A question claims nothing: "do you want that message sent to Swamy
+        # now?" was "corrected" as a false send on 8 Oct.
+        stop = re.search(r"[.!?\n]", text[m.end():])
+        if stop and stop.group() == "?":
             continue
         claim = line.strip()[-200:]
         break
@@ -3927,6 +3950,16 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                       f"channel '{staged.get('channel', 'chat')}'"
                       + (f" to {staged['to']}" if staged.get("to") else "")
                       + f":\n\n{staged.get('what', '')}\n\nAfter it's sent, confirm in one line.")
+        elif _moves_on_from_draft(user_text):
+            # A call, or a question about what happened, is never an edit to the
+            # draft. 8 Oct: "Connect with swamy … and clarify" arrived wrapped as
+            # draft feedback and came back as a re-worded TEXT; "What swamy told?"
+            # came back as "do you want that message sent?".
+            store.record_outcome("turn", "draft dropped for new ask", subject=cid,
+                                 detail=user_text[:200])
+            prompt = (f"{user_text.strip()}\n\n(The draft to {staged.get('to') or 'them'} "
+                      f"that was waiting is dropped — he moved on to this. Do not stage it "
+                      f"again unless he asks.)")
         else:
             # "Revise accordingly" is one reading. "enable MX … in develop and
             # 3.1.6" typed at a waiting draft was a new instruction, and the

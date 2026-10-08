@@ -65,8 +65,15 @@ async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> s
 
 
 @op("teams_call", lambda a: f"Call {a.get('who', '?')} on Teams")
-async def _teams_call(who: str = "", video: bool = False, group: bool = False) -> str:
+async def _teams_call(who: str = "", video: bool = False, group: bool = False,
+                      topic: str = "", agenda: str = "") -> str:
     import asyncio as _asyncio
+    if not group and not video:
+        # A person rung by Asta is TALKED to. 8 Oct: "call Swamy and help him with
+        # what he asked" dialled, connected — and sat in silence, because this
+        # path only ever listened. He said hello into nothing and hung up after
+        # 40 s. Asta's browser is not Arun's headset; a silent 1:1 call helps nobody.
+        return await talk_to(who, topic, agenda)
     result = await meetings.call_person(who, video=video, **({"group": True} if group else {}))
     # The join paths have always spawned a watcher; this one never did. Without
     # it a placed call is never noticed ringing out, never hung up, never
@@ -74,6 +81,22 @@ async def _teams_call(who: str = "", video: bool = False, group: bool = False) -
     # "already in a call" until the server restarts.
     _asyncio.create_task(meetings.call_watch(result))
     return f"📞 Calling {result} — I'll tell you if they pick up, and how it went."
+
+
+async def talk_to(who: str, topic: str = "", agenda: str = "") -> str:
+    """Ring one person and hold the conversation, in the background; the outcome
+    reaches him when it ends. The one door for every 1:1 call Asta places."""
+    from . import conversation, daemon, notify
+    topic = (topic or "").strip() or conversation.topic_for(who)
+
+    async def _go() -> None:
+        outcome = await conversation.converse(who, topic, agenda=agenda)
+        with contextlib.suppress(Exception):
+            await notify.notify(f"📞 {outcome}", "calls", urgency="direct")
+
+    daemon.once(f"call:{who}", _go())
+    return (f"📞 Calling {who} about {topic} — I'll talk it through and send you what "
+            f"was said when it ends. I won't commit you to anything.")
 
 
 @op("meeting_join", lambda a: f"Join {a.get('title') or 'the meeting'}"

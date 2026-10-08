@@ -2964,6 +2964,32 @@ _DECLINE = re.compile(r"^\s*(no|nope|nah|not now|later|skip|ignore|drop it|leave
                       r"don'?t|stop|👎|❌)\s*[.!]*\s*$", re.I)
 
 
+#: "no ignore rajendra request, dont need to do anything" — a refusal that names
+#: what it refuses. _DECLINE only knew the bare word.
+_DECLINE_LEAD = re.compile(r"^\s*(?:no|nope|nah|ignore|skip|drop|leave|don'?t|dont)\b", re.I)
+_NOT_A_NAME = {"request", "requests", "asks", "change", "code", "task", "please", "need",
+               "anything", "nothing", "this", "that", "them", "him", "her", "it"}
+
+
+def _subject_names(o) -> set[str]:
+    """The person (or thing) an offer is about, as words he would type."""
+    return {w for w in re.findall(r"[a-z]{4,}", (getattr(o, "subject", "") or "").lower())
+            if w not in _NOT_A_NAME and w not in {"asks", "wants", "code", "change"}}
+
+
+def _about_offer(text: str, o) -> bool:
+    """His words name who the open offer is about."""
+    words = set(re.findall(r"[a-z]{4,}", (text or "").lower()))
+    return bool(o is not None and words & _subject_names(o))
+
+
+def _declines_offer(text: str, o) -> bool:
+    """A plain no, or a no that names the offer's subject (8 Oct: his "no ignore
+    rajendra request" stopped task #268 instead of dropping Rajendra's ask)."""
+    return bool(_DECLINE.match(text or "")) or bool(
+        _DECLINE_LEAD.match(text or "") and _about_offer(text, o))
+
+
 def _offer_prompt(o, where: str = "") -> str:
     """Turn an accepted offer into the instruction that does the work.
 
@@ -4041,7 +4067,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                 # into this repo that the ask never mentioned reads as drift.
                 relevance.mark_inherited_workspace(cid, ws_name)
             return _start_turn(conv, _offer_prompt(open_offer), sink, channel)
-        if _DECLINE.match(user_text):
+        if _declines_offer(user_text, open_offer):
             offers.decline()
             _judge_offer(open_offer.kind, accepted=False)
             await sink.send({"type": "note", "text": "👍 Dropped it."})
@@ -4224,6 +4250,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                              "Say the number — e.g. “14 also cover the amend path”."})
             return None
     elif len(live) == 1 and not _names_another_task(user_text, live) \
+            and not _about_offer(user_text, offers.pending()) \
             and _conversation_is_on_task(cid, live[0]):
         if (not _independent_code_ask(user_text, conv.get("workspace") or
                                       policy.prefer("workspace")) and

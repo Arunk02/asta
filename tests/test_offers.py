@@ -379,3 +379,31 @@ class _Sink:
 
     async def send(self, payload):
         self.sent.append(payload)
+
+
+def test_ignoring_a_named_request_drops_it_and_leaves_the_running_task_alone(monkeypatch):
+    """8 Oct: Rajendra's code-change ask was open, task #268 was live, and "no
+    ignore rajendra request, dont need to do anything" stopped #268 — the ask
+    stayed open."""
+    import asyncio
+
+    from app import store, tasks
+    t = store.create_task("Revert event library change", "code", "p", "booking")
+    store.update_task(t["id"], status="running")
+    monkeypatch.setattr(tasks, "live_tasks_for", lambda cid: [t["id"]])
+
+    async def no_cancel(*a, **k):
+        pytest.fail("a running task was stopped by a reply to someone else's ask")
+    monkeypatch.setattr(tasks, "cancel", no_cancel)
+    monkeypatch.setattr(main, "_start_turn",
+                        lambda *a: pytest.fail("declining must not start a turn"))
+    o = offers.propose("🛠 Rajendra Kumar asks for a code change", "SCM hotfix build",
+                       "Plan it?", "plan the hotfix", kind="code_ask")
+    o.shown = True
+    sink = _Sink()
+    asyncio.run(main._dispatch({"id": "c1", "model": "claude"},
+                               "no ignore rajendra request , dont need to do anything",
+                               sink, "whatsapp"))
+    assert offers.pending() is None
+    assert any("Dropped it" in str(p) for p in sink.sent)
+    assert store.get_task(t["id"])["status"] == "running"

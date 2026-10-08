@@ -617,3 +617,46 @@ def test_the_old_engine_checks_the_tasks_own_worktree(world, monkeypatch, tmp_pa
     tasks.mark_approved(t["id"])
     asyncio.run(tasks._verify_gate(t["id"], t, "done", hops=0))
     assert seen == [own]
+
+
+# --- resuming a task whose thread already ended (8 Oct, #268) ---------------------
+
+def _finished(world, monkeypatch, *extra):
+    brain = _use(monkeypatch, Brain("STRUCTURE\n  one line\n\nPLAN READY",
+                                    "Changed one line. Tests: 3 passed.", *extra))
+
+    async def go():
+        t = _spawn()
+        await _settle(t["id"])
+        tasks.reply(t["id"], "PLAN APPROVED")
+        await _settle(t["id"])
+        return t["id"]
+    return asyncio.run(go()), brain
+
+
+def test_resuming_a_failed_task_whose_thread_ended_runs_it_again(world, monkeypatch):
+    tid, brain = _finished(world, monkeypatch, "Checked: all committed. Tests: 5 passed.")
+    assert asyncio.run(runner.ended(tid))
+    store.update_task(tid, status="failed", error="reported completion, no changes seen")
+
+    async def go():
+        out = await tasks.resume_task(tid)
+        await _settle(tid)
+        return out
+    out = asyncio.run(go())
+    assert "continuing" in out
+    assert len(brain.calls) == 3, "the same session ran again"
+    assert brain.calls[2]["resume"] is True
+    assert _status(tid) != "running"
+
+
+def test_a_run_that_ends_with_the_row_still_running_is_not_left_running(world, monkeypatch):
+    tid, _ = _finished(world, monkeypatch)
+    store.update_task(tid, status="running")                  # nothing settles it
+
+    async def go():
+        runner.carry_on(tid)
+        await _settle(tid)
+    asyncio.run(go())
+    assert _status(tid) == "failed"
+    assert "nothing was left to run" in store.get_task(tid)["error"]

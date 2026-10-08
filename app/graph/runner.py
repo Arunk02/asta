@@ -60,10 +60,20 @@ async def _drive(task_id: int, inp) -> None:
             # shown as one. Without the second half, a resume that found no
             # answer waiting would leave the row saying "running" at a gate.
             store.kv_del(_pending_key(task_id))
-            gate = _gate_of(await app.aget_state(config(task_id)))
+            snap = await app.aget_state(config(task_id))
+            gate = _gate_of(snap)
             t = store.get_task(task_id) or {}
             if gate and t.get("status") == "running":
                 store.update_task(task_id, status="awaiting_approval")
+            elif not gate and not snap.next and t.get("status") == "running":
+                # The thread is at its end and nothing settled the row. Left as
+                # "running", nothing would ever touch it again (8 Oct, #268 sat
+                # "running" with no process behind it).
+                import time
+                store.update_task(task_id, status="failed", finished_at=time.time(),
+                                  error="nothing was left to run — say what to do next")
+                await notify.notify(f"⚠️ Task #{task_id} had nothing left to run — tell me "
+                                    f"what to do next with it.", "task")
     except asyncio.CancelledError:
         raise                                   # cancel() owns the status
     except Stopped:
@@ -150,6 +160,16 @@ class _Pending:
 
     def __init__(self, task_id: int):
         self.task_id = task_id
+
+
+async def ended(task_id: int) -> bool:
+    """The thread ran to its end — not waiting at a gate, nothing next."""
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from .code_graph import build
+    async with AsyncSqliteSaver.from_conn_string(str(db_path())) as saver:
+        app = build().compile(checkpointer=saver)
+        snap = await app.aget_state(config(task_id))
+        return bool(snap.values) and not snap.next and not _gate_of(snap)
 
 
 async def waiting_at(task_id: int) -> str:

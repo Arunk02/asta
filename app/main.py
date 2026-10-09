@@ -2156,6 +2156,10 @@ def _moves_on_from_draft(text: str) -> bool:
     return bool(_ASKS_WHAT_HAPPENED.search(text)) and not _EDITS_A_DRAFT.search(text)
 
 
+#: Words that put Asta in front of a bare "sent to …".
+_SENDER_WORDS = {"i", "i've", "ive", "we", "just", "already", "and", "then", "also", "✅", "have", "has"}
+
+
 def unproven_send(reply: str, since: float) -> str:
     """The sentence claiming a send that nothing performed since `since`, or ""."""
     claim = ""
@@ -2177,6 +2181,15 @@ def unproven_send(reply: str, since: float) -> str:
         stop = re.search(r"[.!?\n]", text[m.end():])
         if stop and stop.group() == "?":
             continue
+        # "sent to" describing a thing is not Asta saying it sent something:
+        # "…derived only as the downstream reference sent to AP" (9 Oct). The
+        # bare form counts only where Asta is the one sending — at the start of
+        # a sentence, or after I / just / already / and.
+        if m.group(0).lower().startswith("sent"):
+            lead = re.findall(r"[\w'✅]+", text[max(0, m.start() - 20):m.start()])
+            starts = not text[:m.start()].strip() or re.search(r"[.!?:\n—-]\s*$", text[:m.start()])
+            if not starts and not (lead and lead[-1].lower() in _SENDER_WORDS):
+                continue
         claim = line.strip()[-200:]
         break
     if not claim:
@@ -4719,8 +4732,9 @@ async def _route_to_task(task_id: int, user_text: str, sink, channel: str,
         return True
     if intent != "augment":
         return False
-    # augment: buffer it; deliver at the next gate (no expensive session restart).
-    note = tasks.augment(task_id, user_text)
+    # augment: buffer it for the next gate — unless it says the approved design
+    # is wrong, when the build stops and it plans again (tasks.note_for_live_task).
+    note = await tasks.note_for_live_task(task_id, user_text)
     await sink.send({"type": "note", "text": note})
     return True
 

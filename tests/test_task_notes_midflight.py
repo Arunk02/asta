@@ -109,6 +109,8 @@ def library(tmp_path, monkeypatch):
                  ws / "telikos-email-service"):
         repo.mkdir(parents=True)
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "remote", "add", "origin",       # matched by its GitHub repo
+                        f"https://github.com/acme/{repo.name}.git"], cwd=repo, check=True)
     monkeypatch.setattr(worktrees, "REPO_DIRS", str(projects))
     monkeypatch.setattr(tasks, "code_cwd", lambda w: str(ws))
     monkeypatch.setattr(tasks, "task_cwd", lambda tid, w: str(tmp_path / "task"))

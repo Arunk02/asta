@@ -53,7 +53,11 @@ _PROD_DOWN = re.compile(r"\b(prod(uction)? (is )?(down|broken|on fire)|outage|se
                         re.I)
 _SMALL = re.compile(r"\b(typo|rename|one[- ]line|single line|log line|comment|bump|"
                     r"version bump|tiny|small fix|quick fix|wording|constant)\b", re.I)
-_FILE = re.compile(r"\b[\w./-]+\.(java|kt|py|ts|tsx|js|go|rb|cs|sql|yaml|yml|json|xml|md|gradle|properties)\b")
+#: A file named in a plan or an ask. The group is NON-capturing: with a capturing
+#: one, findall returned the extension, so a plan naming five .java files counted
+#: as ONE file — #272 was waved through as "1 class(es)/file(s)" and built at low
+#: effort (9 Oct).
+_FILE = re.compile(r"\b[\w./-]+\.(?:java|kt|py|ts|tsx|js|go|rb|cs|sql|yaml|yml|json|xml|md|gradle|properties)\b")
 
 #: "use claude", "on copilot", "with codex" — which brain he wants the job on.
 _BRAIN_OVERRIDE = re.compile(r"\b(?:use|on|with|via)\s+(claude|copilot|codex)\b", re.I)

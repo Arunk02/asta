@@ -556,6 +556,8 @@ def augment(task_id: int, text: str, *, code_change: bool = False) -> str:
     key = f"task_addenda:{task_id}"
     prior = (store.kv_get(key) or "").strip('"').strip()
     store.kv_set(key, (prior + "\n" if prior else "") + text.strip())
+    from . import go as _go
+    _go.note_his_words(task_id, text)
     where = "plan" if t["status"] == "awaiting_approval" else "next checkpoint"
     return (f"✚ noted for task #{task_id} — I'll fold that in when you approve its {where} "
             f"(no restart, no wasted tokens).")
@@ -762,7 +764,8 @@ def _repos_still_needed(task_id: int, t: dict, result: str) -> list[str]:
     try:
         root = Path(code_cwd(t.get("workspace")))
         have = {r.name for r in _wt.repos_in(Path(task_cwd(task_id, t.get("workspace"))))}
-        every = {r.name for r in _wt.repos_in(root)} | {r.name for r in _wt.outside(result)}
+        inside = _wt.repos_in(root)
+        every = {r.name for r in inside} | {r.name for r in _wt.outside(result, inside=inside)}
     except Exception:                                          # noqa: BLE001
         # `code_cwd` refuses an unregistered workspace by raising, which is a
         # state a finishing task is legitimately in. Continuing to the next repo
@@ -1125,6 +1128,46 @@ def is_running(task_id: int) -> bool:
     return bool(job and not job.done())
 
 
+#: He is saying the approved design is wrong — not adding to it. 9 Oct, #272:
+#: "hey incorrect task 272 … update the workprocess and send to IOM, not true or
+#: false" was queued for the next gate, which came after the code was written.
+_CORRECTS = re.compile(
+    r"\b(?:incorrect|wrong|not\s+(?:correct|right|what\s+i\s+(?:asked|wanted|said))|"
+    r"redo|re-do|that'?s\s+not|not\s+true\s+or\s+false|instead\s+of)\b", re.I)
+
+#: Sent with his correction when a build is stopped to plan again.
+REPLAN_CORRECTION = ("Arun corrected the APPROVED design while you were building it. Stop "
+                     "building to the old plan. Plan again with his correction (plan only — "
+                     "change no file), and show what changes from the plan he approved:")
+
+
+def corrects_design(text: str) -> bool:
+    return bool(_CORRECTS.search(text or ""))
+
+
+async def replan_now(task_id: int, note: str) -> str:
+    """Stop a build whose approved design he just corrected, and plan again."""
+    await cancel(task_id, status="failed", why=note)
+    if (store.get_task(task_id) or {}).get("status") in LIVE_STATUSES:
+        store.update_task(task_id, status="failed", finished_at=time.time())
+    store.kv_set(f"task_addenda:{task_id}", "")
+    store.kv_del(f"task_gate:{task_id}")
+    store.record_outcome("task", "replanned on correction", subject=str(task_id),
+                         detail=note[:200])
+    await propose_change(task_id, f"{REPLAN_CORRECTION}\n{note}")
+    return (f"✋ Task #{task_id}: that changes what was approved — I stopped the build and "
+            f"it is planning again with your correction. You'll see the new plan first.")
+
+
+async def note_for_live_task(task_id: int, text: str, *, code_change: bool = False) -> str:
+    """His words for a task that is still running: a correction to the approved
+    design stops the build and re-plans; anything else is kept for its next step."""
+    t = store.get_task(task_id) or {}
+    if t.get("status") == "running" and plan_approved(task_id) and corrects_design(text):
+        return await replan_now(task_id, text)
+    return augment(task_id, text, code_change=code_change)
+
+
 async def cancel(task_id: int, status: str = "cancelled", why: str = "") -> bool:
     """Stop a running worker and kill its copilot process. True if one was killed."""
     job = _running.get(task_id)
@@ -1247,7 +1290,7 @@ def _unfence_plan(lines: list[str]) -> list[str]:
     return out
 
 
-def _phone_text(result: str, limit: int = 1100) -> str:
+def _phone_text(result: str, limit: int = 1100, head_first: bool = False) -> str:
     """A gate's output, made readable on a phone.
 
     The raw tail was unusable there: it started mid-sentence, carried code fences,
@@ -1306,6 +1349,18 @@ def _phone_text(result: str, limit: int = 1100) -> str:
     cut = {i for (st, en), _ in spans for i in range(st, en)}
     rest = [ln for i, ln in enumerate(keep) if i not in cut]
     budget = limit - sum(len(ln) + 1 for ln in shape)
+    if head_first:
+        # A plan is read from the top: what changes, in which files. 9 Oct, #272:
+        # the phone got "5. Tests…" onwards and the four changes above it were cut.
+        out, total = [], 0
+        for line in rest:
+            if total + len(line) + 1 > budget - 40:
+                out.append("… (the rest is in the app)")
+                break
+            out.append(line)
+            total += len(line) + 1
+        body = "\n".join((shape + [""] + out) if shape and out else (shape or out)).strip()
+        return re.sub(r"\n{3,}", "\n\n", body) or (result or "").strip()[:limit]
     # Prefer the tail (the plan + the ask), but start on a real heading/bullet.
     out: list[str] = []
     total = 0
@@ -2424,7 +2479,7 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         # on, is drag. He still gets the plan — to read, and to stop.
         await notify.notify(
             f"📋 *PLAN #{task_id}* — going ahead ({why})\n{clip.clip(t['title'], 90)}\n\n"
-            f"{_phone_text(result, 1100)}\n\n"
+            f"{_phone_text(result, 1500, head_first=True)}\n\n"
             f"— — —\n"
             + ("I'll raise the PR when it's done. " if go.ships(task_id)
                else "It stays local until you say *raise PR*. ")
@@ -2444,7 +2499,7 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         return
     await notify.notify(
         f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
-        f"{_phone_text(result, 1100)}\n\n"
+        f"{_phone_text(result, 1500, head_first=True)}\n\n"
         f"— — —\n"
         f"👍 *approve task {task_id}*\n"
         f"👎 *reject task {task_id}*\n"
@@ -2481,10 +2536,52 @@ async def ship_as_told(task_id: int) -> None:
                             "task", urgency="direct")
 
 
+async def _note_arrived_while_building(task_id: int, t: dict, result: str) -> bool:
+    """He wrote to the task while it built and that note was never delivered.
+
+    9 Oct, #272: his correction sat in the queue, the task was marked done and
+    announced "Local implementation ready" — the note would never have been
+    applied. Not ready, then: the note is applied first (a correction plans
+    again; anything else continues in the same session)."""
+    from . import notify
+    note = note_waiting(task_id)
+    if not note:
+        return False
+    store.kv_set(f"task_addenda:{task_id}", "")
+    store.update_task(task_id, status="done", result=result, finished_at=time.time())
+    correction = corrects_design(note)
+
+    async def _after_this_run() -> None:
+        for _ in range(1200):                 # the run calling us ends right after
+            if not is_running(task_id):
+                break
+            await asyncio.sleep(0.5)
+        try:
+            if correction:
+                await propose_change(task_id, f"{REPLAN_CORRECTION}\n{note}")
+            else:
+                await refine(task_id, note, code_change=True, approved_plan=True)
+        except ValueError as exc:
+            await notify.notify(f"⚠️ #{task_id}: could not apply your note — {exc}", "task",
+                                urgency="direct")
+
+    asyncio.get_running_loop().create_task(_after_this_run())
+    await notify.notify(
+        f"📝 #{task_id} {t.get('title', '')} — built, but NOT ready: your note came in while "
+        f"it was building and is not in it yet: “{clip.clip(note, 220)}”. "
+        + ("Planning again with it — you'll see the plan first." if correction
+           else "Applying it now, in the same session."), "task", urgency="direct")
+    store.record_outcome("task", "note applied after build", subject=str(task_id),
+                         detail=note[:200])
+    return True
+
+
 async def complete(task_id: int, t: dict, result: str) -> None:
     """The one way a code task is marked done and announced — both engines."""
     from . import go, notify
     if (store.get_task(task_id) or {}).get("status") in _ALREADY_REPORTED:
+        return
+    if await _note_arrived_while_building(task_id, t, result):
         return
     if await _followup_changed_nothing(task_id, t, result):
         return
@@ -2898,6 +2995,11 @@ def record_answer(task_id: int, t: dict, text: str) -> tuple[bool, str]:
             from .graph import outcome as _outcome
             routing.on_plan(task_id, t.get("result") or "", _outcome.reported(task_id, 0))
     store.add_task_event(task_id, "gate", ("approved: " if approved else "answer: ") + text[:200])
+    if approved:
+        store.kv_del(f"task_gate:{task_id}")      # building now: no gate is open
+    else:
+        from . import go as _go
+        _go.note_his_words(task_id, text)
     # Anything buffered by augment() while the task ran rides in now, on the user's
     # gate action — so mid-flight additions land without a session restart.
     full_text = text + _drain_addenda(task_id)
@@ -4073,7 +4175,7 @@ async def _propose_worker(task_id: int, prompt: str) -> None:
     store.update_task(task_id, status="awaiting_approval")
     await notify.notify(
         f"📋 #{task_id} {t.get('title', '')} — proposed change (nothing changed yet):\n\n"
-        f"{_phone_text(readable_outcome(result), 1500)}\n\n"
+        f"{_phone_text(readable_outcome(result), 1800, head_first=True)}\n\n"
         f"Reply *approve task {task_id}* to apply it, or tell me what to change.", "task")
 
 
@@ -4113,8 +4215,9 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
                             else "a request for a different action")
                          + ", not an instruction to change its implementation")
     if t["status"] in LIVE_STATUSES:
-        # Still running: augment() is the right door, and it needs no restart.
-        return augment(task_id, feedback, code_change=code_change)
+        # Still running: kept for its next step — or, when he says the approved
+        # design is wrong, the build stops and it plans again.
+        return await note_for_live_task(task_id, feedback, code_change=code_change)
     if not approved_plan and t["status"] in REFINABLE and _PLAN_FIRST.search(feedback or ""):
         return await propose_change(task_id, feedback)
     if t["status"] not in REFINABLE:

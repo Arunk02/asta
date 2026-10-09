@@ -168,6 +168,54 @@ def ask_from_tier() -> int:
     return APPROVAL_FROM_TIER
 
 
+#: He wants someone else to approve before any code: "share the plan to vinish,
+#: get an approval and implement" (9 Oct, #272 — waved through as small).
+_OUTSIDE_APPROVAL = re.compile(
+    r"\b(?:get|take|ask\s+for|need|wait\s+for|after)\s+(?:an?\s+|his\s+|her\s+|their\s+)?"
+    r"(?:approval|go-?ahead|sign-?off)\b"
+    r"|\bapprov\w*\s+(?:from|by)\s+[a-z]+"
+    r"|\b(?:share|send|show)\b[^.\n]{0,40}\bplan\b[^.\n]{0,60}"
+    r"\b(?:approv\w*|review|go-?ahead|sign-?off|ok)\b", re.I)
+
+#: The plan itself still asks him something — it is not ready to run.
+_PLAN_ASKS = re.compile(
+    r"\bawaiting\s+(?:your|arun'?s|his)\s+(?:approval|confirmation|answer|decision|go)"
+    r"|\bopen\s+questions?\b"
+    r"|\bI'?ll\s+implement\s+(?:as\s+soon\s+as|once|when)\s+you\b"
+    r"|\bneeds?\s+(?:your|arun'?s|his)\s+(?:answer|decision|confirmation|input)\b"
+    r"|\bplease\s+confirm\b", re.I)
+
+
+def _asks_outside_approval(text: str) -> str:
+    """The words asking for someone else's approval before code, or ""."""
+    m = _OUTSIDE_APPROVAL.search(text or "")
+    if m:
+        return m.group(0)
+    # "plan on requirements which i gave then send to Vinish i told for approval"
+    for sentence in re.split(r"(?<=[.!?\n])\s+", text or ""):
+        if (re.search(r"\bplan\b", sentence, re.I)
+                and re.search(r"\b(?:approv\w*|go-?ahead|sign-?off)\b", sentence, re.I)
+                and re.search(r"\b(?:send|share|show|get|take|ask|wait)\b", sentence, re.I)):
+            return sentence.strip()[:300]
+    return ""
+
+
+def note_his_words(task_id: int, text: str) -> None:
+    """Keep what he said about who must approve, in full. Gate answers are
+    recorded clipped to 200 characters, and #272's "get an approval" came after."""
+    if _asks_outside_approval(text):
+        store.kv_set(f"task_outside_approval:{task_id}", (text or "")[:600])
+
+
+def waits_for_someone(task_id: int) -> str:
+    """His words asking for someone else's approval before code, or ""."""
+    t = store.get_task(task_id) or {}
+    said = store.kv_get(f"task_outside_approval:{task_id}") or ""
+    if said:
+        return said
+    return _asks_outside_approval(f"{t.get('prompt') or ''}\n{words(task_id)}")
+
+
 def no_ask(task_id: int, plan: str) -> str:
     """Why this plan goes ahead without waiting for him — "" when it must wait.
 
@@ -175,6 +223,10 @@ def no_ask(task_id: int, plan: str) -> str:
     but getting too much approval is drag." So a plan waits for him only when
     the change is big, and never when he has already said go on this task."""
     if not enabled():
+        return ""
+    # Before "as you said": a go-ahead for the task is not a go-ahead to skip the
+    # approval he asked someone else for, nor to skip the plan's own questions.
+    if waits_for_someone(task_id) or _PLAN_ASKS.search(plan or ""):
         return ""
     if granted(task_id):
         return "as you said"

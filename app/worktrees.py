@@ -91,21 +91,58 @@ def repos_in(workspace_root: Path) -> list[Path]:
 REPO_DIRS = os.environ.get("ASTA_REPO_DIRS", "~/Projects")
 
 
-def outside(*hints: str) -> list[Path]:
-    """Repos outside the workspace that these words name EXACTLY (full repo
-    name) — never a guess, so a task only reaches a repo it said it needs."""
+def origin_name(repo: Path) -> str:
+    """The GitHub repo a checkout belongs to — `telikos-booking-service` for a
+    clone in a folder called `new`. "" when it has no origin."""
+    import subprocess
+    try:
+        url = subprocess.run(["git", "config", "--get", "remote.origin.url"], cwd=str(repo),
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") if url else ""
+
+
+def outside(*hints: str, inside: list[Path] | tuple = ()) -> list[Path]:
+    """Repos outside the workspace that these words name by their GitHub repo
+    name, exactly — never a guess, so a task only reaches a repo it said it needs.
+
+    By the repo, not the folder: 9 Oct, #272 — "prepare for the NEW customs
+    status changes" matched ~/Projects/new, a stray clone of booking-service, and
+    the whole task was planned and built there. A clone of a repo the workspace
+    already has is never used: the workspace's own checkout is the one."""
     text = " ".join(h or "" for h in hints).lower()
-    found: list[Path] = []
+    taken = {(origin_name(r) or r.name).lower() for r in inside}
+    best: dict[str, Path] = {}
     for folder in (REPO_DIRS or "").split(":"):
         base = Path(folder.strip()).expanduser() if folder.strip() else None
         if base is None or not base.is_dir():
             continue
         for repo in sorted(base.iterdir()):
-            if (repo / ".git").exists() and re.search(
-                    rf"(?<![\w-]){re.escape(repo.name.lower())}(?![\w-])", text) \
-                    and all(r.name != repo.name for r in found):
-                found.append(repo)
-    return found
+            if not (repo / ".git").exists():
+                continue
+            name = origin_name(repo).lower()
+            if not name or name in taken or not re.search(
+                    rf"(?<![\w-]){re.escape(name)}(?![\w-])", text):
+                continue
+            # Of several clones, the one whose folder IS the repo's name.
+            if name not in best or repo.name.lower() == name:
+                best[name] = repo
+    return list(best.values())
+
+
+def _owner_of(worktree: Path) -> Path | None:
+    """The repo a linked worktree was cut from."""
+    import subprocess
+    try:
+        common = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=str(worktree),
+                                capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not common:
+        return None
+    path = Path(common) if Path(common).is_absolute() else (worktree / common).resolve()
+    return path.parent if path.name == ".git" else None
 
 
 def all_repos_in(workspace_root: Path) -> list[Path]:
@@ -193,13 +230,10 @@ async def create(workspace_root: Path, task_id: int, branch: str,
     root.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
     inside = repos_in(workspace_root)
-    extra = [r for r in outside(*hints) if all(r.name != x.name for x in inside)]
-    text = " ".join(h or "" for h in hints)
-    named = [r for r in inside if _names(r.name) & _tokens(text)]
-    # A repo outside the workspace was named and nothing inside was: prepare
-    # just that one, not every service by the "nothing matched" fallback.
-    chosen = named if extra else repos_for(workspace_root, *hints)
-    for repo in chosen + extra:
+    extra = outside(*hints, inside=inside)
+    # The workspace's own repos keep their rule, fallback included: preparing one
+    # that turns out unneeded costs a fetch, missing one costs the task.
+    for repo in repos_for(workspace_root, *hints) + extra:
         out: dict = {"repo": repo.name, "branch": branch, "base": "", "ok": False,
                      "note": "", "path": str(root / repo.name)}
         # Fetch so the branch is cut from what origin has now, not from whatever
@@ -249,7 +283,10 @@ async def remove(workspace_root: Path, task_id: int, force: bool = False) -> lis
     if not root.is_dir():
         return []
     notes: list[str] = []
-    for repo in repos_in(workspace_root) + outside(*[p.name for p in root.iterdir()]):
+    inside = repos_in(workspace_root)
+    owners = [o for p in root.iterdir() if p.is_dir() and all(p.name != r.name for r in inside)
+              for o in [_owner_of(p)] if o is not None]
+    for repo in inside + owners:
         target = root / repo.name
         if not target.exists():
             continue

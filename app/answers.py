@@ -327,6 +327,22 @@ async def offer_plan(*, who: str, chat: str, need: str, summary: str, thread: st
                            "source_text": source_text}):
         _record_rejected_origin(item)
         return False
+    from . import tasks
+    covered = tasks.covering_task(f"{need}\n{summary}\n{words}")
+    if covered:
+        # Already being built: offering it again is the nag he complained of,
+        # and a "yes" would start a second task on the same change.
+        store.record_outcome("answer", "covered by task", subject=str(covered["id"]),
+                             detail=f"{who}: {need}"[:200])
+        if thread:
+            threads.update(thread, status="awaiting_arun")
+        if not store.kv_get(f"covered_told:{covered['id']}:{who}"):
+            store.kv_set(f"covered_told:{covered['id']}:{who}", "1")
+            from . import notify
+            await notify.notify(f"🛠 {who}'s ask is the same work as task #{covered['id']} "
+                                f"({covered.get('title', '')}) — not offering it again.",
+                                "answer", urgency="ambient", considered=True)
+        return False
     if thread:
         threads.update(thread, status="awaiting_arun")
     cid = phone_conversation()
@@ -658,6 +674,34 @@ async def _deliver_approved_review(intent: dict) -> bool:
                          subject=str(intent.get("task_id") or ""), detail=intent["to"][:200])
     await notify.notify(f"{line} (same approved review of {origin['ref']}).",
                         "answer", urgency="ambient", considered=True)
+    return True
+
+
+async def present_task_draft(task_id: int, t: dict, *, answered: bool = False) -> bool:
+    """Show the draft a finished task staged, labelled with the task.
+
+    `answered`: the task's REPLY already went to him as a colleague's answer —
+    the staged copy would be the same message twice, so it is dropped."""
+    from . import loop
+    intent = loop.take_task_send(task_id)
+    if not intent:
+        return False
+    if answered:
+        store.record_outcome("answer", "task draft dropped", subject=str(task_id),
+                             detail="its REPLY was presented")
+        return False
+    from . import tasks
+    cid = phone_conversation() or tasks.conversation_of(task_id)
+    if not cid:
+        return False
+    to = intent["to"]
+    intent = {**intent, "task_id": task_id, "who": to, "need": "", "analysis": "",
+              "lead": f"From task #{task_id} ({t.get('title', '')}) — a draft for *{to}*.",
+              "_at": time.time()}
+    if _blocked(cid):
+        _enqueue({"type": "answer", **intent})
+        return True
+    await _show(cid, intent)
     return True
 
 

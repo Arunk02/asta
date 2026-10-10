@@ -1304,9 +1304,9 @@ async def watch_and_report(title: str = "") -> None:
                   f"than reconstructing it. Do not summarise the rest of the meeting.")
         question = "Want me to go through what was said and pull out anything for you?"
         context = f"{why} · no captions captured"
-    offers.propose(subject=f"📞 Call ended{label}", context=context,
+    o = offers.propose(subject=f"📞 Call ended{label}", context=context,
                    question=question, action=action)
-    await notify.notify(offers.pending().render(), "calls", urgency="ambient")
+    await notify.notify(o.render(), "calls", urgency="ambient")
 
 
 async def drop_call_lost_to_sleep(gap: float) -> str:

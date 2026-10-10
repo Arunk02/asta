@@ -92,6 +92,33 @@ def set_pending_send(cid: str, what: str, to: str = "", channel: str = "chat",
         }
 
 
+def set_task_send(task_id: int | str, what: str, to: str, channel: str = "chat") -> None:
+    """A draft a background TASK staged: kept with the task, not the chat.
+
+    In the chat's slot it waited, unseen, for his next message and was shown
+    after the answer to it: task 275's reply to Komal surfaced under his
+    booking question, and his next message was taken as an edit to it (9 Oct).
+    The task's finish shows it, labelled with the task (answers.present_task_draft)."""
+    from . import store
+    store.kv_set(f"task_send:{task_id}", json.dumps({
+        "kind": "send", "what": (what or "").strip(), "to": (to or "").strip(),
+        "channel": (channel or "chat").strip() or "chat", "to_group": False}))
+
+
+def take_task_send(task_id: int | str) -> dict | None:
+    """The draft a task left, read once."""
+    from . import store
+    raw = store.kv_get(f"task_send:{task_id}")
+    if not raw:
+        return None
+    store.kv_del(f"task_send:{task_id}")
+    try:
+        intent = json.loads(raw)
+    except ValueError:
+        return None
+    return intent if isinstance(intent, dict) and intent.get("what") else None
+
+
 def take(cid: str) -> dict | None:
     """The intent a just-finished turn left — read once, then cleared."""
     return _next.pop(cid, None)

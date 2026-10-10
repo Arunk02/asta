@@ -171,6 +171,15 @@ def offer(kind: str, subject: str, context: str, prompt: str,
     # being asked, and the id he was shown keeps changing underneath him.
     if _same_question(asdict(head), o):
         return head
+    if head.aside and not head.shown:
+        # He moved on from the head without answering, so nothing is being
+        # asked: the new offer is asked now and the set-aside one waits first in
+        # line. Left in front, every call that rang re-sent Vinish's old code
+        # change — and his "yes" to pick up would have planned it (9 Oct).
+        rest = [row for row in _queue() if not _same_question(row, o)]
+        store.kv_set(QUEUE_KEY, json.dumps([asdict(head)] + (rest[-(QUEUE_MAX - 1):] if QUEUE_MAX > 1 else [])))
+        store.kv_set(KEY, json.dumps(asdict(o)))
+        return o
     queued = _queue()
     # The same proposal twice is one proposal. Watchers re-detect the same state
     # on every pass — a stale context is still stale five minutes later — and
@@ -274,7 +283,10 @@ def _promote() -> Offer | None:
             store.kv_set(QUEUE_KEY, json.dumps(queued))
             # Queued offers told him "I'll ask when that one is answered" — and
             # promotion never asked. Marked here; answers.announce_offer asks.
-            store.kv_set(f"offer_unasked:{o.id}", "1")
+            # Not one he already moved on from: he was told it is still open,
+            # and a bare yes shows it again before it counts.
+            if not o.aside:
+                store.kv_set(f"offer_unasked:{o.id}", "1")
             return o
     store.kv_set(QUEUE_KEY, json.dumps([]))
     return None

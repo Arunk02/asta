@@ -249,6 +249,13 @@ def required_for(query: str) -> list[str]:
         out.append("do_in_app")
     if _ABOUT_PRODUCTION.search(query or ""):
         out.append("grafana_logs")
+    # A question about one booking is answered from its logs and workflows
+    # (booking_case.rule). "HYNBFDPWY7R … why is AP still in progress" named no
+    # log word, got neither tool, and the brain told him to register an MCP
+    # server itself (9 Oct).
+    from . import booking_case
+    if booking_case.ids(query or "") and booking_case.asks(query or ""):
+        out += ["grafana_logs", "temporal_workflows", "temporal_workflow"]
     # "notify him on Monday", "follow up after 2:30", "remind me": the whole
     # reminders group. With only set_reminder offered, a brain told him it had
     # "no delete tool for reminders" and set three for one thing (1 Oct).

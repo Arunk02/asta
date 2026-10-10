@@ -12,6 +12,8 @@ leg so it can never become the next token bleed:
     job notes             — decisions and facts from earlier legs (graph/notes.py)
     his standing rules    — the typed ones the gate enforces (policy.py)
     people and systems    — facts about who and what the job names (people.py)
+    how the flow works    — a plan leg only: his documents and the repo summaries
+                            on the task's subject (project_knowledge.py)
 
 Each part is a few hundred characters, each is dropped whole rather than cut
 mid-line, and a job only ever sees its own notes and plan.
@@ -23,7 +25,7 @@ from . import people, policy, store
 
 #: Characters a pack may add, per kind of leg. A plan reads widely and needs the
 #: least carried in; an implementation leg after a fresh start needs the plan.
-CAPS = {"plan": 2500, "implement": 5000, "analysis": 2500, "draft": 1500}
+CAPS = {"plan": 4500, "implement": 5000, "analysis": 2500, "draft": 1500}
 
 
 def _approved_plan(task_id: int) -> str:
@@ -32,6 +34,31 @@ def _approved_plan(task_id: int) -> str:
         from . import task_spec
         plan = task_spec.get(task_id)
     return plan.strip()
+
+
+#: What a plan leg may spend on his documents, inside the plan cap.
+KNOWLEDGE_BUDGET = 1800
+
+
+def _how_it_works(t: dict) -> str:
+    """His documents and the repo summaries on what the task names.
+
+    9 Oct, task 272: the plan for a manual customs status change never said the
+    same update goes on to IOM, though his flow doc says CUSTOMS_UPDATE →
+    manualCustomsUpdate → execution status → IOM → EH. The plan leg was handed
+    his plan, notes, rules and people — never the knowledge he wrote down."""
+    from . import project_knowledge
+    try:
+        found = project_knowledge.lookup(f"{t.get('title', '')}\n{t.get('prompt', '')}"[:1500],
+                                         t.get("workspace") or "", budget=KNOWLEDGE_BUDGET,
+                                         channel="plan")
+    except Exception:                                          # noqa: BLE001
+        return ""
+    if not found:
+        return ""
+    return ("[How this flow works — his documents and the repo summaries. Trace the "
+            "change upstream and downstream from here; where the code disagrees, the "
+            "code wins and the plan says so]\n" + found)
 
 
 def build(task_id: int, stage: str) -> str:
@@ -59,6 +86,11 @@ def build(task_id: int, stage: str) -> str:
     if known:
         parts.append("[What is known about the people and systems this names — dated]\n"
                      + "\n".join(f"- {people.line(r)}" for r in known))
+
+    if stage == "plan":
+        flow = _how_it_works(t)
+        if flow:
+            parts.append(flow)
 
     out, size = [], 0
     for p in parts:

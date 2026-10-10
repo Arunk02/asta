@@ -111,7 +111,9 @@ _TABLE: tuple[Capability, ...] = (
                note="THE way to read production logs. Code builds the LogQL (Loki "
                     "needs namespace AND cluster labels) and groups what comes back "
                     "into error signatures. Never write LogQL yourself, and never "
-                    "ask for raw lines — 89 of 194 hand-written queries failed."),
+                    "ask for raw lines — 89 of 194 hand-written queries failed. "
+                    "If it fails, say what failed — never ask Arun to switch modes, "
+                    "run a command or register an MCP server."),
     Capability("temporal_workflows", "observe",
                http='POST /api/temporal/workflows {"env":"prod","query":"ExecutionStatus=\"Failed\""}',
                note="Temporal workflows by environment (dev/qa/sit/uat/perf/preprod/"

@@ -247,7 +247,7 @@ async def _report_stale(workspace: str, ws_root, detail: str, lines: list[str],
         store.kv_set(f"last_refresh:{workspace}", str(time.time()))
         return summary + "\n(already reported — not repeated)"
 
-    offers.propose(
+    o = offers.propose(
         subject=f"🗂 {workspace} context is stale",
         context=f"{age}\n{detail[:900]}",
         question="Want me to bring the context up to date?",
@@ -260,7 +260,7 @@ async def _report_stale(workspace: str, ws_root, detail: str, lines: list[str],
                 f"and where a commit changed nothing the context claims, change nothing "
                 f"and say so. Then re-index and stamp verified_against = HEAD."),
         payload={"workspace": workspace})
-    await notify.notify(offers.pending().render(), "info",
+    await notify.notify(o.render(), "info",
                         priority=priority if attention.enabled() else None,
                         considered=True)   # attention.consider ran above
     store.kv_set(f"last_refresh:{workspace}", str(time.time()))

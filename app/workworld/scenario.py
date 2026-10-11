@@ -329,9 +329,14 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
         store.kv_set(budget._key(), str(int(s["pushes_today"])))
     for r in s.get("rules", []) or []:
         # Rules he has already approved, as the world finds them.
-        from app import policy
+        from app import guardrails, policy
         policy.add(r["kind"], r.get("act", ""), r.get("target", ""), r.get("value", ""),
                    bool(r.get("unless_asked")), r.get("words", ""))
+        # An approved note reaches the brains only through his guardrails file
+        # (instructions.adopt writes both). Seeded as a policy row alone, the
+        # rule-7 replay of his 8 Oct branch-name note could never pass.
+        if r["kind"] == "note" and r.get("words"):
+            guardrails.append_standing(r["words"])
     if s.get("clock"):
         # A particular hour of a particular day — a Saturday, 09:05 on a Monday —
         # because "quiet at the weekend" cannot be tested on whatever day CI runs.

@@ -230,3 +230,54 @@ def test_the_context_boot_points_at_the_workspace_from_a_worktree(tmp_path, monk
     assert "sh .asta-context/boot.sh" not in out
     # Run from the workspace itself, the relative path already works.
     assert tasks.context_boot_paths(tasks.CODE_OVERRIDES, str(ws), "booking") == tasks.CODE_OVERRIDES
+
+
+# --- 5. every brain, and the way he wants a case debugged ----------------------------
+
+class _Captured(Exception):
+    pass
+
+
+def test_the_api_key_brain_gets_the_same_turn_context_as_the_cli_brains(monkeypatch):
+    """Claude CLI and Copilot CLI put copilot_cli.turn_context ahead of his words;
+    an API-key turn did not, so a booking question reached it with no rule."""
+    seen = {}
+
+    class _Agent:
+        def run_stream_events(self, prompt, **kw):
+            seen["prompt"] = prompt
+            raise _Captured()
+
+    monkeypatch.setattr(main.agent_mod, "get_model", lambda n: object())
+    monkeypatch.setattr(main.agent_mod, "build_agent", lambda sel: _Agent())
+    monkeypatch.setattr(main, "AGENT", _Agent())
+    monkeypatch.setattr(main, "_load_history", lambda conv: [])
+    conv = {"id": "api1", "summary": "", "workspace": "booking"}
+    with pytest.raises(_Captured):
+        asyncio.run(main._run_turn_streaming(None, conv, BOOKING_Q, "claude"))
+    assert "HYNBFDPWY7R" in seen["prompt"] and "grafana_logs" in seen["prompt"]
+    assert seen["prompt"].rstrip().endswith("can you check") or BOOKING_Q in seen["prompt"]
+
+
+def test_a_why_question_about_a_booking_is_debugged_his_way():
+    rule = booking_case.rule(BOOKING_Q)
+    for step in ("Current state first", "Mind log retention", "Class:line",
+                 "Temporal", "Not confirmed"):
+        assert step in rule, step
+    assert {"resolve_context", "read_workspace_file"} <= set(tool_index.required_for(BOOKING_Q))
+
+
+def test_a_status_question_keeps_the_short_brief():
+    rule = booking_case.rule("have we sent TMS for H7SL7T6CZLP in sit?")
+    assert "Current state first" not in rule
+
+
+def test_a_debugging_task_is_briefed_with_the_case_method():
+    from app import roles
+    assert roles.CASE_METHOD in roles.briefed("debugging")
+    assert roles.CASE_METHOD not in roles.briefed("review")
+    assert roles.CASE_METHOD not in roles.brief("debugging"), "the brief stays short"
+    from app import copilot_cli
+    sysp = copilot_cli._first_turn_context({"id": "x", "summary": "", "workspace": "booking"},
+                                           user_text="why is the email service throwing 500s")
+    assert "Current state first" in sysp

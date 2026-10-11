@@ -55,6 +55,13 @@ _FILLER = re.compile(r"\b(?:booking|bkg|id|no|number|ref|reference|here|this|is|
                      r"environment|bro|da|sir|pls|please|ok|okay|thanks|hi|hey)\b", re.I)
 
 
+#: Asking why something did not happen or is stuck — a case to debug, not a
+#: status to read out.
+WHY = re.compile(r"\b(?:why|stuck|still|remains?|instead\s+of|fail(?:ed|ing|s)?|error|"
+                  r"not\s+(?:closed|updated|sent|received|moving|working|happening|done|"
+                  r"marked|reflected|triggered|created))\b", re.I)
+
+
 def ids(text: str) -> list[str]:
     """The ids in it, upper-cased, in order, once each."""
     out: list[str] = []
@@ -223,6 +230,10 @@ def rule(text: str, context: str = "", heard: bool = False) -> str:
            "overall. At most one 'Also noticed'.\n"
            "If the logs or Temporal cannot be read, say 'from the documents only — not "
            "confirmed in the logs' and what failed. Never present a document's answer as checked.")
+    if WHY.search(whole):
+        from . import roles
+        out += ("\nThey are asking WHY — this replaces the summary shape above.\n"
+                + roles.CASE_METHOD)
     if heard:
         out += ("\nThe id was HEARD on a call and may be misheard: if it is not found, try the "
                 "nearest spellings (one character off) before saying it does not exist.")

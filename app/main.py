@@ -2432,6 +2432,21 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     # Recall rides in the user prompt (not instructions) so the instruction
     # prefix stays byte-stable and the Anthropic prompt cache actually hits.
     prompt = _with_recall(user_text)
+    # The same per-turn block the Claude and Copilot CLI brains get, from the same
+    # function: who he means, how to check one booking, what his documents say.
+    # Without it an API-key turn answered a booking question from nothing.
+    from . import copilot_cli, resume as resume_mod
+    with contextlib.suppress(Exception):
+        ranked = resume_mod.ranking_text(user_text)
+        ctx = copilot_cli.turn_context(ranked)
+        if ctx:
+            prompt = f"{ctx}\n\n{prompt}"
+        # The role brief the CLI brains carry in their system prompt. Here it rides
+        # with the turn, so the cached instruction prefix stays byte-stable.
+        from . import roles
+        hat = roles.briefed(roles.role_for(ranked))
+        if hat:
+            prompt = f"{hat}\n\n{prompt}"
     # Only the tools this conversation has needed, not all 32 — see tool_index
     # for why the selection is sticky rather than per-message.
     selected = tool_index.select_sticky(conv["id"], user_text)

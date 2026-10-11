@@ -256,6 +256,9 @@ def required_for(query: str) -> list[str]:
     from . import booking_case
     if booking_case.ids(query or "") and booking_case.asks(query or ""):
         out += ["grafana_logs", "temporal_workflows", "temporal_workflow"]
+        # "Why is it stuck" is answered from the code that should have moved it.
+        if booking_case.WHY.search(query or ""):
+            out += ["resolve_context", "read_workspace_file"]
     # "notify him on Monday", "follow up after 2:30", "remind me": the whole
     # reminders group. With only set_reminder offered, a brain told him it had
     # "no delete tool for reminders" and set three for one thing (1 Oct).

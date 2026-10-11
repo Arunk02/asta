@@ -469,7 +469,7 @@ def brief_for(kind: str, who: str, text: str) -> str:
     from . import roles
     body = _BRIEFS.get(kind, _BRIEFS["debug"])
     pr = pr_number(text)
-    hat = roles.brief(roles.role_for(text, kind=kind))
+    hat = roles.briefed(roles.role_for(text, kind=kind))
     out = (body + _CLOSING).format(who=who or "A colleague", text=message_of(text),
                                    pr=f"#{pr}" if pr else "(number not stated)")
     return f"{hat}\n\n{out}" if hat else out

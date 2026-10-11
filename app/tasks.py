@@ -1565,8 +1565,8 @@ def _with_pipeline(pipeline: str, prompt: str, task_id: str = "") -> str:
     so the role rides alongside rather than forking the pipeline files.
     """
     body = agents.load(pipeline) if pipeline else ""
-    hat = roles.brief(roles.sustained(task_id, prompt) if task_id
-                      else roles.role_for(prompt))
+    hat = roles.briefed(roles.sustained(task_id, prompt) if task_id
+                        else roles.role_for(prompt))
     body = f"{body}\n\n{hat}" if (body and hat) else (body or hat)
     return f"{body}\n\n---\n\n{prompt}" if body else prompt
 

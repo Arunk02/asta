@@ -921,7 +921,113 @@ def task_cwd(task_id: int, workspace: str | None) -> str:
     root = Path(code_cwd(workspace))
     if worktrees.exists(root, task_id):
         return str(worktrees.root_for(root, task_id))
+    if store.kv_get(_CLEANED + str(task_id)):
+        # Its checkout was cleaned away and not yet restored (ensure_checkout).
+        # A path that does not exist fails loudly; the shared checkout would
+        # quietly run this task's work in the tree he has open.
+        return str(worktrees.root_for(root, task_id))
     return str(root)
+
+
+#: A task's checkout was removed by the sweep: {"branch": …, "repos": […]}.
+_CLEANED = "worktree_cleaned:"
+
+#: Finished for good: the checkout goes a day after the last activity.
+_FINAL_FOR_GOOD = ("merged", "pr_closed", "cancelled", "rejected")
+#: Finished, but he may come back to it: kept a while, restored if he does.
+_FINISHED_FOR_NOW = ("done", "failed", "sent", "send_failed")
+CHECKOUT_KEEP_DAYS = float(os.environ.get("ASTA_CHECKOUT_KEEP_DAYS", "14"))
+
+
+def _last_activity(t: dict) -> float:
+    return max(float(t.get(k) or 0) for k in ("created_at", "started_at", "finished_at",
+                                                "pr_checked_at"))
+
+
+def checkout_due(t: dict, now: float) -> bool:
+    """Whether a task's checkout may go now. Never while it runs, waits for his
+    approval, or waits on CI or review (`shipped`)."""
+    if t.get("kind") != "code":
+        return False
+    idle = now - _last_activity(t)
+    if t.get("status") in _FINAL_FOR_GOOD:
+        return idle > 86400
+    if t.get("status") in _FINISHED_FOR_NOW:
+        return idle > CHECKOUT_KEEP_DAYS * 86400
+    return False
+
+
+async def remove_checkout(task_id: int, t: dict | None = None) -> list[str]:
+    """Remove one task's checkout, remembering its branch and repos so
+    ensure_checkout can bring it back. Uncommitted work is kept (worktrees.remove)."""
+    from . import worktrees
+    t = t or store.get_task(task_id) or {}
+    try:
+        ws_root = Path(code_cwd(t.get("workspace")))
+    except RuntimeError:
+        return []
+    root = worktrees.root_for(ws_root, task_id)
+    if not worktrees.exists(ws_root, task_id):
+        return []
+    repos = sorted(p.name for p in root.iterdir() if p.is_dir() and (p / ".git").exists()) \
+        if root.is_dir() else []
+    branch = store.kv_get(f"task_branch:{task_id}") or task_branch(t, task_id)
+    notes = await worktrees.remove(ws_root, task_id)
+    if not worktrees.exists(ws_root, task_id):
+        store.kv_set(_CLEANED + str(task_id), _json.dumps({"branch": branch, "repos": repos}))
+    store.record_outcome("checkout", "removed", subject=str(task_id), detail="; ".join(notes)[:200])
+    return notes
+
+
+async def ensure_checkout(task_id: int) -> None:
+    """Bring back a cleaned checkout before anything works in it again — on the
+    same branch, with the same repos."""
+    raw = store.kv_get(_CLEANED + str(task_id))
+    if not raw:
+        return
+    from . import worktrees
+    t = store.get_task(task_id) or {}
+    try:
+        ws_root = Path(code_cwd(t.get("workspace")))
+        was = _json.loads(raw)
+    except (RuntimeError, ValueError):
+        return
+    if not worktrees.exists(ws_root, task_id):
+        await worktrees.create(ws_root, task_id, was.get("branch") or task_branch(t, task_id),
+                               *(was.get("repos") or []))
+    if worktrees.exists(ws_root, task_id):
+        store.kv_del(_CLEANED + str(task_id))
+        store.record_outcome("checkout", "restored", subject=str(task_id))
+
+
+async def sweep_checkouts(now: float | None = None) -> list[int]:
+    """Remove the checkouts of tasks that no longer need them, and stale PR
+    review checkouts. Returns the task ids cleaned."""
+    from . import worktrees
+    now = time.time() if now is None else now
+    cleaned, roots = [], set()
+    for t in store.list_tasks(limit=500):
+        try:
+            roots.add(Path(code_cwd(t.get("workspace"))))
+        except RuntimeError:
+            continue
+        if checkout_due(t, now):
+            notes = await remove_checkout(t["id"], t)
+            if notes and not any("uncommitted" in n for n in notes):
+                cleaned.append(t["id"])
+    for root in roots:
+        with contextlib.suppress(Exception):
+            await worktrees.sweep_reviews(root, now)
+    return cleaned
+
+
+async def checkout_sweeper() -> None:
+    """At start (after it settles), then once a day."""
+    await asyncio.sleep(120)
+    while True:
+        with contextlib.suppress(Exception):
+            await sweep_checkouts()
+        await asyncio.sleep(86400)
 
 
 def code_cwd(workspace: str | None) -> str:
@@ -2896,6 +3002,8 @@ async def _worker(task_id: int) -> None:
     t = store.get_task(task_id)
     if not t:
         return
+    with contextlib.suppress(Exception):
+        await ensure_checkout(task_id)
     prompt = t["prompt"]
     agent = _agent_for(t)
     if t["kind"] == "teams_draft":
@@ -3249,6 +3357,8 @@ async def resume_task(task_id: int, switch_to: str = "") -> str:
         raise ValueError(f"no task #{task_id}")
     if t["status"] not in ("paused", "failed"):
         raise ValueError(f"task #{task_id} is {t['status']} — nothing to resume")
+    with contextlib.suppress(Exception):
+        await ensure_checkout(task_id)
     if is_running(task_id):
         return f"Task #{task_id} is already running."
     note = ""
@@ -3562,6 +3672,7 @@ async def ship(task_id: int) -> str:
     if t["kind"] != "code" or t["status"] != "done":
         raise ValueError(f"task #{task_id} is not a finished code task "
                          f"(kind={t['kind']}, status={t['status']})")
+    await ensure_checkout(task_id)
     root = Path(task_cwd(task_id, t["workspace"]))
     # Same rule, same place. This copy mattered most: with the old shortcut,
     # shipping looked for the task's branch in the generated-context repo and
@@ -4223,6 +4334,7 @@ async def propose_change(task_id: int, feedback: str) -> str:
         raise ValueError(f"task #{task_id} is not a code task")
     if t["status"] in LIVE_STATUSES:
         raise ValueError(f"task #{task_id} is still running — I'll plan this when it stops")
+    await ensure_checkout(task_id)
     ci_read = await _ci_failure_for(t, feedback)
     store.kv_set(f"task_approved:{task_id}", "")          # this leg cannot write
     store.kv_set(f"task_proposal:{task_id}", _json.dumps(
@@ -4362,9 +4474,6 @@ async def reject(task_id: int, why: str = "") -> str:
     # Clean checkouts only — uncommitted edits are kept — and the branch stays.
     if t.get("kind") == "code":
         with contextlib.suppress(Exception):
-            from . import worktrees
-            ws_root = Path(code_cwd(t.get("workspace")))
-            if worktrees.exists(ws_root, task_id):
-                await worktrees.remove(ws_root, task_id)
+            await remove_checkout(task_id, t)
     return (f"Task #{task_id} rejected and its worker killed."
             if killed else f"Task #{task_id} rejected (it had already finished).")

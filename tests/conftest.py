@@ -41,6 +41,13 @@ def _no_repos_outside_the_workspace(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _checkouts_in_the_test_folder(tmp_path, monkeypatch):
+    """Task checkouts now live outside the workspace, under ~/.asta-worktrees by
+    default — a test's checkout must land in its own temp folder, never there."""
+    monkeypatch.setenv("ASTA_WORKTREES_DIR", str(tmp_path / "asta-worktrees"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "asta-test.db", raising=False)
     store.init()

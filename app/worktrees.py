@@ -31,10 +31,21 @@ from pathlib import Path
 
 from . import repo_ops
 
-#: Where a task's checkouts live. Inside the workspace so everything to do with a
-#: workspace stays together, but NOT inside any repo — a directory inside a repo
-#: would show up in that repo's `git status` forever.
+#: Where a task's checkouts USED to live: inside the workspace. Still honoured
+#: for a task that already has one there — its CLI session is keyed by that path.
 DIRNAME = ".asta-worktrees"
+
+
+def base_for(workspace_root: Path) -> Path:
+    """Where new checkouts for this workspace live: OUTSIDE it.
+
+    Inside the workspace, every checkout was another full copy of his services
+    in the folder IntelliJ has open — watched and indexed, 29 of them and 1.3 GB
+    by 11 Oct. Not inside any repo either: it would show in `git status` forever.
+    The folder keeps the `.asta-worktrees` name, so the Claude project directory a
+    task's session lands in still reads as Asta's (brains.py)."""
+    home = os.environ.get("ASTA_WORKTREES_DIR", "").strip() or str(Path.home() / DIRNAME)
+    return Path(home).expanduser() / Path(workspace_root).name
 
 #: How many code tasks may hold checkouts at once. Each is a full checkout plus a
 #: CLI subprocess plus, on verification, a Maven build — so this is bounded by the
@@ -44,7 +55,18 @@ MAX_PARALLEL = int(os.environ.get("ASTA_MAX_PARALLEL_TASKS", "3"))
 
 
 def root_for(workspace_root: Path, task_id: int) -> Path:
-    return Path(workspace_root) / DIRNAME / f"task-{task_id}"
+    """A task's checkout: where it already is, else the new home outside."""
+    legacy = Path(workspace_root) / DIRNAME / f"task-{task_id}"
+    if legacy.is_dir():
+        return legacy
+    return base_for(workspace_root) / f"task-{task_id}"
+
+
+def review_root(workspace_root: Path, repo_name: str, number: str) -> Path:
+    """A detached checkout of someone's PR, for a walkthrough."""
+    name = f"review-{repo_name}-{number}"
+    legacy = Path(workspace_root) / DIRNAME / name
+    return legacy if legacy.is_dir() else base_for(workspace_root) / name
 
 
 def exists(workspace_root: Path, task_id: int) -> bool:
@@ -306,3 +328,32 @@ async def remove(workspace_root: Path, task_id: int, force: bool = False) -> lis
     if root.is_dir() and not any(root.iterdir()):
         shutil.rmtree(root, ignore_errors=True)
     return notes
+
+
+#: A PR review checkout is rebuilt on demand, so a week unused is plenty.
+REVIEW_KEEP_DAYS = float(os.environ.get("ASTA_REVIEW_CHECKOUT_DAYS", "7"))
+
+
+async def sweep_reviews(workspace_root: Path, now: float | None = None) -> list[str]:
+    """Remove PR review checkouts not touched for REVIEW_KEEP_DAYS. Clean ones only."""
+    import time
+    now = time.time() if now is None else now
+    out: list[str] = []
+    for base in (Path(workspace_root) / DIRNAME, base_for(workspace_root)):
+        if not base.is_dir():
+            continue
+        for tree in base.glob("review-*"):
+            m = re.match(r"review-(.+)-(\d+)$", tree.name)
+            repo = Path(workspace_root) / m.group(1) if m else None
+            if not tree.is_dir() or repo is None or not (repo / ".git").exists():
+                continue
+            if now - tree.stat().st_mtime < REVIEW_KEEP_DAYS * 86400:
+                continue
+            rc, dirty = await repo_ops.git(tree, "git", "status", "--porcelain")
+            if rc != 0 or dirty.strip():
+                continue
+            rc, _ = await repo_ops.git(repo, "git", "worktree", "remove", str(tree), timeout=120)
+            await repo_ops.git(repo, "git", "worktree", "prune", timeout=60)
+            if rc == 0:
+                out.append(tree.name)
+    return out

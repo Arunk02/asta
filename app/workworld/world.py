@@ -344,6 +344,8 @@ class World:
         # Files Asta writes land in THIS world, never in his own folder — found
         # the hard way: two bench files appeared in ~/Asta files.
         self.use_env({"ASTA_FILES_DIR": str(self.db_path.parent / "files")})
+        # And task checkouts: outside the workspace now, under his home by default.
+        self.use_env({"ASTA_WORKTREES_DIR": str(self.db_path.parent / "worktrees")})
         # His real .env sets ASTA_QUIET_HOURS=22:00-07:00, and the bench inherits
         # it: two attention scenarios expect an interrupt, and after ten at night
         # they correctly got a digest entry instead. The suite has cleared this

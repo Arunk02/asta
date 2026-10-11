@@ -231,3 +231,18 @@ def test_the_bench_never_speaks_to_him_for_real(monkeypatch, tmp_path):
         assert any("voice" in d["caption"] for d in w.documents)
     finally:
         w.uninstall()
+
+
+def test_a_note_he_adopted_holds_in_its_replay():
+    """His 8 Oct note "Dont include asta name in feature branch creation" was
+    adopted, so its replay was written — and failed every run: the world seeded
+    it as a policy row only, while a note reaches the brains through his
+    guardrails file. The replay is built here, as adopt() builds it."""
+    from app import instructions
+    from app.policy import Rule
+    rule = Rule(id=7, kind="note", act="", target="", value="", unless_asked=False,
+                words="Dont include asta name in feature branch creation remember always")
+    d = instructions.replay_scenario(rule, "2026-10-08")
+    sc = S.Scenario(id=d["id"], set="replays", title=d["title"], twin=False,
+                    setup=d["setup"], brains=d["brains"], steps=d["steps"], checks=d["checks"])
+    assert asyncio.run(S.run(sc)) == []

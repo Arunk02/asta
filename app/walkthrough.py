@@ -289,8 +289,9 @@ async def review_tree(ws: Path, repo_dir: Path, pr: str) -> str:
                                f"pull/{number}/head", timeout=120)
     if rc != 0:
         return ""
-    base = ws / ".asta-worktrees"
-    tree = base / f"review-{repo_dir.name}-{number}"
+    from . import worktrees
+    tree = worktrees.review_root(ws, repo_dir.name, number)
+    base = tree.parent
     if tree.exists():
         rc, _ = await repo_ops.git(tree, "git", "checkout", "--quiet", "--detach", "FETCH_HEAD")
         if rc != 0:
@@ -298,7 +299,7 @@ async def review_tree(ws: Path, repo_dir: Path, pr: str) -> str:
                                        f"pull/{number}/head")
             rc, _ = await repo_ops.git(tree, "git", "checkout", "--quiet", "--detach", "FETCH_HEAD")
     else:
-        base.mkdir(exist_ok=True)
+        base.mkdir(parents=True, exist_ok=True)
         rc, _ = await repo_ops.git(repo_dir, "git", "worktree", "add", "--quiet", "--detach",
                                    str(tree), "FETCH_HEAD")
     if rc != 0:

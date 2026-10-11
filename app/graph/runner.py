@@ -49,6 +49,9 @@ async def _drive(task_id: int, inp) -> None:
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
     from app import notify, tasks
     from .code_graph import Stopped, build
+    import contextlib
+    with contextlib.suppress(Exception):
+        await tasks.ensure_checkout(task_id)
     try:
         async with AsyncSqliteSaver.from_conn_string(str(db_path())) as saver:
             app = build().compile(checkpointer=saver)

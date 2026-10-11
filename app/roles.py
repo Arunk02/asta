@@ -32,6 +32,26 @@ from __future__ import annotations
 
 import re
 
+#: How a case in an environment is debugged — a booking, an order, a container,
+#: anything "why is X stuck / not done". His words for it, 10 Oct, after booking
+#: HYNBFDPWY7R ("Booking Cancelled" stuck In Progress in AP): "this is how I want
+#: to ask to debug anything, any issues". The order is the point: state before
+#: theory, the code that should have moved it, and an honest line on what the
+#: evidence cannot show.
+CASE_METHOD = """How to debug it — in this order:
+1. Pin it: the id, the environment, what is stuck and what it should be.
+2. Current state first: what each service holds for it NOW (done, pending,
+   stuck, with times), read from its logs or API responses — never from memory.
+3. Its trail by the id across services, oldest first. Mind log retention (prod
+   keeps about 8 weeks): if the moment is older, say so and work from the state.
+4. Find the code that moves the stuck state to the expected one (Class:line).
+   The transition that never ran names the event that never arrived.
+5. Check that event at the workflow (Temporal) and on the other side of the
+   boundary (TMS, IOM, UNITED, billing…).
+6. Answer as: Timeline · Why (the mechanism, with Class:line) · Not confirmed,
+   and why · Next step. Say which parts are confirmed and which are likely."""
+
+
 #: role -> (who they are, what they do differently). The second half is the part
 #: that does the work; the title is there so the brain knows which hat it has on.
 ROLES: dict[str, tuple[str, str]] = {
@@ -172,6 +192,19 @@ def brief(role: str) -> str:
     who, moves = found
     return (f"For this piece of work you are {who}. That is not a label — it is "
             f"how you work here:{moves.rstrip()}")
+
+
+def briefed(role: str) -> str:
+    """The brief, plus the step-by-step method the role carries, if any.
+
+    The brief stays short (it rides on every turn of the role); the debugging
+    method is its own block so the two are never trimmed into each other. Every
+    door that briefs a role — the CLI brains' system prompt, the API turn, task
+    legs and the responder — comes through here, so no brain debugs another way."""
+    out = brief(role)
+    if out and role == "debugging":
+        out += "\n\n" + CASE_METHOD
+    return out
 
 
 def remember(task: str, role: str) -> None:

@@ -273,7 +273,7 @@ async def offer(call: dict) -> bool:
     if already_offered(call):
         return False
     note_offered(call)
-    offers.staged_write(
+    o = offers.staged_write(
         "call_answer", {"speak": False},
         describe(call),
         f"{describe(call)} Say yes and I'll pick up and listen; "
@@ -282,7 +282,7 @@ async def offer(call: dict) -> bool:
     store.record_outcome("incoming", "offered", subject=(call.get("who") or "")[:80],
                          detail=call.get("via", "poll"))
     with contextlib.suppress(Exception):
-        await notify.notify(offers.pending().render(), "calls", urgency="direct")
+        await notify.notify(o.render(), "calls", urgency="direct")
     return True
 
 

@@ -2146,12 +2146,33 @@ _EDITS_A_DRAFT = re.compile(
     r"include|instead|say\s+(?:it|that)|tell\s+him|tell\s+her|ask\s+him|ask\s+her)\b", re.I)
 
 
-def _moves_on_from_draft(text: str) -> bool:
-    """His reply to a waiting draft is a new ask, not an edit: a call, or a
-    question about what happened."""
+#: "add PR 1475 too", "mention booking H7SL7T6CZLP": a new subject, put INTO the draft.
+_STARTS_AS_EDIT = re.compile(
+    r"^\s*(?:pls\s+|please\s+|also\s+|and\s+)?(?:add|mention|include|put|say|tell\s+(?:him|her|them)|"
+    r"ask\s+(?:him|her|them)|change|replace|use|attach|link|share|write)\b", re.I)
+
+#: A PR or task number named in so many words.
+_NUMBERED = re.compile(r"\b(?:pr|pull\s+request|task)\s*#?\s*(\d{2,6})\b", re.I)
+
+
+def _subjects(text: str) -> set[str]:
+    """The bookings, PRs and tasks a message names."""
+    from . import booking_case
+    return set(booking_case.ids(text or "")) | {m.group(1) for m in _NUMBERED.finditer(text or "")}
+
+
+def _moves_on_from_draft(text: str, draft: str = "") -> bool:
+    """His reply to a waiting draft is a new ask, not an edit: a call, a
+    question about what happened, or a booking/PR/task the draft never named.
+    9 Oct: "HYNBFDPWY7R … status remains in progress instead of closed", typed
+    under a draft to Komal about PR 1469, went to the brain as feedback on it."""
     from . import consent
     text = text or ""
     if consent.asked_to_call(text):
+        return True
+    named = _subjects(text)
+    if named and not _STARTS_AS_EDIT.match(text) \
+            and not named & (_subjects(draft) | set(re.findall(r"\d{2,6}", draft or ""))):
         return True
     return bool(_ASKS_WHAT_HAPPENED.search(text)) and not _EDITS_A_DRAFT.search(text)
 
@@ -2411,6 +2432,21 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     # Recall rides in the user prompt (not instructions) so the instruction
     # prefix stays byte-stable and the Anthropic prompt cache actually hits.
     prompt = _with_recall(user_text)
+    # The same per-turn block the Claude and Copilot CLI brains get, from the same
+    # function: who he means, how to check one booking, what his documents say.
+    # Without it an API-key turn answered a booking question from nothing.
+    from . import copilot_cli, resume as resume_mod
+    with contextlib.suppress(Exception):
+        ranked = resume_mod.ranking_text(user_text)
+        ctx = copilot_cli.turn_context(ranked)
+        if ctx:
+            prompt = f"{ctx}\n\n{prompt}"
+        # The role brief the CLI brains carry in their system prompt. Here it rides
+        # with the turn, so the cached instruction prefix stays byte-stable.
+        from . import roles
+        hat = roles.briefed(roles.role_for(ranked))
+        if hat:
+            prompt = f"{hat}\n\n{prompt}"
     # Only the tools this conversation has needed, not all 32 — see tool_index
     # for why the selection is sticky rather than per-message.
     selected = tool_index.select_sticky(conv["id"], user_text)
@@ -3995,7 +4031,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                       f"channel '{staged.get('channel', 'chat')}'"
                       + (f" to {staged['to']}" if staged.get("to") else "")
                       + f":\n\n{staged.get('what', '')}\n\nAfter it's sent, confirm in one line.")
-        elif _moves_on_from_draft(user_text):
+        elif _moves_on_from_draft(user_text, f"{staged.get('to') or ''}\n{staged.get('what') or ''}"):
             # A call, or a question about what happened, is never an edit to the
             # draft. 8 Oct: "Connect with swamy … and clarify" arrived wrapped as
             # draft feedback and came back as a re-worded TEXT; "What swamy told?"

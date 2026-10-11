@@ -2037,9 +2037,17 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # a Jira comment or PR body has no term of address to get wrong.
     if channel in ("teams", "chat", "whatsapp"):
         what = writing.fit_address(what, to)
-    loop.set_pending_send(cid, what, to, channel, to_group=to_group)
     tgt = f" to {'group ' if to_group else ''}{to}" if to else ""
-    staged = f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
+    task_id = capabilities.FROM_TASK.get()
+    if task_id and to and not to_group and channel in ("teams", "chat"):
+        # A background task: shown when the task finishes, labelled with it —
+        # never attached to whatever he says next in the chat.
+        loop.set_task_send(task_id, what, to, channel)
+        staged = (f"Draft staged{tgt} on {channel}. Arun sees it, labelled with this task, "
+                  f"when the task finishes; staging again replaces it.")
+    else:
+        loop.set_pending_send(cid, what, to, channel, to_group=to_group)
+        staged = f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
     if clash:
         staged += (f" Held for his yes: the draft says “{clash}”, which contradicts what he "
                    f"just told you. Check the current facts (the PR's files, the task) and "

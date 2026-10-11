@@ -402,7 +402,7 @@ async def _offer_to_join(ev: dict, now: dt.datetime) -> None:
     store.kv_set(key, "1")
     if not ev.get("join_url"):
         return          # nothing to join; the prep ping already covered the meeting
-    offers.staged_write(
+    o = offers.staged_write(
         "meeting_join",
         {"title": ev["title"], "join_url": ev["join_url"], "speak": False},
         f"📅 {ev['title']} is starting ({ev['start']})",
@@ -411,7 +411,7 @@ async def _offer_to_join(ev: dict, now: dt.datetime) -> None:
         "Want me to join? Say yes and I'll listen, or 'join and talk' to take part.",
         kind="meeting")
     with contextlib.suppress(Exception):
-        await notify.notify(offers.pending().render(), "premeeting", urgency="direct")
+        await notify.notify(o.render(), "premeeting", urgency="direct")
 
 
 async def premeeting_loop() -> None:

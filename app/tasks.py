@@ -191,6 +191,13 @@ CODE_OVERRIDES = """
   the step where the change actually lands with a trailing `<- change`. This is
   the half the tree cannot show: that a service in the MIDDLE needs no change is
   the fact a reviewer most needs and the easiest one to get wrong.
+  Run it from where the data COMES FROM to EVERY place it goes after the change
+  — the events, Kafka/Avro publishes and services that read it (IOM, AP, EH,
+  TMS, billing…). Find them in the workspace context's flow and integration
+  docs and the event→activity chains, not from memory. Each consumer gets a
+  line even when it needs nothing: "unchanged, reads X already". A plan that
+  changes a status or a field and never says who reads it is not ready (9 Oct:
+  a customs status plan missed that the same update goes on to IOM).
 
       STRUCTURE
         EtaValidator                  NEW · rejects ETA at/after gate-in
@@ -214,6 +221,21 @@ CODE_OVERRIDES = """
   explaining why. Asta reflows both blocks to fit his screen, but it can only
   shorten a line by cutting it — what you leave out of a note is lost, and what
   you pack in gets truncated.
+  Each numbered step ends with how it is checked (`→ test X asserts Y`).
+  After RISK, two short bullets: `ASSUMPTIONS:` what you took as given that he
+  did not say (or "none"), and `CONTEXT USED:` the workspace docs you planned
+  from (boot.sh resolver hits, integration/flow docs). "none" there means the
+  plan was made from the code alone — say so, never leave it out.
+- Working discipline (from Karpathy's notes on LLM coding mistakes; the code
+  quality bar itself is his `## Coding` guardrails section):
+  · Think before coding: never pick one reading of an ambiguous ask silently —
+    name the readings and ask at the gate. Push back when a simpler way exists.
+  · Surgical changes: every changed line traces to the plan. Do not reformat,
+    rename or "improve" code next to it; match the file's style. Remove only
+    what YOUR change left unused; mention other dead code, never delete it.
+  · Goal-driven: a bug fix starts with a test that fails for the reported
+    reason, then passes. Existing tests for the touched classes pass before and
+    after; a test you had to change is named in the summary, with why.
 - Skip Stage 1.5 and never run Stage 6: no push, no PR, and no Jira writes of
   any kind (no subtasks, no comments, no transitions). Stage 5 Evolution SHOULD
   still run — lessons and skill patches are wanted. After the Stage 4 (and 4b)
@@ -994,6 +1016,38 @@ def _already_live(title: str, prompt: str, workspace: str | None) -> dict | None
     return None
 
 
+#: Code identifiers: CUSTOMS_NOT_RELEASED, isCustomsCleared, getConsolidatedCustomsStatus.
+_IDENTIFIER = re.compile(r"\b(?:[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[a-z]+[A-Z][A-Za-z0-9]*)\b")
+
+
+def _identifiers(text: str) -> set[str]:
+    """Identifiers, spelled one way: IS_CUSTOMS_CLEARED and isCustomsCleared match."""
+    return {m.group(0).replace("_", "").lower() for m in _IDENTIFIER.finditer(text or "")}
+
+
+def covering_task(text: str, days: float = 3) -> dict | None:
+    """A code task already on this work, or None.
+
+    9 Oct: Vinish's customs-status ask was offered to Arun as a new code change
+    five times while task 272 was building exactly that. Matched on at least two
+    shared code identifiers against the task's title, prompt and approved plan —
+    a topic word ("customs") alone is two different jobs as often as one."""
+    want = _identifiers(text)
+    if len(want) < 2:
+        return None
+    for row in store.list_tasks(limit=60):
+        if row.get("kind") != "code" or row.get("status") in FINAL + ("failed",):
+            continue
+        if row.get("status") not in LIVE_STATUSES \
+                and time.time() - float(row.get("created_at") or 0) > days * 86400:
+            continue
+        plan = store.kv_get(f"task_plan:{row['id']}") or ""
+        have = _identifiers(f"{row.get('title', '')}\n{row.get('prompt', '')}\n{plan}")
+        if len(want & have) >= 2:
+            return row
+    return None
+
+
 def _prior_case_finding(prompt: str) -> str:
     """Carry a recent same-case, same-env finding into a new read-only task."""
     from . import answers, booking_case
@@ -1511,8 +1565,8 @@ def _with_pipeline(pipeline: str, prompt: str, task_id: str = "") -> str:
     so the role rides alongside rather than forking the pipeline files.
     """
     body = agents.load(pipeline) if pipeline else ""
-    hat = roles.brief(roles.sustained(task_id, prompt) if task_id
-                      else roles.role_for(prompt))
+    hat = roles.briefed(roles.sustained(task_id, prompt) if task_id
+                        else roles.role_for(prompt))
     body = f"{body}\n\n{hat}" if (body and hat) else (body or hat)
     return f"{body}\n\n---\n\n{prompt}" if body else prompt
 
@@ -1569,6 +1623,31 @@ def mark_approved(task_id: int) -> None:
     store.kv_set(f"task_approved:{task_id}", "1")
 
 
+_BOOT = "sh .asta-context/boot.sh"
+
+
+def context_boot_paths(prompt: str, cwd: str, workspace: str | None) -> str:
+    """Point the context boot at the workspace, not the task's own checkout.
+
+    A task runs in `.asta-worktrees/task-N`, which has no `.asta-context`, so the
+    relative `sh .asta-context/boot.sh` found nothing. Task 272 (9 Oct) never got
+    the lessons, pins or resolver through it and planned a customs status change
+    without the flow doc that says the same update goes on to IOM."""
+    if _BOOT not in prompt:
+        return prompt
+    try:
+        root = Path(code_cwd(workspace))
+    except Exception:                                          # noqa: BLE001
+        return prompt
+    boot = root / ".asta-context" / "boot.sh"
+    if not boot.is_file() or (Path(cwd) / ".asta-context" / "boot.sh").is_file():
+        return prompt
+    return (prompt.replace(_BOOT, f"sh {boot}")
+            + f"\n\n[Workspace context] It lives at {root}/.asta-context, not in your "
+              f"checkout ({cwd}). Its source: paths are repo-relative — open them in "
+              f"YOUR checkout, never in {root}.")
+
+
 async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
                         resume: bool, effort: str, workspace: str | None = None) -> str:
     """One executor leg of a code task, pinned to the task's session so gates
@@ -1589,6 +1668,7 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         # leg already carries them, and re-sending a rule the session holds is
         # the token bleed the guardrails file exists to end.
         prompt += guardrails.block("code")
+    prompt = context_boot_paths(prompt, cwd, workspace)
     watcher = _progress_watcher(task_id, (store.get_task(task_id) or {}).get("title", ""))
     pipeline = _pipeline_name("code", _pipeline_for(task_id))
     from . import agent as agent_mod
@@ -2890,6 +2970,8 @@ async def _worker(task_id: int) -> None:
                 "task")
         elif t["kind"] == "code" and agent:
             await _finish_code(task_id, t, result, hops=0)
+            from . import answers
+            await answers.present_task_draft(task_id, t)
         else:
             store.update_task(task_id, status="done", result=result,
                               finished_at=time.time())
@@ -2899,6 +2981,7 @@ async def _worker(task_id: int) -> None:
             # he then has to turn into a message himself. See app/answers.py.
             from . import answers
             if t.get("teams_chat") and await answers.present_task(task_id, t, result):
+                await answers.present_task_draft(task_id, t, answered=True)
                 return
             snippet = result[:400] + ("…" if len(result) > 400 else "")
             waste = _audit_note(task_id)
@@ -2906,6 +2989,7 @@ async def _worker(task_id: int) -> None:
                 f"✅ Task #{task_id} done — {t['title']}\n\n{snippet}\n\n"
                 f"(full result: ask 'task {task_id} result' or see the Missions tab)"
                 f"{waste}", "task")
+            await answers.present_task_draft(task_id, t)
     except asyncio.CancelledError:
         # cancel() owns the status and the notification; just stop cleanly.
         raise

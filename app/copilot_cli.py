@@ -455,7 +455,7 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     # pipeline and the responder's investigations all reach the same answer about
     # the same sentence — see app/roles.py for why that is not a nicety.
     from . import roles
-    hat = roles.brief(roles.role_for(user_text))
+    hat = roles.briefed(roles.role_for(user_text))
 
     from . import capabilities, consent, guardrails, skills, tool_index
     name = os.environ.get("ASSISTANT_NAME", "Asta")

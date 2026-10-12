@@ -19,8 +19,14 @@ import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaile
 import qrcode from "qrcode-terminal";
 import QRCode from "qrcode";
 import pino from "pino";
+import { takeCatchup, backoffMs, tsOf, timesOf } from "./catchup.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Every log line carries its time: "closed (code 408)" ten thousand times says
+// nothing about WHEN — or that it was the laptop asleep.
+const _log = console.log.bind(console);
+console.log = (...a) => _log(new Date().toISOString().slice(0, 19), ...a);
 
 // Minimal .env loader (shares the asta .env)
 const envPath = path.join(__dirname, "..", ".env");
@@ -89,6 +95,21 @@ function alreadyHandled(id) {
   return false;
 }
 
+// The newest message handled, kept on disk: what a caught-up batch is measured
+// against after a restart. First run starts from now, so old history is never
+// answered.
+const STATE_PATH = path.join(__dirname, "state.json");
+const CATCHUP_MAX_AGE_SEC = Number(process.env.WA_CATCHUP_MAX_AGE_HOURS || 24) * 3600;
+let lastTs = 0;
+function saveLastTs(ts) {
+  if (!(ts > lastTs)) return;
+  lastTs = ts;
+  try { fs.writeFileSync(STATE_PATH, JSON.stringify({ lastTs })); } catch {}
+}
+try { lastTs = Number(JSON.parse(fs.readFileSync(STATE_PATH, "utf8")).lastTs) || 0; } catch {}
+if (!lastTs) saveLastTs(Math.floor(Date.now() / 1000));
+let closes = 0; // consecutive failed connections, for the reconnect backoff
+
 // Runtime config, editable from the Asta UI. File wins over .env defaults.
 const CONFIG_PATH = path.join(__dirname, "config.json");
 let config = { enabled: true, allowed_jid: process.env.WA_ALLOWED_JID || "" };
@@ -150,14 +171,17 @@ async function connect() {
         } catch {}
       }
       selfLid = lidRaw ? lidRaw.replace(/:\d+@/, "@") : null;
+      closes = 0;
       console.log("WhatsApp connected as", selfJid, "lid:", selfLid);
     }
     if (u.connection === "close") {
       paired = false;
       const code = u.lastDisconnect?.error?.output?.statusCode;
       if (code !== DisconnectReason.loggedOut) {
-        console.log(`Connection closed (code ${code}), reconnecting…`);
-        setTimeout(connect, 3000);
+        closes += 1;
+        const wait = backoffMs(closes);
+        console.log(`Connection closed (code ${code}), reconnecting in ${wait / 1000}s…`);
+        setTimeout(connect, wait);
       } else {
         console.log("Logged out — delete whatsapp/auth/ and re-pair.");
       }
@@ -165,59 +189,79 @@ async function connect() {
   });
 
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-    for (const msg of messages) {
-      if (!config.enabled) continue;
-      const jid = msg.key.remoteJid;
-      let text =
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        msg.message?.imageMessage?.caption ||
-        "";
-      // A photo or screenshot he sends: saved where Asta can open it, and named
-      // in the message as [image: path]. Until 30 Sep a photo was dropped here
-      // because it had no text.
-      if (msg.message?.imageMessage && isAllowedChat(jid) && !sentByMe.has(msg.key.id)) {
-        try {
-          const buf = await downloadMediaMessage(msg, "buffer", {});
-          const dir = path.join(__dirname, "..", "data", "media");
-          fs.mkdirSync(dir, { recursive: true });
-          const ext = (msg.message.imageMessage.mimetype || "image/jpeg").split("/")[1].split(";")[0] || "jpg";
-          const file = path.join(dir, `wa-${msg.key.id}.${ext}`);
-          fs.writeFileSync(file, buf);
-          text = (text ? text + "\n" : "") + `[image: ${file}]`;
-        } catch (e) {
-          console.log("image download failed:", e.message);
-          text = text || "(sent a photo I couldn't download)";
-        }
-      }
-      if (text && !isAllowedChat(jid)) {
-        console.log(`dropped (chat not allowed): jid=${jid} fromMe=${msg.key.fromMe} text="${text.slice(0, 40)}"`);
-      }
-      if (!isAllowedChat(jid)) continue;
-      if (sentByMe.has(msg.key.id)) continue;
-      if (!text || text.startsWith(BOT_MARK)) continue;
-      if (alreadyHandled(msg.key.id)) {
-        console.log(`dropped (duplicate delivery): id=${msg.key.id} text="${text.slice(0, 40)}"`);
-        continue;
-      }
-      console.log("→ asta:", text.slice(0, 80));
-      await startWorking(jid, msg.key);
-      const mine = (working.get(jid) || []).slice(-1)[0];
-      try {
-        const data = await postToAsta(text);
-        if (data.reply) await send(data.reply);
-        // Still working: the answer comes later through /send with done=true,
-        // and "typing…" stays until then.
-        if (!data.working) {
-          await finishOne(jid, mine, String(data.reply || "").trim().startsWith("⚠️") ? "⚠️" : "✅");
-        }
-      } catch (e) {
-        await send("(bridge error: " + e.message + ")");
-        await finishOne(jid, mine, "⚠️");
-      }
+    if (type === "notify") {
+      for (const msg of messages) await handle(msg);
+      return;
     }
+    // "append": what arrived while this bridge was offline. His messages from
+    // that time are answered now, oldest first, after one line saying so.
+    if (!config.enabled) return;
+    const { take, skipped } = takeCatchup(messages, {
+      lastTs, now: Date.now() / 1000, maxAgeSec: CATCHUP_MAX_AGE_SEC,
+      allowed: isAllowedChat, mine: (id) => sentByMe.has(id), botMark: BOT_MARK,
+    });
+    const why = {};
+    for (const s of skipped) why[s.why] = (why[s.why] || 0) + 1;
+    if (skipped.length) console.log(`catch-up: skipped ${skipped.length}`, JSON.stringify(why));
+    if (!take.length) return;
+    console.log(`catch-up: answering ${take.length} sent while offline`);
+    await send(`📥 Picked up ${take.length === 1 ? "your message" : `${take.length} messages you sent`} `
+      + `from ${timesOf(take)}, while I was offline — on ${take.length === 1 ? "it" : "them"} now.`);
+    for (const msg of take) await handle(msg);
   });
+}
+
+async function handle(msg) {
+  if (!config.enabled) return;
+  const jid = msg.key.remoteJid;
+  let text =
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    msg.message?.imageMessage?.caption ||
+    "";
+  // A photo or screenshot he sends: saved where Asta can open it, and named
+  // in the message as [image: path]. Until 30 Sep a photo was dropped here
+  // because it had no text.
+  if (msg.message?.imageMessage && isAllowedChat(jid) && !sentByMe.has(msg.key.id)) {
+    try {
+      const buf = await downloadMediaMessage(msg, "buffer", {});
+      const dir = path.join(__dirname, "..", "data", "media");
+      fs.mkdirSync(dir, { recursive: true });
+      const ext = (msg.message.imageMessage.mimetype || "image/jpeg").split("/")[1].split(";")[0] || "jpg";
+      const file = path.join(dir, `wa-${msg.key.id}.${ext}`);
+      fs.writeFileSync(file, buf);
+      text = (text ? text + "\n" : "") + `[image: ${file}]`;
+    } catch (e) {
+      console.log("image download failed:", e.message);
+      text = text || "(sent a photo I couldn't download)";
+    }
+  }
+  if (text && !isAllowedChat(jid)) {
+    console.log(`dropped (chat not allowed): jid=${jid} fromMe=${msg.key.fromMe} text="${text.slice(0, 40)}"`);
+  }
+  if (!isAllowedChat(jid)) return;
+  if (sentByMe.has(msg.key.id)) return;
+  if (!text || text.startsWith(BOT_MARK)) return;
+  if (alreadyHandled(msg.key.id)) {
+    console.log(`dropped (duplicate delivery): id=${msg.key.id} text="${text.slice(0, 40)}"`);
+    return;
+  }
+  saveLastTs(tsOf(msg));
+  console.log("→ asta:", text.slice(0, 80));
+  await startWorking(jid, msg.key);
+  const mine = (working.get(jid) || []).slice(-1)[0];
+  try {
+    const data = await postToAsta(text);
+    if (data.reply) await send(data.reply);
+    // Still working: the answer comes later through /send with done=true,
+    // and "typing…" stays until then.
+    if (!data.working) {
+      await finishOne(jid, mine, String(data.reply || "").trim().startsWith("⚠️") ? "⚠️" : "✅");
+    }
+  } catch (e) {
+    await send("(bridge error: " + e.message + ")");
+    await finishOne(jid, mine, "⚠️");
+  }
 }
 
 // A file, not a paragraph about a file. His ask from the start was a spreadsheet

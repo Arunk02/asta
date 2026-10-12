@@ -64,3 +64,6 @@ npmcache/
 *.log
 scratch/
 tmp/
+
+# The WhatsApp bridge's last-handled message time (machine state).
+whatsapp/state.json

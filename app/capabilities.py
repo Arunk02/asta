@@ -122,6 +122,10 @@ _TABLE: tuple[Capability, ...] = (
                http='POST /api/temporal/workflow {"env":"prod","workflow_id":"…","history":false}',
                note="One workflow: status, what it waits on, why it failed. "
                     "history=true for the events that ended it."),
+    Capability("away_mode", "hands", write=True,
+               http='POST /api/away {"on": true}',
+               note="Only when he asks: he is leaving and work should go on, or he is "
+                    "back. Never switched on by your own choice."),
     Capability("open_app", "hands", write=True,
                http='POST /api/open {"what":"intellij"} or {"what":"youtube","browser":"chrome"}',
                note="Put an app or a site in front of him — \"open intellij\", "

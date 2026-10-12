@@ -2264,6 +2264,18 @@ async def temporal_workflow(env: str = "", workflow_id: str = "", run_id: str = 
         return f"Temporal — {exc}"
 
 
+async def away_mode(on: bool) -> str:
+    """Keep the laptop awake with the lid closed while Arun is away, so Asta keeps
+    working and answering (on=True); or back to normal sleep (on=False).
+
+    Use it when he says he is leaving and wants work to go on ("I'm heading out,
+    keep going", "keep the laptop up tonight"), or that he is back and it may
+    sleep. It switches only `pmset disablesleep`, through the one sudoers line he
+    set up; if that is missing, the reply is the setup line — pass it on as is."""
+    from . import away
+    return await (away.turn_on("asked via brain") if on else away.turn_off("asked via brain"))
+
+
 async def open_app(what: str, browser: str = "") -> str:
     """Open an application or a website on Arun's Mac and put it in front of him.
 

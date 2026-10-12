@@ -212,6 +212,10 @@ async def startup() -> None:
     # Task checkouts of finished work, and stale PR review copies, removed so
     # they stop piling up (29 and 1.3 GB in the workspace IntelliJ has open).
     daemon.start("checkout_sweep", tasks.checkout_sweeper)
+    # Away mode's guard: low battery off the charger, or him back at the laptop,
+    # puts normal sleep back (app/away.py).
+    from . import away
+    daemon.start("away_guard", away.guard_loop)
     # Quiet: snapshots yesterday's card after midnight, pushes nothing.
     daemon.start("scorecard", scorecard.loop)
     # The live test bench, at night, on quota that would otherwise expire. Off
@@ -1412,6 +1416,12 @@ async def api_temporal_workflow(request: Request):
     return {"ok": True, "detail": await agent_mod.temporal_workflow(
         b.get("env", ""), b.get("workflow_id", ""), b.get("run_id", ""),
         bool(b.get("history", False)))}
+
+
+@app.post("/api/away", dependencies=[Depends(require_auth)])
+async def api_away(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.away_mode(bool(b.get("on")))}
 
 
 @app.post("/api/open", dependencies=[Depends(require_auth)])
@@ -3731,6 +3741,16 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                          + ("Previous context is digested into memory, so anything "
                             "durable is still recalled." if dropped
                             else "Nothing to clear.")})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+
+    # "I'm leaving, stay awake" / "normal sleep": switched here, on every channel,
+    # without a brain — the words are exact and the act is one command.
+    from . import away
+    said = await away.command(user_text or "")
+    if said:
+        await sink.send({"type": "note", "text": said})
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None

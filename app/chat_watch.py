@@ -985,6 +985,17 @@ async def _say(chat: str, line: str, *, group: bool = False,
         store.record_outcome("thread", "held back", subject=chat[:80],
                              detail=f"he answered himself — not said: {line}"[:200])
         return False
+    if not group and in_his_exchange(chat, since):
+        # His conversation. 13 Oct: he sent Shabda event-router PR 96 — "can you
+        # merge this please" — and her "need one more approval" got "Who else
+        # needs to approve it?" from Asta two minutes later. The reply was to
+        # HIM; he decides what to say. He sees it and the line, nothing is sent.
+        from . import answers
+        store.record_outcome("thread", "held back", subject=chat[:80],
+                             detail=f"his conversation — not said: {line}"[:200])
+        await answers.present(who=chat, need="replied to you", chat=chat, group=False,
+                              analysis="Your conversation — I did not reply.", reply=line)
+        return False
     # The fence for EVERY line said without his yes (13 Oct): a question that only
     # asks, and courtesy around it. A line stating what was found goes to him
     # first — Deepa got "logs are in QA … got a 400 back, status PENDING" as a
@@ -1113,6 +1124,21 @@ def answering_him(chat: str, sent_at: float | None, hours: float = 24) -> bool:
         return False
     last = max(before, key=lambda r: float(r["sent_at"]))
     return written_by_him(last, chat)
+
+
+#: He wrote in this chat this recently → the conversation is his, and Asta
+#: does not speak in it on its own.
+HIS_EXCHANGE_MINUTES = int(os.environ.get("ASTA_HIS_EXCHANGE_MINUTES", "30"))
+
+
+def in_his_exchange(chat: str, since: float | None) -> bool:
+    """Is this a conversation he is having himself? Their message answers his,
+    or he wrote here within HIS_EXCHANGE_MINUTES."""
+    import time as _t
+    if since and answering_him(chat, since):
+        return True
+    mins = _his_last_minutes(chat, _t.time())
+    return mins is not None and mins <= HIS_EXCHANGE_MINUTES
 
 
 def answering_asta(chat: str, sent_at: float | None, hours: float = 24) -> str:

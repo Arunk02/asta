@@ -258,3 +258,52 @@ def test_the_method_names_its_tools_and_never_guesses_an_environment():
     assert "never guess one" in roles.CASE_METHOD
     assert "exceptionCode 400" in roles.CASE_METHOD
     assert booking_case.WHY.search("why is the consume log missing")
+
+
+# --- 13 Oct, 11:31: Vinish's Temporal link -----------------------------------------------
+
+VINISH_LINK = ("https://prod-westeurope-01-web.service-composition.maersk.io/namespaces/"
+               "telikos-temporal-prod/workflows/H22TCMNTBTW_BOOKINGEVENTS/"
+               "01a00056-5b7b-75c9-a123-9c6c227586e0/history")
+ASKED = ("Vinish shared one temporal workflow , billing team saying location function is "
+         "missing , can you debug and analyse whether from booking it send , and where it "
+         "get lost like that")
+
+
+def test_a_temporal_link_carries_env_workflow_and_run():
+    assert temporal.parse_link(VINISH_LINK) == (
+        "prod", "H22TCMNTBTW_BOOKINGEVENTS", "01a00056-5b7b-75c9-a123-9c6c227586e0")
+    assert "H22TCMNTBTW" in booking_case.ids(VINISH_LINK)
+
+
+def test_the_workflow_tool_takes_the_link_itself(monkeypatch):
+    seen = {}
+
+    async def history(env, wid, run=""):
+        seen.update(env=env, wid=wid, run=run)
+        return []
+    monkeypatch.setattr(temporal, "history", history)
+    from app import agent
+    asyncio.run(agent.temporal_workflow(workflow_id=VINISH_LINK, history=True))
+    assert seen == {"env": "prod", "wid": "H22TCMNTBTW_BOOKINGEVENTS",
+                    "run": "01a00056-5b7b-75c9-a123-9c6c227586e0"}
+
+
+def test_teams_keeps_the_whole_link_not_its_shortened_text():
+    from app import teams_bridge
+    js = [v for v in vars(teams_bridge).values()
+          if isinstance(v, str) and "workflow id Vinish shared" in v][0]
+    assert "a.textContent = a.getAttribute('href')" in js
+
+
+def test_a_link_is_something_to_check_not_a_hello():
+    assert chat_watch._concrete("Vinish Kumar: " + VINISH_LINK)
+
+
+def test_what_vinish_shared_is_read_from_his_chat_not_asked_for():
+    need = set(tool_index.required_for(ASKED))
+    assert {"teams_read_chat", "temporal_workflow"} <= need
+    assert set(tool_index.DEBUG_TOOLS) <= need
+    ctx = copilot_cli.turn_context(ASKED)
+    assert 'teams_read_chat "Vinish"' in ctx and "Never ask him to paste" in ctx
+    assert roles.role_for(ASKED) == "debugging"

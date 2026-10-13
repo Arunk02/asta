@@ -65,7 +65,9 @@ WHY = re.compile(r"\b(?:why|stuck|still|remains?|instead\s+of|fail(?:ed|ing|s)?|
 def ids(text: str) -> list[str]:
     """The ids in it, upper-cased, in order, once each."""
     out: list[str] = []
-    for m in ID.finditer(text or ""):
+    # "H22TCMNTBTW_BOOKINGEVENTS" — a workflow id is the booking id and a suffix,
+    # and '_' joins words, so the id had no boundary to match on.
+    for m in ID.finditer((text or "").replace("_", " ")):
         v = m.group(0).upper()
         if v not in out:
             out.append(v)

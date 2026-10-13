@@ -1396,6 +1396,17 @@ _MESSAGE_JS = """
         '[data-tid="quoted-reply"], [data-tid="message-quote"], blockquote, ' +
         '[class*="quotedReply" i], [class*="messageQuote" i], [class*="replyPreview" i]');
       if (quotes.length) { quotes.forEach(q => q.remove()); src = clone; }
+      // Teams shows a long link shortened ("…/namespaces/telikos-temporal-prod/workf…")
+      // and innerText kept only that, so the workflow id Vinish shared was never
+      // read by anyone (13 Oct). The address is on the anchor: use it.
+      const links = Array.from(clone.querySelectorAll('a[href]')).filter(a => {
+        const h = a.getAttribute('href') || '', t = (a.innerText || a.textContent || '').trim();
+        return /^https?:/i.test(h) && t !== h && (/(…|\\.\\.\\.)$/.test(t) || /^https?:/i.test(t));
+      });
+      if (links.length) {
+        links.forEach(a => { a.textContent = a.getAttribute('href'); });
+        src = clone;
+      }
     } catch (e) { src = body; }
     const text = (src.innerText || '').trim();
     // Screenshots and pasted images: tagged so the reader can photograph each

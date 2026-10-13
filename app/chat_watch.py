@@ -1679,6 +1679,11 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             threads.close(tid, why=f"closing ({d.get('source')}, {conf:.2f})", now=now)
             continue
 
+        if state == "opener" and not ping and _concrete("\n".join(c["new"])):
+            # Something to check — a link, an id, an error — is an ask, not a hello.
+            # 13 Oct: Vinish's Temporal link (prod, in its own URL) got "what should
+            # I check in this link — is it prod or QA?" instead of being opened.
+            state = "ask"
         if state == "opener":
             for k in c["keys"]:
                 attention.mark_dropped(k)

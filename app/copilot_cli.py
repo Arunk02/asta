@@ -426,6 +426,16 @@ def turn_context(user_text: str, conv_id: str = "") -> str:
     # A question about one booking: checked in the logs, with the booking and
     # its environment asked for first when missing — the same rule Teams
     # investigations and calls follow (app/booking_case.py).
+    with contextlib.suppress(Exception):
+        from . import tool_index
+        shared = tool_index.SHARED_BY.search(user_text or "")
+        if shared and shared.group(1).lower() not in ("i", "you", "he", "she", "they", "it", "we"):
+            who = shared.group(1)
+            parts.append(
+                f"He refers to something {who} shared. It is in their Teams chat: read it "
+                f"first (teams_read_chat \"{who}\") and work from what is there — a link, an "
+                f"id, a screenshot. A Temporal link goes straight into temporal_workflow. "
+                f"Never ask him to paste what {who} already sent.")
     case = ""
     with contextlib.suppress(Exception):
         from . import booking_case

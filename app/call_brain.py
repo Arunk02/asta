@@ -132,7 +132,7 @@ async def answer_from_knowledge(question: str, extra_context: str = "") -> str:
     gets said out loud and the other must not be.
 
     `extra_context` is the playbook a real turn would already have in hand — the
-    grafana-analyser skill for a logs question, say. It is a parameter rather than
+    debugging skill for a logs question, say. It is a parameter rather than
     a second answering function on purpose: an eval that measures a path nobody
     takes measures nothing, and two answering paths would drift until the measured
     one and the used one were different code.

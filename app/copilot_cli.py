@@ -332,7 +332,24 @@ def open_work() -> str:
     return "\n\n".join(lines)
 
 
-def turn_context(user_text: str) -> str:
+def _recent_asks(conv_id: str, current: str, within: float = 1800.0) -> str:
+    """What he said just before, so "prod" or "check in qa" is read with the
+    booking it answers — the id was in the message before (12 Oct)."""
+    if not conv_id:
+        return ""
+    import time as _t
+    from . import store
+    try:
+        rows = store.list_ui_messages(conv_id)[-8:]
+    except Exception:                                          # noqa: BLE001
+        return ""
+    said = [r["content"] for r in rows if r.get("role") == "user"
+            and _t.time() - float(r.get("created_at") or 0) < within
+            and (r.get("content") or "").strip() != (current or "").strip()]
+    return "\n".join(said[-2:])
+
+
+def turn_context(user_text: str, conv_id: str = "") -> str:
     """What a chat turn should know before it starts, besides the date.
 
     Two things, both learned on 29 Sep, and both built so they can only ever add:
@@ -412,7 +429,7 @@ def turn_context(user_text: str) -> str:
     case = ""
     with contextlib.suppress(Exception):
         from . import booking_case
-        case = booking_case.for_turn(user_text).strip()
+        case = booking_case.for_turn(user_text, _recent_asks(conv_id, user_text)).strip()
         if case:
             parts.append(case)
     if _SEEKING.search(user_text or "") or case:
@@ -676,7 +693,7 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     user_text = f"{now_line()}\n{user_text}"
     # Who he means and what his documents say — judged on HIS sentence, never on
     # a handoff's wrapper (see resume.ranking_text).
-    ctx = turn_context(ranking_text)
+    ctx = turn_context(ranking_text, conv.get("id", ""))
     if ctx:
         user_text = f"{ctx}\n\n{user_text}"
     if extra_context:

@@ -216,6 +216,7 @@ _ABOUT_A_CONVERSATION = re.compile(
     r"\bwhat(?:'s|s| is)?\s+(?:happening|going on|the status)\s+with\b|"
     r"\bdid\s+(?:you|u)\s+(?:reply|respond|answer|ask|send)\b|"
     r"\bwhy\s+did\s+(?:you|u)\s+(?:push|send|ask|reply|close)\b|"
+    r"\bwhy\s+(?:you\s+|u\s+)?(?:send|sent|messag\w*|repl\w*)\b|\bwithout\s+my\s+(?:approval|yes|ok)\b|"
     r"\bwhat\s+did\s+\w+(?:\s+\w+)?\s+(?:want|need|ask)\b", re.I)
 
 
@@ -229,6 +230,21 @@ _ABOUT_LATER = re.compile(
     r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|mrng|morning|"
     r"follow\s*up|after\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?|at\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm))\b",
     re.I)
+
+
+#: The tools a case is debugged with (app/debugkit.py) — offered together, always.
+DEBUG_TOOLS = ("log_counts", "log_lines", "find_id", "log_gaps")
+
+
+def is_short_followup(text: str) -> bool:
+    """"prod", "in qa", "yes", "sit env": an answer to the turn before, not a new
+    subject. 12 Oct: "prod" was ranked as a PR request (31 PR tools) and pushed
+    the log tools out — the brain then said the log tool was "disconnected"."""
+    from . import booking_case
+    words = re.findall(r"[\w-]+", text or "")
+    if not words or len(words) > 4:
+        return False
+    return bool(booking_case.env_of(text)) or len(words) <= 2
 
 
 def required_for(query: str) -> list[str]:
@@ -248,14 +264,14 @@ def required_for(query: str) -> list[str]:
     if app_tasks.asks_inside_an_app(query or ""):
         out.append("do_in_app")
     if _ABOUT_PRODUCTION.search(query or ""):
-        out.append("grafana_logs")
+        out += ["grafana_logs"] + list(DEBUG_TOOLS)
     # A question about one booking is answered from its logs and workflows
     # (booking_case.rule). "HYNBFDPWY7R … why is AP still in progress" named no
     # log word, got neither tool, and the brain told him to register an MCP
     # server itself (9 Oct).
     from . import booking_case
     if booking_case.ids(query or "") and booking_case.asks(query or ""):
-        out += ["grafana_logs", "temporal_workflows", "temporal_workflow"]
+        out += ["grafana_logs", "temporal_workflows", "temporal_workflow"] + list(DEBUG_TOOLS)
         # "Why is it stuck" is answered from the code that should have moved it.
         if booking_case.WHY.search(query or ""):
             out += ["resolve_context", "read_workspace_file"]
@@ -385,6 +401,9 @@ def select_sticky(conv_id: str, query: str, k: int = TOP_K) -> list[str] | None:
     if not conv_id:
         return picked
     prev = _sticky.get(conv_id)
+    if prev and is_short_followup(query):
+        # The turn before chose these; a one-word answer to it changes nothing.
+        return sorted(set(prev) | set(_floor()) | set(required_for(query)))
     if picked is None:
         # This turn wants everything; so does the rest of the conversation.
         _sticky.pop(conv_id, None)

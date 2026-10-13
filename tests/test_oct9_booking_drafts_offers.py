@@ -261,15 +261,15 @@ def test_the_api_key_brain_gets_the_same_turn_context_as_the_cli_brains(monkeypa
 
 def test_a_why_question_about_a_booking_is_debugged_his_way():
     rule = booking_case.rule(BOOKING_Q)
-    for step in ("Current state first", "Mind log retention", "Class:line",
-                 "Temporal", "Not confirmed"):
+    for step in ("State and trail", "kept about 8 weeks", "Class:line",
+                 "temporal_workflow", "Not confirmed"):
         assert step in rule, step
     assert {"resolve_context", "read_workspace_file"} <= set(tool_index.required_for(BOOKING_Q))
 
 
 def test_a_status_question_keeps_the_short_brief():
     rule = booking_case.rule("have we sent TMS for H7SL7T6CZLP in sit?")
-    assert "Current state first" not in rule
+    assert "State and trail" not in rule
 
 
 def test_a_debugging_task_is_briefed_with_the_case_method():
@@ -280,4 +280,4 @@ def test_a_debugging_task_is_briefed_with_the_case_method():
     from app import copilot_cli
     sysp = copilot_cli._first_turn_context({"id": "x", "summary": "", "workspace": "booking"},
                                            user_text="why is the email service throwing 500s")
-    assert "Current state first" in sysp
+    assert "State and trail" in sysp

@@ -61,6 +61,10 @@ _ENV_ALIASES = {"pp": "preprod", "pre-prod": "preprod", "pre prod": "preprod",
                 "production": "prod", "cdt": "sit", "test": "qa"}
 
 
+#: Environments whose Loki namespace is not telikos-<env>.
+_LOKI_NS = {"perf": "spt"}
+
+
 def envs() -> list[str]:
     """The environments an "everywhere" search covers, most important first."""
     raw = os.environ.get("ASTA_GRAFANA_ENVS") or "prod,preprod,uat,sit,qa,dev"
@@ -83,7 +87,9 @@ def resolve_namespace(given: str) -> str:
     base = default.rsplit("-", 1)[0] if "-" in default else (default or "telikos")
     env = _ENV_ALIASES.get(g, g)
     if env in envs() or env in ("spt", "perf", "devops"):
-        return f"{base}-{env}"
+        # perf's logs live in telikos-spt: the one environment whose namespace
+        # does not echo its name, so telikos-perf found nothing, every time.
+        return f"{base}-{_LOKI_NS.get(env, env)}"
     m = re.fullmatch(rf"{re.escape(base)}[-_ ]?([a-z-]+)", g)
     if m:
         env = _ENV_ALIASES.get(m.group(1), m.group(1))
@@ -215,8 +221,12 @@ def query_params(query: str, start: datetime, end: datetime, limit: int) -> dict
             "limit": str(limit), "direction": "backward"}
 
 
-def _proxy(path: str) -> str:
-    return f"{url().rstrip('/')}/api/datasources/proxy/uid/{datasource_uid()}/{path}"
+def prometheus_uid() -> str:
+    return (os.environ.get("ASTA_GRAFANA_PROM_UID") or "prometheus").strip()
+
+
+def _proxy(path: str, uid: str = "") -> str:
+    return f"{url().rstrip('/')}/api/datasources/proxy/uid/{uid or datasource_uid()}/{path}"
 
 
 # --- the token ------------------------------------------------------------------------
@@ -267,7 +277,7 @@ async def _mint(client: httpx.AsyncClient) -> str:
     return token
 
 
-async def _get(path: str, params: dict[str, str]) -> dict:
+async def _get(path: str, params: dict[str, str], uid: str = "") -> dict:
     if not enabled():
         raise GrafanaError("Grafana is not configured — ASTA_GRAFANA_URL and "
                            "ASTA_GRAFANA_DATASOURCE_UID are what it needs")
@@ -277,12 +287,12 @@ async def _get(path: str, params: dict[str, str]) -> dict:
             raise GrafanaError("no Grafana token, and no service principal to mint one "
                                "(ARM_CLIENT_ID / ARM_CLIENT_SECRET / ARM_TENANT_ID)")
         head = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        resp = await client.get(_proxy(path), params=params, headers=head)
+        resp = await client.get(_proxy(path, uid), params=params, headers=head)
         if resp.status_code == 401:                       # expired: mint once, retry once
             token = await _mint(client)
             if token:
                 head["Authorization"] = f"Bearer {token}"
-                resp = await client.get(_proxy(path), params=params, headers=head)
+                resp = await client.get(_proxy(path, uid), params=params, headers=head)
         if resp.status_code >= 400:
             detail = " ".join(resp.text.split())[:200]
             raise GrafanaError(f"Grafana said {resp.status_code}: {detail}", resp.status_code)

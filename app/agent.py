@@ -56,16 +56,14 @@ session uncovers a root cause / fix / environment gotcha worth keeping. Do it si
 of answering; mention it in one short parenthetical at most.
 
 MCP tools (temporal, grafana, github, docs) give you live debugging of workflows, logs and
-metrics. HARD RULE for grafana_* tools: call load_skill('grafana-analyser') first (once per
-conversation) and follow its query discipline exactly — namespace-wide Loki first, one wide-window
-call for identifier traces, aggregates before raw lines, limit <= 50, no per-service loops,
-Prometheus/Tempo only for performance asks. The atlassian_* MCP tools are the optional fallback
-for what the Jira REST tools don't cover (Confluence, creating issues) — never for plain reads.
-HARD RULE for EVERY MCP server, not just grafana: ONE wide call, then reason from what came
-back. The response is already in your context, so re-querying for a detail you were sent costs
-a round trip and buys nothing, and calling the same tool twice with the same arguments buys
-less. Pull the whole set — the namespace, the window, the workflow history — and do the
-analysis against it. Go back only for something genuinely absent, and say what was missing.
+metrics. DEBUGGING: follow the case method that comes with any debugging question — small
+queries, each built on what the last one returned: log_counts (where), log_lines (the exact
+lines, with a link), find_id (an id that matches nothing), log_gaps (missing log, or missing
+event?), temporal_workflow (what actually ran, with its input). Never re-run a query whose
+answer you already have, and never stop at an empty result: none in one window, service or
+environment is a fact about that window, not proof it never happened.
+The atlassian_* MCP tools are the optional fallback for what the Jira REST tools don't cover
+(Confluence, creating issues) — never for plain reads.
 For an identifier, use the environment explicitly named with this case or in its matching
 conversation; if none is known, search all environments — never assume prod. The prod
 namespace and the Helm values path are in your guardrails (Investigation). Runtime
@@ -2183,8 +2181,10 @@ async def grafana_logs(service: str = "", terms=(), minutes: int = 0,
     You do not write LogQL here. The query is built in code — it always carries the
     namespace and cluster labels Loki requires, and your terms become filters Loki
     applies. What comes back is grouped into error signatures: the dominant one,
-    how often, first and last seen, the top stack frames and trace ids. Ask once
-    and reason from the answer; do not re-query for a detail you were already sent.
+    how often, first and last seen, the top stack frames and trace ids. Do not
+    re-query for a detail you were already sent; to narrow down, use log_counts
+    (where), log_lines (exactly what was logged, around a moment), find_id (an id
+    that matches nothing) and log_gaps (missing log, or missing event?).
     """
     from . import grafana
     end = None
@@ -2252,16 +2252,102 @@ async def temporal_workflow(env: str = "", workflow_id: str = "", run_id: str = 
         return "Which environment and which workflow id?"
     try:
         if history:
-            events = await temporal.history(env, workflow_id, run_id)
-            tail = [e for e in events if str(e.get("eventType", "")).lower().find("fail") >= 0]
-            shown = (tail or events)[-8:]
-            return (f"{len(events)} events for {workflow_id} in {env}"
-                    + (f", {len(tail)} of them failures" if tail else "") + ":\n"
-                    + "\n".join(f"  {e.get('eventId', '?')}: {e.get('eventType', '?')} "
-                                 f"{str(e.get('attributes') or '')[:200]}" for e in shown))
+            return temporal.render_history(await temporal.history(env, workflow_id, run_id),
+                                           env, workflow_id)
         return temporal.render_one(await temporal.describe(env, workflow_id, run_id), env)
     except temporal.TemporalError as exc:
         return f"Temporal — {exc}"
+
+
+def _when(value: str) -> "_dt.datetime | None":
+    from . import debugkit
+    return debugkit.parse_when(value)
+
+
+async def log_counts(term: str = "", env: str = "", by: str = "app", hours: float = 24,
+                     service: str = "", at: str = "") -> str:
+    """WHERE something is logged: how many lines carry `term` (a booking id, a TO
+    number, a class or message), per environment and per service (by="app") or
+    per pod (by="pod"), over `hours` back from now (or from `at`).
+
+    Start here for any id. env "" or "all" counts every environment — never guess
+    one: a booking asked about with no environment was searched in preprod and
+    SIT and declared "not sent", while it lived, and was sent, in QA (12 Oct).
+    A window too large for Loki is shortened and the answer says to what; none in
+    a window means none THERE, THEN — not that it never happened."""
+    from . import debugkit, grafana
+    try:
+        found = await debugkit.counts(term, env, by=by, minutes=int(max(0.1, hours) * 60),
+                                      end=_when(at), service=service)
+    except grafana.GrafanaError as exc:
+        return f"Grafana — {exc}"
+    return debugkit.render_counts(found)
+
+
+async def log_lines(env: str, service: str = "", contains=(), logger: str = "", at: str = "",
+                    minutes: int = 10, start: str = "", end: str = "", limit: int = 40,
+                    newest_first: bool = False, pod: str = "") -> str:
+    """The EXACT log lines — quote them, never paraphrase them — with a Grafana
+    link to the same query a colleague can open.
+
+    env: one environment. service: part of an app name ("booking-service").
+    contains: text every line must carry (an id, "Successfully consumed").
+    logger: a class name to keep to. Time: `at` (ISO; no zone = UTC) with
+    `minutes` around it, or `start`/`end`. Oldest first unless newest_first.
+    Every line shows UTC and local time — logs here are written in UTC.
+
+    Use it for "share the logs" and for reading what one class logged around a
+    moment. When someone asks for the log link, the link printed here IS the link."""
+    from . import debugkit, grafana
+    s, e = _when(start), _when(end)
+    if at:
+        mid = _when(at)
+        if not mid:
+            return "Invalid time — use ISO, e.g. 2026-10-12T09:50:03Z."
+        s, e = mid - _dt.timedelta(minutes=minutes / 2), mid + _dt.timedelta(minutes=minutes / 2)
+    try:
+        found = await debugkit.lines(env, service, _terms(contains), logger, s, e, limit,
+                                     "backward" if newest_first else "forward", pod)
+    except grafana.GrafanaError as exc:
+        return f"Grafana — {exc}"
+    return debugkit.render_lines(found)
+
+
+async def find_id(id: str, env: str = "", hours: float = 24,
+                  service: str = "booking|activityplan") -> str:
+    """Ids that START like this one — for when the exact id matches nothing.
+    Typed ids get letters and digits swapped: "H7QKN8NGNOR" was H7QKN8NGN9R
+    (12 Oct). Ranked by closeness; name the one you used, never fix it silently."""
+    from . import debugkit, grafana
+    try:
+        return debugkit.render_find(await debugkit.find_id(id, env, int(hours * 60), service))
+    except grafana.GrafanaError as exc:
+        return f"Grafana — {exc}"
+
+
+async def log_gaps(env: str, service: str, at: str = "", minutes: int = 10,
+                   start: str = "", end: str = "") -> str:
+    """Is a log line MISSING, or did the thing not happen? Per pod of `service`,
+    per minute: lines that reached Loki, lines its node's log agent DROPPED (and
+    why), restarts and CPU throttling.
+
+    Use it before saying "it was never consumed / sent / received" from a missing
+    line. 12 Oct: two TMS acks had no consume log; the workflows had run, and pod
+    vm5rh was healthy but silent while its node dropped ~40k lines (Loki
+    ingester_error). A line missing then is a lost log, not a missed event."""
+    from . import debugkit, grafana
+    s, e = _when(start), _when(end)
+    if at:
+        mid = _when(at)
+        if not mid:
+            return "Invalid time — use ISO, e.g. 2026-10-12T09:50:03Z."
+        s, e = mid - _dt.timedelta(minutes=minutes / 2), mid + _dt.timedelta(minutes=minutes / 2)
+    if not (s and e):
+        return "Which moment? Give `at` (ISO) or `start` and `end`."
+    try:
+        return debugkit.render_gaps(await debugkit.gaps(env, service, s, e))
+    except grafana.GrafanaError as exc:
+        return f"Grafana — {exc}"
 
 
 async def away_mode(on: bool) -> str:

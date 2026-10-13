@@ -28,7 +28,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import (agents, claude_cli, clip, copilot_cli, guardrails, repo_ops, roles, store,
+from . import (agents, claude_cli, clip, copilot_cli, guardrails, repo_ops, roles, store, task_fence,
                wa_format, workspace_tools)
 
 
@@ -1756,6 +1756,18 @@ def context_boot_paths(prompt: str, cwd: str, workspace: str | None) -> str:
 
 async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
                         resume: bool, effort: str, workspace: str | None = None) -> str:
+    """A code leg inside the task fence: it may push its branch and open its own
+    PR, never approve, merge or close one (app/task_fence.py)."""
+    token = task_fence.MODE.set("code")
+    try:
+        return await _code_leg(task_id, prompt + task_fence.prompt_line("code"), cwd,
+                               resume=resume, effort=effort, workspace=workspace)
+    finally:
+        task_fence.MODE.reset(token)
+
+
+async def _code_leg(task_id: int, prompt: str, cwd: str, *,
+                    resume: bool, effort: str, workspace: str | None = None) -> str:
     """One executor leg of a code task, pinned to the task's session so gates
     can pause/resume without losing the pipeline's context. Copilot quota
     dying on a FRESH leg fails over to claude transparently; mid-pipeline it
@@ -1840,6 +1852,18 @@ _GUARDRAIL_AUDIENCE = {"analysis": "analysis", "teams_draft": "draft", "code": "
 
 
 async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
+    """`_simple_leg` inside the task fence. An analysis or a draft changes nothing
+    outside this machine: 13 Oct, an analysis of Komal's "please approve" ran
+    `gh pr review --approve` as Arun (app/task_fence.py)."""
+    mode = task_fence.kind_mode(t["kind"])
+    token = task_fence.MODE.set(mode)
+    try:
+        return await _simple_leg(task_id, t, prompt + task_fence.prompt_line(mode))
+    finally:
+        task_fence.MODE.reset(token)
+
+
+async def _simple_leg(task_id: int, t: dict, prompt: str) -> str:
     """Non-pipeline kinds (analysis, teams_draft, agent-less code): one leg,
     executor-aware, with transparent claude failover when copilot's quota dies."""
     ex = _resolve_executor(task_id)

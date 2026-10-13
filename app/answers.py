@@ -154,8 +154,14 @@ def render(who: str, need: str, analysis: str, reply: str, note: str = "",
     quote, one question."""
     first = (who or "Someone").split()[0]
     need = (need or "").strip().rstrip(".")
-    head = (f"*{who}* asked about {need[0].lower() + need[1:]}." if need
-            else f"*{who}* asked me something.")
+    # `need` is what they want ("the PR approved"). A few callers pass what
+    # happened instead ("wrote to you"); "Komal asked about wrote to you" went to
+    # his phone on 13 Oct. Those read as a sentence of their own.
+    if re.match(r"(?:wrote|sent|asked|messaged|pinged|replied|called)\b", need, re.I):
+        head = f"*{who}* {need}."
+    else:
+        head = (f"*{who}* asked about {need[0].lower() + need[1:]}." if need
+                else f"*{who}* asked me something.")
     # The reader's own sentence, when it wrote one ("Yogesh wants a quick call
     # about the event-history defect…"), says it better than the template.
     parts = [(lead or head) + (f" {note}" if note else "")]

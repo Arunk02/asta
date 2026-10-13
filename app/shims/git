@@ -1,0 +1,25 @@
+#!/bin/bash
+# Asta task fence (app/task_fence.py): an analysis or draft task never pushes or
+# commits. A code task's git is untouched.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+real=""
+IFS=: read -r -a dirs <<< "$PATH"
+for d in "${dirs[@]}"; do
+  [ -z "$d" ] && continue
+  [ "$(cd "$d" 2>/dev/null && pwd)" = "$here" ] && continue
+  if [ -x "$d/git" ]; then real="$d/git"; break; fi
+done
+[ -z "$real" ] && { echo "git: not found" >&2; exit 127; }
+if [ -n "${ASTA_TASK_WRITES:-}" ] && [ "$ASTA_TASK_WRITES" != "code" ]; then
+  skip=0
+  for a in "$@"; do
+    if [ $skip = 1 ]; then skip=0; continue; fi
+    case "$a" in
+      -C|-c|--git-dir|--work-tree) skip=1 ;;
+      -*) ;;
+      push|commit) echo "asta: 'git $a' is blocked in this task — it only reads. Put it in your answer instead." >&2; exit 3 ;;
+      *) break ;;
+    esac
+  done
+fi
+exec "$real" "$@"

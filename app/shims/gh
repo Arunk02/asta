@@ -1,0 +1,64 @@
+#!/bin/bash
+# Asta task fence (app/task_fence.py): first on a task's PATH, so a background
+# task cannot approve, merge or post on GitHub under Arun's login. Reads pass
+# through to the real gh untouched.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+real=""
+IFS=: read -r -a dirs <<< "$PATH"
+for d in "${dirs[@]}"; do
+  [ -z "$d" ] && continue
+  [ "$(cd "$d" 2>/dev/null && pwd)" = "$here" ] && continue
+  if [ -x "$d/gh" ]; then real="$d/gh"; break; fi
+done
+[ -z "$real" ] && { echo "gh: not found" >&2; exit 127; }
+
+mode="${ASTA_TASK_WRITES:-}"
+refuse() {
+  echo "asta: 'gh $*' is blocked in this task — approving, merging and posting are Arun's, with his yes. Put it in your answer instead." >&2
+  exit 3
+}
+# The subcommand words, skipping global flags (-R/--repo take a value).
+words=(); skip=0
+for a in "$@"; do
+  if [ $skip = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    -R|--repo|--hostname) skip=1 ;;
+    -*) ;;
+    *) words+=("$a") ;;
+  esac
+  [ ${#words[@]} -ge 2 ] && break
+done
+cmd="${words[0]} ${words[1]}"
+
+if [ -n "$mode" ]; then
+  case "$cmd" in
+    "pr review"|"pr merge"|"pr close"|"pr reopen") refuse "$@" ;;
+  esac
+  if [ "${words[0]}" = "api" ]; then
+    method="GET"; prev=""; has_fields=0
+    for a in "$@"; do
+      case "$prev" in -X|--method) method="$(echo "$a" | tr a-z A-Z)" ;; esac
+      case "$a" in
+        --method=*) method="$(echo "${a#--method=}" | tr a-z A-Z)" ;;
+        -f|-F|--field|--raw-field|--input|-f*|-F*|--field=*|--raw-field=*|--input=*) has_fields=1 ;;
+      esac
+      prev="$a"
+    done
+    if [ "$method" = "GET" ] && [ $has_fields = 1 ] && ! printf '%s\n' "$@" | grep -qx -- "--method\|-X"; then method="POST"; fi
+    if [ "$method" != "GET" ] && [ "$method" != "HEAD" ]; then
+      if [ "$mode" != "code" ] || printf '%s\n' "$@" | grep -Eq '/(merge|reviews)(/|$)'; then refuse "$@"; fi
+    fi
+  fi
+  if [ "$mode" != "code" ]; then
+    case "$cmd" in
+      "pr create"|"pr edit"|"pr comment"|"pr ready"|\
+      "issue create"|"issue comment"|"issue close"|"issue edit"|"issue reopen"|"issue delete"|\
+      "release create"|"release delete"|"release edit"|"release upload"|\
+      "repo create"|"repo delete"|"repo edit"|"repo fork"|"repo rename"|"repo archive"|\
+      "workflow run"|"workflow enable"|"workflow disable"|"run rerun"|"run cancel"|\
+      "secret set"|"secret delete"|"variable set"|"variable delete"|\
+      "label create"|"label edit"|"label delete"|"gist create"|"gist edit"|"gist delete") refuse "$@" ;;
+    esac
+  fi
+fi
+exec "$real" "$@"

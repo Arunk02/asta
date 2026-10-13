@@ -122,10 +122,15 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     if agent_file:
         with contextlib.suppress(OSError):
             cmd += ["--append-system-prompt", Path(agent_file).read_text()]
-    if plan_only:
-        # The plan gate, made structural: an unapproved leg cannot write, commit,
-        # push or open a PR even if it decides to.
-        cmd += ["--disallowed-tools", ",".join(_PLAN_DENY)]
+    from . import task_fence
+    fence = task_fence.MODE.get()
+    deny = list(_PLAN_DENY) if plan_only else []
+    # The plan gate, made structural: an unapproved leg cannot write, commit,
+    # push or open a PR even if it decides to. And no task leg approves, merges
+    # or posts as him (task_fence) — one flag, so neither list replaces the other.
+    deny += [d for d in task_fence.claude_deny(fence) if d not in deny]
+    if deny:
+        cmd += ["--disallowed-tools", ",".join(deny)]
     if effort and effort != "default":
         cmd += ["--effort", effort]
     from . import agent as agent_mod
@@ -142,7 +147,7 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
         stdin=asyncio.subprocess.DEVNULL,
         cwd=cwd or str(ROOT),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env=_subprocess_env(),
+        env=task_fence.env(_subprocess_env()),
     )
     async def _drain() -> str:
         # Read incrementally rather than communicate(), so on_progress can watch

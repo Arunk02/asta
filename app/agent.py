@@ -2356,7 +2356,7 @@ async def log_gaps(env: str, service: str, at: str = "", minutes: int = 10,
 
 
 def self_audit(hours: float = 24) -> str:
-    """What went wrong in Asta's own records over the last `hours`: colleague
+    """What went wrong in Asta's own records over the past `hours`: colleague
     messages not looked into, lines sent without his yes, false claims corrected,
     failed tasks, times it asked him for what it could have looked up. Use it for
     "how did you do today", "what went wrong", "any issues with you"."""

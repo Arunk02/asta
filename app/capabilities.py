@@ -140,6 +140,9 @@ _TABLE: tuple[Capability, ...] = (
                note="Missing log or missing event? Per-pod lines vs the log agent's "
                     "dropped lines. Never call something 'not consumed' from a missing "
                     "line without it."),
+    Capability("self_audit", "observe", http='GET /api/self-audit?hours=24',
+               note="Asta's own failures from its records — answer from this, never "
+                    "from memory, when he asks how it did."),
     Capability("away_mode", "hands", write=True,
                http='POST /api/away {"on": true}',
                note="Only when he asks: he is leaving and work should go on, or he is "
@@ -546,7 +549,7 @@ READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=Fal
 SIDE_READS = frozenset({
     "search_memory", "read_data_file", "search_knowledge", "conversation_status",
     "grafana_logs", "temporal_workflows", "temporal_workflow", "app_recipes",
-    "log_counts", "log_lines", "find_id", "log_gaps",
+    "log_counts", "log_lines", "find_id", "log_gaps", "self_audit",
     "facts_about", "resolve_context", "read_workspace_file", "list_services",
     "jira_search", "jira_my_issues", "jira_issue", "jira_sprint",
     "teams_activity", "teams_read_chat", "teams_search", "teams_history",

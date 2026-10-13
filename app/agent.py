@@ -2244,10 +2244,15 @@ async def temporal_workflows(env: str = "", query: str = "", limit: int = 10) ->
 async def temporal_workflow(env: str = "", workflow_id: str = "", run_id: str = "",
                             history: bool = False) -> str:
     """One Temporal workflow: its status, what it is waiting on, and why it failed.
+    workflow_id may be a Temporal web link — env, workflow and run are read from it.
 
     history=True returns its events instead — the sequence that ended it. Use this
     once `temporal_workflows` has found the id, or when he gives you one."""
     from . import temporal
+    linked = temporal.parse_link(workflow_id) or temporal.parse_link(run_id)
+    if linked:
+        # A Temporal web link carries all three — never ask for what it says.
+        env, workflow_id, run_id = linked[0] or env, linked[1], linked[2] or ""
     if not env or not workflow_id:
         return "Which environment and which workflow id?"
     try:
@@ -2348,6 +2353,15 @@ async def log_gaps(env: str, service: str, at: str = "", minutes: int = 10,
         return debugkit.render_gaps(await debugkit.gaps(env, service, s, e))
     except grafana.GrafanaError as exc:
         return f"Grafana — {exc}"
+
+
+def self_audit(hours: float = 24) -> str:
+    """What went wrong in Asta's own records over the past `hours`: colleague
+    messages not looked into, lines sent without his yes, false claims corrected,
+    failed tasks, times it asked him for what it could have looked up. Use it for
+    "how did you do today", "what went wrong", "any issues with you"."""
+    from . import selfaudit
+    return selfaudit.render(selfaudit.findings(hours), hours)
 
 
 async def away_mode(on: bool) -> str:

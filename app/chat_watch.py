@@ -1679,6 +1679,11 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             threads.close(tid, why=f"closing ({d.get('source')}, {conf:.2f})", now=now)
             continue
 
+        if state == "opener" and not ping and _concrete("\n".join(c["new"])):
+            # Something to check — a link, an id, an error — is an ask, not a hello.
+            # 13 Oct: Vinish's Temporal link (prod, in its own URL) got "what should
+            # I check in this link — is it prod or QA?" instead of being opened.
+            state = "ask"
         if state == "opener":
             for k in c["keys"]:
                 attention.mark_dropped(k)
@@ -1898,8 +1903,13 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                                  review_revision=review_revision,
                                  review_question=c["last"],
                                  correction_of=corrected["id"] if corrected else None,
+                                 # The reader already judged this an ask; the word
+                                 # list only names its kind. Left to decide alone it
+                                 # dropped Deepa's "how do we know if it's accepted or
+                                 # rejected?" and Vinish's "Got anything, bro?" as
+                                 # "nothing checkable" (12 Oct).
                                  kind_override=(responder.what_it_asks(pending["original"]) or "ask")
-                                 if reference else "",
+                                 if reference else (responder.what_it_asks(ask_text) or "ask"),
                                  source_text=c["raw"][-1].get("text") or "")
         if task and task.get("reused"):
             from . import answers

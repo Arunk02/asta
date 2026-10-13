@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import os
 import shutil
 from pathlib import Path
@@ -234,6 +235,23 @@ def render_one(found: dict, env: str) -> str:
     if not pending and status.lower().endswith("failed"):
         lines.append("  it failed — read the history for the event that ended it")
     return "\n".join(lines)
+
+
+_LINK = re.compile(r"https?://[^\s/]*service-composition[^\s/]*/namespaces/([^/\s]+)/workflows/"
+                   r"([^/\s?#…]+)(?:/([0-9a-f-]{20,}))?", re.I)
+
+
+def parse_link(text: str) -> tuple[str, str, str] | None:
+    """(env, workflow id, run id) from a Temporal web link, or None.
+    13 Oct: Vinish shared one; Asta asked for "the workflow ID" instead."""
+    m = _LINK.search(text or "")
+    if not m:
+        return None
+    ns, wid, run = m.group(1), m.group(2), m.group(3) or ""
+    env = next((e for e, v in envs().items() if v.get("namespace") == ns), "")
+    if not env:
+        env = "prod" if "prod" in ns and "pre" not in ns else ""
+    return env, wid, run
 
 
 def _payloads(attrs: dict) -> str:

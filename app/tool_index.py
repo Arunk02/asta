@@ -205,7 +205,8 @@ _REQUIRED = (
 #: noise, and a brain without the log tool investigates by guessing.
 _ABOUT_PRODUCTION = re.compile(
     r"\b(logs?|log ?lines?|stack ?trace|exception|errors?|failing|failure|crash\w*|"
-    r"oom\w*|killed|restart\w*|latency|timeout|throwing|5\d\d|not working|broken)\b", re.I)
+    r"oom\w*|killed|restart\w*|latency|timeout|throwing|5\d\d|not working|broken|"
+    r"debug\w*|missing|get(?:s|ting)? lost|not (?:received|reaching|sent|consumed|coming))\b", re.I)
 _ABOUT_WORKFLOWS = re.compile(
     r"\b(workflow|workflows|temporal|activity|activities|retry|retries|stuck|"
     r"replay|saga|orchestrat\w+)\b", re.I)
@@ -247,6 +248,12 @@ def is_short_followup(text: str) -> bool:
     return bool(booking_case.env_of(text)) or len(words) <= 2
 
 
+#: "Vinish shared one temporal workflow", "Deepa sent the logs", "Swamy posted it".
+SHARED_BY = re.compile(
+    r"\b([A-Z][a-z]{2,})\s+(?:has\s+|had\s+)?(?:shared|sent|posted|pasted|gave|forwarded|"
+    r"dropped|mentioned)\b", re.I)
+
+
 def required_for(query: str) -> list[str]:
     """Capabilities this message names outright, whatever the ranker thinks."""
     from . import consent
@@ -263,6 +270,9 @@ def required_for(query: str) -> list[str]:
     from . import app_tasks
     if app_tasks.asks_inside_an_app(query or ""):
         out.append("do_in_app")
+    if SHARED_BY.search(query or ""):
+        # What they shared is in their chat — read it, never ask him to paste it.
+        out += ["teams_read_chat", "teams_history", "teams_search"]
     if _ABOUT_PRODUCTION.search(query or ""):
         out += ["grafana_logs"] + list(DEBUG_TOOLS)
     # A question about one booking is answered from its logs and workflows

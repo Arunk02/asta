@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import re
 
-#: Booking refs (H65ZMWX52B2, MH65W8JZNVNT), CBK/job numbers, long numeric ids.
+#: Booking refs (H65ZMWX52B2, MH65W8JZNVNT), CBK/job numbers, transport orders
+#: (TO2934106728115 — 15 characters, past the ref rule's 14), long numeric ids.
 #: Typed in any case; a word never has two digits in it, so case-insensitive is
 #: safe once letters AND digits are both required.
 #: A ref can have ONE digit (HYNBFDPWY7R, 9 Oct: read as no booking at all, so
@@ -30,7 +31,7 @@ import re
 ID = re.compile(r"\b(?=[A-Za-z0-9]*\d[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*[A-Za-z])"
                 r"[A-Za-z0-9]{9,14}\b"
                 r"|(?-i:\b(?=[A-Z0-9]*\d)(?=(?:[A-Z0-9]*[A-Z]){2})[A-Z0-9]{9,14}\b)"
-                r"|\bCBK\d{5,}\b|\b\d{8,10}\b", re.I)
+                r"|\bCBK\d{5,}\b|\bTO\d{10,16}\b|\b\d{8,10}\b", re.I)
 
 #: The environments, as people say them → the name the tools take.
 _ENV = re.compile(r"\b(?:(pre-?\s?prod|pp)|(prod(?:uction)?|live)|(sit)|(uat)|(dev)|(qa)|(perf)"
@@ -65,7 +66,9 @@ WHY = re.compile(r"\b(?:why|stuck|still|remains?|instead\s+of|fail(?:ed|ing|s)?|
 def ids(text: str) -> list[str]:
     """The ids in it, upper-cased, in order, once each."""
     out: list[str] = []
-    for m in ID.finditer(text or ""):
+    # "H22TCMNTBTW_BOOKINGEVENTS" — a workflow id is the booking id and a suffix,
+    # and '_' joins words, so the id had no boundary to match on.
+    for m in ID.finditer((text or "").replace("_", " ")):
         v = m.group(0).upper()
         if v not in out:
             out.append(v)

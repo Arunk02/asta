@@ -258,3 +258,99 @@ def test_the_method_names_its_tools_and_never_guesses_an_environment():
     assert "never guess one" in roles.CASE_METHOD
     assert "exceptionCode 400" in roles.CASE_METHOD
     assert booking_case.WHY.search("why is the consume log missing")
+
+
+# --- 13 Oct, 11:31: Vinish's Temporal link -----------------------------------------------
+
+VINISH_LINK = ("https://prod-westeurope-01-web.service-composition.maersk.io/namespaces/"
+               "telikos-temporal-prod/workflows/H22TCMNTBTW_BOOKINGEVENTS/"
+               "01a00056-5b7b-75c9-a123-9c6c227586e0/history")
+ASKED = ("Vinish shared one temporal workflow , billing team saying location function is "
+         "missing , can you debug and analyse whether from booking it send , and where it "
+         "get lost like that")
+
+
+def test_a_temporal_link_carries_env_workflow_and_run():
+    assert temporal.parse_link(VINISH_LINK) == (
+        "prod", "H22TCMNTBTW_BOOKINGEVENTS", "01a00056-5b7b-75c9-a123-9c6c227586e0")
+    assert "H22TCMNTBTW" in booking_case.ids(VINISH_LINK)
+
+
+def test_the_workflow_tool_takes_the_link_itself(monkeypatch):
+    seen = {}
+
+    async def history(env, wid, run=""):
+        seen.update(env=env, wid=wid, run=run)
+        return []
+    monkeypatch.setattr(temporal, "history", history)
+    from app import agent
+    asyncio.run(agent.temporal_workflow(workflow_id=VINISH_LINK, history=True))
+    assert seen == {"env": "prod", "wid": "H22TCMNTBTW_BOOKINGEVENTS",
+                    "run": "01a00056-5b7b-75c9-a123-9c6c227586e0"}
+
+
+def test_teams_keeps_the_whole_link_not_its_shortened_text():
+    from app import teams_bridge
+    js = [v for v in vars(teams_bridge).values()
+          if isinstance(v, str) and "workflow id Vinish shared" in v][0]
+    assert "a.textContent = a.getAttribute('href')" in js
+
+
+def test_a_link_is_something_to_check_not_a_hello():
+    assert chat_watch._concrete("Vinish Kumar: " + VINISH_LINK)
+
+
+def test_what_vinish_shared_is_read_from_his_chat_not_asked_for():
+    need = set(tool_index.required_for(ASKED))
+    assert {"teams_read_chat", "temporal_workflow"} <= need
+    assert set(tool_index.DEBUG_TOOLS) <= need
+    ctx = copilot_cli.turn_context(ASKED)
+    assert 'teams_read_chat "Vinish"' in ctx and "Never ask him to paste" in ctx
+    assert roles.role_for(ASKED) == "debugging"
+
+
+# --- asks the reader saw, and the evening self-audit --------------------------------------
+
+def test_an_ask_the_reader_saw_is_worked_even_if_the_word_list_misses_it(monkeypatch):
+    src = open("app/chat_watch.py").read()
+    assert 'if reference else (responder.what_it_asks(ask_text) or "ask")' in src
+    from app import responder
+    for said in ("Arunkumar - how we get to know if this is accepted or rejected ?",
+                 "Got anything, bro?"):
+        assert responder.what_it_asks(said) == ""   # the word list alone drops these
+
+
+def test_a_one_to_one_booking_question_is_not_muted_as_an_incident(monkeypatch):
+    from app import responder
+    kinds = []
+
+    def should(kind, *a, **k):
+        kinds.append(kind)
+        return "stop here"
+    monkeypatch.setattr(responder, "should_respond", should)
+    monkeypatch.setattr("app.steward.consider", lambda who, text: {"hold": False, "opened_with": ""})
+    responder.respond("teams-chat", "Vinish Kumar",
+                      "prod ack for TO2934106728115 failing — consume log missing",
+                      reply_to="Vinish Kumar", group=False)
+    assert kinds == ["debug"]
+
+
+def test_the_self_audit_reads_asta_own_failures():
+    from app import selfaudit
+    store.record_outcome("responder", "skipped", subject="Deepa Singh",
+                         detail="nothing checkable in it — how we get to know if accepted?")
+    store.record_outcome("thread", "said", subject="Deepa Singh", detail=DEEPA_LINE)
+    store.record_outcome("turn", "false_denial_of_send", subject="c", detail="Deepa Singh: …")
+    conv = store.create_conversation("claude_cli", None)
+    store.add_ui_message(conv["id"], "assistant",
+                         "I need the specific workflow ID — can you share the Temporal workflow ID?",
+                         {"via": "claude_cli"})
+    found = {f["kind"]: f for f in selfaudit.findings(1)}
+    assert {"skipped_asks", "said_alone", "false_claims", "asked_him"} <= set(found)
+    text = selfaudit.render(list(found.values()), 1)
+    assert "Deepa Singh" in text and "workflow ID" in text
+
+
+def test_a_clean_day_says_so():
+    from app import selfaudit
+    assert "nothing went wrong" in selfaudit.render([], 24)

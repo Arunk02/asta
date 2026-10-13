@@ -996,6 +996,11 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
         # denied it cannot, whatever it decides to do.
         for tool in _PLAN_DENY:
             cmd += ["--deny-tool", tool]
+    from . import task_fence
+    fence = task_fence.MODE.get()
+    # No task leg approves, merges or posts as him (task_fence).
+    for tool in task_fence.copilot_deny(fence):
+        cmd += ["--deny-tool", tool]
     # Headless workers are where the money goes — one ran 22 minutes
     # unchallenged. Their own effort/credit ceiling, separate from chat.
     cmd += _budget_flags(effort or os.environ.get("COPILOT_EFFORT_TASK", "medium"),
@@ -1009,7 +1014,7 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
         stdin=asyncio.subprocess.DEVNULL,
         cwd=cwd or str(ROOT),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env={**os.environ, "CI": "1"},
+        env=task_fence.env({**os.environ, "CI": "1"}),
     )
     async def _drain() -> str:
         # Incremental read (not communicate()) so on_progress sees the run unfold

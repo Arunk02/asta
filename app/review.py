@@ -23,6 +23,7 @@ not an instruction to go and make one.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import hashlib
 import re
@@ -61,7 +62,7 @@ CI:
 
 {context}
 
-DIFF:
+{others}DIFF:
 {diff}
 
 Output EXACTLY this shape:
@@ -90,6 +91,9 @@ Hard rules:
 - Do NOT restate what the diff does — Arun can read it. Nothing a linter would catch.
 - If a file you needed was not in the diff (see any NOTE above), say which, and do not
   guess at what it contains.
+- ALREADY RAISED (if shown above): check each point against the diff. One still true
+  goes in your notes as yours, with its path:line; never APPROVE past an open one
+  without saying why it is wrong.
 
 Then CALL `propose_pr_review` with the pull request and your notes exactly as written
 above. That is what turns a review into comments the author can act on, each on its own
@@ -276,11 +280,44 @@ async def gather(pr: str, workspace: str = "", repo: str = "") -> dict:
         if meta.get("headRefOid", "").lower() != current.rsplit("@", 1)[-1].split(":")[0]:
             raise RuntimeError(f"PR #{number} changed while its diff was being read; review again")
     meta["diff"] = diff
+    meta["others"] = await _already_raised(cwd, number, where, meta)
     meta["repo_dir"] = str(cwd)
     meta["target"] = (where[1] if where else
                       f"{(meta.get('headRepositoryOwner') or {}).get('login', '')}/"
                       f"{(meta.get('headRepository') or {}).get('name', '')}".strip("/"))
     return meta
+
+
+#: Room for what others already said. A review that never saw them approved
+#: booking PR 1479 (13 Oct) past an open finding from the Copilot reviewer.
+OTHERS_CHARS = 5000
+
+_HTML = re.compile(r"<[^>]+>")
+
+
+async def _already_raised(cwd: Path, number: str, where: list[str], meta: dict) -> str:
+    """Reviews and line comments already on the PR — people's and bots' — as text."""
+    out: list[str] = []
+    rc, raw = await _gh(cwd, "pr", "view", number, *where, "--json", "reviews")
+    with contextlib.suppress(ValueError, TypeError):
+        for r in (json.loads(raw).get("reviews") or []) if rc == 0 else []:
+            body = " ".join(_HTML.sub(" ", r.get("body") or "").split())
+            if body:
+                out.append(f"[{(r.get('author') or {}).get('login', '?')} · {r.get('state', '')}] {body[:800]}")
+    target = (where[1] if where else
+              f"{(meta.get('headRepositoryOwner') or {}).get('login', '')}/"
+              f"{(meta.get('headRepository') or {}).get('name', '')}".strip("/"))
+    if "/" in target:
+        rc, raw = await _gh(cwd, "api", f"repos/{target}/pulls/{number}/comments?per_page=100")
+        with contextlib.suppress(ValueError, TypeError):
+            for c in json.loads(raw) if rc == 0 else []:
+                body = " ".join(_HTML.sub(" ", c.get("body") or "").split())
+                if body:
+                    out.append(f"[{(c.get('user') or {}).get('login', '?')}] "
+                               f"`{c.get('path', '?')}:{c.get('line') or c.get('original_line') or '?'}` "
+                               f"{body[:500]}")
+    text = "\n".join(out)
+    return text[:OTHERS_CHARS]
 
 
 async def my_logins() -> set[str]:
@@ -435,6 +472,9 @@ async def brief(pr: str, workspace: str, repo: str = "") -> tuple[str, dict]:
         files=_fmt_files(meta.get("files") or []),
         checks=_fmt_checks(meta.get("checks") or []),
         context=context,
+        others=("ALREADY RAISED by other reviewers (check each — still true?):\n"
+                + untrusted.wrap(meta["others"], f"reviews on PR #{meta['number']}") + "\n\n")
+        if meta.get("others") else "",
         diff=untrusted.wrap(_prioritise_diff(meta["diff"]), f"diff of PR #{meta['number']}"),
     )
     return text, meta

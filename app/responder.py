@@ -188,6 +188,18 @@ _DEBUG = re.compile(
 #: "incident" inside a repository name.
 _URL_IN_TEXT = re.compile(r"https?://\S+")
 
+#: A pull request LINK, and what they want done with it. "Hi Arunkumar, please
+#: approve - <booking PR 1479>" (Komal, 13 Oct) read as a plain ask once the link
+#: was stripped — no "PR", no "review" left — so it went to a general analysis,
+#: which approved the PR itself. A PR link with "approve", "check", "look" or
+#: nothing else beside it is a request for his review.
+_PR_LINK = re.compile(r"https?://github\.com/[\w.-]+/[\w.-]+/pull/\d+", re.I)
+_ON_A_PR = re.compile(
+    r"\b(?:approv\w*|lgtm|sign[\s-]*off|merge|review\w*|check|look|have\s+a\s+look|"
+    r"take\s+a\s+look|go\s+through|once)\b", re.I)
+_ONLY_GREETING = re.compile(
+    r"^\W*(?:(?:hi+|hey+|hello|bro|da|sir|arun\w*|good\s+\w+|please|pls|kindly)\W*)*$", re.I)
+
 #: One definition, in the ranking policy — see `attention.is_broadcast`. These
 #: names stay because callers and tests already use them, and because "is this a
 #: broadcast" must give the same answer to the investigator and to the ranker.
@@ -277,6 +289,9 @@ def what_it_asks(text: str) -> str:
         return "incident"
     if counterpart(text or ""):
         return "port"
+    if _PR_LINK.search(text or "") and not _THEIR_FEEDBACK.search(blob) \
+            and (_ON_A_PR.search(blob) or _ONLY_GREETING.match(blob)):
+        return "review_request"
     if _PR.search(blob) or _REVIEW_ASK.search(blob):
         # Their feedback on his change, or their change wanting his eyes. The
         # words decide here; the review itself confirms from the PR's author.

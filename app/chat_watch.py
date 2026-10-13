@@ -953,6 +953,18 @@ async def he_replied_since(chat: str, since: float | None) -> bool:
                for r in rows)
 
 
+#: A line that only says work is under way. Held, it is dropped rather than put
+#: to him for a yes.
+_PROGRESS_ONLY = re.compile(
+    r"^\W*(?:(?:sure|ok|okay|yes|yeah|hi\s+\w+)[,!.\s—-]*)?"
+    r"(?:looking|checking|having a look|reviewing|going through|let me (?:check|look|see|go through)|"
+    r"will (?:check|look|review|go through)|i'?ll (?:check|look|review|go through)|on it|"
+    r"give me (?:a )?(?:min|minute|sec|second|moment|few)|one (?:min|sec))\b"
+    r"(?:\s+(?:in)?to)?(?:\s+(?:it|this|that|the|your|ur|PR|pr|details|change|changes|now|once|"
+    r"and|update|you|u|shortly|soon|\d+))*\s*[.!]?$",
+    re.I)
+
+
 async def _say(chat: str, line: str, *, group: bool = False,
                since: float | None = None) -> bool:
     """One of the two unapproved lines Asta may send: the ask-back and the check-in.
@@ -980,6 +992,13 @@ async def _say(chat: str, line: str, *, group: bool = False,
     from . import steward, understand
     problem = "you asked me to send nothing without your yes" if not steward.say_without_yes() \
         else understand.unapproved_line_problem(line)
+    if problem and _PROGRESS_ONLY.match(" ".join(line.split())):
+        # "Looking into the PR details" is not worth his yes: it went to his phone
+        # as a draft to approve (13 Oct) while the real answer was still coming.
+        # Not said, not shown — the finding is what he hears about.
+        store.record_outcome("thread", "held back", subject=chat[:80],
+                             detail=f"progress line, not shown — not said: {line}"[:200])
+        return False
     if problem:
         from . import answers
         store.record_outcome("thread", "held back", subject=chat[:80],

@@ -560,10 +560,12 @@ def test_implicit_reference_to_two_recent_prs_is_clarified_before_investigating(
     now = time.time()
     chat = "Vinish Kumar"
     for n, who, text in [
-        (3, "Arunkumar K", "RFP: https://github.com/org/booking/pull/1429"),
-        (2, "Arunkumar K", "NAM: https://github.com/org/booking/pull/1466"),
-        (1, chat, "Then merging both, bro"),
+        (42, "Arunkumar K", "RFP: https://github.com/org/booking/pull/1429"),
+        (41, "Arunkumar K", "NAM: https://github.com/org/booking/pull/1466"),
+        (40, chat, "Then merging both, bro"),
     ]:
+        # Over ASTA_HIS_EXCHANGE_MINUTES ago: minutes after his own message the
+        # chat is his conversation and Asta says nothing in it (13 Oct, Shabda).
         store.save_teams_messages([{"key": f"pr{n}", "chat": chat, "sender": who,
                                     "text": text, "sent_at": now - 60 * n, "stamp": ""}])
     from app import threads
@@ -666,7 +668,14 @@ def test_rejected_answer_with_ambiguous_reference_is_clarified_not_reused(rail, 
     for n, number in enumerate((1429, 1466), 2):
         store.save_teams_messages([{"key": f"prior{number}", "chat": chat, "sender": "Arunkumar K",
                                     "text": f"https://github.com/org/booking/pull/{number}",
-                                    "sent_at": now - 60 * n, "stamp": ""}])
+                                    "sent_at": now - 60 * (40 + n), "stamp": ""}])
+    # The answer he is correcting went out under Asta's standing auto-reply rule
+    # (authority.send_reply notes it), so his "Not correct Asta" answers ASTA —
+    # not a conversation Arun is having himself.
+    store.save_teams_messages([{"key": "oldans", "chat": chat, "sender": "Arunkumar K",
+                                "text": "Old PR answer", "sent_at": now - 60, "stamp": ""}])
+    from app import chat_watch
+    chat_watch.note_asta_said(chat, "Old PR answer")
     rail.rows[chat] = [_msg(
         chat, "Arunkumar K\n06/10/2026 17:56\nOld PR answer\n\nNot correct Asta.", now)]
     rail.script["teams:Vinish Kumar"] = {
@@ -686,6 +695,32 @@ def test_rejected_answer_with_ambiguous_reference_is_clarified_not_reused(rail, 
     assert "/pull/1466" in rail.asked[0]["text"]
     assert sum("says my previous answer was wrong" in p["text"] for p in phone["pushed"]) == 1
 
+
+
+def test_a_correction_in_his_own_conversation_is_put_to_him(rail, monkeypatch):
+    """The same correction, but the last word before it was HIS (13 Oct, Shabda):
+    the clarifying question is shown to him, never sent on its own."""
+    from app import answers
+    now = time.time()
+    chat = "Vinish Kumar"
+    for n, number in enumerate((1429, 1466), 2):
+        store.save_teams_messages([{"key": f"his{number}", "chat": chat, "sender": "Arunkumar K",
+                                    "text": f"https://github.com/org/booking/pull/{number}",
+                                    "sent_at": now - 60 * n, "stamp": ""}])
+    shown = []
+
+    async def present(**kw):
+        shown.append(kw)
+        return True
+
+    monkeypatch.setattr(answers, "present", present)
+    rail.rows[chat] = [_msg(chat, "Bro, merge the PR. Share ticket and build.", now)]
+    rail.script["teams:Vinish Kumar"] = {
+        "state": "ask", "need": "Share the ticket and build", "closing_confidence": 0.1,
+        "summary": "merge the PR", "entities": [], "work": "check"}
+    rail.sweep()
+    assert rail.sent == [] and not rail.asked
+    assert any("1429" in (p.get("reply") or "") and "1466" in (p.get("reply") or "") for p in shown)
 
 def test_specific_correction_reopens_work_instead_of_filing_status(rail):
     from app import answers

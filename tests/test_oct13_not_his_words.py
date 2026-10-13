@@ -154,3 +154,62 @@ def test_the_evening_audit_catches_a_term_he_never_used():
     store.save_teams_messages([_row("v9", "Arunkumar K", "bro check once", now - 30, chat="Vinish Kumar")])
     found = {f["kind"]: f for f in selfaudit.findings(1)}
     assert found["address"]["count"] == 1 and KOMAL in found["address"]["examples"][0]
+
+
+# --- his conversation is his ------------------------------------------------------------
+
+SHABDA = "Shabda Anubhav Dev"
+
+
+def _his_ask_and_her_reply(now, his_at=-60):
+    store.save_teams_messages([
+        _row("s1", "Arunkumar K", "Shabda can you merge this please", now + his_at, chat=SHABDA),
+        _row("s2", SHABDA, "need one more aopprval", now - 10, chat=SHABDA)])
+
+
+def test_her_reply_to_his_ask_is_not_answered_by_asta(monkeypatch):
+    """13 Oct: he asked Shabda to merge event-router PR 96; her "need one more
+    approval" got "Who else needs to approve it?" from Asta."""
+    from app import answers
+    now = time.time()
+    _his_ask_and_her_reply(now)
+    sent, shown = [], []
+
+    async def send(chat, text, allow_group=False):
+        sent.append(text)
+        return chat
+
+    async def present(**kw):
+        shown.append(kw)
+        return True
+
+    monkeypatch.setattr(tb, "enabled", lambda: False)
+    monkeypatch.setattr(tb, "send_message", send)
+    monkeypatch.setattr(answers, "present", present)
+    assert asyncio.run(chat_watch._say(SHABDA, "Who else needs to approve it?", since=now - 10)) is False
+    assert sent == []
+    assert shown and shown[0]["reply"] == "Who else needs to approve it?"
+
+
+def test_he_wrote_recently_so_asta_stays_out():
+    now = time.time()
+    store.save_teams_messages([_row("r1", "Arunkumar K", "ok will check", now - 20 * 60, chat=SHABDA),
+                               _row("r2", SHABDA, "hi", now - 5 * 60, chat=SHABDA),
+                               _row("r3", SHABDA, "one more thing", now - 60, chat=SHABDA)])
+    assert chat_watch.in_his_exchange(SHABDA, now - 60)
+
+
+def test_an_old_conversation_of_his_does_not_silence_asta():
+    now = time.time()
+    store.save_teams_messages([_row("o1", "Arunkumar K", "thanks", now - 5 * 3600, chat=SHABDA),
+                               _row("o2", SHABDA, "hi Arunkumar", now - 4 * 3600, chat=SHABDA),
+                               _row("o3", SHABDA, "call?", now - 30, chat=SHABDA)])
+    assert not chat_watch.in_his_exchange(SHABDA, now - 30)
+
+
+def test_asta_own_line_does_not_make_it_his_exchange():
+    now = time.time()
+    store.save_teams_messages([_row("a1", "Arunkumar K", "Yes, tell me", now - 120, chat=SHABDA),
+                               _row("a2", SHABDA, "need help on PR", now - 30, chat=SHABDA)])
+    store.record_automatic_teams_message("a1", SHABDA)
+    assert not chat_watch.in_his_exchange(SHABDA, now - 30)

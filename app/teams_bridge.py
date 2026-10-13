@@ -1715,6 +1715,8 @@ _automatic_send: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 async def send_automatic(chat: str, text: str) -> str:
     """Send an unapproved acknowledgement and attribute only its verified message."""
+    from . import writing
+    text = writing.fit_address(text, chat)    # every caller, not only chat_watch._say
     token = _automatic_send.set(chat)
     try:
         return await send_message(chat, text)

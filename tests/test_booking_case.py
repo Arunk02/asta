@@ -241,6 +241,45 @@ def test_the_environment_answering_asta_question_starts_the_investigation(rail):
     assert ID in text and "preprod" in text and "manual customs" in text
 
 
+def test_an_answer_to_asta_own_question_is_worked_not_forwarded(rail):
+    """13 Oct, Komal: "Hi Arunkumar, call ?" -> Asta "what's up?" -> "it is for
+    avro update" + the repo. Read as "a reply to Arun", it was forwarded to him
+    and she got "anything else you need from my side?". It is the ask."""
+    from app import store, threads
+    chat, now = "Komal Jayswal", time.time()
+    store.save_teams_messages([
+        {"key": "k1", "chat": chat, "sender": chat, "text": "Hi Arunkumar, call ?",
+         "sent_at": now - 600, "stamp": ""},
+        {"key": "k2", "chat": chat, "sender": "Arunkumar K", "text": "Sure, what's up?",
+         "sent_at": now - 560, "stamp": ""}])
+    store.record_automatic_teams_message("k2", chat)
+    threads.open("teams", chat, chat=chat)
+    threads.update(f"teams:{chat}", status="clarifying", asta_spoke=1, asked_back=1)
+    rail.rows[chat] = [_msg("it is for avro update", who=chat),
+                       _msg("https://github.com/Maersk-Global/empv3-tenant-intake", who=chat)]
+    rail.script[f"teams:{chat}"] = {"state": "status", "need": "", "closing_confidence": 0.3,
+                                    "summary": "avro update", "entities": []}
+    rail.sweep()
+    assert len(rail.asked) == 1 and "avro update" in rail.asked[0]["text"]
+    assert not any("anything else" in t for _, t in rail.sent)
+
+
+def test_ok_after_asta_acknowledged_is_not_made_an_ask(rail):
+    """Only an answer to a QUESTION Asta asked is the rest of the ask."""
+    from app import store, threads
+    chat, now = "Komal Jayswal", time.time()
+    store.save_teams_messages([{"key": "k5", "chat": chat, "sender": "Arunkumar K",
+                                "text": "Let me look into this", "sent_at": now - 60, "stamp": ""}])
+    store.record_automatic_teams_message("k5", chat)
+    threads.open("teams", chat, chat=chat)
+    threads.update(f"teams:{chat}", status="clarifying", asta_spoke=1, asked_back=1)
+    rail.rows[chat] = [_msg("ok", who=chat)]
+    rail.script[f"teams:{chat}"] = {"state": "status", "need": "", "closing_confidence": 0.3,
+                                    "summary": "ok", "entities": []}
+    rail.sweep()
+    assert not rail.asked
+
+
 def test_a_complete_question_is_investigated_at_once(rail):
     rail.rows["Vinish Kumar"] = [_msg(f"{Q} {ID} in uat")]
     rail.script["teams:Vinish Kumar"] = _ask("check manual customs to billing for a booking")

@@ -167,8 +167,10 @@ question — REQUIRED for an opener, whenever subject is "unclear", and for ANY
        ONE short, polite, natural question to ask them, in Arun's voice (see
        arun_writes_like: his own recent messages to them — match the register,
        never the content). If the earlier conversation suggests a topic, offer
-       it as a guess and leave room for something new ("Sure bro — is this about
-       the event-history defect, or something else?"). It must be a question,
+       it as a guess and leave room for something new ("Sure — is this about
+       the event-history defect, or something else?"). No "bro", "da", "sir" or
+       any term of address unless arun_writes_like shows HIM using it with THIS
+       person — never from his other chats. It must be a question,
        promise nothing, and not ask for anything already given. Empty when the
        subject is stated or clearly continuing and there is enough to act on.
 tell — what Arun's assistant would say to Arun on WhatsApp about this
@@ -180,8 +182,9 @@ tell — what Arun's assistant would say to Arun on WhatsApp about this
        emoji, no markdown, no "Teams:". Empty for closing.
 reply — for an ask with work "talk" only: the short reply Arun would most likely
        send them, in his voice (arun_writes_like), that moves it forward without
-       committing him to a time he has not given ("Sure bro, what time works for
-       you?", "yes, give me 10 mins, will call"). Empty otherwise.
+       committing him to a time he has not given ("Sure, what time works for
+       you?", "yes, give me 10 mins, will call"). Same rule for terms of address
+       as the question. Empty otherwise.
 
 Reply with ONLY this JSON, one entry per conversation, ids exactly as given:
 {"threads":[{"id":"...","state":"...","closing_confidence":0.0,"subject":"stated",

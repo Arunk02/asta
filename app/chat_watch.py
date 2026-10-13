@@ -601,13 +601,41 @@ def answered_by_him(chat: str, message: dict) -> bool:
     except Exception:                                          # noqa: BLE001
         return False
     return any(r.get("sent_at") and r["sent_at"] > when
-               and is_from_him(r.get("sender", "")) for r in rows)
+               and written_by_him(r, chat) for r in rows)
 
 
 def is_from_him(sender: str) -> bool:
     """His own messages are not things he was asked."""
     from . import meetings
     return meetings.speaker_is_arun(sender or "")
+
+
+def written_by_him(row: dict, chat: str = "") -> bool:
+    """His own words: from his account AND not a line Asta sent on its own.
+
+    Teams shows Asta's ask-backs as his. Counted as his, they became his voice,
+    his "reply", the term he calls someone (13 Oct: "Sure bro, what's up?" to
+    Komal made "bro" look attested with her), and her answer to Asta's question
+    looked like an answer to him. Use this wherever "he said it" matters;
+    `is_from_him` only where any message from his account counts (a send
+    happened, the 1:1 is not theirs)."""
+    if not is_from_him(row.get("sender", "")):
+        return False
+    chat = chat or row.get("chat") or ""
+    if row.get("automatic") or ("automatic" not in row
+                                and store.is_automatic_teams_message(row.get("key", ""), chat)):
+        return False
+    return " ".join((row.get("text") or "").split()) not in asta_said(chat)
+
+
+def speaker(row: dict, chat: str = "") -> str:
+    """Who said it, for a transcript a brain reads: Asta's own lines are labelled
+    as Asta's, so it never quotes them back as something Arun said."""
+    if written_by_him(row, chat):
+        return "Arun"
+    if is_from_him(row.get("sender", "")):
+        return "Asta (as Arun)"
+    return row.get("sender") or "?"
 
 
 #: Rows that only ever appear on the real chat list. Their presence is how we
@@ -932,6 +960,11 @@ async def _say(chat: str, line: str, *, group: bool = False,
     Never in a group while ASTA_GROUP_SILENT is on — False, and the caller
     carries on as if the line could not be sent. Never once he has answered
     the message (`since`) himself."""
+    # No term of address he has never used with them — whatever wrote the line.
+    # 13 Oct: the model's "Sure bro, what's up?" went to Komal; `fit_address`
+    # guarded his drafts and never saw the lines Asta says on its own.
+    from . import writing
+    line = writing.fit_address(line, chat)
     if group and group_silent():
         store.record_outcome("thread", "held back", subject=chat[:80],
                              detail=f"group — not said: {line}"[:200])
@@ -1043,7 +1076,7 @@ def his_last_words(chat: str, before: float | None, hours: float = 24) -> str:
         rows = store.teams_messages(chat=chat, since=_t.time() - hours * 3600, limit=400)
     except Exception:                                          # noqa: BLE001
         return ""
-    mine = [r for r in rows if is_from_him(r.get("sender", "")) and r.get("sent_at")
+    mine = [r for r in rows if written_by_him(r, chat) and r.get("sent_at")
             and (before is None or float(r["sent_at"]) < float(before))]
     return " ".join((max(mine, key=lambda r: float(r["sent_at"]))["text"] or "").split()) if mine else ""
 
@@ -1060,7 +1093,27 @@ def answering_him(chat: str, sent_at: float | None, hours: float = 24) -> bool:
     if not before:
         return False
     last = max(before, key=lambda r: float(r["sent_at"]))
-    return is_from_him(last.get("sender", ""))
+    return written_by_him(last, chat)
+
+
+def answering_asta(chat: str, sent_at: float | None, hours: float = 24) -> str:
+    """Was the last message before theirs a line Asta sent on its own? Then
+    what they sent answers ASTA's question — the rest of their ask, which Asta
+    works, not "a reply to Arun" to forward (Komal, 13 Oct: "it is for avro
+    update" + the repo, after Asta's "what's up?"). Asta's line, or ""."""
+    if not sent_at:
+        return ""
+    try:
+        rows = store.teams_messages(chat=chat, since=float(sent_at) - hours * 3600, limit=400)
+    except Exception:                                          # noqa: BLE001
+        return ""
+    before = [r for r in rows if r.get("sent_at") and float(r["sent_at"]) < float(sent_at)]
+    if not before:
+        return ""
+    last = max(before, key=lambda r: float(r["sent_at"]))
+    if is_from_him(last.get("sender", "")) and not written_by_him(last, chat):
+        return " ".join((last.get("text") or "").split())
+    return ""
 
 
 def _his_last_minutes(chat: str, now: float, hours: float = 6) -> int | None:
@@ -1070,7 +1123,7 @@ def _his_last_minutes(chat: str, now: float, hours: float = 6) -> int | None:
         rows = store.teams_messages(chat=chat, since=now - hours * 3600, limit=400)
     except Exception:                                          # noqa: BLE001
         return None
-    his = [float(r.get("sent_at") or 0) for r in rows if is_from_him(r.get("sender", ""))]
+    his = [float(r.get("sent_at") or 0) for r in rows if written_by_him(r, chat)]
     return int((now - max(his)) // 60) if his else None
 
 
@@ -1086,7 +1139,7 @@ def _transcript(chat: str, now: float, hours: float = 6, at_most: int = 14) -> l
     for r in rows[-at_most:]:
         text = " ".join(as_read(r.get("text") or "", earlier).split())[:400]
         if text:
-            out.append(f"{'Arun' if is_from_him(r.get('sender', '')) else r.get('sender', '?')}: {text}")
+            out.append(f"{speaker(r, chat)}: {text}")
     return out
 
 
@@ -1592,6 +1645,16 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 and (booking_case.ids(theirs) or booking_case.env_of(theirs)):
             # The booking or environment Asta asked for. It reads like an answer
             # ("status") — it is the rest of their question, and it is worked.
+            state = "ask"
+        elif c["one_to_one"] and state in ("status", "opener", "closing") \
+                and (state == "status" or _concrete(theirs)) \
+                and "?" in answering_asta(c["chat"], c.get("first_at") or c.get("sent_at")):
+            # The answer to a question ASTA asked them. 13 Oct, Komal: "call ?",
+            # Asta "what's up?", Komal "it is for avro update" + the repo link —
+            # filed as "replied to you" for him, then as closing, and she got
+            # "anything else you need from my side?". It is the ask. A bare "ok"
+            # or "no thanks" stays closing; a greeting counts only with something
+            # checkable in it.
             state = "ask"
 
 

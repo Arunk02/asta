@@ -74,7 +74,7 @@ def _his(chat: str | None, limit: int) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for r in rows:
-        if not chat_watch.is_from_him(r.get("sender", "")):
+        if not chat_watch.written_by_him(r):
             continue
         t = _usable(r.get("text") or "")
         k = _key(t)
@@ -89,11 +89,16 @@ def examples(to: str, k: int = AT_MOST) -> list[str]:
     up from his other chats when there are too few to go on."""
     got = _his(to, 400)[:k] if to else []
     if len(got) < ENOUGH:
+        from . import writing
         have = {_key(g) for g in got}
         for t in _his(None, 1500):
             if len(got) >= k:
                 break
-            if _key(t) not in have:
+            # From his OTHER chats: the register travels, the "bro" does not.
+            # Shown to the model as how he writes to `to`, Vinish's "bro" lines
+            # taught it to call Komal bro (13 Oct).
+            t = writing.fit_address(t, to) if to else t
+            if t and _key(t) not in have:
                 got.append(t)
     return got[:k]
 

@@ -1798,6 +1798,11 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
     checkout and nowhere else — and if anything else changed while it ran, he is
     told (13 Oct: #295 edited #251's checkout, #298 committed in his own)."""
     ws = workspace or (store.get_task(task_id) or {}).get("workspace")
+    # On EVERY leg, not only at preparation: a resumed task ("continue the
+    # implementation") never prepares again, and #295 stayed blocked on the
+    # branch #251's idle checkout held (13 Oct, after the first fix).
+    with contextlib.suppress(Exception):
+        await free_idle_checkouts(Path(code_cwd(ws)), task_id)
     refuse_shared_tree(task_id, cwd, ws)
     before = await other_trees(ws, cwd)
     token = task_fence.MODE.set("code")

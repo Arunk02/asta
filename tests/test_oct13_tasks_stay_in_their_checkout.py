@@ -196,3 +196,18 @@ def test_nothing_changed_nothing_said(ws, monkeypatch):
 
 def test_the_leg_is_told_to_stay_inside():
     assert "never edit" in tasks._stay_inside("/x/task-1") and "/x/task-1" in tasks._stay_inside("/x/task-1")
+
+
+def test_a_resumed_leg_frees_the_branch_too(ws, monkeypatch):
+    """'task 295: continue' never prepares again — the leg itself frees."""
+    held = _checkout(ws, "failed")
+    me = _task(status="running")
+    asyncio.run(worktrees.create(ws, me, f"feature/me-{me}"))
+
+    async def leg(*a, **k):
+        return "ok"
+
+    monkeypatch.setattr(tasks, "_code_leg", leg)
+    asyncio.run(tasks._run_code_leg(me, "continue", tasks.task_cwd(me, "booking"),
+                                    resume=True, effort="", workspace="booking"))
+    assert not worktrees.exists(ws, held)

@@ -1000,6 +1000,43 @@ async def ensure_checkout(task_id: int) -> None:
         store.record_outcome("checkout", "restored", subject=str(task_id))
 
 
+async def _unpushed(task_id: int, ws_root: Path) -> bool:
+    """Does this task's checkout hold anything that exists nowhere else?"""
+    from . import worktrees
+    root = worktrees.root_for(ws_root, task_id)
+    for repo in (p for p in root.iterdir() if p.is_dir() and (p / ".git").exists()):
+        rc, dirty = await repo_ops.git(repo, "git", "status", "--porcelain")
+        if rc != 0 or dirty.strip():
+            return True
+        rc, ahead = await repo_ops.git(repo, "git", "rev-list", "--count", "HEAD", "--not", "--remotes")
+        if rc != 0 or ahead.strip() not in ("", "0"):
+            return True
+    return False
+
+
+async def free_idle_checkouts(ws_root: Path, but: int) -> list[int]:
+    """Remove the checkouts of tasks that are not running and hold nothing unpushed,
+    so their branches can be checked out by the task that needs them now."""
+    from . import worktrees
+    freed: list[int] = []
+    for t in store.list_tasks(limit=500):
+        if t["id"] == but or t.get("kind") != "code" \
+                or t.get("status") not in _FINAL_FOR_GOOD + _FINISHED_FOR_NOW:
+            continue
+        try:
+            root = Path(code_cwd(t.get("workspace")))
+        except RuntimeError:
+            continue
+        if root.resolve() != Path(ws_root).resolve() or not worktrees.exists(root, t["id"]):
+            continue
+        if await _unpushed(t["id"], root):
+            continue
+        notes = await remove_checkout(t["id"], t)
+        if notes and not any("uncommitted" in n for n in notes):
+            freed.append(t["id"])
+    return freed
+
+
 async def sweep_checkouts(now: float | None = None) -> list[int]:
     """Remove the checkouts of tasks that no longer need them, and stale PR
     review checkouts. Returns the task ids cleaned."""
@@ -1757,13 +1794,91 @@ def context_boot_paths(prompt: str, cwd: str, workspace: str | None) -> str:
 async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
                         resume: bool, effort: str, workspace: str | None = None) -> str:
     """A code leg inside the task fence: it may push its branch and open its own
-    PR, never approve, merge or close one (app/task_fence.py)."""
+    PR, never approve, merge or close one (app/task_fence.py). It works in its own
+    checkout and nowhere else — and if anything else changed while it ran, he is
+    told (13 Oct: #295 edited #251's checkout, #298 committed in his own)."""
+    ws = workspace or (store.get_task(task_id) or {}).get("workspace")
+    refuse_shared_tree(task_id, cwd, ws)
+    before = await other_trees(ws, cwd)
     token = task_fence.MODE.set("code")
     try:
-        return await _code_leg(task_id, prompt + task_fence.prompt_line("code"), cwd,
-                               resume=resume, effort=effort, workspace=workspace)
+        return await _code_leg(task_id, prompt + task_fence.prompt_line("code") + _stay_inside(cwd),
+                               cwd, resume=resume, effort=effort, workspace=workspace)
     finally:
         task_fence.MODE.reset(token)
+        with contextlib.suppress(Exception):
+            await _report_strays(task_id, before, await other_trees(ws, cwd))
+
+
+def _stay_inside(cwd: str) -> str:
+    return (f"\nYOUR CHECKOUT is {cwd}. Read, edit, commit and check out branches only "
+            "inside it. If the branch you need is checked out in another worktree, or a "
+            "change seems to belong in another checkout, STOP and say which — never edit, "
+            "commit or switch branches in any other directory.\n")
+
+
+def refuse_shared_tree(task_id: int, cwd: str, workspace: str | None) -> None:
+    """A code leg never runs in the checkout he has open. When no private checkout
+    could be made, the task stops and says so — it used to fall back to his tree."""
+    from . import worktrees
+    try:
+        root = Path(code_cwd(workspace))
+    except RuntimeError:
+        return
+    if Path(cwd).resolve() != root.resolve() or worktrees.exists(root, task_id):
+        return
+    if not worktrees.repos_in(root):
+        return
+    raise RuntimeError(
+        f"no private checkout for task #{task_id}, so it would work in {root} — the tree "
+        "Arun has open. Refusing. The 🌿 note above says why the checkout could not be made.")
+
+
+async def other_trees(workspace: str | None, cwd: str) -> dict[str, str]:
+    """Every checkout of the workspace's repos except this task's: what each holds."""
+    from . import worktrees
+    try:
+        root = Path(code_cwd(workspace))
+    except RuntimeError:
+        return {}
+    own = Path(cwd).resolve()
+    out: dict[str, str] = {}
+    for repo in worktrees.repos_in(root):
+        rc, listing = await repo_ops.git(repo, "git", "worktree", "list", "--porcelain")
+        if rc != 0:
+            continue
+        for line in listing.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            path = Path(line[len("worktree "):]).resolve()
+            if path == own or own in path.parents or path in own.parents:
+                continue
+            rc1, head = await repo_ops.git(path, "git", "rev-parse", "--abbrev-ref", "HEAD")
+            rc2, sha = await repo_ops.git(path, "git", "rev-parse", "HEAD")
+            rc3, dirty = await repo_ops.git(path, "git", "status", "--porcelain")
+            if 0 in (rc1, rc2, rc3):
+                out[str(path)] = f"{head.strip()}@{sha.strip()[:12]}\n{dirty.strip()}"
+    return out
+
+
+async def _report_strays(task_id: int, before: dict[str, str], after: dict[str, str]) -> None:
+    changed = [p for p in after if p in before and after[p] != before[p]]
+    if not changed:
+        return
+    from . import notify
+    lines = []
+    for p in changed:
+        (was_b, _, was_sha), (now_b, _, now_sha) = (x.split("\n", 1)[0].partition("@")
+                                                      for x in (before[p], after[p]))
+        what = (f"switched branch {was_b} → {now_b}" if was_b != now_b
+                else f"new commit on {now_b}" if was_sha != now_sha else "files changed")
+        lines.append(f"• {p} — {what}")
+    store.record_outcome("task", "outside_checkout", subject=str(task_id),
+                         detail="; ".join(changed)[:200])
+    await notify.notify(
+        f"⚠️ While task #{task_id} ran, another checkout changed:\n" + "\n".join(lines)
+        + "\nIf that was not you, the task wrote outside its own checkout — nothing there "
+          "was pushed by Asta; look before you build or commit in it.", "task")
 
 
 async def _code_leg(task_id: int, prompt: str, cwd: str, *,
@@ -1856,6 +1971,8 @@ async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
     outside this machine: 13 Oct, an analysis of Komal's "please approve" ran
     `gh pr review --approve` as Arun (app/task_fence.py)."""
     mode = task_fence.kind_mode(t["kind"])
+    if t["kind"] == "code":
+        refuse_shared_tree(task_id, task_cwd(task_id, t.get("workspace")), t.get("workspace"))
     token = task_fence.MODE.set(mode)
     try:
         return await _simple_leg(task_id, t, prompt + task_fence.prompt_line(mode))
@@ -1867,7 +1984,8 @@ async def _simple_leg(task_id: int, t: dict, prompt: str) -> str:
     """Non-pipeline kinds (analysis, teams_draft, agent-less code): one leg,
     executor-aware, with transparent claude failover when copilot's quota dies."""
     ex = _resolve_executor(task_id)
-    cwd = _cwd(t["workspace"])
+    # A code task works in its own checkout (task_cwd); `_cwd` is for reading.
+    cwd = task_cwd(task_id, t["workspace"]) if t["kind"] == "code" else _cwd(t["workspace"])
     # One fresh session per simple run, so his guardrails ride exactly once —
     # the Investigation rules to an analysis, the Communication rules to a draft.
     prompt += guardrails.block(_GUARDRAIL_AUDIENCE.get(t["kind"], "chat"))
@@ -2063,7 +2181,11 @@ async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
     # shared checkout ran his tests against code the task never touched, so a
     # green result said nothing about the work.
     cwd = task_cwd(task_id, t["workspace"])
-    outcome = await verify.check_tree(cwd, t["workspace"], _cwd(t["workspace"]))
+    try:
+        shared = code_cwd(t["workspace"])
+    except RuntimeError:
+        shared = _cwd(t["workspace"])
+    outcome = await verify.check_tree(cwd, t["workspace"], shared)
     if not outcome.ran:
         return False   # no usable oracle — behave exactly as today
     cmd = outcome.command
@@ -2948,7 +3070,15 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     # somehow resolves to it.
     if not t.get("workspace"):
         return []
-    root = Path(_cwd(t.get("workspace")))
+    # `code_cwd`, the resolver every other code path uses. With `_cwd`, a
+    # workspace named by its directory ("email") resolved to Asta's own repo
+    # here — so nothing was prepared — while `task_cwd` resolved it to the
+    # shared ~/booking-workspace, and task #298 (13 Oct) cut a branch and
+    # committed in the checkout he has open.
+    try:
+        root = Path(code_cwd(t.get("workspace")))
+    except RuntimeError:
+        return []
     if not root.exists() or root.resolve() == ROOT.resolve():
         return []
     # One definition, in worktrees. This was the third inline copy of the rule and
@@ -2966,6 +3096,12 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     # Arun has open in his editor is never touched. `start_branch` remains for
     # anything that genuinely needs the shared tree.
     from . import worktrees
+    # A finished task's checkout holds its branch, and git lets a branch be
+    # checked out once. #251 failed on 7 Oct and still held PR 676's branch on
+    # 13 Oct, so #295 could not work on it. Clean, fully pushed checkouts of
+    # tasks that are not running are freed — ensure_checkout brings one back.
+    with contextlib.suppress(Exception):
+        await free_idle_checkouts(root, task_id)
     try:
         # The task's own words decide which repos are prepared. A one-line change
         # in the booking service should not cost three fetches and three
@@ -3006,7 +3142,8 @@ def first_code_prompt(task_id: int, t: dict) -> str:
         if _pipeline_for(task_id) == "full":
             prompt += CODE_OVERRIDES
     else:
-        prompt += repo_ops.playbook_block(Path(_cwd(t["workspace"])))
+        with contextlib.suppress(RuntimeError):
+            prompt += repo_ops.playbook_block(Path(code_cwd(t["workspace"])))
     # How far the context map has fallen behind the code it describes — on
     # EVERY pipeline, because micro is the tier most likely to answer from
     # the map alone. Empty for a workspace whose context is current, so a
@@ -3647,7 +3784,7 @@ async def _push_named_branches(task_id: int, t: dict) -> list[str]:
     named_repos = {m.group(1) for m in re.finditer(
         r"github\.com/[^/\s]+/([^/\s]+)/pull/\d+", t.get("prompt", ""), re.I)}
     try:
-        root = Path(_cwd(t.get("workspace")))
+        root = Path(code_cwd(t.get("workspace")))
     except Exception:                                          # noqa: BLE001
         return []
     repos = _wt.repos_in(root)

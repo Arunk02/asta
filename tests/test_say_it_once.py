@@ -1403,6 +1403,7 @@ def test_ship_pushes_the_existing_pr_branch_the_task_committed_to(monkeypatch, t
 
     monkeypatch.setattr(tasks.repo_ops, "git", git)
     monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
+    monkeypatch.setattr(tasks, "code_cwd", lambda ws: str(tmp_path))
     monkeypatch.setattr(worktrees, "repos_in", lambda root: [tmp_path / "telikos-booking-service"])
     t = store.create_task("Add @NotBlank on facilityCityCode (PR #1429)", "code",
                           "On the existing PR #1429 (branch feature/rfp-mandatory-field-validation)", "booking")
@@ -1423,6 +1424,7 @@ def test_existing_ap_pr_cannot_push_same_named_branch_from_booking(monkeypatch, 
 
     monkeypatch.setattr(tasks.repo_ops, "git", git)
     monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
+    monkeypatch.setattr(tasks, "code_cwd", lambda ws: str(tmp_path))
     monkeypatch.setattr(worktrees, "repos_in",
                         lambda root: [tmp_path / "telikos-booking-service"])
     t = store.create_task(

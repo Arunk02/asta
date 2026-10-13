@@ -225,6 +225,8 @@ async def test_every_repo_in_a_workspace_gets_the_same_branch(monkeypatch, tmp_p
     from app import worktrees
     monkeypatch.setattr(worktrees, "create", spy)
     monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
+    # Branches are prepared where the code task runs — `code_cwd` (13 Oct).
+    monkeypatch.setattr(tasks, "code_cwd", lambda ws: str(tmp_path))
 
     t = {"title": "BEPTELIKOS-9: fix", "prompt": "", "workspace": "booking-workspace"}
     await tasks._prepare_branches(70, t)
@@ -248,6 +250,7 @@ async def test_one_broken_repo_does_not_stop_the_others(monkeypatch, tmp_path):
     from app import worktrees
     monkeypatch.setattr(worktrees, "create", flaky)
     monkeypatch.setattr(tasks, "_cwd", lambda ws: str(tmp_path))
+    monkeypatch.setattr(tasks, "code_cwd", lambda ws: str(tmp_path))
 
     sent = {}
 

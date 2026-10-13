@@ -117,6 +117,12 @@ def is_greeting(text: str) -> bool:
 #: talking to him, asking them to finish.
 #:
 #: Off unless switched on, like everything else that acts outward.
+def say_without_yes() -> bool:
+    """Whether ANY line may go to a colleague without his yes — the ask-back,
+    the check-in, a clarifying question. Off: every such line waits for him."""
+    return os.environ.get("ASTA_SAY_WITHOUT_YES", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
 def ask_back_enabled() -> bool:
     return os.environ.get("ASTA_ASK_BACK", "1").strip().lower() in ("1", "true", "yes", "on")
 

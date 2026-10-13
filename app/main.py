@@ -1400,7 +1400,40 @@ async def api_grafana_logs(request: Request):
     b = await request.json()
     return {"ok": True, "detail": await agent_mod.grafana_logs(
         b.get("service", ""), b.get("terms", ()), int(b.get("minutes", 0) or 0),
-        b.get("namespace", ""), bool(b.get("errors_only", True)))}
+        b.get("namespace", ""), bool(b.get("errors_only", True)), b.get("at", ""))}
+
+
+@app.post("/api/debug/counts", dependencies=[Depends(require_auth)])
+async def api_debug_counts(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.log_counts(
+        b.get("term", ""), b.get("env", ""), b.get("by", "app"), float(b.get("hours", 24) or 24),
+        b.get("service", ""), b.get("at", ""))}
+
+
+@app.post("/api/debug/lines", dependencies=[Depends(require_auth)])
+async def api_debug_lines(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.log_lines(
+        b.get("env", ""), b.get("service", ""), b.get("contains", ()), b.get("logger", ""),
+        b.get("at", ""), int(b.get("minutes", 10) or 10), b.get("start", ""), b.get("end", ""),
+        int(b.get("limit", 40) or 40), bool(b.get("newest_first")), b.get("pod", ""))}
+
+
+@app.post("/api/debug/find-id", dependencies=[Depends(require_auth)])
+async def api_debug_find_id(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.find_id(
+        b.get("id", ""), b.get("env", ""), float(b.get("hours", 24) or 24),
+        b.get("service", "booking|activityplan"))}
+
+
+@app.post("/api/debug/gaps", dependencies=[Depends(require_auth)])
+async def api_debug_gaps(request: Request):
+    b = await request.json()
+    return {"ok": True, "detail": await agent_mod.log_gaps(
+        b.get("env", ""), b.get("service", ""), b.get("at", ""), int(b.get("minutes", 10) or 10),
+        b.get("start", ""), b.get("end", ""))}
 
 
 @app.post("/api/temporal/workflows", dependencies=[Depends(require_auth)])
@@ -2279,6 +2312,46 @@ _INTERNAL_RELAY = re.compile(
     r"(?:to|on)\s+(?:the\s+)?task\s*#?\s*\d+", re.I)
 
 
+#: "Nothing's been sent to Deepa", "I haven't sent anything", "that was your own message".
+_DENIES_SENDING = re.compile(
+    r"\b(?:nothing(?:'s| has| was)?\s+(?:been\s+)?sent|(?:haven'?t|have not|didn'?t|did not|"
+    r"never)\s+(?:drafted\s+or\s+)?(?:sent|messaged|replied|written)|not\s+sent\s+anything|"
+    r"was\s+your\s+own|typed\s+by\s+you)\b", re.I)
+
+
+def asta_sends(hours: float = 24.0) -> list[dict]:
+    """What Asta itself said to people lately, from its own record — the lines it
+    sends in his name (chat_watch._say) and the automatic replies."""
+    since = time.time() - hours * 3600
+    out: list[dict] = []
+    with contextlib.suppress(Exception):
+        with store._connect() as conn:
+            for r in conn.execute(
+                    "SELECT subject, detail, created_at FROM outcomes WHERE kind='thread' "
+                    "AND outcome='said' AND created_at > ? ORDER BY created_at", (since,)):
+                out.append({"to": r["subject"], "text": r["detail"], "at": r["created_at"]})
+            for r in conn.execute(
+                    "SELECT chat, recorded_at FROM teams_automatic_messages WHERE recorded_at > ?",
+                    (since,)):
+                if not any(x["to"] == r["chat"] and abs(x["at"] - r["recorded_at"]) < 120 for x in out):
+                    out.append({"to": r["chat"], "text": "", "at": r["recorded_at"]})
+    return out
+
+
+def denied_send(reply: str, hours: float = 24.0) -> dict | None:
+    """The send this reply denies, when Asta's own record says it happened.
+    12 Oct: "Nothing's been sent to Deepa — the last message … was your own,
+    typed by you." Asta had sent it at 15:43."""
+    if not _DENIES_SENDING.search(reply or ""):
+        return None
+    low = (reply or "").lower()
+    for sent in reversed(asta_sends(hours)):
+        first = (sent["to"] or "").split()[0].lower() if (sent["to"] or "").split() else ""
+        if len(first) > 2 and re.search(rf"\b{re.escape(first)}\b", low):
+            return sent
+    return None
+
+
 async def _correct_claims(out, conv: dict, reply: str, since: float) -> None:
     """"Already staged and ready — … is sent now with your confirm" (1 Oct, 14:40):
     nothing had been sent. Whatever the brain, a claim that something went out
@@ -2290,6 +2363,16 @@ async def _correct_claims(out, conv: dict, reply: str, since: float) -> None:
                 "set it properly.")
         store.record_outcome("turn", "false_schedule_claim", subject=conv["id"],
                              detail=planned[:200])
+        store.add_ui_message(conv["id"], "assistant", line, {"via": "claim-check"})
+        await out.send({"type": "note", "text": line})
+    denied = denied_send(reply)
+    if denied:
+        when = time.strftime("%H:%M", time.localtime(denied["at"]))
+        line = (f"⚠️ Correction: I did send to {denied['to']} at {when}"
+                + (f" — “{denied['text'][:160]}”" if denied["text"] else "")
+                + ". That was me, not you.")
+        store.record_outcome("turn", "false_denial_of_send", subject=conv["id"],
+                             detail=f"{denied['to']}: {denied['text'][:150]}")
         store.add_ui_message(conv["id"], "assistant", line, {"via": "claim-check"})
         await out.send({"type": "note", "text": line})
     claim = unproven_send(reply, since)
@@ -2451,7 +2534,7 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     from . import copilot_cli, resume as resume_mod
     with contextlib.suppress(Exception):
         ranked = resume_mod.ranking_text(user_text)
-        ctx = copilot_cli.turn_context(ranked)
+        ctx = copilot_cli.turn_context(ranked, conv.get("id", ""))
         if ctx:
             prompt = f"{ctx}\n\n{prompt}"
         # The role brief the CLI brains carry in their system prompt. Here it rides

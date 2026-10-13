@@ -122,6 +122,24 @@ _TABLE: tuple[Capability, ...] = (
                http='POST /api/temporal/workflow {"env":"prod","workflow_id":"…","history":false}',
                note="One workflow: status, what it waits on, why it failed. "
                     "history=true for the events that ended it."),
+    Capability("log_counts", "observe",
+               http='POST /api/debug/counts {"term":"H7Y5BWNBNX9","env":"all","by":"app","hours":24}',
+               note="WHERE first: counts per env and service (or pod). env all when "
+                    "nobody named one — never guess an environment."),
+    Capability("log_lines", "observe",
+               http='POST /api/debug/lines {"env":"prod","service":"booking-service",'
+                    '"contains":["H7Y5BWNBNX9"],"at":"2026-10-12T09:50:03Z","minutes":6}',
+               note="The exact lines, with UTC and local time and a Grafana link. "
+                    "Quote them; never paraphrase a log line into a claim."),
+    Capability("find_id", "observe",
+               http='POST /api/debug/find-id {"id":"H7QKN8NGNOR","env":"all"}',
+               note="When an id matches nothing: ids that start like it, closest first."),
+    Capability("log_gaps", "observe",
+               http='POST /api/debug/gaps {"env":"prod","service":"booking-service",'
+                    '"at":"2026-10-12T09:50:03Z","minutes":10}',
+               note="Missing log or missing event? Per-pod lines vs the log agent's "
+                    "dropped lines. Never call something 'not consumed' from a missing "
+                    "line without it."),
     Capability("away_mode", "hands", write=True,
                http='POST /api/away {"on": true}',
                note="Only when he asks: he is leaving and work should go on, or he is "
@@ -528,6 +546,7 @@ READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=Fal
 SIDE_READS = frozenset({
     "search_memory", "read_data_file", "search_knowledge", "conversation_status",
     "grafana_logs", "temporal_workflows", "temporal_workflow", "app_recipes",
+    "log_counts", "log_lines", "find_id", "log_gaps",
     "facts_about", "resolve_context", "read_workspace_file", "list_services",
     "jira_search", "jira_my_issues", "jira_issue", "jira_sprint",
     "teams_activity", "teams_read_chat", "teams_search", "teams_history",

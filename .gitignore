@@ -67,3 +67,4 @@ tmp/
 
 # The WhatsApp bridge's last-handled message time (machine state).
 whatsapp/state.json
+!skills/debugging.md

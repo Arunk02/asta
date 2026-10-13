@@ -940,6 +940,20 @@ async def _say(chat: str, line: str, *, group: bool = False,
         store.record_outcome("thread", "held back", subject=chat[:80],
                              detail=f"he answered himself — not said: {line}"[:200])
         return False
+    # The fence for EVERY line said without his yes (13 Oct): a question that only
+    # asks, and courtesy around it. A line stating what was found goes to him
+    # first — Deepa got "logs are in QA … got a 400 back, status PENDING" as a
+    # "clarifying question". ASTA_SAY_WITHOUT_YES=0 holds every line.
+    from . import steward, understand
+    problem = "you asked me to send nothing without your yes" if not steward.say_without_yes() \
+        else understand.unapproved_line_problem(line)
+    if problem:
+        from . import answers
+        store.record_outcome("thread", "held back", subject=chat[:80],
+                             detail=f"needs his yes ({problem}) — not said: {line}"[:200])
+        await answers.present(who=chat, need="wrote to you", chat=chat, group=group,
+                              analysis=f"Held for your yes — {problem}.", reply=line)
+        return False
     from . import senior
     if senior.is_senior(chat):
         # Manager and above: not even "checking, will update you" goes on its

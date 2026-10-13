@@ -38,18 +38,26 @@ import re
 #: to ask to debug anything, any issues". The order is the point: state before
 #: theory, the code that should have moved it, and an honest line on what the
 #: evidence cannot show.
-CASE_METHOD = """How to debug it — in this order:
-1. Pin it: the id, the environment, what is stuck and what it should be.
-2. Current state first: what each service holds for it NOW (done, pending,
-   stuck, with times), read from its logs or API responses — never from memory.
-3. Its trail by the id across services, oldest first. Mind log retention (prod
-   keeps about 8 weeks): if the moment is older, say so and work from the state.
-4. Find the code that moves the stuck state to the expected one (Class:line).
-   The transition that never ran names the event that never arrived.
-5. Check that event at the workflow (Temporal) and on the other side of the
-   boundary (TMS, IOM, UNITED, billing…).
-6. Answer as: Timeline · Why (the mechanism, with Class:line) · Not confirmed,
-   and why · Next step. Say which parts are confirmed and which are likely."""
+CASE_METHOD = """How to debug it — in this order, each step a small query built on the last:
+1. Pin it: the id(s), the environment, what is stuck or missing and what it should be.
+   No environment named → log_counts with env "all"; never guess one.
+2. Where: log_counts by app, then by pod. Nothing anywhere → find_id: typed ids get
+   letters and digits swapped (O/0, 9/O).
+3. State and trail: log_lines for the id, oldest first (grafana_logs with
+   errors_only=false for its whole trail). Logs are written in UTC — give UTC and
+   local time. Prod logs are kept about 8 weeks: older than that, work from state.
+4. The code: read the class that should have logged it or moved it on (Class:line).
+   Its log text is what to search for; the transition that never ran names the event
+   that never came.
+5. A missing line is a question, not an answer. Before saying "not consumed / sent /
+   received": check what that step starts (temporal_workflow history=true shows each
+   start's input; downstream services' lines) and log_gaps for that pod and minute
+   (dropped lines, restarts).
+6. Answer as: Timeline · Why (the mechanism, with Class:line) · Not confirmed, and why
+   · Next step. Quote the exact lines with their link — never turn a log line into a
+   claim it does not make ("exceptionCode 400" in a line is not "billing returned
+   400"). One answer per question: if it differs from an earlier one, say which was
+   wrong and why."""
 
 
 #: role -> (who they are, what they do differently). The second half is the part

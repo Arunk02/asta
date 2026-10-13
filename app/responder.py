@@ -344,13 +344,11 @@ def review_scope(text: str) -> str:
 #: country in disable-countries-to-billing?" open as out of scope when the answer
 #: was one grep of a prod-values.yml already in its own worktree.
 _HOW = (
-    "\n\nBEFORE touching Grafana or Temporal, call load_skill('grafana-analyser') "
-    "and follow it exactly — namespace-wide first (the prod namespace is in your "
-    "guardrails), ONE wide call for an identifier — namespace ONLY, never a "
-    "container matcher — then "
-    "reason from what came back instead of "
-    "querying again. The environment they named; when none was named, every "
-    "environment — never assume production.\n"
+    "\n\nDebug it with Asta's tools, in the case method's order: log_counts (where — "
+    "every environment when they named none; never assume production), log_lines "
+    "(the exact lines, with a Grafana link — quote them), find_id (an id that "
+    "matches nothing), log_gaps (missing log, or missing event?), temporal_workflow "
+    "history (what ran, with its input). Each query builds on the last.\n"
     "EVERY service in that namespace is in scope, not just the one the question "
     "names — reading logs changes nothing, so 'that service is outside this "
     "read-only pass' is never a reason to stop. The evidence for 'did it "

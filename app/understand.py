@@ -371,6 +371,60 @@ def safe_question(q: str, who: str = "") -> str:
     return q
 
 
+#: Short courtesies a line may carry besides its question: no fact in them.
+_COURTESY = re.compile(
+    r"^(?:(?:hi|hello|hey)\b[\w ]{0,25}?[, ]*(?:(?:yes|yeah|ya)[, ]*(?:tell me|go ahead))?|"
+    r"(?:yes|yeah|ya)[, ]*(?:tell me|go ahead)|sure|thanks?(?: you)?|ok(?:ay)?|noted|got it|"
+    r"(?:sure[,—\- ]+)?(?:looking into (?:it|this|the booking|that)|checking(?: it| this)?|"
+    r"i'?ll (?:check|look)(?: (?:the logs|into it|it))?(?: (?:there|for it|now))?|"
+    r"will (?:check|update you|get back(?: to you)?)(?: shortly| soon)?))[\s,.!—-]*$", re.I)
+#: Asking them for something: "Share the booking number and I'll check the logs."
+_REQUEST = re.compile(
+    r"^(?:please |could you |can you |kindly )?(?:share|send|tell|confirm|let me know|paste)\b"
+    r"[^.!?]{0,90}[.!]*$", re.I)
+#: A question that opens as one asks; a statement with a '?' tacked on does not.
+_ASKS_FIRST = re.compile(
+    r"^(?:(?:hi|hello|hey|sure|ok(?:ay)?|yes)\b[^?]{0,20}?[,—-]\s*)?"
+    r"(?:was|were|is|are|did|do|does|has|have|had|can|could|would|will|should|which|what|"
+    r"when|where|who|why|how|want|shall|may)\b", re.I)
+#: What makes a sentence a FINDING, question mark or not.
+_FINDING = re.compile(
+    r"\b(?:published|failed|failing|error|exception|pending|sent|received|consumed|merged|"
+    r"deployed|released|processed|logs? (?:are|is|show)|status|returned|got (?:a|an|back)|"
+    r"\d{3}\b|no (?:link|logs?|trace|workflow|data)|not (?:sent|found|there|received)|"
+    r"isn'?t|wasn'?t|didn'?t|doesn'?t|hasn'?t)\b", re.I)
+
+
+def unapproved_line_problem(line: str) -> str:
+    """Why this line may NOT go out without his yes — '' when it may.
+
+    12 Oct: "Hi Deepa, no link - logs are in QA not prod for this one. Billing did
+    get published but got a 400 back, status PENDING. Want full trail?" went to
+    Deepa as a "clarifying question": short, ending in '?', no promise words.
+    It was three findings — one of them wrong — with a question on the end. What
+    may go alone is a question that asks, and courtesy around it; nothing that
+    states what was found."""
+    text = " ".join((line or "").split())
+    if not text:
+        return "empty"
+    if len(text) > 260:
+        return "too long to be a question"
+    parts = [p.strip() for p in re.findall(r"[^.!?]+[.!?]*", text) if p.strip()]
+    asked = False
+    for part in parts:
+        if part.endswith("?"):
+            asked = True
+            if not _ASKS_FIRST.match(part) and _FINDING.search(part):
+                return f"the question states a finding: “{part[:80]}”"
+            continue
+        if _REQUEST.match(part) and not _FINDING.search(part):
+            asked = True
+            continue
+        if not _COURTESY.match(part):
+            return f"it states something, not only asks: “{part[:80]}”"
+    return "" if asked or all(_COURTESY.match(p) for p in parts) else "no question in it"
+
+
 #: Questions that are correct and curt. "Hi Shabda, what's the issue?" went to a
 #: colleague who had written politely (1 Oct); in his name it reads as
 #: impatience. The caller falls back to the courteous fixed line.

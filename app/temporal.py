@@ -236,6 +236,49 @@ def render_one(found: dict, env: str) -> str:
     return "\n".join(lines)
 
 
+def _payloads(attrs: dict) -> str:
+    """A start's or signal's input, decoded: the payload is the evidence. The ack
+    for H7Y5BWNBNX9 was proved by the uniqueIdentifier inside this (12 Oct)."""
+    import base64
+    out = []
+    for p in ((attrs.get("input") or {}).get("payloads") or [])[:3]:
+        data = p.get("data", "") if isinstance(p, dict) else ""
+        try:
+            data = base64.b64decode(data).decode("utf-8", "replace")
+        except Exception:                                          # noqa: BLE001
+            pass
+        out.append(" ".join(str(data).split())[:400])
+    return " | ".join(out)
+
+
+def render_history(events: list[dict], env: str, workflow_id: str, limit: int = 40) -> str:
+    """Every step in order — when, what, and for starts and signals, with what."""
+    if not events:
+        return f"No history for {workflow_id} in {env}."
+    out = [f"{len(events)} events for {workflow_id} in {env} (times UTC):"]
+    noise = ("WORKFLOW_TASK_SCHEDULED", "WORKFLOW_TASK_STARTED", "WORKFLOW_TASK_COMPLETED",
+             "ACTIVITY_TASK_STARTED")
+    for e in events:
+        kind = str(e.get("eventType", "?")).replace("EVENT_TYPE_", "")
+        if kind in noise:
+            continue
+        attrs = next((v for k, v in e.items() if k.endswith("Attributes") and isinstance(v, dict)), {})
+        name = (_of(attrs, "activityType", "name") or attrs.get("signalName")
+                or _of(attrs, "workflowType", "name") or "")
+        line = f"  {str(e.get('eventTime', ''))[11:23]} {kind}" + (f" {name}" if name else "")
+        if kind in ("WORKFLOW_EXECUTION_STARTED", "WORKFLOW_EXECUTION_SIGNALED"):
+            who = attrs.get("identity") or ""
+            line += (f" by {who}" if who else "") + (f" · input: {_payloads(attrs)}" if attrs.get("input") else "")
+        failure = _of(attrs, "failure", "message")
+        if failure:
+            line += f" · failure: {failure[:200]}"
+        out.append(line)
+        if len(out) > limit:
+            out.append("  …more — ask for a run_id or a narrower question")
+            break
+    return "\n".join(out)
+
+
 async def health() -> tuple[bool, str]:
     known = envs()
     if not known:

@@ -49,7 +49,7 @@ def load(workspace: str = "") -> list[dict]:
 def _playbook(workspace: str) -> str:
     """The skills a suite declares, concatenated — what a real turn would hold.
 
-    Declared per suite in its JSON (`"skills": ["grafana-analyser"]`) rather than
+    Declared per suite in its JSON (`"skills": ["debugging"]`) rather than
     hardcoded here, so adding a suite for a new area does not mean editing this
     file too.
     """
@@ -104,7 +104,7 @@ async def run(workspace: str = "booking", ask=None) -> dict:
     if ask is None:
         from . import meetings                      # the in-call brain: read-only tools
         # A suite may name the playbooks a real turn would already have loaded —
-        # the grafana-analyser skill for a logs question. Without them the eval
+        # the debugging skill for a logs question. Without them the eval
         # measures a brain working blind, scores it badly, and the number says
         # nothing about the path Arun actually uses.
         playbook = _playbook(workspace)

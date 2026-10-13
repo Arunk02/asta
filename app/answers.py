@@ -927,10 +927,13 @@ async def note_followup(thread: str, who: str, text: str, now: float | None = No
 
 
 def _is_clarifying(reply: str, who: str) -> bool:
-    """A short question that asks them for something, promising nothing."""
-    from . import understand
+    """A question that asks them for something and states nothing found. The
+    whole reply is judged — 12 Oct, findings with "Want full trail?" on the end
+    passed when only the part up to the last '?' was. Off with ASTA_SAY_WITHOUT_YES=0."""
+    from . import steward, understand
     r = " ".join((reply or "").split())
-    return bool(r) and r.count("?") >= 1 and len(r) <= 260 \
+    return bool(r) and steward.say_without_yes() and "?" in r \
+        and not understand.unapproved_line_problem(r) \
         and bool(understand.safe_question(r if r.endswith("?") else r.rsplit("?", 1)[0] + "?", who))
 
 

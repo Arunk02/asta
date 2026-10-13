@@ -145,7 +145,7 @@ def test_chat_effort_requires_a_pinned_non_auto_model(monkeypatch, model):
     monkeypatch.setenv("COPILOT_MAX_CREDITS", "30")
     monkeypatch.setattr(copilot_cli, "_session_id", lambda _cid: ("test-session", True))
     monkeypatch.setattr(copilot_cli, "_first_turn_context", lambda *_a, **_k: "")
-    monkeypatch.setattr(copilot_cli, "turn_context", lambda _text: "")
+    monkeypatch.setattr(copilot_cli, "turn_context", lambda _text, *_a: "")
     monkeypatch.setattr(copilot_cli, "mcp_cli_enabled", lambda: False)
     cmd = copilot_cli._build_cmd({"id": "test-conv"}, "hello")
     assert ("--effort" in cmd) == (model == "gpt-5.4")

@@ -2268,7 +2268,7 @@ async def log_counts(term: str = "", env: str = "", by: str = "app", hours: floa
                      service: str = "", at: str = "") -> str:
     """WHERE something is logged: how many lines carry `term` (a booking id, a TO
     number, a class or message), per environment and per service (by="app") or
-    per pod (by="pod"), over the last `hours` (or the `hours` before `at`).
+    per pod (by="pod"), over `hours` back from now (or from `at`).
 
     Start here for any id. env "" or "all" counts every environment — never guess
     one: a booking asked about with no environment was searched in preprod and
@@ -2296,9 +2296,8 @@ async def log_lines(env: str, service: str = "", contains=(), logger: str = "", 
     `minutes` around it, or `start`/`end`. Oldest first unless newest_first.
     Every line shows UTC and local time — logs here are written in UTC.
 
-    Use it for "share the logs", "what did it say", and for reading what one
-    class logged around a moment. When someone asks for the log link, the link
-    printed here IS the link."""
+    Use it for "share the logs" and for reading what one class logged around a
+    moment. When someone asks for the log link, the link printed here IS the link."""
     from . import debugkit, grafana
     s, e = _when(start), _when(end)
     if at:
@@ -2318,7 +2317,7 @@ async def find_id(id: str, env: str = "", hours: float = 24,
                   service: str = "booking|activityplan") -> str:
     """Ids that START like this one — for when the exact id matches nothing.
     Typed ids get letters and digits swapped: "H7QKN8NGNOR" was H7QKN8NGN9R
-    (12 Oct). Ranked by closeness; say which you used, never fix it silently."""
+    (12 Oct). Ranked by closeness; name the one you used, never fix it silently."""
     from . import debugkit, grafana
     try:
         return debugkit.render_find(await debugkit.find_id(id, env, int(hours * 60), service))

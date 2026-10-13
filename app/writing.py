@@ -122,7 +122,12 @@ sir madam maam ma'am
 #: Openers a term of address commonly follows. Used to catch "hey dude …" without
 #: resorting to "second word of the line", which would eat "my brother is here".
 _GREETING = "|".join(("hey", "hi", "hello", "yo", "ok", "okay", "thanks", "thx",
-                      "morning", "good morning"))
+                      "morning", "good morning",
+                      # An acknowledgement takes one too. "Sure bro, what's up?"
+                      # went to Komal (13 Oct) straight past this list.
+                      "sure", "yes", "yeah", "yep", "ya", "haan", "no", "nope",
+                      "done", "sorry", "thank you", "fine", "cool", "noted",
+                      "got it", "right"))
 
 
 def _his_messages(limit: int = 400, chat: str = "") -> list[str]:
@@ -131,7 +136,12 @@ def _his_messages(limit: int = 400, chat: str = "") -> list[str]:
     out = []
     for r in rows:
         sender = (r.get("sender") or "").strip().lower()
-        if not sender.startswith(_HIS_NAMES):
+        # Not a line Asta sent on its own: its "Sure bro" to Komal (13 Oct) was
+        # counted as him calling her "bro", and the guard let the next one through.
+        if not sender.startswith(_HIS_NAMES) or r.get("automatic"):
+            continue
+        from .chat_watch import asta_said
+        if " ".join((r.get("text") or "").split()) in asta_said(r.get("chat") or chat):
             continue
         text = (r.get("text") or "").strip()
         # Reaction rows and quoted blocks are Teams chrome, not his prose.
@@ -202,7 +212,11 @@ def fit_address(text: str, chat: str) -> str:
             # "hey dude", "ok bro" — vocative, but not at either end. Anchored to
             # an actual greeting rather than to position: "my brother is
             # visiting" has the term in the same slot and must survive.
-            line = re.sub(rf"^(\s*(?:{_GREETING})\b[\s,]*){t}\b[\s,]*", r"\1",
+            # The comma or dash after the term stays with the greeting: "Sure
+            # bro, what's up?" -> "Sure, what's up?", not "Sure what's up?".
+            line = re.sub(rf"^(\s*(?:{_GREETING})\b)[\s,]*{t}\b\s*([,—–]?)\s*",
+                          lambda m: m.group(1) + (m.group(2) if m.group(2) == ","
+                                                   else f" {m.group(2)}" if m.group(2) else "") + " ",
                           line, flags=re.I)
         out_lines.append(re.sub(r"[ \t]{2,}", " ", line).rstrip())
     fitted = _unmask_urls("\n".join(out_lines), held).strip()

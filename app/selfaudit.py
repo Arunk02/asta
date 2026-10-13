@@ -47,7 +47,15 @@ def findings(hours: float = 24.0) -> list[dict]:
                if "nothing checkable" in (r["detail"] or "") or "incident asks" in (r["detail"] or "")]
     add("skipped_asks", "Colleague messages not looked into", skipped,
         lambda r: f"{r['subject']}: {r['detail'][:120]}")
-    add("said_alone", "Lines sent without your yes", _outcomes(since, "thread", "said"),
+    said = _outcomes(since, "thread", "said")
+    add("said_alone", "Lines sent without your yes", said,
+        lambda r: f"{r['subject']}: {r['detail'][:120]}")
+    from . import writing
+
+    def unattested(r: dict) -> set[str]:
+        words = set(re.findall(r"[a-z']+", (r["detail"] or "").lower()))
+        return (words & writing._STRIP) - set(writing.address_terms(r["subject"] or ""))
+    add("address", "Called someone a word you never use with them", [r for r in said if unattested(r)],
         lambda r: f"{r['subject']}: {r['detail'][:120]}")
     held = [r for r in _outcomes(since, "thread", "held back") if "needs his yes" in (r["detail"] or "")]
     add("held", "Lines held for your yes", held, lambda r: f"{r['subject']}: {r['detail'][:120]}")

@@ -283,7 +283,7 @@ def _teams_with(who: str, n: int = 12) -> str:
         if ident in seen:
             continue
         seen.add(ident)
-        sender = "Arun" if chat_watch.is_from_him(r.get("sender", "")) else (r.get("sender") or "?")
+        sender = chat_watch.speaker(r)
         when = _t.strftime("%d %b %H:%M", _t.localtime(float(r.get("sent_at") or r.get("seen_at") or 0)))
         text = " ".join(chat_watch.as_read(r.get("text") or "").split())[:400]
         lines.append(f"{when} {sender}: {text}")

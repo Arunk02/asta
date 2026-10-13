@@ -1265,8 +1265,20 @@ def teams_messages(chat: str = "", since: float | None = None,
     sql.append("ORDER BY sent_at IS NULL, sent_at ASC, id ASC LIMIT ?")
     args.append(max(1, limit))
     with _connect() as conn:
-        rows = conn.execute(" ".join(sql), args).fetchall()
-    return [dict(r) for r in rows]
+        rows = [dict(r) for r in conn.execute(" ".join(sql), args).fetchall()]
+        # Lines Asta sent on its own go out under his name, so Teams shows them
+        # as his. Marked here, once, so nothing downstream mistakes them for his
+        # words (13 Oct: its "Sure bro" became evidence he calls Komal "bro").
+        keys = [r["key"] for r in rows if r.get("key")]
+        auto: set[str] = set()
+        for i in range(0, len(keys), 500):
+            chunk = keys[i:i + 500]
+            auto |= {k for (k,) in conn.execute(
+                f"SELECT key FROM teams_automatic_messages WHERE key IN ({','.join('?' * len(chunk))})",
+                chunk)}
+    for r in rows:
+        r["automatic"] = r.get("key") in auto
+    return rows
 
 
 def teams_senders_known(limit: int = 400) -> list[dict]:

@@ -733,7 +733,7 @@ def he_replied_since(row: dict) -> bool:
         msgs = store.teams_messages(chat=who, since=seen_at, limit=100)
     except Exception:                                          # noqa: BLE001
         return False
-    return any(chat_watch.is_from_him(m.get("sender", "")) and m.get("sent_at")
+    return any(chat_watch.written_by_him(m, who) and m.get("sent_at")
                and m["sent_at"] > seen_at for m in msgs)
 
 

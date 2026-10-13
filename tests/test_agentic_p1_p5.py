@@ -355,7 +355,10 @@ def test_an_unclear_subject_is_asked_about_first_with_the_guess(rail):
     rail.script["teams:Yogesh Kumar Ravichandran"] = {
         **_decide("ask", "wants a call", work="talk", question=q), "subject": "unclear"}
     rail.sweep()
-    assert rail.sent == [("Yogesh Kumar Ravichandran", q)]
+    # The guess goes as asked; the "bro" does not — he has never called Yogesh
+    # that (13 Oct, Komal got "Sure bro" the same way).
+    assert rail.sent == [("Yogesh Kumar Ravichandran",
+                          "Sure — is this about the event-history defect, or something else?")]
     assert not rail.asked and not rail.pushed, "no investigation, nothing to him yet"
 
 

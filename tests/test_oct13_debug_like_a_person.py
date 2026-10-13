@@ -307,3 +307,50 @@ def test_what_vinish_shared_is_read_from_his_chat_not_asked_for():
     ctx = copilot_cli.turn_context(ASKED)
     assert 'teams_read_chat "Vinish"' in ctx and "Never ask him to paste" in ctx
     assert roles.role_for(ASKED) == "debugging"
+
+
+# --- asks the reader saw, and the evening self-audit --------------------------------------
+
+def test_an_ask_the_reader_saw_is_worked_even_if_the_word_list_misses_it(monkeypatch):
+    src = open("app/chat_watch.py").read()
+    assert 'if reference else (responder.what_it_asks(ask_text) or "ask")' in src
+    from app import responder
+    for said in ("Arunkumar - how we get to know if this is accepted or rejected ?",
+                 "Got anything, bro?"):
+        assert responder.what_it_asks(said) == ""   # the word list alone drops these
+
+
+def test_a_one_to_one_booking_question_is_not_muted_as_an_incident(monkeypatch):
+    from app import responder
+    kinds = []
+
+    def should(kind, *a, **k):
+        kinds.append(kind)
+        return "stop here"
+    monkeypatch.setattr(responder, "should_respond", should)
+    monkeypatch.setattr("app.steward.consider", lambda who, text: {"hold": False, "opened_with": ""})
+    responder.respond("teams-chat", "Vinish Kumar",
+                      "prod ack for TO2934106728115 failing — consume log missing",
+                      reply_to="Vinish Kumar", group=False)
+    assert kinds == ["debug"]
+
+
+def test_the_self_audit_reads_asta_own_failures():
+    from app import selfaudit
+    store.record_outcome("responder", "skipped", subject="Deepa Singh",
+                         detail="nothing checkable in it — how we get to know if accepted?")
+    store.record_outcome("thread", "said", subject="Deepa Singh", detail=DEEPA_LINE)
+    store.record_outcome("turn", "false_denial_of_send", subject="c", detail="Deepa Singh: …")
+    conv = store.create_conversation("claude_cli", None)
+    store.add_ui_message(conv["id"], "assistant",
+                         "I need the specific workflow ID — can you share the Temporal workflow ID?",
+                         {"via": "claude_cli"})
+    found = {f["kind"]: f for f in selfaudit.findings(1)}
+    assert {"skipped_asks", "said_alone", "false_claims", "asked_him"} <= set(found)
+    text = selfaudit.render(list(found.values()), 1)
+    assert "Deepa Singh" in text and "workflow ID" in text
+
+
+def test_a_clean_day_says_so():
+    from app import selfaudit
+    assert "nothing went wrong" in selfaudit.render([], 24)

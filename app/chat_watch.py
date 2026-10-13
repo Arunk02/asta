@@ -1903,8 +1903,13 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                                  review_revision=review_revision,
                                  review_question=c["last"],
                                  correction_of=corrected["id"] if corrected else None,
+                                 # The reader already judged this an ask; the word
+                                 # list only names its kind. Left to decide alone it
+                                 # dropped Deepa's "how do we know if it's accepted or
+                                 # rejected?" and Vinish's "Got anything, bro?" as
+                                 # "nothing checkable" (12 Oct).
                                  kind_override=(responder.what_it_asks(pending["original"]) or "ask")
-                                 if reference else "",
+                                 if reference else (responder.what_it_asks(ask_text) or "ask"),
                                  source_text=c["raw"][-1].get("text") or "")
         if task and task.get("reused"):
             from . import answers

@@ -2355,6 +2355,15 @@ async def log_gaps(env: str, service: str, at: str = "", minutes: int = 10,
         return f"Grafana — {exc}"
 
 
+def self_audit(hours: float = 24) -> str:
+    """What went wrong in Asta's own records over the last `hours`: colleague
+    messages not looked into, lines sent without his yes, false claims corrected,
+    failed tasks, times it asked him for what it could have looked up. Use it for
+    "how did you do today", "what went wrong", "any issues with you"."""
+    from . import selfaudit
+    return selfaudit.render(selfaudit.findings(hours), hours)
+
+
 async def away_mode(on: bool) -> str:
     """Keep the laptop awake with the lid closed while Arun is away, so Asta keeps
     working and answering (on=True); or back to normal sleep (on=False).

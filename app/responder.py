@@ -80,6 +80,7 @@ _DONE_KEY = "responder_done"
 # there is no way to check it without changing something, it is not for this.
 
 #: Production is misbehaving. "check the production temporal bookings struck".
+INC_NUMBER = re.compile(r"\bINC\d{5,}\b")
 _INCIDENT = re.compile(
     # A ServiceNow incident number IS an incident, whatever words surround it —
     # "INC0012345 is open, can you check?" read as a debug ask, so muting
@@ -772,6 +773,13 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     kind = (answers._meta(correction_of).get("ask_kind") or kind_override
             or what_it_asks(text) or "ask") if original else (
                 kind_override or what_it_asks(text))
+    if kind == "incident" and not group and not INC_NUMBER.search(text or ""):
+        from . import booking_case
+        if booking_case.ids(text or ""):
+            # His incident mute is for incident traffic, not a colleague's 1:1 about
+            # one booking: Vinish's TO2934106728115 finding was skipped as an
+            # "incident ask" (12 Oct).
+            kind = "debug"
     if original and kind != "port" and counterpart(
             answers._meta(correction_of).get("source_text") or ""):
         # The first reading was the wrong JOB, not a wrong detail: the request

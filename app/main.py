@@ -216,6 +216,9 @@ async def startup() -> None:
     # puts normal sleep back (app/away.py).
     from . import away
     daemon.start("away_guard", away.guard_loop)
+    # Every evening: what went wrong today, from Asta's own records (selfaudit.py).
+    from . import selfaudit
+    daemon.start("self_audit", selfaudit.daily_loop)
     # Quiet: snapshots yesterday's card after midnight, pushes nothing.
     daemon.start("scorecard", scorecard.loop)
     # The live test bench, at night, on quota that would otherwise expire. Off
@@ -1401,6 +1404,11 @@ async def api_grafana_logs(request: Request):
     return {"ok": True, "detail": await agent_mod.grafana_logs(
         b.get("service", ""), b.get("terms", ()), int(b.get("minutes", 0) or 0),
         b.get("namespace", ""), bool(b.get("errors_only", True)), b.get("at", ""))}
+
+
+@app.get("/api/self-audit", dependencies=[Depends(require_auth)])
+def api_self_audit(hours: float = 24):
+    return {"ok": True, "detail": agent_mod.self_audit(hours)}
 
 
 @app.post("/api/debug/counts", dependencies=[Depends(require_auth)])

@@ -407,6 +407,26 @@ def retire_session_for_size(conv: dict, context: int) -> list[str]:
     return dropped
 
 
+_HOLD_ON = re.compile(
+    r"^\s*(?:pls\s+|please\s+)?(?:don'?t|do\s+not|stop|never)\s+(?:send(?:ing)?|reply(?:ing)?|messag(?:e|ing))"
+    r"\s+(?:any\s+)?(?:message|messages|msgs?|replies|anything|any\s*thing)?\s*"
+    r"(?:to\s+(?:any\s*one|anybody|everyone|people|others|colleagues))?\s*"
+    r"(?:for\s+now|until\s+i\s+say)?\s*[.!]*\s*$", re.I)
+_HOLD_OFF = re.compile(
+    r"^\s*(?:ok\s+|okay\s+)?(?:you\s+can\s+(?:start\s+)?send(?:ing)?\s+(?:again|messages\s+again|now)|"
+    r"resume\s+send(?:ing)?|start\s+send(?:ing)?\s+again|unpause\s+(?:messages|sending))\s*[.!]*\s*$",
+    re.I)
+
+
+def _hold_command(text: str) -> bool | None:
+    """True = hold all of Asta's own sends, False = lift the hold, None = neither."""
+    if _HOLD_ON.match(text or ""):
+        return True
+    if _HOLD_OFF.match(text or ""):
+        return False
+    return None
+
+
 # Phone channels have no "new chat" button, so this is the way to get a clean slate.
 _FRESH_START = re.compile(
     r"^\s*(new chat|fresh start|start over|reset( chat| context)?|clear context|forget (all|everything))\s*[.!]*\s*$",
@@ -2595,9 +2615,14 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
         _queue_redo(conv["id"], user_text, channel)
         store.record_outcome("turn", "toolless", subject=model_name, detail=user_text[:200])
         await out.send({"type": "note", "text": (
-            "⚠️ No brain with tools is up right now (Claude at its limit, Copilot out), so "
-            "I can only talk, not look anything up. I've saved this and will do it "
-            "properly as soon as one is back.")})
+            "⚠️ No brain with tools is up right now (Claude at its limit, Copilot out), so I "
+            "can't look anything up or act. I've saved this and will do it properly as soon "
+            "as one is back.")})
+        # And nothing else: 14 Oct, the local model answered "dont send any message
+        # to anyone" with "I've integrated those senior engineer review standards…"
+        # — an answer from no evidence is worse than the honest note alone.
+        await out.send({"type": "done", "tools": []})
+        return
     model = agent_mod.get_model(model_name)
     history = _load_history(conv)
     # Recall rides in the user prompt (not instructions) so the instruction
@@ -3893,6 +3918,21 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     said = await voice_mode.command(user_text or "")
     if said:
         await sink.send({"type": "note", "text": said})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+
+    # "dont send any message to anyone" / "you can send again": his switch for
+    # everything Asta would send on its own. Before any draft can swallow it.
+    hold = _hold_command(user_text)
+    if hold is not None:
+        from . import steward
+        steward.hold_sends(hold)
+        await sink.send({"type": "note", "text": (
+            "⏸ Holding: nothing goes to anyone on my own — no replies, check-ins or "
+            "standing auto-replies — until you say “you can send again”. What you ask me "
+            "to send still goes." if hold else
+            "▶️ Sending again: short replies and your standing auto-replies are back on.")})
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None

@@ -115,6 +115,9 @@ def auto_reply_to(target: str, group: bool = False) -> bool:
     """Exact 1:1 recipients Arun named in his private automatic-replies list."""
     if group or not target:
         return False
+    from . import steward
+    if steward.sends_held():
+        return False
     from . import guardrails, policy, senior
     if senior.is_senior(target) or not policy.check("send", target).ok:
         return False

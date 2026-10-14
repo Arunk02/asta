@@ -201,10 +201,9 @@ def test_a_toolless_turn_says_so_and_is_queued(monkeypatch):
 
     monkeypatch.setattr(main.agent_mod, "get_model", boom)
     conv = store.create_conversation(model="local", workspace=None)
-    with pytest.raises(RuntimeError):
-        asyncio.run(main._run_turn_streaming(Out(), conv, "send to Komal the review comments",
-                                             "local", "whatsapp"))
-    assert sent and "can only talk" in sent[0]["text"]
+    asyncio.run(main._run_turn_streaming(Out(), conv, "send to Komal the review comments",
+                                         "local", "whatsapp"))
+    assert sent and "can't look anything up" in sent[0]["text"]
     queued = json.loads(store.kv_get(main._REDO_KEY))
     assert queued[0]["text"] == "send to Komal the review comments"
 
@@ -470,3 +469,75 @@ def test_redo_runs_a_skipped_task_again(monkeypatch):
     store.update_task(t["id"], status="running")
     with pytest.raises(ValueError):
         tasks.redo(t["id"])
+
+
+# --- his "dont send any message to anyone" is a switch; a tool-less brain never answers ----
+
+@pytest.mark.parametrize("text,want", [
+    ("dont send any message to anyone", True), ("stop sending messages", True),
+    ("please do not reply to anyone for now", True), ("you can send again", False),
+    ("resume sending", False), ("dont send it to Vinish", None), ("stop", None),
+])
+def test_his_words_switch_the_hold(text, want):
+    from app import main
+    assert main._hold_command(text) is want
+
+
+def test_while_held_nothing_goes_on_its_own(monkeypatch):
+    from app import authority, guardrails, steward
+    monkeypatch.setattr(guardrails, "section", lambda name: "- Vinish Kumar")
+    monkeypatch.setenv("ASTA_SAY_WITHOUT_YES", "1")
+    steward.hold_sends(True)
+    try:
+        assert not steward.say_without_yes()
+        assert not authority.auto_reply_to("Vinish Kumar")
+        with pytest.raises(PermissionError):
+            asyncio.run(teams_bridge.send_automatic("Vinish Kumar", "ok bro"))
+    finally:
+        steward.hold_sends(False)
+    assert steward.say_without_yes()
+
+
+def test_a_toolless_turn_gives_the_note_and_no_answer(monkeypatch):
+    from app import main
+    sent = []
+
+    class Out:
+        async def send(self, payload):
+            sent.append(payload)
+
+    def must_not_run(name):
+        raise AssertionError("the tool-less model must not answer")
+
+    monkeypatch.setattr(main.agent_mod, "get_model", must_not_run)
+    conv = store.create_conversation(model="local", workspace=None)
+    asyncio.run(main._run_turn_streaming(Out(), conv, "dont send any message to anyone",
+                                         "local", "whatsapp"))
+    assert sent[0]["type"] == "note" and "can't look anything up" in sent[0]["text"]
+    assert sent[-1]["type"] == "done"
+
+
+# --- "nothing needed from you" goes to the digest, never his pocket -------------------------
+
+def test_an_fyi_never_reaches_his_phone(monkeypatch):
+    from app import digest, notify as notify_mod
+    pushed, digested = [], []
+
+    async def wa(text, done=False):
+        pushed.append(text)
+        return True
+
+    monkeypatch.setattr(notify_mod, "wa_send", wa)
+    monkeypatch.setattr(digest, "add", lambda text, **k: digested.append(text))
+    out = asyncio.run(notify_mod.notify("· 💬 Teams — FYI, nothing needed from you (2):\n• x",
+                                        "teams", urgency="fyi"))
+    assert out.get("digested") and digested and pushed == []
+
+
+def test_the_nothing_needed_senders_use_fyi():
+    import inspect
+    from app import answers, outlook
+    assert 'urgency="direct" if wants_him else "fyi"' in inspect.getsource(teams_bridge)
+    assert 'urgency="direct" if wants_him else "fyi"' in inspect.getsource(outlook)
+    src = inspect.getsource(answers)
+    assert src.count('urgency="fyi"') >= 2

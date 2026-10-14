@@ -331,7 +331,9 @@ def test_a_real_ask_still_reaches_him_directly(on):
 def test_pure_fyi_still_rides_the_quiet_path(on):
     n = _Notify()
     asyncio.run(outlook._push_mail(n, [_mail("Sam", "FYI — notes from the sync")]))
-    assert n.sent and n.sent[0][1] == "ambient"
+    # Quieter than ambient since 14 Oct: an FYI-only bundle goes to the digest and
+    # never his pocket ("fyi") — 26 of them still buzzed his phone in one week.
+    assert n.sent and n.sent[0][1] == "fyi"
 
 
 # --- the Teams activity click, which was silently dead in production ------------

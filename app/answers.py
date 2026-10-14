@@ -215,7 +215,7 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
         await notify.notify(
             f"💬 You've already answered {first} yourself — what I found, in case "
             f"it helps:\n\n{(analysis or reply).strip()[:1500]}",
-            "answer", urgency="ambient", considered=True)
+            "answer", urgency="fyi", considered=True)
         if thread:
             threads.update(thread, status="awaiting_arun")
         store.record_outcome("answer", "he answered", subject=str(task_id or ""),
@@ -762,7 +762,7 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
                              detail="Arun wrote in the chat while it ran — not sent")
         await notify.notify(f"🔎 For your chat with {first} (you're already in it — "
                             f"nothing sent):\n\n{analysis or reply}".strip(),
-                            "answer", urgency="ambient", considered=True)
+                            "answer", urgency="fyi", considered=True)
         return True
     if _DENIES_ASTA.search(reply):
         store.record_outcome("answer", "identity claim dropped", subject=str(task_id),

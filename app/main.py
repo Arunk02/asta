@@ -4679,11 +4679,11 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
 #: is ENTIRELY a command, never "approve it once CI is green".
 _COMMAND_VERB = {"approve": "approve", "approved": "approve",
                  "reject": "reject", "rejected": "reject",
-                 "cancel": "stop", "stop": "stop"}
+                 "cancel": "stop", "stop": "stop", "redo": "redo"}
 
 _TASK_CMD = re.compile(
     r"^\s*(?:ok(?:ay)?|pls|please|yes)?[\s,:—-]*"
-    r"(approve[d]?|reject(?:ed)?|cancel|stop)\b"
+    r"(approve[d]?|reject(?:ed)?|cancel|stop|redo)\b"
     r"(?:\s+(?:the\s+)?task)?\s*#?\s*(\d{1,5})?\s*[.!]*\s*$", re.I)
 _MULTI_TASK_APPROVE = re.compile(
     r"^\s*(?:yes\s+|please\s+)?approve\s+(?:the\s+)?(?:both\s+)?"
@@ -4704,6 +4704,9 @@ async def _run_task_command(verb: str, wanted: int | None, cid: str) -> str:
         return ""
     store.record_outcome("command", verb, subject=str(tid))
     try:
+        if verb == "redo":
+            new = tasks.redo(tid)
+            return f"↻ Doing #{tid} again as task #{new['id']} — {new['title'][:60]}."
         if verb == "approve":
             return "👍 " + await tasks.approve(tid)
         if verb == "reject":
@@ -4723,6 +4726,8 @@ def _task_for_command(verb: str, wanted: int | None, cid: str) -> tuple[int | No
         if not row:
             return None, f"There's no task #{wanted}."
         return wanted, ""
+    if verb == "redo":
+        return None, "Which task? Say “redo #N”."
     want_status = ("awaiting_approval",) if verb in ("approve", "reject") else ("running",)
     here = [i for i in tasks.live_tasks_for(cid)
             if (store.get_task(i) or {}).get("status") in want_status]

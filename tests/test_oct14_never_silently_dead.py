@@ -412,3 +412,61 @@ def test_a_task_waiting_in_this_process_is_left_alone(monkeypatch):
     monkeypatch.setattr(tasks._gate, "queued_ids", lambda: [t["id"]])
     assert t["id"] not in asyncio.run(tasks.recover_orphans())
     assert store.get_task(t["id"])["status"] == "queued"
+
+
+# --- a pasted link's card never "names" him; stale colleague asks are not answered late ----
+
+JIRA_CARD = ("https://maersk-tools.atlassian.net/browse/BEPTELIKOS-10771\n\nJira Cloud\n\n"
+             "BEPTELIKOS-10771: Mandatory field validation for downstream processing\n\n"
+             "Assigned to Arunkumar K\n\nMedium\n\n|\n\nDONE\n\nComment\nEdit")
+
+
+def test_a_link_card_assigned_to_him_is_not_a_mention():
+    """14 Oct: Suraj pasted this into a sprint group; Asta treated it as an ask to Arun."""
+    from app import chat_watch
+    assert not chat_watch.mentions_him(JIRA_CARD)
+    assert not chat_watch.addressed_to_him("Titans & Nexus : Sprint Backlog Refinement",
+                                           "Suraj Prakash", JIRA_CARD)
+    assert chat_watch.mentions_him("Arunkumar can you check this\n" + JIRA_CARD)
+    assert chat_watch.mentions_him("Arun, the github build failed")
+
+
+def test_a_stale_colleague_ask_left_in_the_queue_is_closed_not_answered(monkeypatch):
+    from app import responder, tasks
+    from app import notify as notify_mod
+    told = []
+
+    async def notify(text, *a, **k):
+        told.append(text)
+
+    monkeypatch.setattr(notify_mod, "notify", notify)
+    old = store.create_task("Suraj Prakash asked: Suraj Prakash…", "analysis", "p", None)
+    store.update_task(old["id"], status="queued",
+                      created_at=time.time() - (responder.MAX_AGE_MINUTES + 30) * 60)
+    store.kv_set(f"responder_task:{old['id']}", "teams-chat|Suraj Prakash|ask|x")
+    mine = store.create_task("Add unit tests to PR 1482", "code", "p", None)
+    store.update_task(mine["id"], status="queued", created_at=time.time() - 8 * 3600)
+    picked = asyncio.run(tasks.recover_orphans())
+    assert store.get_task(old["id"])["status"] == "superseded" and old["id"] not in picked
+    assert mine["id"] in picked, "his own requests are always picked back up"
+    assert any("Not answered" in t and f"#{old['id']}" in t for t in told)
+
+
+def test_redo_runs_a_skipped_task_again(monkeypatch):
+    from app import tasks
+    spawned = []
+
+    def spawn(title, prompt, kind="analysis", workspace=None, teams_chat="", **k):
+        spawned.append((title, kind, teams_chat))
+        return {"id": 9999, "title": title}
+
+    monkeypatch.setattr(tasks, "spawn", spawn)
+    t = store.create_task("Vinish Kumar asked: LD in booking service?", "analysis", "brief", None, "Vinish Kumar")
+    store.update_task(t["id"], status="superseded")
+    store.kv_set(f"responder_task:{t['id']}", "teams-chat|Vinish Kumar|ask|x")
+    assert tasks.redo(t["id"])["id"] == 9999
+    assert spawned == [("Vinish Kumar asked: LD in booking service?", "analysis", "Vinish Kumar")]
+    assert store.kv_get("responder_task:9999")
+    store.update_task(t["id"], status="running")
+    with pytest.raises(ValueError):
+        tasks.redo(t["id"])

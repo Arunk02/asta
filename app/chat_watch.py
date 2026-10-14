@@ -330,10 +330,20 @@ def remember(chat: str, rows: list[dict]) -> None:
         store.kv_set(_seen_at_key(chat), str(max(before, max(times))))
 
 
+#: The preview Teams unfurls under a pasted link: a provider line, then the card.
+#: 14 Oct: Suraj pasted a Jira link in a group; its card said "Assigned to
+#: Arunkumar K", which read as Suraj naming him — a non-ask became a task, and
+#: its answer reached his phone seven hours later.
+_LINK_CARD = re.compile(
+    r"(?ims)^\s*(?:jira(?:\s+cloud)?|github|confluence|azure\s+devops|servicenow|"
+    r"(?:microsoft\s+)?loop|sharepoint|onedrive)\s*$.*")
+
+
 def mentions_him(text: str) -> bool:
-    """Only the sender's words, not a quote, attachment path or URL, can tag him."""
+    """Only the sender's words, not a quote, attachment path, URL or the preview
+    card under a link, can tag him."""
     from . import meetings
-    own_words = _URL.sub("", _IMAGE_MARK.sub("", clean_message(text))).lower()
+    own_words = _URL.sub("", _IMAGE_MARK.sub("", _LINK_CARD.sub("", clean_message(text)))).lower()
     aliases = set(meetings.HIS_NAMES)
     aliases.update(n.replace(" ", "") for n in meetings.HIS_NAMES if " " in n)
     return any(re.search(rf"(?<!\w){re.escape(n)}(?!\w)", own_words)

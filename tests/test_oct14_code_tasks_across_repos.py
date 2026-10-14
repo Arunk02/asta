@@ -185,3 +185,31 @@ def test_the_pinned_jdk_is_the_highest_21_not_the_one_lombok_fails_on():
     assert buildenv.java_home() == out.stdout.strip()
     assert "21.0.4" not in buildenv.java_home() or "21.0.11" not in out.stdout
     buildenv.java_home.cache_clear()
+
+
+# --- a bare "PR 1482" inside the workspace is still that PR --------------------------------
+
+@pytest.fixture
+def two_repos(tmp_path, monkeypatch):
+    ws = tmp_path / "ws"
+    for name in ("telikos-booking-service", "telikos-email-service"):
+        (ws / name / ".git").mkdir(parents=True)
+    monkeypatch.setattr(worktrees, "repos_in", lambda root: sorted(p for p in Path(root).iterdir()))
+    return ws
+
+
+def test_a_bare_pr_number_finds_the_one_repo_where_it_is_open(two_repos, monkeypatch):
+    async def head(local, number):
+        return "feature/disable-sync" if local.name == "telikos-booking-service" else ""
+
+    monkeypatch.setattr(tasks, "_open_pr_head", head)
+    t = {"title": "Add unit tests to PR 1482 (disable sync deleted container)", "prompt": ""}
+    assert asyncio.run(tasks.pr_head_branch(t, two_repos)) == {"telikos-booking-service": "feature/disable-sync"}
+
+
+def test_a_bare_pr_number_open_in_two_repos_is_not_guessed(two_repos, monkeypatch):
+    async def head(local, number):
+        return f"feature/{local.name}"
+
+    monkeypatch.setattr(tasks, "_open_pr_head", head)
+    assert asyncio.run(tasks.pr_head_branch({"title": "fix PR 12", "prompt": ""}, two_repos)) == {}

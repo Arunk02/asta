@@ -482,3 +482,43 @@ async def evidence(prompt: str, minutes: int = 4320) -> str:
             "Do not repeat this identifier/env/window query; use these records first. "
             "Query again only for a missing downstream signal, a different time window, "
             "or a new attempt, and say what was absent here.]\n" + "\n\n".join(parts))
+
+
+# --- evidence before a chat turn ----------------------------------------------
+#
+# Investigations got their evidence in code (`evidence`, above); chat turns did
+# not — a question about one booking reached the brain with nothing, and it then
+# had to discover and call the log tools itself. Measured 14 Oct: of 42
+# investigations that week, 0 used the debug kit. Now the first fact — where the
+# id is logged, per environment and service — is fetched before the brain
+# starts, bounded so a slow Loki never holds the turn.
+
+#: The most a turn waits for evidence before it starts without it.
+TURN_EVIDENCE_SECONDS = float(__import__("os").environ.get("ASTA_TURN_EVIDENCE_SECONDS", "15"))
+
+_CHECKING = re.compile(
+    r"\b(?:log|logs|check|status|why|stuck|struck|missing|not\s+(?:sent|received|consumed|reaching|"
+    r"coming|updated|closed)|fail\w*|error\w*|debug\w*|trace|where|consum\w*|publish\w*|sent|"
+    r"billing|temporal|workflow|kafka|ack|in\s+progress)\b", re.I)
+
+
+async def turn_evidence(text: str) -> str:
+    """Where the ids in his message are logged, fetched in code — '' when the
+    message names no id, is not about checking one, or the logs cannot answer in time."""
+    import asyncio
+    found = ids(text)[:2]
+    if not found or not _CHECKING.search(text or ""):
+        return ""
+    from . import agent
+    env = env_of(text) or "all"
+    try:
+        outs = await asyncio.wait_for(
+            asyncio.gather(*(agent.log_counts(i, env=env, hours=72) for i in found),
+                           return_exceptions=True), TURN_EVIDENCE_SECONDS)
+    except asyncio.TimeoutError:
+        return ""
+    lines = [o for o in outs if isinstance(o, str) and o.strip()]
+    if not lines:
+        return ""
+    return ("[Evidence fetched in code before this turn — where these ids are logged. Build on "
+            "it (log_lines, temporal_workflow…); do not re-run it.]\n" + "\n".join(lines))

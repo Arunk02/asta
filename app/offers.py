@@ -51,6 +51,10 @@ from . import store
 KEY = "pending_offer"
 
 
+#: How long an offer to answer a ringing call stays answerable.
+CALL_OFFER_SECONDS = 120
+
+
 def ttl_seconds() -> int:
     """How long an offer stays answerable (default 6h). 0 = never expires."""
     try:
@@ -81,10 +85,16 @@ class Offer:
     aside: bool = False
 
     def expired(self, now: float | None = None) -> bool:
+        age = (time.time() if now is None else now) - self.created
+        # A ring is over in about thirty seconds; an offer to pick it up that sat
+        # in the queue for hours (14 Oct: still "queued" behind a CI offer) is
+        # noise in front of every yes he gives.
+        if self.kind == "call" and age > CALL_OFFER_SECONDS:
+            return True
         ttl = ttl_seconds()
         if ttl <= 0:
             return False
-        return (time.time() if now is None else now) - self.created > ttl
+        return age > ttl
 
     def mechanical(self) -> bool:
         """True when accepting runs code directly instead of asking a brain."""

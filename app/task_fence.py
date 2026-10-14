@@ -72,6 +72,10 @@ def env(base: dict | None = None, mode: str | None = None) -> dict:
     mode = MODE.get() if mode is None else mode
     env = dict(os.environ if base is None else base)
     if mode:
+        # Task builds use the JDK CI uses (app/buildenv.py).
+        from . import buildenv
+        env = buildenv.with_java(env)
+    if mode:
         env["ASTA_TASK_WRITES"] = mode
         env["PATH"] = f"{SHIMS}{os.pathsep}{env.get('PATH', '')}"
     return env

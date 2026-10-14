@@ -546,7 +546,7 @@ async def test_a_build_that_could_not_run_is_skipped_not_failed(output, monkeypa
         async def communicate(self):
             return (output.encode(), b"")
 
-    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None):
+    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None, **_kw):
         return P()
 
     monkeypatch.setattr(verify.asyncio, "create_subprocess_shell", fake_shell)
@@ -563,7 +563,7 @@ async def test_a_genuinely_failing_test_is_still_a_failure(monkeypatch, tmp_path
             return (b"[ERROR] Tests run: 42, Failures: 3, Errors: 0\n"
                     b"[ERROR] BookingServiceTest.shouldRejectCancelledBooking:88 expected <true>", b"")
 
-    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None):
+    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None, **_kw):
         return P()
 
     monkeypatch.setattr(verify.asyncio, "create_subprocess_shell", fake_shell)
@@ -580,7 +580,7 @@ async def test_a_passing_build_is_a_pass_even_if_it_mentions_a_network(monkeypat
             return (b"Downloading from artifactory: connection timed out, retrying\n"
                     b"[INFO] BUILD SUCCESS", b"")
 
-    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None):
+    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None, **_kw):
         return P()
 
     monkeypatch.setattr(verify.asyncio, "create_subprocess_shell", fake_shell)
@@ -602,7 +602,7 @@ async def test_a_check_that_times_out_is_skipped_not_looped(monkeypatch, tmp_pat
         def kill(self):
             pass
 
-    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None):
+    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None, **_kw):
         return P()
 
     monkeypatch.setattr(verify.asyncio, "create_subprocess_shell", fake_shell)
@@ -661,7 +661,7 @@ async def test_a_broken_toolchain_is_not_a_broken_codebase(output, why, monkeypa
         async def communicate(self):
             return (output.encode(), b"")
 
-    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None):
+    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None, **_kw):
         return P()
 
     monkeypatch.setattr(verify.asyncio, "create_subprocess_shell", fake_shell)
@@ -680,7 +680,7 @@ async def test_an_ordinary_compile_error_is_still_the_codes_fault(monkeypatch, t
             return (b"[ERROR] /src/main/java/com/maersk/BookingService.java:[42,17] "
                     b"cannot find symbol\n  symbol: method cancelBooking(String)", b"")
 
-    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None):
+    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None, **_kw):
         return P()
 
     monkeypatch.setattr(verify.asyncio, "create_subprocess_shell", fake_shell)
@@ -698,7 +698,7 @@ async def test_a_checkstyle_violation_is_the_codes_fault(monkeypatch, tmp_path):
             return (b"[ERROR] src/main/java/com/maersk/BookingService.java:[88] "
                     b"(sizes) LineLength: Line is longer than 120 characters", b"")
 
-    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None):
+    async def fake_shell(cmd, cwd=None, stdout=None, stderr=None, **_kw):
         return P()
 
     monkeypatch.setattr(verify.asyncio, "create_subprocess_shell", fake_shell)

@@ -382,8 +382,9 @@ async def run(cwd: str, command: str | None, _retried: bool = False) -> VerifyRe
     if not command:
         return VerifyResult(ran=False, ok=False)
     try:
+        from . import buildenv
         proc = await asyncio.create_subprocess_shell(
-            command, cwd=cwd,
+            command, cwd=cwd, env=buildenv.with_java(dict(os.environ)),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     except (OSError, ValueError):
         return VerifyResult(ran=False, ok=False, command=command)

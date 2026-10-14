@@ -144,13 +144,38 @@ def outside(*hints: str, inside: list[Path] | tuple = ()) -> list[Path]:
             if not (repo / ".git").exists():
                 continue
             name = origin_name(repo).lower()
-            if not name or name in taken or not re.search(
-                    rf"(?<![\w-]){re.escape(name)}(?![\w-])", text):
+            if not name or name in taken:
+                continue
+            phrase = _phrase(name)
+            if not (re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text)
+                    or (phrase and re.search(phrase, text))):
                 continue
             # Of several clones, the one whose folder IS the repo's name.
             if name not in best or repo.name.lower() == name:
                 best[name] = repo
     return list(best.values())
+
+
+#: Org prefixes that say nothing about WHICH repo.
+_ORG_WORDS = ("telikos", "maersk")
+#: Words too common to count towards naming a repo.
+_GENERIC_WORDS = ("service", "svc", "app", "api", "the")
+
+
+def _phrase(name: str) -> str:
+    """The repo as people say it: its distinctive words in order, spaces, hyphens
+    or nothing between them. 8 Oct, #268: "event router library" never found
+    ~/Projects/telikos-event-router-library — only the exact name did — and the
+    task ended blocked with nothing checked out. Two words at least, so a
+    one-word folder ("new", 9 Oct) never matches by accident."""
+    words = re.findall(r"[a-z0-9]+", name.lower())
+    while words and words[0] in _ORG_WORDS:
+        words = words[1:]
+    # Generic words never make a name: "booking service" said in passing must not
+    # pick a stray ~/Projects/telikos-booking-service clone (the bench caught it).
+    if len([w for w in words if w not in _GENERIC_WORDS]) < 2:
+        return ""
+    return r"(?<![\w])" + r"[\s_-]*".join(map(re.escape, words)) + r"(?![\w])"
 
 
 def _owner_of(worktree: Path) -> Path | None:
@@ -241,7 +266,7 @@ def _names(repo_name: str) -> set[str]:
 
 
 async def create(workspace_root: Path, task_id: int, branch: str,
-                 *hints: str) -> list[dict]:
+                 *hints: str, existing: dict[str, str] | None = None) -> list[dict]:
     """A private checkout of every repo in the workspace, on `branch`.
 
     Reported, never raised: one repo that cannot be prepared must not kill a
@@ -274,6 +299,28 @@ async def create(workspace_root: Path, task_id: int, branch: str,
         if target.exists():
             out["ok"] = True
             out["note"] = "reusing this task's existing checkout"
+            results.append(out)
+            continue
+        if (existing or {}).get(repo.name):
+            # The PR he named: work ON its branch, as it is on origin — never a new
+            # branch of the same name cut from develop. 13 Oct, #295 was cut from
+            # develop and then could not get PR 676's branch at all.
+            head = existing[repo.name]
+            out["branch"], out["base"] = head, f"origin/{head}"
+            await repo_ops.git(repo, "git", "fetch", "origin", head, timeout=180)
+            rc, msg = await repo_ops.git(repo, "git", "worktree", "add", str(target), head,
+                                         timeout=300)
+            if rc != 0:
+                rc, msg = await repo_ops.git(repo, "git", "worktree", "add", "--track", "-b",
+                                             head, str(target), f"origin/{head}", timeout=300)
+            if rc == 0:
+                # A local branch can lag origin; the PR is what is on origin now.
+                await repo_ops.git(target, "git", "merge", "--ff-only", f"origin/{head}",
+                                   timeout=120)
+                out["ok"] = True
+            else:
+                from . import clip as clip_mod
+                out["note"] = f"could not check out the PR branch {head}: {clip_mod.problem(msg)}"
             results.append(out)
             continue
         rc, msg = await repo_ops.git(repo, "git", "worktree", "add", "-b", branch,

@@ -120,7 +120,10 @@ def library(tmp_path, monkeypatch):
 def test_a_repo_named_exactly_is_found_outside_the_workspace(library):
     from app import worktrees
     assert worktrees.outside(BLOCKED) == [library]
-    assert worktrees.outside("the event router library") == [], "a full repo name, never a guess"
+    # Its distinctive words, in order, are its name said aloud — not a guess.
+    # 8 Oct: #268 ended blocked because only "telikos-event-router-library" matched.
+    assert worktrees.outside("the event router library") == [library]
+    assert worktrees.outside("the event library") == [], "a partial name is still a guess"
 
 
 def test_a_run_stopped_by_a_missing_checkout_gets_the_checkout(library):

@@ -174,7 +174,10 @@ def test_generic_words_never_name_a_repo():
 def test_the_pinned_jdk_is_the_highest_21_not_the_one_lombok_fails_on():
     """The bench records Lombok 1.18.30 failing on Corretto 21.0.4; 21.0.11 built
     the email service clean on 14 Oct. `java_home -v 21` returns the highest 21."""
+    import os
     import subprocess
+    if not os.path.exists("/usr/libexec/java_home"):
+        pytest.skip("not macOS — no java_home here")
     buildenv.java_home.cache_clear()
     out = subprocess.run(["/usr/libexec/java_home", "-v", "21"], capture_output=True, text=True)
     if out.returncode != 0:

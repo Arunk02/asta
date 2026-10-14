@@ -377,3 +377,38 @@ def test_a_normal_read_is_untouched(monkeypatch):
 
     monkeypatch.setattr(teams_bridge, "_read_history", fine)
     assert asyncio.run(teams_bridge.read_history("Vinish Kumar", max_scrolls=0))[0]["text"] == "hi"
+
+
+# --- a restart never strands what was waiting in the queue ---------------------------------
+
+def test_a_task_left_queued_by_a_restart_is_picked_up(monkeypatch):
+    """14 Oct: ten colleague asks sat "queued" 5-8 hours, nothing running."""
+    from app import tasks
+    from app import notify as notify_mod
+
+    async def quiet(*a, **k):
+        return None
+
+    monkeypatch.setattr(notify_mod, "notify", quiet)
+    t = store.create_task("Vinish Kumar asked: LD in booking service, can you pick up?", "analysis", "p", None)
+    store.update_task(t["id"], status="queued")
+    picked = asyncio.run(tasks.recover_orphans())
+    assert t["id"] in picked
+    row = store.get_task(t["id"])
+    assert row["status"] == "paused" and "queue" in row["error"]
+    assert store.kv_get(f"task_resume_at:{t['id']}")
+
+
+def test_a_task_waiting_in_this_process_is_left_alone(monkeypatch):
+    from app import tasks
+    from app import notify as notify_mod
+
+    async def quiet(*a, **k):
+        return None
+
+    monkeypatch.setattr(notify_mod, "notify", quiet)
+    t = store.create_task("still genuinely waiting", "analysis", "p", None)
+    store.update_task(t["id"], status="queued")
+    monkeypatch.setattr(tasks._gate, "queued_ids", lambda: [t["id"]])
+    assert t["id"] not in asyncio.run(tasks.recover_orphans())
+    assert store.get_task(t["id"])["status"] == "queued"

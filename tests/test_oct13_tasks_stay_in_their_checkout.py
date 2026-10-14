@@ -53,7 +53,7 @@ def test_a_workspace_named_by_its_directory_is_prepared_where_it_runs(ws, monkey
     monkeypatch.setattr(workspace_tools, "WORKSPACES", {"booking": ws})
     seen = {}
 
-    async def create(root, task_id, branch, *hints):
+    async def create(root, task_id, branch, *hints, **_kw):
         seen["root"] = Path(root)
         return [{"repo": "telikos-email-service", "branch": branch, "ok": True, "note": ""}]
 

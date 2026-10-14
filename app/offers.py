@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, fields
@@ -171,6 +172,13 @@ def offer(kind: str, subject: str, context: str, prompt: str,
     # being asked, and the id he was shown keeps changing underneath him.
     if _same_question(asdict(head), o):
         return head
+    if _same_target(asdict(head), o):
+        # A REVISION of the open question — the same review on the same PR, new
+        # words. 14 Oct: two Request-changes drafts for booking PR 1483 sat side
+        # by side and he was asked twice. The newest is the one he was just shown.
+        store.kv_set(KEY, json.dumps(asdict(o)))
+        store.kv_set(QUEUE_KEY, json.dumps([r for r in _queue() if not _same_target(r, o)]))
+        return o
     if head.aside and not head.shown:
         # He moved on from the head without answering, so nothing is being
         # asked: the new offer is asked now and the set-aside one waits first in
@@ -363,6 +371,22 @@ def propose(subject: str, context: str, question: str, action: str,
     would do next, say the word.
     """
     return offer(kind, subject, context, question, payload=payload, action=action)
+
+
+def _pr_of(value) -> str:
+    m = re.search(r"(\d+)\s*$", str(value or "").rstrip("/").split("/pull/")[-1])
+    return m.group(1) if m else str(value or "")
+
+
+def _same_target(row: dict, o: Offer) -> bool:
+    """The same act on the same thing — one PR, one kind of review — whatever its words."""
+    row_op, new_op = row.get("op") or {}, o.op or {}
+    if row.get("kind") != o.kind or not new_op.get("name") or row_op.get("name") != new_op.get("name"):
+        return False
+    ra, na = row_op.get("args") or {}, new_op.get("args") or {}
+    if not (ra.get("pr") and na.get("pr")):
+        return False
+    return _pr_of(ra.get("pr")) == _pr_of(na.get("pr")) and ra.get("action") == na.get("action")
 
 
 def staged_write(op_name: str, args: dict, subject: str, context: str,

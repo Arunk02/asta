@@ -197,6 +197,8 @@ async def startup() -> None:
     # keep it only if it wins. Off unless ASTA_EVOLVE is on.
     daemon.start("evolve", evolve.loop)
     daemon.start("bench_guard", evolve.guard_loop)
+    daemon.start("vitals", health.vitals_loop)
+    daemon.start("redo", redo_loop)
     # Whatever was mid-flight when this process's predecessor stopped. Runs once,
     # here, because a fresh process is the only place that can tell an
     # interrupted task from a running one.
@@ -2530,8 +2532,72 @@ async def _run_turn(out, conv: dict, user_text: str, channel: str = "web") -> No
         raise
 
 
+#: Brains that answer without any tool. A turn that lands on one cannot look
+#: anything up — 13 Oct, 14:24: Claude limited, Copilot out for the month, and
+#: "send to Komal and update the review comments to her" got a restatement from
+#: the local model after 108 s. Said plainly instead, and redone properly later.
+TOOLLESS_BRAINS = ("local",)
+_REDO_KEY = "redo_pending"
+#: A message older than this is not redone — he has moved on.
+REDO_MAX_AGE = 12 * 3600
+
+
+def _queue_redo(conv_id: str, text: str, channel: str) -> None:
+    try:
+        items = json.loads(store.kv_get(_REDO_KEY) or "[]")
+    except ValueError:
+        items = []
+    items = [i for i in items if i.get("text") != text][-9:]
+    items.append({"cid": conv_id, "text": text, "channel": channel, "at": time.time()})
+    store.kv_set(_REDO_KEY, json.dumps(items))
+
+
+def _tool_brain_up() -> bool:
+    return any(agent_mod.available(b) and not agent_mod.quota_down(b)
+               for b in ("claude_cli", "copilot"))
+
+
+async def redo_loop() -> None:
+    """Redo, with a brain that has tools, what a tool-less brain could only talk about."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            items = json.loads(store.kv_get(_REDO_KEY) or "[]")
+        except ValueError:
+            items = []
+        if not items or not _tool_brain_up():
+            continue
+        store.kv_set(_REDO_KEY, "[]")
+        for item in items:
+            if time.time() - float(item.get("at") or 0) > REDO_MAX_AGE or item.get("channel") != "whatsapp":
+                continue
+            conv = store.get_conversation(item["cid"])
+            if conv is None:
+                continue
+            conv["model"] = _channel_model(conv)
+            when = time.strftime("%H:%M", time.localtime(float(item["at"])))
+            with contextlib.suppress(Exception):
+                await notify.wa_send(f"↻ A brain with tools is back — doing your {when} message "
+                                     f"properly now: “{item['text'][:120]}”")
+            sink = HybridSink(notify.wa_send, conv["id"])
+            sink.handoff()
+            store.record_outcome("turn", "redone", subject=conv["id"], detail=item["text"][:200])
+            with contextlib.suppress(Exception):
+                job = await _dispatch(conv, item["text"], sink, "whatsapp")
+                if job is not None:
+                    await job
+                await sink.close()
+
+
 async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
                               channel: str = "web") -> None:
+    if model_name in TOOLLESS_BRAINS and channel in ("whatsapp", "telegram"):
+        _queue_redo(conv["id"], user_text, channel)
+        store.record_outcome("turn", "toolless", subject=model_name, detail=user_text[:200])
+        await out.send({"type": "note", "text": (
+            "⚠️ No brain with tools is up right now (Claude at its limit, Copilot out), so "
+            "I can only talk, not look anything up. I've saved this and will do it "
+            "properly as soon as one is back.")})
     model = agent_mod.get_model(model_name)
     history = _load_history(conv)
     # Recall rides in the user prompt (not instructions) so the instruction
@@ -3196,8 +3262,19 @@ def _offer_prompt(o, where: str = "") -> str:
                 f"do NOT send it yourself.")
     return f"{ctx}Arun approved: {o.prompt}. Carry it out, then report back in one line."
 # A bare yes to "can I send this?" — anything else is treated as change-requests.
-_AFFIRM = re.compile(r"^\s*(send( it)?|yes|yep|yeah|y|ok(ay)?( send| do it)?|go( ahead)?|"
-                     r"confirm|do it|👍|✅)\s*[.!]*\s*$", re.I)
+#: A yes, as he types it. Bare words used to be all that counted: "yes post it"
+#: (14 Oct, the Request-changes review on booking PR 1483) read as a NEW ask, the
+#: brain staged a second copy and asked again. Now a yes may carry the verb it
+#: approves — post, send, submit, approve, proceed — and a "now" or "please"; a
+#: yes that carries an instruction ("yes but shorter", "yes we don't want …")
+#: still is not one.
+_AFFIRM = re.compile(
+    r"^\s*(?:(?:yes|yep|yeah|y|ok(?:ay)?|sure|pls|please)[,\s]+)*"
+    r"(?:send(?:\s+it)?|yes|yep|yeah|y|ok(?:ay)?(?:\s+(?:send|do\s+it))?|go(?:\s+ahead)?|"
+    r"confirm|do\s+it|proceed|approved?|submit(?:\s+it)?|ship\s+it|"
+    r"post(?:\s+(?:it|this|that|the\s+(?:review(?:\s+comments?)?|comments?)))?|👍|✅)"
+    r"(?:[,\s]+(?:now|please|pls|go\s+ahead|do\s+it|post\s+it|send\s+it))*\s*[.!]*\s*$",
+    re.I)
 _SEND_TO = re.compile(r"^\s*(?:please\s+)?send(?:\s+it)?\s+to\s+([\w.' -]+?)\s*[.!]*$", re.I)
 
 

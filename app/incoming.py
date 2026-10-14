@@ -26,9 +26,11 @@ leaves the call to ring out exactly as it would have.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import re
+import time
 
 from . import store
 
@@ -40,6 +42,30 @@ def enabled() -> bool:
 #: How often to look. A ring lasts about thirty seconds, so anything slower than
 #: this answers a phone that has already stopped.
 POLL_SECONDS = float(os.environ.get("ASTA_INCOMING_SECONDS", "8"))
+#: One look at the page, at most. A frozen page must not freeze the ring check.
+LOOK_TIMEOUT = 5.0
+#: When the ring check last completed a look — the vitals check reads it.
+CHECKED_KEY = "incoming_checked_at"
+
+
+async def check_once():
+    """(call, toast) for whatever is ringing now — WITHOUT waiting for the lock.
+
+    The ring check used to queue for the one Teams lock like every chat read,
+    and that lock was held past ten minutes 86 times in the week to 14 Oct. A
+    ring lasts about thirty seconds. The open page is read directly; the lock
+    is taken only when no browser exists yet (to launch one)."""
+    from . import teams_bridge
+    page = teams_bridge.peek_page()
+    if page is not None:
+        call = await asyncio.wait_for(look(page), LOOK_TIMEOUT)
+        saved = await asyncio.wait_for(capture_toast(page), LOOK_TIMEOUT) if call else ""
+    else:
+        async with teams_bridge.teams_page() as page:
+            call = await look(page)
+            saved = await capture_toast(page) if call else ""
+    store.kv_set(CHECKED_KEY, str(time.time()))
+    return call, saved
 
 #: The words Teams puts on an incoming call, across its wordings.
 #: A RING, and only a ring. The participants clause that used to live here —
@@ -247,13 +273,11 @@ async def watch_loop() -> None:
             continue
         if meetings_busy():
             continue
-        saved = ""
         try:
-            async with teams_bridge.teams_page() as page:
-                call = await look(page)
-                if call:
-                    saved = await capture_toast(page)
-        except Exception:                                      # noqa: BLE001
+            call, saved = await check_once()
+        except Exception as exc:                               # noqa: BLE001
+            from . import quiet
+            quiet.note("incoming.check", exc)
             continue
         if not call:
             clear()                    # the ring stopped

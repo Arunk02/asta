@@ -3706,14 +3706,22 @@ async def recover_orphans() -> list[int]:
     from . import notify
     picked: list[int] = []
     now = time.time()
+    waiting_here = set(_gate.queued_ids())
     for t in store.list_tasks(limit=200):
-        if t["status"] != "running" or is_running(t["id"]):
+        # "queued" too: the investigation gate is in memory, so a restart dropped
+        # every waiting task while its row still said queued. 14 Oct: ten
+        # colleague asks sat 5-8 hours with nothing running — seven restarts that
+        # afternoon, and nothing ever picked them up again.
+        if t["status"] not in ("running", "queued") or is_running(t["id"]) \
+                or t["id"] in waiting_here:
             continue
         brain = _resolve_executor(t["id"])
         store.kv_set(f"task_paused:{t['id']}", _json.dumps(
             {"brain": brain, "reset_at": None, "raw": "interrupted by a restart", "at": now}))
         store.kv_set(f"task_resume_at:{t['id']}", str(now + RESTART_RESUME_SECONDS))
-        store.update_task(t["id"], status="paused", error="interrupted by a restart")
+        store.update_task(t["id"], status="paused",
+                          error="interrupted by a restart" if t["status"] == "running"
+                          else "was waiting in the queue when Asta restarted")
         store.record_outcome("task", "orphaned", subject=str(t["id"]), detail=brain)
         picked.append(t["id"])
     if picked:

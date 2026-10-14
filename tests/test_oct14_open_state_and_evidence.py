@@ -116,3 +116,27 @@ def test_both_brains_get_the_evidence():
     from app import claude_cli
     assert "turn_evidence" in inspect.getsource(claude_cli.run_turn)
     assert "turn_evidence" in inspect.getsource(copilot_cli.run_turn)
+
+
+# --- "do not push or message anyone" is not a request to message anyone -------------------
+
+ARUDDHA_ASK = ("On booking PR 1482, Aruddha reviewed it and said: looks good, just add a test. Add unit "
+               "tests on that PR's branch covering all the scenarios. Run the tests. Do not push or "
+               "message anyone — show me the plan and the result.")
+
+
+@pytest.mark.parametrize("text,talk", [
+    ("Do not push or message anyone", False),
+    ("dont push, commit or ping Vinish", False),
+    ("never call or message him", False),
+    ("message Vinish about it", True),
+    ("Do not push. Message Vinish when done", True),
+])
+def test_a_negation_covers_the_list_of_verbs_after_it(text, talk):
+    from app import consent
+    assert consent.asked_to_talk(text) is talk
+
+
+def test_a_code_ask_that_forbids_messaging_is_not_blocked_as_talk():
+    from app import consent
+    assert consent.substitution(ARUDDHA_ASK, "code") == ""

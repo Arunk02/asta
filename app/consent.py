@@ -100,11 +100,15 @@ _TALK = re.compile(
 #: Negations that turn "call him" into "don't call him". Checked against the words
 #: immediately before the match, not the whole message — "don't push, discuss with
 #: them" negates the push and asks for the discussion.
-_NOT = re.compile(r"\b(?:don'?t|do\s+not|never|no\s+need\s+to|without|instead\s+of)\s*$", re.I)
+#: A negation reaches across a short list of verbs: "do not push or message
+#: anyone" (14 Oct) read as a request to message someone, and blocked the code
+#: task he had just asked for as "you asked me to talk to them".
+_NOT = re.compile(r"\b(?:don'?t|do\s+not|never|no\s+need\s+to|without|instead\s+of)\s*"
+                  r"(?:[a-z]+(?:\s*,\s*|\s+(?:or|nor|and)\s+)){0,3}$", re.I)
 
 
 def _negated(text: str, at: int) -> bool:
-    return bool(_NOT.search(text[max(0, at - 24):at]))
+    return bool(_NOT.search(text[max(0, at - 48):at]))
 
 
 def _is_person_call(text: str, m: re.Match) -> bool:

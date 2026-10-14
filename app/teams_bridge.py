@@ -366,13 +366,45 @@ class Ambiguous(NotFound):
     whole browser away 500 times in a day, and nothing else got read."""
 
 
-#: When the Teams lock was last taken — 0 when free. The watchdog reads it.
-_HELD: dict = {"since": 0.0}
+#: When the Teams lock was last taken — 0 when free — and by whom. The watchdog
+#: reads it. "who" exists because 86 resets in a week (to 14 Oct) all said "an
+#: operation held the browser" and none could say which one.
+_HELD: dict = {"since": 0.0, "who": ""}
 #: Launching Chrome and loading Teams, at most this long.
 LAUNCH_TIMEOUT = 150.0
 #: Any one operation holding the browser longer than this is stuck (a live call
-#: excepted — it owns the browser for as long as it lasts).
-STUCK_SECONDS = 600.0
+#: excepted — it owns the browser for as long as it lasts). Was 600: a single
+#: read takes under a minute, and ten minutes of a held lock is ten minutes in
+#: which no chat, mention or ring is seen.
+STUCK_SECONDS = float(os.environ.get("ASTA_TEAMS_STUCK_SECONDS", "240"))
+
+
+def _caller() -> str:
+    """module.function of whoever asked for the browser, for the watchdog's report."""
+    f = sys._getframe(1)
+    while f is not None and f.f_code.co_filename.endswith(("teams_bridge.py", "contextlib.py")):
+        f = f.f_back
+    return f"{Path(f.f_code.co_filename).stem}.{f.f_code.co_name}" if f is not None else "?"
+
+
+def holder() -> str:
+    """Who has the browser right now, '' when nobody does."""
+    return _HELD.get("who", "") if _HELD.get("since") else ""
+
+
+def peek_page():
+    """The open Teams page WITHOUT taking the lock, or None.
+
+    For the one job that cannot queue: noticing a ring and picking it up. A ring
+    lasts ~30 s; the lock can be held for minutes by a chat read. Reading the
+    page's text (and clicking Accept) alongside another operation is safe enough
+    — the cost of interleaving is that operation failing, the cost of waiting is
+    a missed call."""
+    page = _POOL.get("page")
+    try:
+        return None if page is None or page.is_closed() else page
+    except Exception:                                          # noqa: BLE001
+        return None
 
 
 async def reset(why: str) -> None:
@@ -398,8 +430,10 @@ async def teams_page():
     Serialised by the same lock as before — a Chromium profile is single-writer —
     but the expensive part now happens once rather than per operation.
     """
+    who = _caller()
     async with _lock:
         _HELD["since"] = time.time()
+        _HELD["who"] = who
         try:
             page = await _pooled_page()
         except BaseException:
@@ -517,11 +551,17 @@ async def watchdog_loop() -> None:
         woke = await wake.sleep(60)
         if woke:
             started = _t.time()            # a fresh start of the clock after sleep
+            # An operation that was mid-flight when the lid closed is talking to
+            # a page that froze under it; waiting out STUCK_SECONDS after waking
+            # is minutes of unread Teams for nothing.
+            if stuck_for() > 0 and not in_a_call():
+                await reset(f"held across sleep by {holder() or '?'}")
+                reset_at = _t.time()
             continue
         try:
             held = stuck_for()
             if held > STUCK_SECONDS and not in_a_call():
-                await reset(f"an operation held the browser for {int(held)}s")
+                await reset(f"an operation held the browser for {int(held)}s ({holder() or '?'})")
                 reset_at = _t.time()
                 continue
             if not (enabled() and logged_in_once()) or in_a_call():

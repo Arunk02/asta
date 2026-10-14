@@ -129,13 +129,21 @@ async def _call_answer(speak: bool = False) -> str:
     him "answered" when nothing was answered is the failure that matters.
     """
     from . import incoming, teams_bridge
-    async with teams_bridge.teams_page() as page:
+
+    async def pick_up(page) -> str:
         call = await incoming.look(page)
         if not call:
             incoming.clear()
             return "📞 Too late — it stopped ringing before you answered."
         result = await incoming.answer(page, speak=speak)
-    return f"📞 {incoming.describe(call)} {result}"
+        return f"📞 {incoming.describe(call)} {result}"
+
+    # Never behind the lock: a chat read holding it for a minute is a missed call.
+    page = teams_bridge.peek_page()
+    if page is not None:
+        return await pick_up(page)
+    async with teams_bridge.teams_page() as page:
+        return await pick_up(page)
 
 
 @op("jira_comment", lambda a: f"Comment on {a.get('key', '?')}")

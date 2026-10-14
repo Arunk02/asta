@@ -356,3 +356,24 @@ def test_asta_tools_load_up_front_not_behind_tool_search(monkeypatch):
     monkeypatch.setenv("ASTA_TOOL_SEARCH", "1")
     assert "ENABLE_TOOL_SEARCH" not in claude_cli._subprocess_env() or \
         claude_cli._subprocess_env().get("ENABLE_TOOL_SEARCH") != "false"
+
+
+def test_a_chat_read_cannot_hold_the_browser_for_minutes(monkeypatch):
+    """14 Oct: chat_watch.new_in held the Teams browser 666 s."""
+    async def stuck(*a, **k):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(teams_bridge, "_read_history", stuck)
+    monkeypatch.setattr(teams_bridge, "READ_TIMEOUT", 0.05)
+    t = time.monotonic()
+    with pytest.raises(RuntimeError, match="gave up"):
+        asyncio.run(teams_bridge.read_history("Vinish Kumar", max_scrolls=0))
+    assert time.monotonic() - t < 1
+
+
+def test_a_normal_read_is_untouched(monkeypatch):
+    async def fine(chat, since=None, limit=200, max_scrolls=0):
+        return [{"text": "hi", "chat": chat}]
+
+    monkeypatch.setattr(teams_bridge, "_read_history", fine)
+    assert asyncio.run(teams_bridge.read_history("Vinish Kumar", max_scrolls=0))[0]["text"] == "hi"

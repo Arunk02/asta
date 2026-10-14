@@ -254,6 +254,7 @@ async def deliver(text: str, *, force: bool = False, keys: tuple = ()) -> dict:
     if not force and quiet_rule() is not None:
         _keep_for_quiet(text, "batch", keys)
         return {"bell": True, "held": True, "quiet": True, "whatsapp": False, "telegram": False}
+    store.record_outcome("notify", "pushed", detail=text[:120])
     wa = await wa_send(text)
     tg = await telegram.send(text)
     if tg and not wa:
@@ -343,6 +344,15 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     # outranks everything below it, breakage included: he is off. What arrives
     # is kept and lands in one summary when the rule ends. `asked` is his own
     # ask coming back to him — a reminder he set still rings.
+    if urgency == "fyi" and not asked:
+        # Says itself that nothing is needed from him ("FYI, nothing needed from
+        # you", "you've already answered her"): the digest, never his pocket.
+        # 14 Oct: 26 such bundles and 26 "already answered / already in it"
+        # notes reached his phone in one week, out of 429 notifications.
+        from . import digest
+        digest.add(text, source=level, why="nothing needed from you", keys=keys)
+        store.record_outcome("notify", "fyi to digest", subject=level, detail=text[:120])
+        return {"bell": True, "held": True, "digested": True, "whatsapp": False, "telegram": False}
     if quiet_rule() is not None:
         if not asked and not (level in HIS_WORK and talking_to_asta()):
             _keep_for_quiet(text, level, keys)

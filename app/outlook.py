@@ -764,7 +764,7 @@ async def _push_mail(notify, fresh: list[dict]) -> None:
     # read that, or the floor only changes a number nobody acts on.
     wants_him = needs or started or (top is not None and top <= attention.P_TODAY)
     await notify.notify(text, "outlook",
-                        urgency="direct" if wants_him else "ambient",
+                        urgency="direct" if wants_him else "fyi",
                         priority=top,
                         considered=True)   # attention.consider ran above
 

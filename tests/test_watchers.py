@@ -104,7 +104,7 @@ def test_a_random_thought_rides_the_quiet_path_and_asks_nothing():
         {"sender": "Sam", "subject": "Just a thought on caching",
          "preview": "Was wondering if we could pre-warm someday."}]))
     text, urgency = n.sent[0]
-    assert urgency == "ambient"                         # does not buzz his pocket
+    assert urgency == "fyi"                             # the digest, never his pocket
     assert "nothing needed from you" in text
     assert "needs you" not in text
 

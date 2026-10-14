@@ -1776,7 +1776,11 @@ _automatic_send: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 async def send_automatic(chat: str, text: str) -> str:
     """Send an unapproved acknowledgement and attribute only its verified message."""
-    from . import writing
+    from . import steward, writing
+    if steward.sends_held():
+        store.record_outcome("thread", "held back", subject=chat[:80],
+                             detail=f"he said hold all sends — not said: {text}"[:200])
+        raise PermissionError("Arun has held all of Asta's own sends")
     text = writing.fit_address(text, chat)    # every caller, not only chat_watch._say
     token = _automatic_send.set(chat)
     try:
@@ -2500,7 +2504,7 @@ async def _push_activity(notify, wanted: list[str]) -> None:
         # read that, or the floor only changes a number nobody acts on.
         wants_him = needs or started or (top is not None and top <= attention.P_TODAY)
         await notify.notify(text, "teams",
-                            urgency="direct" if wants_him else "ambient",
+                            urgency="direct" if wants_him else "fyi",
                             priority=top,
                             considered=True,   # attention.consider ran above
                             keys=tuple(keys))

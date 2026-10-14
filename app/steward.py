@@ -119,8 +119,28 @@ def is_greeting(text: str) -> bool:
 #: Off unless switched on, like everything else that acts outward.
 def say_without_yes() -> bool:
     """Whether ANY line may go to a colleague without his yes — the ask-back,
-    the check-in, a clarifying question. Off: every such line waits for him."""
+    the check-in, a clarifying question. Off: every such line waits for him.
+    Also off while he has said to hold all sends (`sends_held`)."""
+    if sends_held():
+        return False
     return os.environ.get("ASTA_SAY_WITHOUT_YES", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+#: His own switch, from any channel: "dont send any message to anyone" (14 Oct)
+#: reached a waiting draft as revision feedback and changed nothing; the hold had
+#: to be done by hand in .env. Now his words set it, and his words lift it.
+HOLD_KEY = "hold_sends"
+
+
+def sends_held() -> bool:
+    from . import store
+    return store.kv_get(HOLD_KEY) == "1"
+
+
+def hold_sends(on: bool) -> None:
+    from . import store
+    store.kv_set(HOLD_KEY, "1" if on else "")
+    store.record_outcome("steward", "sends held" if on else "sends resumed")
 
 
 def ask_back_enabled() -> bool:

@@ -1822,12 +1822,41 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
     before = await other_trees(ws, cwd)
     token = task_fence.MODE.set("code")
     try:
-        return await _code_leg(task_id, prompt + task_fence.prompt_line("code") + _stay_inside(cwd),
+        return await _code_leg(task_id, prompt + workspace_context_note(ws, cwd, prompt)
+                               + task_fence.prompt_line("code") + _stay_inside(cwd),
                                cwd, resume=resume, effort=effort, workspace=workspace)
     finally:
         task_fence.MODE.reset(token)
         with contextlib.suppress(Exception):
             await _report_strays(task_id, before, await other_trees(ws, cwd))
+
+
+def workspace_context_note(workspace: str | None, cwd: str, prompt: str = "") -> str:
+    """Point a leg whose checkout is OUTSIDE the workspace at the workspace's context.
+
+    Worktrees moved to ~/.asta-worktrees (11 Oct). From there the workspace's
+    AGENTS.md and .asta-context are not on any path the CLI loads, and the boot
+    line was rewritten only when the prompt happened to carry it — #295 (13 Oct)
+    got no context at all, and most code sessions that week read none."""
+    try:
+        root = Path(code_cwd(workspace)).resolve()
+    except RuntimeError:
+        return ""
+    here = Path(cwd).resolve()
+    if here == root or root in here.parents:
+        return ""
+    bits = []
+    boot = root / ".asta-context" / "boot.sh"
+    if boot.is_file() and str(boot) not in (prompt or ""):
+        bits.append(f"run `sh {boot}` first — the workspace's flows, contracts and lessons")
+    agents = root / "AGENTS.md"
+    if agents.is_file():
+        bits.append(f"read {agents} — the workspace's working rules")
+    if not bits:
+        return ""
+    return ("\n[Workspace context] Your checkout is outside the workspace, so none of it loads on "
+            "its own: " + "; ".join(bits) + ". Paths in it are repo-relative — open them in YOUR "
+            "checkout.\n")
 
 
 def _stay_inside(cwd: str) -> str:
@@ -3058,6 +3087,41 @@ def task_branch(t: dict, task_id: int) -> str:
                                 t.get("title", ""), task_id)
 
 
+async def pr_head_branch(t: dict, ws_root: Path) -> dict[str, str]:
+    """{repo dir name: head branch} for the OPEN pull request this task names, or {}.
+
+    "Bump the library on email PR 676", "fix CT failure on AP PR 1252", or a PR
+    link: the work belongs on that PR's branch."""
+    from . import prname, review, worktrees
+    text = f"{t.get('title') or ''}\n{(t.get('prompt') or '')[:3000]}"
+    repo, number = prname.parse(text)
+    if not number:
+        number, target = review.pr_target(text)
+        repo = target.split("/")[-1] if target else ""
+    if not (repo and str(number).isdigit()):
+        return {}
+    local = next((r for r in worktrees.repos_in(ws_root) + worktrees.outside(repo)
+                  if (worktrees.origin_name(r) or r.name).lower() == repo.lower()), None)
+    if local is None:
+        return {}
+    rc, url = await repo_ops.git(local, "git", "remote", "get-url", "origin")
+    m = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?$", (url or "").strip())
+    if rc != 0 or not m:
+        return {}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "pr", "view", str(number), "-R", f"{m.group(1)}/{m.group(2)}", "--json",
+            "headRefName,state,isCrossRepository", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL)
+        raw, _ = await asyncio.wait_for(proc.communicate(), 30)
+        info = _json.loads(raw or b"{}")
+    except Exception:                                          # noqa: BLE001
+        return {}
+    if info.get("state") != "OPEN" or info.get("isCrossRepository") or not info.get("headRefName"):
+        return {}
+    return {local.name: info["headRefName"]}
+
+
 async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     """Put every repo in the workspace on a fresh feature branch off develop.
 
@@ -3128,9 +3192,10 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
         # neither should be paying for the other's repos. Falls back to all when
         # nothing is named, because under-preparing breaks a run and
         # over-preparing only costs a fetch.
+        head = await pr_head_branch(t, root)
         results = await worktrees.create(root, task_id, branch,
                                          t.get("title") or "", t.get("goal") or "",
-                                         t.get("prompt") or "")
+                                         t.get("prompt") or "", existing=head)
     except Exception as exc:                          # noqa: BLE001
         results = [{"repo": r.name, "branch": branch, "ok": False, "dirty": False,
                     "note": f"{type(exc).__name__}: {exc}"} for r in repos]

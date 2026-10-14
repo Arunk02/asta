@@ -1637,8 +1637,29 @@ async def read_chat(chat: str, limit: int = 15) -> list[str]:
     return [fmt_message(r) for r in rows]
 
 
+#: The most one chat read may hold the browser (plus a little per scroll back).
+#: 14 Oct, once holders were named: chat_watch.new_in held it 666 s — eleven
+#: minutes of no other Teams read and no ring check. A read past this is
+#: cancelled, which releases the lock.
+READ_TIMEOUT = float(os.environ.get("ASTA_TEAMS_READ_TIMEOUT", "90"))
+
+
 async def read_history(chat: str, since: float | None = None, limit: int = 200,
                        max_scrolls: int = MAX_SCROLLBACKS) -> list[dict]:
+    """`_read_history`, never longer than READ_TIMEOUT plus 3 s per scroll back."""
+    budget = READ_TIMEOUT + 3 * max(0, max_scrolls or 0)
+    try:
+        return await asyncio.wait_for(
+            _read_history(chat, since=since, limit=limit, max_scrolls=max_scrolls), budget)
+    except asyncio.TimeoutError:
+        store.record_outcome("teams", "read_timeout", subject=(chat or "")[:80],
+                             detail=f"gave up after {int(budget)}s")
+        raise RuntimeError(f"reading {chat} took over {int(budget)}s — gave up so other "
+                           f"Teams work and the ring check are not blocked")
+
+
+async def _read_history(chat: str, since: float | None = None, limit: int = 200,
+                        max_scrolls: int = MAX_SCROLLBACKS) -> list[dict]:
     """Read a thread, scrolling back far enough to cover `since`.
 
     Returns message dicts oldest-first. Everything read is persisted, so the

@@ -448,3 +448,85 @@ async def loop() -> None:
         except Exception:
             pass
         await asyncio.sleep(CHECK_SECONDS)
+
+
+# --- vitals: the fast check ---------------------------------------------------
+#
+# `checks()` runs every six hours, and that is right for an expired token or a
+# full disk. It is wrong for "Asta has stopped working": on 14 Oct a test world
+# held the live process from 01:26 to 12:10 — ten and a half hours of no Teams,
+# no rings, his WhatsApp answered "(nothing scripted)" — between two six-hourly
+# checks that did not look for it. These are the few things that, when broken,
+# mean he is on his own; checked every couple of minutes, said once.
+
+VITALS_SECONDS = int(os.environ.get("ASTA_VITALS_SECONDS", "120"))
+#: Teams not read for this long while awake and logged in is an outage.
+TEAMS_STALE_SECONDS = 15 * 60
+#: The ring check runs every few seconds; this long without one is missed calls.
+CALLS_STALE_SECONDS = 5 * 60
+
+
+def vitals(now: float | None = None, started: float = 0.0) -> dict[str, str]:
+    """What is broken right now that leaves him on his own — {} when nothing is."""
+    from . import agent, incoming, teams_bridge
+    from .workworld import world as bench_world
+    now = now or time.time()
+    out: dict[str, str] = {}
+    if bench_world.installed():
+        out["test_world"] = ("running inside a test world — Teams is not read and "
+                             "replies go nowhere")
+    teams_up = (teams_bridge.enabled() and teams_bridge.logged_in_once()
+                and store.kv_get("teams_session_ok") != "0" and not teams_bridge.in_a_call())
+    if teams_up:
+        last = teams_bridge._last_read() or started
+        if last and now - last > TEAMS_STALE_SECONDS:
+            out["teams_read"] = f"Teams has not been read for {int((now - last) / 60)} min"
+        if incoming.enabled():
+            try:
+                checked = float(store.kv_get(incoming.CHECKED_KEY) or 0) or started
+            except ValueError:
+                checked = started
+            if checked and now - checked > CALLS_STALE_SECONDS:
+                out["call_check"] = (f"the incoming-call check has not run for "
+                                     f"{int((now - checked) / 60)} min — calls would be missed")
+    if not [b for b in ("claude_cli", "copilot") if agent.available(b) and not agent.quota_down(b)]:
+        out["brains"] = ("no brain that can use tools is up (Claude limited, Copilot out) — "
+                         "I can talk but not look anything up; I'll redo what you send when one is back")
+    return out
+
+
+async def vitals_loop() -> None:
+    """Every VITALS_SECONDS: tell him once when something vital breaks, once when it is back.
+
+    A problem must be seen on two checks in a row before he hears about it — one
+    slow read is not an outage — and the first check after the laptop wakes is
+    skipped, because everything is stale for a moment after a sleep."""
+    from . import notify, wake
+    started = time.time()
+    await asyncio.sleep(180)               # bridges and watchers settle after startup
+    prev: dict[str, str] = {}
+    told: set[str] = set()
+    while True:
+        woke = await wake.sleep(VITALS_SECONDS)
+        if woke:
+            prev = {}
+            continue
+        try:
+            cur = vitals(started=started)
+        except Exception as exc:                               # noqa: BLE001
+            from . import quiet
+            quiet.note("health.vitals", exc)
+            continue
+        new = (set(cur) & set(prev)) - told
+        if new:
+            told |= new
+            store.record_outcome("vitals", "broken", subject=",".join(sorted(new)),
+                                 detail="; ".join(cur[k] for k in sorted(new))[:200])
+            await notify.notify("⚠️ " + "\n".join(f"• {cur[k]}" for k in sorted(new)), "health")
+        gone = told - set(cur)
+        if gone:
+            told -= gone
+            store.record_outcome("vitals", "recovered", subject=",".join(sorted(gone)))
+            await notify.notify("✅ Back to normal: " + ", ".join(sorted(gone)).replace("_", " "),
+                                "health", urgency="ambient")
+        prev = cur

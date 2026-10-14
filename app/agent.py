@@ -1221,12 +1221,20 @@ async def pr_review_post(pr: str, action: str, body: str = "",
     said = scorecard.his_words(capabilities.said_this_turn()).lower()
     asked = {"comment": r"\b(?:post|comment|share|send|add)\b",
              "approve": r"\bapprov",
-             "request_changes": r"\brequest(?:ed)?\s+changes\b"}[action]
-    if said and re.search(asked, said):
+             # "add a request change directly in the PR" (14 Oct) is the same
+             # ask as "request changes" — singular, article and all.
+             "request_changes": r"\brequest(?:ed|ing)?\s+(?:a\s+|for\s+)?changes?\b|\bchanges?\s+requested\b"}[action]
+    if said and (re.search(asked, said) or _approves_shown_review(said, pr, action)):
         try:
-            return "✅ " + await ops.run({"name": "pr_review", "args": {
+            done = await ops.run({"name": "pr_review", "args": {
                 "pr": pr, "workspace": workspace, "repo": repo, "action": action,
-                "body": body}}) + " — posted as he asked. Tell him in one line."
+                "body": body}})
+            # The copy waiting for his yes is answered by this post — never asked again.
+            head = offers.pending()
+            if head and (head.op or {}).get("name") == "pr_review" \
+                    and offers._pr_of(((head.op or {}).get("args") or {}).get("pr")) == offers._pr_of(pr):
+                offers.accept()
+            return "✅ " + done + " — posted as he asked. Tell him in one line."
         except Exception as exc:                               # noqa: BLE001
             return f"Not posted — {exc}. Tell him exactly that; do not retry blindly."
     offers.staged_write(
@@ -1236,6 +1244,21 @@ async def pr_review_post(pr: str, action: str, body: str = "",
         (body or "(no comment body — approval only)").strip()[:900],
         f"{verb} PR #{str(pr).lstrip('#')} as you?", kind="pr_write")
     return f"Staged the {action.replace('_', ' ')} on PR #{str(pr).lstrip('#')} — waiting for Arun's yes."
+
+
+def _approves_shown_review(said: str, pr, action: str) -> bool:
+    """His yes ("yes post it") to the review he was just shown for this PR and action.
+
+    One yes, his rule: the review was staged, he read it and said post — staging
+    it again for the same words was the second and third yes on booking PR 1483."""
+    from . import offers
+    if not re.search(r"\b(?:yes|post|send|go\s+ahead|proceed|submit|ok(?:ay)?)\b", said) \
+            or re.search(r"\b(?:don'?t|do\s+not|not\s+yet|hold|wait)\b", said):
+        return False
+    head = offers.pending()
+    args = ((head.op or {}).get("args") or {}) if head else {}
+    return bool(head) and (head.op or {}).get("name") == "pr_review" \
+        and offers._pr_of(args.get("pr")) == offers._pr_of(pr) and args.get("action") == action
 
 
 async def merge_pr(pr: str, workspace: str, repo: str = "", method: str = "squash") -> str:
@@ -1869,6 +1892,25 @@ def _he_asked_to_send(to: str, cid: str) -> bool:
     return any(re.search(rf"\b{re.escape(first)}\b", r) for r in recent)
 
 
+#: A reply to a waiting draft that approves it — with or without an edit. His rule
+#: (14 Oct): "one yes … if I said yes good update and send, then directly update
+#: and send, don't ask multiple things". Not when he holds it or wants to see it.
+_APPROVES = re.compile(r"\b(?:yes|yep|yeah|ok(?:ay)?|fine|good|send|post|go\s+ahead|proceed)\b", re.I)
+_HOLDS = re.compile(r"\b(?:don'?t|do\s+not|never|not\s+yet|hold|wait|show\s+me|let\s+me\s+(?:see|check|read)|"
+                    r"preview|before\s+(?:you\s+)?send)\b", re.I)
+
+
+def _approves_waiting_draft(to: str, cid: str) -> bool:
+    """His words this turn approve the draft already waiting for THIS person."""
+    from . import capabilities, loop, scorecard
+    said = scorecard.his_words(capabilities.said_this_turn()).lower()
+    if not said or not _APPROVES.search(said) or _HOLDS.search(said):
+        return False
+    staged = loop.awaiting(cid) or {}
+    waiting_for, now_for = (staged.get("to") or "").lower().split(), (to or "").lower().split()
+    return bool(waiting_for and now_for) and waiting_for[0] == now_for[0]
+
+
 async def _send_as_asked(cid: str, to: str, body: str) -> None:
     """Send what he asked for, as a recorded call, and say how it ended."""
     from . import notify, ops, store
@@ -2009,9 +2051,12 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # review — I told you earlier as well" was staged back to him as "can I send
     # this?" (30 Sep). One-to-one only; a group always waits for his yes, and so
     # does anything long enough that he would want to read it first.
+    # And his yes to a draft he has already read, edited or not, is the yes for
+    # the revision: one yes, not one per wording.
     if channel in ("teams", "chat") and to and not to_group and not above \
-            and _he_asked_to_send(to, cid) and len(what.strip()) <= SEND_WHEN_ASKED_MAX \
-            and not _LABEL_NOT_MESSAGE.match(what.strip()):
+            and not _LABEL_NOT_MESSAGE.match(what.strip()) \
+            and ((_he_asked_to_send(to, cid) and len(what.strip()) <= SEND_WHEN_ASKED_MAX)
+                 or _approves_waiting_draft(to, cid)):
         import asyncio
         body = writing.fit_address(writing.tidy_links(what), to)
         try:

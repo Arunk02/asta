@@ -63,6 +63,12 @@ def _subprocess_env() -> dict:
     # `remember` tool and his guardrails file; nothing else. Measured: with this
     # set, the session reports no memory directory; without it, it has one.
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    # Asta's own tools load up front instead of behind ToolSearch. Measured 14
+    # Oct: 48 of 84 tool-using chat turns spent their first round trip on
+    # ToolSearch, and 0 of 42 investigations reached the debug kit (log_counts,
+    # find_id…) the brain could not see. Off costs ~4.6k cached tokens per call.
+    if os.environ.get("ASTA_TOOL_SEARCH", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        env["ENABLE_TOOL_SEARCH"] = "false"
     return env
 
 

@@ -431,6 +431,7 @@ async def run_turn(conv: dict, user_text: str,
     # brain even starts. Under MCP the brain calls teams_activity/outlook_mail on
     # demand instead; the curl-era pre-fetch stays only for the MCP-off fallback.
     prefetched = "" if copilot_cli.mcp_cli_enabled() else await copilot_cli._prefetch(user_text)
+    prefetched = "\n\n".join(x for x in (prefetched, await copilot_cli.turn_evidence(user_text)) if x)
     proc = await asyncio.create_subprocess_exec(
         *_build_cmd(conv, user_text, prefetched),
         stdin=asyncio.subprocess.DEVNULL,           # see one_shot: never inherit

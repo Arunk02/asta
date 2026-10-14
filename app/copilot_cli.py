@@ -332,6 +332,68 @@ def open_work() -> str:
     return "\n\n".join(lines)
 
 
+#: How far back "what just happened" reaches for tasks in the state block.
+STATE_TASK_HOURS = 12
+
+
+async def turn_evidence(user_text: str) -> str:
+    """The same evidence step for every brain (booking_case.turn_evidence)."""
+    from . import booking_case, resume
+    try:
+        return await booking_case.turn_evidence(resume.ranking_text(user_text))
+    except Exception:                                          # noqa: BLE001
+        return ""
+
+
+def conversation_state(conv_id: str = "") -> str:
+    """What is open right now, so "yes", "it", "that", "post it" bind to a REAL item.
+
+    14 Oct: "yes post it" re-staged a second review because nothing told the
+    brain one was waiting, and a later turn said "#306 failed — nothing real to
+    post" while #307 had finished that very review. The brain reasoned well from
+    what it could see; it could not see the queue, the draft or the task table."""
+    import time as _t
+    from . import loop, offers, store
+    lines: list[str] = []
+    try:
+        head = offers.pending()
+        rest = [o for o in offers.waiting() if not head or o.id != head.id]
+    except Exception:                                          # noqa: BLE001
+        head, rest = None, []
+    if head:
+        lines.append(f"• WAITING FOR HIS YES (a bare yes approves THIS): [{head.id}] {head.subject} "
+                     f"— {(head.context or '').strip()[:140]}")
+    for o in rest[:4]:
+        lines.append(f"• queued behind it: [{o.id}] {o.subject}")
+    try:
+        draft = loop.awaiting(conv_id) if conv_id else None
+    except Exception:                                          # noqa: BLE001
+        draft = None
+    if draft and draft.get("to"):
+        lines.append(f"• Draft waiting for his yes, to {draft['to']}: "
+                     f"“{(draft.get('what') or '').strip()[:140]}”")
+    try:
+        cut = _t.time() - STATE_TASK_HOURS * 3600
+        recent = [t for t in store.list_tasks(limit=40) if float(t.get("created_at") or 0) > cut][:6]
+    except Exception:                                          # noqa: BLE001
+        recent = []
+    for t in recent:
+        if t["status"] == "done":
+            gist = next((ln.strip(" -•1.") for ln in (t.get("result") or "").splitlines()
+                         if ln.strip() and not ln.strip().endswith(":")), "")[:120]
+        else:
+            gist = (t.get("error") or "")[:120]
+        lines.append(f"• task #{t['id']} {t['status']}: {t['title'][:80]}" + (f" — {gist}" if gist else ""))
+    if not lines:
+        return ""
+    return ("What is open RIGHT NOW (from Asta's own records — trust this over memory):\n"
+            + "\n".join(lines)
+            + "\nHis \"yes\", \"it\", \"that\", \"post it\", \"send it\" means one of these. If it "
+              "could mean two, ask which in one line; otherwise act on the one it means — never "
+              "stage a second copy of something already waiting. A failed task with a later done "
+              "task for the same ask is superseded by the done one.")
+
+
 def _recent_asks(conv_id: str, current: str, within: float = 1800.0) -> str:
     """What he said just before, so "prod" or "check in qa" is read with the
     booking it answers — the id was in the message before (12 Oct)."""
@@ -398,6 +460,9 @@ def turn_context(user_text: str, conv_id: str = "") -> str:
     # Komal's?" — "my PR, why would I chase others' PRs, simple things" — and a
     # follow-up said to be scheduled for 14:32 had never been stored at all.
     with contextlib.suppress(Exception):
+        state = conversation_state(conv_id)
+        if state:
+            parts.append(state)
         work = open_work()
         if work:
             parts.append(work)
@@ -817,6 +882,7 @@ async def run_turn(conv: dict, user_text: str,
     # ~25s pre-read that blocks every turn is redundant. Kept for the MCP-off
     # fallback, where the brain can't reliably reach those itself.
     prefetched = "" if mcp_cli_enabled() else await _prefetch(user_text)
+    prefetched = "\n\n".join(x for x in (prefetched, await turn_evidence(user_text)) if x)
     proc = await asyncio.create_subprocess_exec(
         *_build_cmd(conv, user_text, prefetched),
         stdin=asyncio.subprocess.DEVNULL,           # see one_shot: never inherit

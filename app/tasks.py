@@ -68,6 +68,21 @@ REVIEW_OWN_DIFF = os.environ.get("ASTA_REVIEW_OWN_DIFF", "1").strip().lower() \
 #: silence regardless of how much ceiling is left.
 TASK_TIMEOUT = {"analysis": 900, "code": 2700, "teams_draft": 300}
 
+#: A PR review reads the whole diff, its CI and the project context — 15 minutes
+#: was an investigation's budget, and Vinish's booking PR 1483 review (14 Oct)
+#: timed out at it and was never done.
+REVIEW_TIMEOUT = int(os.environ.get("ASTA_REVIEW_TIMEOUT", "2400"))
+
+
+def timeout_for(task_id: int, t: dict) -> int:
+    """How long one leg of this task may run."""
+    if t["kind"] == "code":
+        return code_timeout(t["workspace"])
+    kind = (store.kv_get(f"responder_task:{task_id}") or "").split("|")
+    if len(kind) > 2 and kind[2] in ("review_request", "pr_review"):
+        return max(REVIEW_TIMEOUT, TASK_TIMEOUT[t["kind"]])
+    return TASK_TIMEOUT[t["kind"]]
+
 # --- how long a code task may take, given what it can touch -------------------
 #
 # A flat number is wrong in both directions, which is Arun's point: "even small
@@ -1994,8 +2009,7 @@ async def _simple_leg(task_id: int, t: dict, prompt: str) -> str:
     # One fresh session per simple run, so his guardrails ride exactly once —
     # the Investigation rules to an analysis, the Communication rules to a draft.
     prompt += guardrails.block(_GUARDRAIL_AUDIENCE.get(t["kind"], "chat"))
-    tout = (code_timeout(t["workspace"]) if t["kind"] == "code"
-            else TASK_TIMEOUT[t["kind"]])
+    tout = timeout_for(task_id, t)
     agent = _agent_for(t)
     eff = _effort_for(t["kind"], ex)
     pipeline = _pipeline_name(t["kind"]) if agent else ""

@@ -196,6 +196,7 @@ async def startup() -> None:
     # Nightly: look at yesterday, prove one small change against the bench, and
     # keep it only if it wins. Off unless ASTA_EVOLVE is on.
     daemon.start("evolve", evolve.loop)
+    daemon.start("bench_guard", evolve.guard_loop)
     # Whatever was mid-flight when this process's predecessor stopped. Runs once,
     # here, because a fresh process is the only place that can tell an
     # interrupted task from a running one.

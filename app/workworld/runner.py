@@ -145,6 +145,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--live", action="store_true")
     ap.add_argument("--only", default="")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--json-out", default="",
+                    help="write the summary here as JSON (evolve reads it back)")
+    ap.add_argument("--no-save", action="store_true",
+                    help="do not record this run as the last/baseline run")
     ap.add_argument("--engine", choices=ENGINES, default="",
                     help="run code tasks on this engine (default: whatever ASTA_GRAPH says)")
     args = ap.parse_args(argv)
@@ -178,7 +182,10 @@ def main(argv: list[str]) -> int:
 
     results, day_summary = asyncio.run(everything())
     summary = summarise(results, k=args.k, live=args.live, day_summary=day_summary)
-    save(summary, baseline=args.command == "baseline", replays=args.command == "replays")
+    if not args.no_save:
+        save(summary, baseline=args.command == "baseline", replays=args.command == "replays")
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(summary))
     if not args.quiet:
         print(report(summary))
     return 0 if not [f for f in summary["failures"] if not f["gap"]] else 1

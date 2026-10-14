@@ -75,29 +75,32 @@ def _proves(monkeypatch, before, after):
 
 
 def test_a_promoted_change_is_in_force_for_the_next_measurement(monkeypatch):
-    """A tuned knob lives in the database and the bench runs in a sandbox with
-    one of its own, so a promotion was invisible to every later measurement —
-    tomorrow's baseline measured an Asta nobody was running."""
+    """A tuned knob lives in the database and the bench runs in its own process
+    with a database of its own, so a promotion was invisible to every later
+    measurement — tomorrow's baseline measured an Asta nobody was running. It
+    reaches the bench through the child's environment."""
+    import json
+    from pathlib import Path
     seen = {}
 
-    async def run_all(k=1, **kw):
-        seen["share"] = __import__("os").environ.get("ASTA_ATTENTION_IGNORE_SHARE")
-        return []
+    class Child:
+        returncode = 0
 
-    async def day_run(**kw):
-        class R:
-            events = pushes = missed = false_interrupts = []
-            investigations = brain_calls = 0
-            seconds = 0.0
-        return R()
+        def __init__(self, cmd):
+            self.cmd = cmd
 
-    from app.workworld import day as day_mod, runner
-    monkeypatch.setattr(runner, "run_all", run_all)
-    monkeypatch.setattr(day_mod, "run", day_run)
+        async def communicate(self):
+            Path(self.cmd[self.cmd.index("--json-out") + 1]).write_text(json.dumps({"pass_rate": 1.0}))
+            return b"", None
+
+    async def spawn(*cmd, env=None, **kw):
+        seen["share"] = (env or {}).get("ASTA_ATTENTION_IGNORE_SHARE")
+        return Child(list(cmd))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     settings.set_override("ASTA_ATTENTION_IGNORE_SHARE", 0.7)
     asyncio.run(evolve.measure())
     assert seen["share"] == "0.7"
-
 
 def test_a_candidate_is_measured_against_the_version_running_now(monkeypatch):
     c = evolve.Candidate("L1", "ASTA_COALESCE_SECONDS", 180, "too many interruptions", "carry more")

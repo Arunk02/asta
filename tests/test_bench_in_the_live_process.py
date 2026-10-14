@@ -67,23 +67,108 @@ async def test_the_chat_sweep_stands_down_while_the_bench_holds_the_doors():
     assert not chat_watch.stand_down()
 
 
+class _Child:
+    """A fake `python -m app.workworld run` — writes its summary like the real one."""
+
+    def __init__(self, cmd, env, summary=None, hang=False):
+        self.cmd, self.env, self.returncode = cmd, env, 0
+        self._summary, self._hang = summary, hang
+
+    async def communicate(self):
+        import asyncio
+        import json
+        from pathlib import Path
+        if self._hang:
+            await asyncio.sleep(3600)
+        if self._summary is not None:
+            Path(self.cmd[self.cmd.index("--json-out") + 1]).write_text(json.dumps(self._summary))
+        else:
+            self.returncode = 2
+        return b"scenario died", None
+
+    def kill(self):
+        pass
+
+
+def _spawned(monkeypatch, **kw):
+    import asyncio
+    seen = {}
+
+    async def spawn(*cmd, env=None, **_):
+        seen["cmd"], seen["env"] = list(cmd), env or {}
+        seen["installed_meanwhile"] = W.installed()
+        seen["child"] = _Child(list(cmd), env or {}, **kw)
+        return seen["child"]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    return seen
+
+
 @pytest.mark.asyncio
-async def test_measuring_gives_the_doors_back_even_when_the_bench_blows_up():
+async def test_measuring_runs_the_bench_in_its_own_process(monkeypatch):
+    """14 Oct: a nightly pass started at 01:26 never gave the doors back, and for
+    ten and a half hours his WhatsApp was answered "(nothing scripted)"."""
     from app import evolve, notify
     real = notify.notify
+    seen = _spawned(monkeypatch, summary={"pass_rate": 1.0, "day": {}})
+    got = await evolve.measure()
+    assert got == {"pass_rate": 1.0, "day": {}}
+    assert seen["cmd"][1:4] == ["-m", "app.workworld", "run"]
+    assert "--no-save" in seen["cmd"]
+    assert not seen["installed_meanwhile"] and not W.installed()
+    assert notify.notify is real
 
-    async def explode(*a, **k):
-        _world()                            # installs, and never comes back out
-        raise RuntimeError("a scenario died mid-run")
 
-    from app.workworld import runner
-    was = runner.run_all
-    runner.run_all = explode
+@pytest.mark.asyncio
+async def test_a_bench_that_dies_leaves_this_process_untouched(monkeypatch):
+    from app import evolve, notify
+    real = notify.notify
+    _spawned(monkeypatch, summary=None)
+    with pytest.raises(RuntimeError, match="no summary"):
+        await evolve.measure()
+    assert notify.notify is real and not W.installed()
+
+
+@pytest.mark.asyncio
+async def test_a_bench_that_hangs_is_killed(monkeypatch):
+    from app import evolve
+    monkeypatch.setattr(evolve, "MEASURE_TIMEOUT", 0.05)
+    _spawned(monkeypatch, hang=True)
+    with pytest.raises(RuntimeError, match="did not finish"):
+        await evolve.measure()
+
+
+@pytest.mark.asyncio
+async def test_the_guard_takes_a_leaked_world_back_out_and_says_so(monkeypatch):
+    import asyncio
+    from app import evolve, notify
+    told = []
+    _world()                                    # leaked: nobody uninstalls it
+
+    async def tell(text, *a, **k):
+        told.append(text)
+
+    async def ticks(_):
+        ticks.n += 1
+        if ticks.n > 3:
+            raise asyncio.CancelledError
+    ticks.n = 0
+    monkeypatch.setattr(asyncio, "sleep", ticks)
+    real_restore = W.restore_all
+
+    def restore_then_listen():
+        # The guard puts Asta's real notify back, then speaks through it; record
+        # what it says instead of sending it anywhere.
+        left = real_restore()
+        monkeypatch.setattr(notify, "notify", tell)
+        return left
+
+    monkeypatch.setattr(W, "restore_all", restore_then_listen)
     try:
-        with pytest.raises(RuntimeError):
-            await evolve.measure()
+        with pytest.raises(asyncio.CancelledError):
+            await evolve.guard_loop(interval=0)
     finally:
-        runner.run_all = was
-        W.restore_all()
-    assert notify.notify is real, (
-        "a bench run that blew up left Asta unable to tell him anything")
+        if W.installed():
+            real_restore()
+    assert not W.installed()
+    assert told and "test world" in told[0]

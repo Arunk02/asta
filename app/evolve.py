@@ -169,35 +169,79 @@ def _score(summary: dict) -> tuple[float, int, int]:
 async def measure(k: int = 1) -> dict:
     """Run the bench and the day as they stand now — INCLUDING what has been tuned.
 
-    A tuned knob lives in the database, and the bench runs in a sandbox with a
-    database of its own, so a promoted change was invisible to every later
-    measurement: tomorrow's baseline measured an Asta nobody was running, and
-    the same change could be proposed and "proved" all over again.
+    In a SEPARATE PROCESS, never this one. It used to run inside the live server,
+    because a tuned knob lives in the database and the bench's sandbox has a
+    database of its own. But the bench replaces notify, store.DB_PATH, the brains
+    and the chat rail with doubles while it runs — and on 14 Oct a nightly pass
+    that started at 01:26 never put them back. For ten and a half hours Asta read
+    nothing, wrote to a temporary database, stood the Teams watcher down, and
+    answered his WhatsApp ("AP build is failing, please fix it") with the fake
+    brain's "(nothing scripted)".
 
-    This is the ONE place the bench runs inside the live server, so it is the
-    place that has to guarantee the doors come back. A scenario that dies in a
-    way its own `finally` never sees leaves a recorder where Asta's notify was,
-    and the process keeps running for days — reading everything, saying nothing.
+    The tuned knobs reach the child the way `prove` already passed a candidate:
+    through the environment. Same measurement, nothing of this process touched.
     """
-    from .workworld import day as day_mod, runner, world as bench_world
-    was = {name: os.environ.get(name) for name in settings.overrides()}
+    import asyncio
+    import sys
+    import tempfile
+    from pathlib import Path
+    env = dict(os.environ)
     for name, value in settings.overrides().items():
-        os.environ[name] = str(value)
-    try:
-        results = await runner.run_all(k=k)
-        seen = await day_mod.run()
-    finally:
-        for name, old in was.items():
-            if old is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = old
-        leaked = bench_world.restore_all()
-        if leaked:
-            store.record_outcome("bench", "leaked", subject="doubles",
-                                 detail=f"{len(leaked)} world(s) left Asta's doors "
-                                        f"replaced; taken back out")
-    return runner.summarise(results, k=k, live=False, day_summary=day_mod.summary(seen))
+        env[name] = str(value)
+    root = Path(__file__).resolve().parent.parent
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "summary.json"
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "app.workworld", "run", "--k", str(k), "--quiet",
+            "--no-save", "--json-out", str(out),
+            cwd=str(root), env=env, stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            tail, _ = await asyncio.wait_for(proc.communicate(), MEASURE_TIMEOUT)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            raise RuntimeError(f"bench did not finish in {MEASURE_TIMEOUT}s")
+        if not out.exists():
+            raise RuntimeError(f"bench wrote no summary (exit {proc.returncode}): "
+                               f"{(tail or b'').decode(errors='replace')[-300:]}")
+        return json.loads(out.read_text())
+
+
+#: A bench run that has not finished in this long is killed, not waited on.
+MEASURE_TIMEOUT = int(os.environ.get("ASTA_EVOLVE_MEASURE_TIMEOUT", "1800"))
+
+
+async def guard_loop(interval: int = 60) -> None:
+    """Nothing in this process may run with the bench's doubles installed.
+
+    The bench runs in its own process now; this is the net under that. Doubles
+    found here twice in a row are taken back out and he is told — the 14 Oct
+    morning was silent precisely because nothing looked."""
+    import asyncio
+    from .workworld import world as bench_world
+    seen = 0
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            if not bench_world.installed():
+                seen = 0
+                continue
+            seen += 1
+            if seen < 2:
+                continue
+            leaked = bench_world.restore_all()
+            seen = 0
+            store.record_outcome("bench", "leaked", subject="guard",
+                                 detail=f"{len(leaked)} world(s) found installed in the live "
+                                        "server; taken back out")
+            from . import notify
+            await notify.notify(
+                "⚠️ Asta was running inside a test world (its replies and reads went "
+                "nowhere). Restored now — anything you sent in the last few minutes may "
+                "need sending again.", "health")
+        except Exception:                                   # noqa: BLE001
+            pass
 
 
 async def prove(c: Candidate, k: int = 1, baseline: dict | None = None) -> dict:

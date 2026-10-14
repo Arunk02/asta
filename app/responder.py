@@ -323,6 +323,13 @@ def pr_number(text: str) -> str:
     link that has one, and the first match alone answered "" for the most common
     review request there is. The link parser settles anything left over.
     """
+    # A LINK names its PR exactly, and the newest one is what they just sent.
+    # 14 Oct: Vinish's "please review <booking PR 1483 link>" became "Review PR
+    # #1252" because the reader's summary ("share the update (PR 1252) and
+    # review PR 1483") came first in the text and its first number won.
+    links = re.findall(r"github\.com/[\w.-]+/[\w.-]+/pull/(\d+)", text or "", re.I)
+    if links:
+        return links[-1]
     for m in _PR.finditer(text or ""):
         found = next((g for g in m.groups() if g), "")
         if found:

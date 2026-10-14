@@ -3098,28 +3098,42 @@ async def pr_head_branch(t: dict, ws_root: Path) -> dict[str, str]:
     if not number:
         number, target = review.pr_target(text)
         repo = target.split("/")[-1] if target else ""
-    if not (repo and str(number).isdigit()):
+    if not str(number).isdigit():
+        # A bare "PR 1482" — the brain's own task title (14 Oct, #329) named no
+        # service. Inside a workspace that is still one PR: the repo that has an
+        # OPEN pull request with that number, when exactly one does.
+        m = re.search(r"\bPR\s*#?\s*(\d{2,6})\b", text, re.I)
+        number, repo = (m.group(1) if m else ""), ""
+    if not str(number).isdigit():
         return {}
-    local = next((r for r in worktrees.repos_in(ws_root) + worktrees.outside(repo)
-                  if (worktrees.origin_name(r) or r.name).lower() == repo.lower()), None)
-    if local is None:
-        return {}
+    candidates = [r for r in worktrees.repos_in(ws_root) + (worktrees.outside(repo) if repo else [])
+                  if not repo or (worktrees.origin_name(r) or r.name).lower() == repo.lower()]
+    found: dict[str, str] = {}
+    for local in candidates:
+        head = await _open_pr_head(local, str(number))
+        if head:
+            found[local.name] = head
+    return found if len(found) == 1 else {}
+
+
+async def _open_pr_head(local: Path, number: str) -> str:
+    """The head branch of this repo's OPEN, same-repo PR `number`, or ''."""
     rc, url = await repo_ops.git(local, "git", "remote", "get-url", "origin")
     m = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?$", (url or "").strip())
     if rc != 0 or not m:
-        return {}
+        return ""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "gh", "pr", "view", str(number), "-R", f"{m.group(1)}/{m.group(2)}", "--json",
+            "gh", "pr", "view", number, "-R", f"{m.group(1)}/{m.group(2)}", "--json",
             "headRefName,state,isCrossRepository", stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL)
         raw, _ = await asyncio.wait_for(proc.communicate(), 30)
         info = _json.loads(raw or b"{}")
     except Exception:                                          # noqa: BLE001
-        return {}
-    if info.get("state") != "OPEN" or info.get("isCrossRepository") or not info.get("headRefName"):
-        return {}
-    return {local.name: info["headRefName"]}
+        return ""
+    if info.get("state") != "OPEN" or info.get("isCrossRepository"):
+        return ""
+    return info.get("headRefName") or ""
 
 
 async def _prepare_branches(task_id: int, t: dict) -> list[dict]:

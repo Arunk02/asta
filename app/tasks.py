@@ -3690,6 +3690,22 @@ async def _resume_due(now: float | None = None) -> list[int]:
 RESTART_RESUME_SECONDS = float(os.environ.get("ASTA_RESTART_RESUME_SECONDS", "90"))
 
 
+def redo(task_id: int) -> dict:
+    """Run a finished, failed or skipped task again, as a new task with the same brief."""
+    t = store.get_task(task_id)
+    if not t:
+        raise ValueError("no such task")
+    if t["status"] in LIVE_STATUSES or t["status"] == "paused":
+        raise ValueError(f"it is still {t['status']} — nothing to redo yet")
+    new = spawn(t["title"], t["prompt"], t["kind"], t.get("workspace"),
+                teams_chat=t.get("teams_chat") or "")
+    tag = store.kv_get(f"responder_task:{task_id}")
+    if tag:
+        store.kv_set(f"responder_task:{new['id']}", tag)
+    store.record_outcome("task", "redone", subject=str(task_id), detail=f"as #{new['id']}")
+    return new
+
+
 async def recover_orphans() -> list[int]:
     """Tasks the database still calls running, in a process that owns no workers.
 
@@ -3707,6 +3723,8 @@ async def recover_orphans() -> list[int]:
     picked: list[int] = []
     now = time.time()
     waiting_here = set(_gate.queued_ids())
+    from . import responder
+    stale: list[dict] = []
     for t in store.list_tasks(limit=200):
         # "queued" too: the investigation gate is in memory, so a restart dropped
         # every waiting task while its row still said queued. 14 Oct: ten
@@ -3714,6 +3732,17 @@ async def recover_orphans() -> list[int]:
         # afternoon, and nothing ever picked them up again.
         if t["status"] not in ("running", "queued") or is_running(t["id"]) \
                 or t["id"] in waiting_here:
+            continue
+        # A colleague's ask that waited out a restart past the responder's own
+        # age limit is not a live ask any more: answering it now is news from
+        # hours ago (14 Oct: "Suraj asked…" reached his phone seven hours late).
+        # Closed and listed once. HIS own requests are always picked back up.
+        if t["status"] == "queued" and store.kv_get(f"responder_task:{t['id']}") \
+                and now - float(t.get("created_at") or now) > responder.MAX_AGE_MINUTES * 60:
+            store.update_task(t["id"], status="superseded",
+                              error="a colleague's ask that waited out a restart — too old to answer now")
+            store.record_outcome("task", "expired_in_queue", subject=str(t["id"]), detail=t["title"][:200])
+            stale.append(t)
             continue
         brain = _resolve_executor(t["id"])
         store.kv_set(f"task_paused:{t['id']}", _json.dumps(
@@ -3724,6 +3753,12 @@ async def recover_orphans() -> list[int]:
                           else "was waiting in the queue when Asta restarted")
         store.record_outcome("task", "orphaned", subject=str(t["id"]), detail=brain)
         picked.append(t["id"])
+    if stale:
+        await notify.notify(
+            "⏭ Not answered — colleague asks that were waiting when Asta restarted and "
+            f"are now over {responder.MAX_AGE_MINUTES:.0f} min old:\n"
+            + "\n".join(f"• #{t['id']} {t['title'][:90]}" for t in stale[:10])
+            + "\nSay \"redo #N\" if one still matters.", "task", urgency="ambient")
     if picked:
         listing = ", ".join(f"#{i}" for i in picked)
         await notify.notify(

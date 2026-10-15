@@ -76,7 +76,12 @@ def counted(monkeypatch):
         calls.append((term, env))
         return f"Lines with “{term}” by app: - {env}: telikos-billing-service 41"
 
+    async def nothing(*a, **k):
+        return ""
+
     monkeypatch.setattr(agent, "log_counts", log_counts)
+    monkeypatch.setattr(agent, "temporal_workflows", nothing)
+    monkeypatch.setattr(agent, "log_lines", nothing)
     return calls
 
 

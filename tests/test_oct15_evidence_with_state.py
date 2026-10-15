@@ -30,6 +30,10 @@ def world(monkeypatch):
 
     async def temporal_workflows(env="", query="", limit=10):
         calls["temporal"].append((env, query))
+        if env == "dev":
+            return "Temporal — no certificate for dev"
+        if env == "qa":
+            return 'No workflows in qa matching WorkflowId STARTS_WITH "H7Y5BWNBNX9".'
         return STATE.format(env=env)
 
     async def log_lines(env, contains=(), at="", **k):
@@ -39,6 +43,8 @@ def world(monkeypatch):
     monkeypatch.setattr(agent, "log_counts", log_counts)
     monkeypatch.setattr(agent, "temporal_workflows", temporal_workflows)
     monkeypatch.setattr(agent, "log_lines", log_lines)
+    from app import temporal
+    monkeypatch.setattr(temporal, "envs", lambda: {"dev": {}, "qa": {}, "prod": {}})
     return calls
 
 
@@ -49,12 +55,14 @@ def test_the_named_env_gets_its_workflows_and_the_lines_when_it_last_ran(world):
     assert "STATUS_RUNNING] ActivityPlanWorkflow" in out and "publishBillingEvent" in out
 
 
-def test_no_env_named_follows_where_the_logs_are_busiest(world):
-    asyncio.run(booking_case.turn_evidence("check booking H7Y5BWNBNX9 status"))
-    assert [e for e, _ in world["temporal"]] == ["prod", "sit"]
+def test_no_env_named_searches_every_env_and_keeps_only_where_it_is(world):
+    out = asyncio.run(booking_case.turn_evidence("check booking H7Y5BWNBNX9 status"))
+    assert sorted(e for e, _ in world["temporal"]) == ["dev", "prod", "qa"]
+    assert "workflow(s) in prod" in out
+    assert "no certificate" not in out and "No workflows in qa" not in out
 
 
-def test_no_env_and_no_logs_never_guesses_prod(world, monkeypatch):
+def test_older_than_lokis_day_is_still_found_in_temporal(world, monkeypatch):
     from app import agent
 
     async def none(*a, **k):
@@ -62,7 +70,37 @@ def test_no_env_and_no_logs_never_guesses_prod(world, monkeypatch):
 
     monkeypatch.setattr(agent, "log_counts", none)
     out = asyncio.run(booking_case.turn_evidence("check booking H7Y5BWNBNX9 status"))
-    assert world["temporal"] == [] and "none" in out
+    assert "BillingCostWorkflow" in out and world["lines"][0][0] == "prod"
+
+
+def test_counts_and_state_run_side_by_side(world, monkeypatch):
+    from app import agent
+
+    async def slow_counts(*a, **k):
+        await asyncio.sleep(0.4)
+        return "- prod: telikos-billing-service 41"
+
+    async def slow_state(env="", query="", limit=10):
+        await asyncio.sleep(0.4)
+        return STATE.format(env=env)
+
+    monkeypatch.setattr(agent, "log_counts", slow_counts)
+    monkeypatch.setattr(agent, "temporal_workflows", slow_state)
+    t = time.monotonic()
+    asyncio.run(booking_case.turn_evidence("why booking H7Y5BWNBNX9 stuck in prod"))
+    assert time.monotonic() - t < 0.75
+
+
+def test_slow_logs_keep_the_state(world, monkeypatch):
+    from app import agent
+
+    async def slow(*a, **k):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(agent, "log_counts", slow)
+    monkeypatch.setattr(booking_case, "TURN_EVIDENCE_SECONDS", 2.0)
+    out = asyncio.run(booking_case.turn_evidence("why booking H7Y5BWNBNX9 stuck in prod"))
+    assert "BillingCostWorkflow" in out
 
 
 def test_slow_temporal_keeps_the_counts(world, monkeypatch):
@@ -91,6 +129,5 @@ def test_a_failing_log_read_keeps_the_state(world, monkeypatch):
 
 
 def test_parsers():
-    assert booking_case._envs_with_hits(COUNTS) == ["prod", "sit"]
     assert booking_case._newest_start(STATE.format(env="qa")) == ("qa", "2026-10-13T23:00:29")
     assert booking_case._newest_start("Temporal — no certificate") is None

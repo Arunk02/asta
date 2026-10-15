@@ -512,32 +512,33 @@ async def turn_evidence(text: str) -> str:
     from . import agent
     named = env_of(text)
     env = named or "all"
+    from . import temporal
+    loop = asyncio.get_running_loop()
     # Each step stops on its own just inside the cap, so what was found is kept.
-    deadline = asyncio.get_running_loop().time() + TURN_EVIDENCE_SECONDS - 0.5
+    deadline = loop.time() + TURN_EVIDENCE_SECONDS - 0.5
 
-    async def one(booking: str) -> str:
-        counts = await agent.log_counts(booking, env=env, hours=72)
-        # STATE next — his order (debug-a-case-his-way): every workflow of the
-        # booking with its status, from Temporal, in the env he named or the
-        # ones its logs are in. 2.7 s measured; it is what turns "logged 41
-        # times" into "billing cost COMPLETED, activity plan RUNNING".
-        envs = [named] if named else _envs_with_hits(counts)[:2]
-        left = deadline - asyncio.get_running_loop().time()
-        state = []
-        if envs and left > 1:
-            try:
-                got = await asyncio.wait_for(asyncio.gather(*(
-                    agent.temporal_workflows(env=e, query=f'WorkflowId STARTS_WITH "{booking}"', limit=8)
-                    for e in envs), return_exceptions=True), left)
-            except asyncio.TimeoutError:
-                got = []
-            state = [g for g in got if isinstance(g, str) and g.strip()]
-        # Then the WORDS, at the moment it last ran: Loki keeps a 24 h window,
-        # so a booking that ran yesterday reads "none" in counts while Temporal
-        # still knows when — read the lines around that start, newest first.
+    async def state_of(booking: str) -> list[str]:
+        # STATE, beside the counts and not after them — his order
+        # (debug-a-case-his-way), and 2.2 s for every environment at once.
+        # Every environment when he named none: Loki keeps 24 h, so a booking
+        # that ran two days ago counts "none" everywhere while Temporal still
+        # knows where and when. Searching all is not guessing prod.
+        envs = [named] if named else list(temporal.envs())
+        left = deadline - loop.time()
+        try:
+            got = await asyncio.wait_for(asyncio.gather(*(
+                agent.temporal_workflows(env=e, query=f'WorkflowId STARTS_WITH "{booking}"', limit=8)
+                for e in envs), return_exceptions=True), max(left, 0.1))
+        except asyncio.TimeoutError:
+            return []
+        got = [g for g in got if isinstance(g, str) and g.strip()]
+        # Unnamed: only where it was found — "no certificate for dev" six times is noise.
+        state = got if named else [g for g in got if re.match(r"\d+ workflow\(s\) in ", g)]
+        # Then the WORDS, at the moment it last ran, newest first — chained
+        # here so they run beside the counts, which take longest (8-12 s).
         moment = _newest_start("\n".join(state))
-        left = deadline - asyncio.get_running_loop().time()
-        if moment and left > 2:
+        left = deadline - loop.time()
+        if moment and left > 1:
             try:
                 said = await asyncio.wait_for(agent.log_lines(
                     moment[0], contains=(booking,), at=moment[1], minutes=20, limit=12,
@@ -545,7 +546,18 @@ async def turn_evidence(text: str) -> str:
                 state.append(f"Log lines around its latest workflow start ({moment[0]}, {moment[1]}):\n{said}")
             except Exception:  # noqa: BLE001 — evidence is a head start, never a blocker
                 pass
-        return "\n".join([counts, *state])
+        return state
+
+    async def one(booking: str) -> str:
+        async def counted() -> str:
+            try:
+                return await asyncio.wait_for(agent.log_counts(booking, env=env, hours=72),
+                                              max(deadline - loop.time(), 0.1))
+            except asyncio.TimeoutError:
+                return ""   # slow Loki keeps what Temporal found
+
+        counts, state = await asyncio.gather(counted(), state_of(booking))
+        return "\n".join([c for c in (counts, *state) if c])
 
     try:
         outs = await asyncio.wait_for(asyncio.gather(*(one(i) for i in found), return_exceptions=True),
@@ -573,12 +585,3 @@ def _newest_start(state: str) -> "tuple[str, str] | None":
             best = (env, t.group(1))
     return best
 
-
-def _envs_with_hits(counts: str) -> list[str]:
-    """Environments a log_counts answer found lines in, busiest first."""
-    hits = []
-    for m in re.finditer(r"^- (\w+) \([^)]*\):\s*(.+)$", counts or "", re.M):
-        total = sum(int(n) for n in re.findall(r"\s(\d+)(?:,|$)", m.group(2)))
-        if total:
-            hits.append((total, m.group(1)))
-    return [e for _, e in sorted(hits, reverse=True)]

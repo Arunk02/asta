@@ -80,8 +80,8 @@ def test_a_days_traffic_sorts_itself_with_every_stage_live(everything, monkeypat
 
     _push([
         _mail("monitoring", "Error Reporting :: Booking", "connection refused, pods are down"),
-        _mail("Sam", "release sign-off", "can you approve this? we ship tonight, asap"),
-        _mail("Priya", "runbook", "any update when you get a sec?"),
+        _mail("Sam", "release sign-off", "Arun, can you approve this? we ship tonight, asap"),
+        _mail("Priya", "runbook", "Arun, any update when you get a sec?"),
         _mail("news@vendor.com", "This week in widgets", "our latest blog"),
     ])
     text = _no_channels[0]
@@ -119,7 +119,7 @@ def test_an_outage_still_wakes_him_with_every_guard_engaged(everything, monkeypa
 
 def test_an_l2_ticket_at_2am_waits_for_morning(everything, monkeypatch, _no_channels):
     monkeypatch.setattr(delivery, "in_quiet_hours", lambda now=None: True)
-    _push([_mail("ServiceNow", "INC9001 assigned to your group",
+    _push([_mail("ServiceNow", "INC9001 assigned to you",
                  "please review this incident")])
     assert _no_channels == []
     assert notify._held_items()                 # not lost — waiting
@@ -128,7 +128,7 @@ def test_an_l2_ticket_at_2am_waits_for_morning(everything, monkeypatch, _no_chan
 def test_what_waited_overnight_arrives_in_the_morning(everything, monkeypatch,
                                                       _no_channels):
     monkeypatch.setattr(delivery, "in_quiet_hours", lambda now=None: True)
-    _push([_mail("ServiceNow", "INC9001 assigned to your group", "please review")])
+    _push([_mail("ServiceNow", "INC9001 assigned to you", "please review")])
     assert _no_channels == []
 
     monkeypatch.setattr(delivery, "in_quiet_hours", lambda now=None: False)
@@ -192,13 +192,13 @@ def test_the_night_guard_is_inert_when_delivery_is_switched_off(monkeypatch):
 def test_turning_everything_off_restores_the_old_behaviour_exactly(nothing, _no_channels):
     """A week of use then a change of mind. The ledger keeps its rows, and the
     watchers must go straight back to how they behaved before any of this."""
-    m = _mail("Sam", "please review the deploy plan")
+    m = _mail("Sam", "Arun please review the deploy plan")
     _push([m])
     _push([m])
     assert len(_no_channels) == 2                       # no dedup
     assert "🔴 📧 Outlook — needs you (1):" in _no_channels[0]
     assert "NOW" not in _no_channels[0]
-    assert store.attention_get(attention.key_for("Sam", "please review the deploy plan")) is None
+    assert store.attention_get(attention.key_for("Sam", "Arun please review the deploy plan")) is None
 
 
 def test_history_survives_the_flags_going_off_and_on(monkeypatch, _no_channels):

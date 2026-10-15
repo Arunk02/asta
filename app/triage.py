@@ -149,6 +149,22 @@ _ADDRESSED = re.compile(
     re.I)
 
 
+#: Tags that take in everyone in the room, him included, without naming him.
+#: Teams renders a mention without its "@", so "everyone pls do update…" is an
+#: @everyone post — the room, him included.
+_ROOM_TAG = re.compile(r"@(?:everyone|all|channel|here|team)\b|\b(?:everyone|everybody)\b"
+                       r"|\b(?:hi|hello|hey|dear)\s+(?:all|team|folks|guys)\b", re.I)
+
+
+def names_him(text: str) -> bool:
+    """His name is in it — "Arun", "Arun K", "Arunkumar", "@Arun Kumar"."""
+    from . import meetings
+    low = (text or "").lower()
+    names = set(meetings.HIS_NAMES)
+    names.update(n.replace(" ", "") for n in meetings.HIS_NAMES if " " in n)
+    return any(re.search(rf"(?<!\w){re.escape(n)}(?!\w)", low) for n in names if n)
+
+
 def _first_sentence(s: str, limit: int = 110) -> str:
     """The gist, trimmed on a word boundary — enough for clarity, not a wall."""
     s = re.sub(r"\s+", " ", (s or "").strip())
@@ -198,10 +214,18 @@ def classify(who: str, subject: str, preview: str = "",
     preview = (preview or "").strip()
     blob = f"{subject} {preview}"
 
-    if addressed is None:
-        addressed = bool(_ADDRESSED.search(blob))
+    # His rule, said more than once (15 Oct): "chat, email or anything — unless
+    # they tag me or mention my name, why does it need my attention?" A 1:1, an
+    # @mention, his name or an @everyone-style tag makes it his; a request to
+    # somebody else is not. "@Shabda / @Yogesh - can you pls take care" was
+    # pushed to him as "needs you" because only the wording was read.
+    addressed = bool(addressed) or bool(_ADDRESSED.search(blob)) or names_him(blob) \
+        or bool(_ROOM_TAG.search(blob))
 
     gist = _first_sentence(subject or preview) or "(no subject)"
+
+    if _ASK.search(blob) and not addressed:
+        return Verdict(False, "asks someone else — you are not tagged or named", f"{who}: {gist}")
 
     if _ASK.search(blob):
         why = "asks you directly" if addressed else "asks for something from you"
@@ -228,7 +252,9 @@ def classify(who: str, subject: str, preview: str = "",
 
 def ambiguous(v: Verdict) -> bool:
     """Cases worth spending a FREE local-model call on to double-check."""
-    return v.why in ("addressed to you, no ask", "no ask detected")
+    # Only what is aimed at him. "No ask detected" in something that neither tags
+    # nor names him stays FYI — a model must not make it his (his rule, 15 Oct).
+    return v.why == "addressed to you, no ask"
 
 
 _JUDGE = (

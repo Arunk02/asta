@@ -30,7 +30,8 @@
       "id": "an-ask-inside-an-fyi-is-still-an-ask",
       "given": {
         "who": "tech lead",
-        "subject": "FYI on the release — but can you approve the hotfix by EOD?"
+        "subject": "FYI on the release — but can you approve the hotfix by EOD?",
+        "addressed": true
       },
       "must": ["action=True"],
       "must_not": ["explicitly FYI"],
@@ -79,7 +80,8 @@
       "id": "blocked-on-him-counts-as-an-ask",
       "given": {
         "who": "QA",
-        "subject": "we are blocked on your sign-off for the booking fix"
+        "subject": "we are blocked on your sign-off for the booking fix",
+        "addressed": true
       },
       "must": ["action=True"],
       "budget": {"seconds": 0.05, "tokens": 0},
@@ -97,6 +99,30 @@
       "budget": {"seconds": 0.05, "tokens": 0},
       "why": "broadcast mail outnumbers real asks; one false positive here trains him to ignore the channel",
       "source": "triage._FYI — newsletter/announcement"
+    },
+    {
+      "id": "a-request-to-someone-else-is-not-his",
+      "given": {
+        "who": "platform team",
+        "subject": "SR client certificate renewal for the shared cluster",
+        "preview": "@Teammate A / @Teammate B - Can you pls take care of the below"
+      },
+      "must": ["action=False", "not tagged or named"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "his rule (15 Oct): chat, email or anything, unless they tag him or name him it does not need him. A mail asking two colleagues was pushed to him as 'needs you'",
+      "source": "triage.classify: addressed = 1:1, @mention, his name, or an @everyone-style tag"
+    },
+    {
+      "id": "the-same-request-naming-him-is-his",
+      "given": {
+        "who": "platform team",
+        "subject": "SR client certificate renewal for the shared cluster",
+        "preview": "@Arun - Can you pls take care of the below"
+      },
+      "must": ["action=True"],
+      "budget": {"seconds": 0.05, "tokens": 0},
+      "why": "named, it is his: the rule narrows by addressee, not by wording",
+      "source": "triage.names_him"
     }
   ]
 }

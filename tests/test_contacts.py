@@ -196,7 +196,7 @@ def test_the_same_sender_asking_a_real_question_still_gets_through(on):
     _history("blast@x.com", ignored=12)
     n = _Notify()
     asyncio.run(outlook._push_mail(
-        n, [_mail("blast@x.com", "can you approve the invoice?", "we need your sign-off")]))
+        n, [_mail("blast@x.com", "Arun, can you approve the invoice?", "we need your sign-off")]))
     assert n.sent and "needs you" in n.sent[0][0]
 
 

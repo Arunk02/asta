@@ -211,6 +211,26 @@ def _said_recently(now: float) -> list[str]:
         return []
 
 
+_OFFERED = re.compile(r"\b(?:do you want me to|want me to|shall i|should i)\s+(.{3,160})")
+
+
+def last_offer(now: float | None = None, within: float = 1800) -> str:
+    """What the last thing on his phone offered to do ("ask which ones you want to
+    tackle first"), or ''. His bare "go ahead" answers THIS."""
+    now = time.time() if now is None else now
+    try:
+        seen = json.loads(store.kv_get(_ON_PHONE_KEY) or "[]")
+    except (ValueError, TypeError):
+        return ""
+    for s in reversed(seen):
+        if float(s.get("at") or 0) < now - within:
+            break
+        m = _OFFERED.search(s.get("n") or "")
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
 def already_on_phone(text: str, now: float | None = None) -> bool:
     """These words, or a message containing them, already reached him lately.
 

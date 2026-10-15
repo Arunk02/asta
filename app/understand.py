@@ -178,8 +178,11 @@ tell — what Arun's assistant would say to Arun on WhatsApp about this
        like a colleague sitting next to him. Who, what they actually want (with
        the subject from the conversation), anything already done, and — only if
        something is needed from him — the one question for him ("Want me to
-       reply that you'll call in 10, or will you take it?"). No labels, no
-       emoji, no markdown, no "Teams:". Empty for closing.
+       reply that you'll call in 10, or will you take it?"). Offer only what his
+       yes can run as said: a reply to them, looking into it, or leaving it to
+       him. Never offer to fix, change code or raise a PR, and never a vague
+       "want me to ask…" — "go ahead" to a vague offer is spent on a guess.
+       No labels, no emoji, no markdown, no "Teams:". Empty for closing.
 reply — for an ask with work "talk" only: the short reply Arun would most likely
        send them, in his voice (arun_writes_like), that moves it forward without
        committing him to a time he has not given ("Sure, what time works for

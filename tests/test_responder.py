@@ -467,7 +467,8 @@ def test_a_bare_imperative_aimed_at_him_is_an_ask(text, is_ask):
     """No "please", no "can you", and unmistakably a request. Anchored on the
     pronoun, because "send the notes to the team" is somebody else's job."""
     from app import triage
-    assert triage.classify("Alex", text).action is is_ask, text
+    # Reached only for messages already his (a 1:1): is it an ask at all?
+    assert triage.classify("Alex", text, addressed=True).action is is_ask, text
 
 
 # --- a live ask, not the day's backlog ----------------------------------------

@@ -186,6 +186,32 @@ def asked_for_a_file(text: str) -> bool:
     return bool(_FILE_NOUN.search(text) and _FILE_VERB.search(text))
 
 
+#: The whole of his message is a yes, and nothing else: it answers what he was offered.
+_BARE_YES = re.compile(
+    r"^\W*(?:(?:ok(?:ay)?|yes|yeah|yep|sure|fine)[\s,.!]*)*"
+    r"(?:go\s*a?head|go\s+head|do\s+it|proceed|please\s+do|yes|yeah|yep|ok(?:ay)?|sure)\W*$", re.I)
+#: An offer that was itself to change code.
+_OFFERED_CODE = re.compile(
+    r"\b(?:fix\w*|chang\w*|implement\w*|patch\w*|refactor\w*|code|pr\b|pull request|"
+    r"commit\w*|push\w*|add\s+(?:the\s+)?tests?|write\s+(?:the\s+)?tests?|update\s+the\s+(?:code|branch))", re.I)
+
+
+def yes_to_something_else(turn_text: str, kind: str, offered: str) -> str:
+    """Why a bare yes must not start this code task, or "".
+
+    15 Oct: he was asked "want me to ask which ones you want to tackle first?" and
+    said "Go head". A code task started fixing every point on his PR 1476 branch —
+    the yes said to one thing spent on another. A yes does what was offered; when
+    the offer was not to change code, it starts no code."""
+    if kind != "code" or not offered or not _BARE_YES.match(turn_text or ""):
+        return ""
+    if _OFFERED_CODE.search(offered):
+        return ""
+    return (f"His \"{(turn_text or '').strip()}\" answered your last offer — \"want me to "
+            f"{offered}?\" — which was not an offer to change code. Do not spawn a code "
+            "task: do what that offer said, or ask him in one line what he wants done.")
+
+
 def substitution(turn_text: str, kind: str, repos: tuple[str, ...] = ()) -> str:
     """Why this background task replaces what he actually asked for, or "".
 

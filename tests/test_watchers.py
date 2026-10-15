@@ -113,7 +113,7 @@ def test_a_real_ask_interrupts_and_says_what_is_wanted():
     n = _Notify()
     asyncio.run(outlook._push_mail(n, [
         {"sender": "Priya", "subject": "Can you approve the release today?",
-         "preview": "Blocked until you sign off."}]))
+         "preview": "Arun, blocked until you sign off."}]))
     text, urgency = n.sent[0]
     assert urgency == "direct"                          # this one is allowed to interrupt
     assert "needs you" in text and "Priya" in text
@@ -124,7 +124,7 @@ def test_a_mixed_batch_is_one_message_with_asks_first():
     n = _Notify()
     asyncio.run(outlook._push_mail(n, [
         {"sender": "Sam", "subject": "FYI nightly finished", "preview": "all green"},
-        {"sender": "Priya", "subject": "Please review PR #12", "preview": "waiting on you"},
+        {"sender": "Priya", "subject": "Please review PR #12", "preview": "Arun, waiting on you"},
         {"sender": "Lee", "subject": "Sharing my notes", "preview": "from the sync"}]))
     assert len(n.sent) == 1                             # ONE push, not three
     text, urgency = n.sent[0]

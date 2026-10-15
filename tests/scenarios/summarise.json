@@ -8,7 +8,7 @@
         "source": "💬 Teams",
         "items": [
           {"who": "reviewer", "subject": "can you approve the PR today?", "addressed": true},
-          {"who": "QA", "subject": "we are blocked on your sign-off"},
+          {"who": "QA", "subject": "we are blocked on your sign-off", "addressed": true},
           {"who": "release manager", "subject": "FYI - sprint 42 notes, no action needed"},
           {"who": "deploy bot", "subject": "Automated: deployment succeeded"}
         ]

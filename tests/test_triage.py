@@ -59,7 +59,7 @@ def test_a_random_thought_is_fyi_and_asks_nothing():
 
 
 def test_a_real_ask_needs_him():
-    v = triage.classify("Priya", "Can you review PR #12 today?")
+    v = triage.classify("Priya", "Can you review PR #12 today?", addressed=True)
     assert v.action is True
     assert "Priya" in v.one_line and v.render().startswith("🔴")
 
@@ -67,7 +67,7 @@ def test_a_real_ask_needs_him():
 def test_approval_requests_need_him():
     for subj in ("Please approve the release", "Awaiting your sign-off",
                  "Action required: timesheet", "Need your input on the design"):
-        assert triage.classify("X", subj).action is True, subj
+        assert triage.classify("X", subj, addressed=True).action is True, subj
 
 
 def test_explicit_fyi_never_asks():
@@ -103,7 +103,7 @@ def test_missing_fields_never_crash():
 # --- batching ---------------------------------------------------------------
 
 def test_summary_puts_asks_first_and_labels_the_fyi_tail():
-    vs = [triage.classify("Priya", "Can you approve the release?"),
+    vs = [triage.classify("Priya", "Can you approve the release?", addressed=True),
           triage.classify("Sam", "FYI — nightly finished"),
           triage.classify("Lee", "Sharing my notes")]
     text, needs = summarize_ok(vs)
@@ -128,7 +128,7 @@ def summarize_ok(vs):
 def test_refine_upgrades_an_ambiguous_item_when_the_local_model_says_act(monkeypatch):
     from app import memory
     monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: "ACT")
-    v = triage.classify("Sam", "quick one about the invoice")
+    v = triage.classify("Sam", "quick one about the invoice", addressed=True)
     assert v.action is False
     out = asyncio.run(triage.refine(v, "Sam", "quick one about the invoice"))
     assert out.action is True
@@ -138,7 +138,7 @@ def test_refine_never_downgrades_a_clear_ask(monkeypatch):
     """A rule-confirmed ask must not be talked out of it by a small model."""
     from app import memory
     monkeypatch.setattr(memory, "local_llm_complete", lambda *a, **k: "FYI")
-    v = triage.classify("Priya", "Can you approve the release?")
+    v = triage.classify("Priya", "Can you approve the release?", addressed=True)
     out = asyncio.run(triage.refine(v, "Priya", "Can you approve the release?"))
     assert out.action is True
 
@@ -163,7 +163,7 @@ def test_refine_handles_an_async_local_model(monkeypatch):
         return "ACT"
 
     monkeypatch.setattr(memory, "local_llm_complete", acomplete)
-    v = triage.classify("Sam", "about the invoice")
+    v = triage.classify("Sam", "about the invoice", addressed=True)
     assert asyncio.run(triage.refine(v, "Sam", "about the invoice")).action is True
 
 
@@ -214,7 +214,7 @@ def test_a_body_with_no_ask_adds_no_quote():
 
 def test_a_long_quoted_line_is_trimmed_on_a_word_boundary():
     ask = "Could you please review " + "the extremely detailed migration document " * 5
-    v = triage.classify("Priya", "Migration", ask)
+    v = triage.classify("Priya", "Migration", ask, addressed=True)
     quoted = v.one_line.split("—", 1)[1] if "—" in v.one_line else ""
     assert len(quoted) < 140
     assert quoted.strip().endswith("…”") or quoted.strip().endswith("”")
@@ -223,5 +223,5 @@ def test_a_long_quoted_line_is_trimmed_on_a_word_boundary():
 def test_the_quote_is_marked_as_a_quote():
     """He is reading someone else's words. Presenting them unmarked, mixed with
     Asta's own summary line, blurs who said what."""
-    v = triage.classify("Priya", "Migration", "Can you review the schema?")
+    v = triage.classify("Priya", "Migration", "Can you review the schema?", addressed=True)
     assert "“" in v.one_line and "”" in v.one_line

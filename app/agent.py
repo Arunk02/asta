@@ -2615,6 +2615,11 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
     instead = consent.substitution(capabilities.said_this_turn(), kind)
     if instead:
         return instead
+    from . import notify as _notify
+    instead = consent.yes_to_something_else(capabilities.said_this_turn(), kind,
+                                            _notify.last_offer())
+    if instead:
+        return instead
     # A question is not a request to go do work. If this turn was opened by a
     # passive question and the model is now trying to spawn work off it, hold and
     # ask first rather than silently running (and touching a repo) unasked.

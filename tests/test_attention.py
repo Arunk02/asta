@@ -324,7 +324,7 @@ def test_teams_announces_one_mention_once_across_polls(on):
 
 def test_a_real_ask_still_reaches_him_directly(on):
     n = _Notify()
-    asyncio.run(outlook._push_mail(n, [_mail("Sam", "can you approve this by EOD?")]))
+    asyncio.run(outlook._push_mail(n, [_mail("Sam", "Arun, can you approve this by EOD?")]))
     assert n.sent and n.sent[0][1] == "direct"
 
 

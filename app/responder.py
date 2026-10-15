@@ -310,7 +310,8 @@ def what_it_asks(text: str) -> str:
     # shared with the notification path, rather than a second opinion here that
     # could disagree with what he was told.
     from . import triage
-    if triage.classify("", blob).action:
+    # Only messages already his reach here — the question is only "is it an ask".
+    if triage.classify("", blob, addressed=True).action:
         return "ask"
     return ""
 

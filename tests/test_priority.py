@@ -260,8 +260,8 @@ def _mail(sender, subject, preview=""):
 def test_a_deadline_ask_and_a_vague_nudge_no_longer_look_the_same(on):
     n = _Notify()
     asyncio.run(outlook._push_mail(n, [
-        _mail("Sam", "please approve the release", "we ship tonight, need it asap"),
-        _mail("Priya", "quick one", "any update on the runbook when you get a sec?"),
+        _mail("Sam", "please approve the release", "Arun, we ship tonight, need it asap"),
+        _mail("Priya", "quick one", "Arun, any update on the runbook when you get a sec?"),
     ]))
     text = n.sent[0][0]
     assert "needs you NOW" in text and "Sam" in text.split("🔴")[0]
@@ -289,7 +289,7 @@ def test_with_the_ledger_off_nothing_is_ranked_and_the_message_is_the_old_one(mo
     monkeypatch.setenv("ASTA_ATTENTION", "0")
     n = _Notify()
     asyncio.run(outlook._push_mail(n, [
-        _mail("Sam", "please approve the release", "we ship tonight, need it asap")]))
+        _mail("Sam", "please approve the release", "Arun, we ship tonight, need it asap")]))
     assert "NOW" not in n.sent[0][0]
     assert "🔴 📧 Outlook — needs you (1):" in n.sent[0][0]
 

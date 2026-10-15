@@ -146,6 +146,13 @@ async def checks() -> dict[str, str]:
     problems: dict[str, str] = {}
     try:
         wa = await notify.wa_status()
+        # The link drops 60-70 times a day and is back in 3-30 s; "not paired"
+        # at 06:06 on 15 Oct was a reconnect mid-dark-wake. Look again first.
+        for _ in range(WA_RECHECKS):
+            if wa.get("up") and wa.get("paired"):
+                break
+            await asyncio.sleep(WA_RECHECK_SECONDS)
+            wa = await notify.wa_status()
         if not wa.get("up"):
             problems["whatsapp"] = "bridge not running"
         elif not wa.get("paired"):
@@ -462,6 +469,9 @@ async def loop() -> None:
 VITALS_SECONDS = int(os.environ.get("ASTA_VITALS_SECONDS", "120"))
 #: Teams not read for this long while awake and logged in is an outage.
 TEAMS_STALE_SECONDS = 15 * 60
+#: Looks, 10 s apart, before WhatsApp is called down — it reconnects in seconds.
+WA_RECHECKS = 4
+WA_RECHECK_SECONDS = 10.0
 #: The ring check runs every few seconds; this long without one is missed calls.
 CALLS_STALE_SECONDS = 5 * 60
 

@@ -48,3 +48,29 @@ def test_no_sleep_on_record_keeps_the_old_reading(teams_on, monkeypatch):
     store.kv_del(wake.LAST_GAP_KEY)
     v = health.vitals(now=now)
     assert "121 min" in v["teams_read"] and "55 min" in v["call_check"]
+
+
+def test_whatsapp_reconnecting_is_looked_at_again_before_it_is_called_down(monkeypatch):
+    import asyncio
+
+    from app import notify
+    looks = iter([{"up": True, "paired": False, "enabled": True},
+                  {"up": True, "paired": True, "enabled": True}])
+
+    async def status():
+        return next(looks)
+
+    monkeypatch.setattr(notify, "wa_status", status)
+    assert "whatsapp" not in asyncio.run(health.checks())
+
+
+def test_whatsapp_down_on_every_look_is_still_told(monkeypatch):
+    import asyncio
+
+    from app import notify
+
+    async def status():
+        return {"up": False}
+
+    monkeypatch.setattr(notify, "wa_status", status)
+    assert asyncio.run(health.checks())["whatsapp"] == "bridge not running"

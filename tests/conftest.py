@@ -196,6 +196,8 @@ def _no_machine_side_effects(monkeypatch):
     # The live Asta's Chrome runs on this Mac; its size is not the suite's.
     from app import teams_bridge as _tb
     monkeypatch.setattr(_tb, "profile_mb", lambda: 0.0)
+    from app import health as _health
+    monkeypatch.setattr(_health, "WA_RECHECK_SECONDS", 0.0)   # the bridge is a stub here
     prname._OPEN.update(at=0.0, lines=[])
     yield
 

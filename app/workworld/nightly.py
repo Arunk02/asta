@@ -125,6 +125,10 @@ def note_limit_hit_today() -> None:
     _save(b)
 
 
+#: Seconds the live bench may run before it is stopped (and still counted).
+LIVE_TIMEOUT = 3600
+
+
 async def run_once(k: int = 4) -> str:
     """Spend the night's budget. Returns a one-line result for the log."""
     now = dt.datetime.now()
@@ -136,10 +140,14 @@ async def run_once(k: int = 4) -> str:
         *cmd, cwd=str(ROOT), stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT)
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=3600)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=LIVE_TIMEOUT)
     except asyncio.TimeoutError:
         proc.kill()
-        return "live bench timed out after an hour"
+        # Still the night's run. A timeout used to return here before
+        # recording it, so the loop started it again: 7-15 Oct, an hour of
+        # brain time two or three times a night, and the call rehearsal after
+        # it never ran (last 6 Oct) while health read "no failures".
+        out = b"live bench timed out after an hour"
     calls = await _rehearse_calls()
     spent = min(legs, k * 3 + 3)         # three live scenarios k times, three calls
     if b.get("week") != _week_of(now):

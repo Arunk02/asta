@@ -114,6 +114,31 @@ def bare(text: str) -> bool:
     return bool(ids(text) or env_of(text)) and not re.search(r"[A-Za-z]{2,}|\?", rest)
 
 
+#: The label chat_watch.as_read puts on what a reply quoted.
+_QUOTED = re.compile(r"\n\s*↳ quoting:\s*(.*)\Z", re.S)
+
+
+def own_and_quoted(text: str) -> tuple[str, str]:
+    """(what they typed, what they quoted) — raw Teams text or already read.
+
+    15 Oct: Vinish replied "Please check this" to Arun's own message of
+    screenshots. "check this" read as a booking still to come, so Asta waited
+    for it and then drafted "which booking is it, and in which environment?".
+    The "this" was the message he quoted."""
+    t = text or ""
+    m = _QUOTED.search(t)
+    if not m:
+        from . import chat_watch
+        t = chat_watch.as_read(t)
+        m = _QUOTED.search(t)
+    return (t[:m.start()], m.group(1)) if m else (text or "", "")
+
+
+def _about_a_case(text: str) -> bool:
+    """Names a booking, or says it is about one — not merely '...' at its end."""
+    return bool(ids(text) or re.search(rf"\b{_THING}\b", text or "", re.I))
+
+
 def waiting_for_more(text: str, before: str = "") -> str:
     """Why this message should wait for the next one, or ''.
 
@@ -124,7 +149,8 @@ def waiting_for_more(text: str, before: str = "") -> str:
     t = (text or "").strip()
     if not t:
         return ""
-    if _FORWARD.search(t) and not ids(t):
+    own, quoted = own_and_quoted(t)
+    if _FORWARD.search(own if quoted else t) and not ids(t) and not quoted:
         return "names a booking it does not include"
     if bare(t) and ids(t) and not asks(before):
         return "an id with no question yet"
@@ -137,6 +163,9 @@ def missing(text: str, context: str = "") -> list[str]:
     Empty for a general question — "does manual customs reach billing?" is the
     documents' to answer, and asking which booking would be the blind reply in
     the other direction."""
+    own, quoted = own_and_quoted(text)
+    if quoted and not ids(own) and not _about_a_case(quoted):
+        return []           # "check this" points at what they quoted, not a booking
     if not points_at_one(text) and not (bare(text) and points_at_one(context)):
         return []
     whole = f"{context}\n{text}"

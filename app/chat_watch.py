@@ -1182,19 +1182,39 @@ def _his_last_minutes(chat: str, now: float, hours: float = 6) -> int | None:
     return int((now - max(his)) // 60) if his else None
 
 
-def _transcript(chat: str, now: float, hours: float = 6, at_most: int = 14) -> list[str]:
-    """The last few messages of this chat, both sides, oldest first, labelled."""
+#: Where the transcript says the current conversation begins.
+CONVERSATION_STARTS = "— the conversation above is over; this one starts here —"
+
+
+def _transcript(chat: str, now: float, hours: float = 6, at_most: int = 14,
+                begins: float = 0.0) -> list[str]:
+    """The last few messages of this chat, both sides, oldest first, labelled.
+
+    `begins` is where the current conversation starts: what came before it is
+    kept (a colleague may point back at it) but marked as over, so a reader
+    does not answer yesterday's PR in today's chat (15 Oct)."""
     try:
         rows = store.teams_messages(chat=chat, since=now - hours * 3600,
                                     until=now, limit=400)
     except Exception:                                          # noqa: BLE001
         return []
     out = []
+    marked = False
     earlier = {(r.get("text") or "") for r in rows}
     for r in rows[-at_most:]:
         text = " ".join(as_read(r.get("text") or "", earlier).split())[:400]
-        if text:
-            out.append(f"{speaker(r, chat)}: {text}")
+        if not text:
+            continue
+        if begins and not marked:
+            try:
+                at = float(r.get("sent_at") or 0)
+            except (TypeError, ValueError):
+                at = 0.0
+            if at >= begins:
+                if out:
+                    out.append(CONVERSATION_STARTS)
+                marked = True
+        out.append(f"{speaker(r, chat)}: {text}")
     return out
 
 
@@ -1626,9 +1646,12 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         # handling it. The first live conversation, 29 Sep, was read as "a code
         # change, plan it?" because the model never saw his "u create group with
         # karthik" before "Ok Arun".
-        c["conversation"] = _transcript(c["chat"], now)
         c["arun_minutes_ago"] = _his_last_minutes(c["chat"], now)
-        t = threads.open("teams", c["counterpart"], chat=c["chat"], now=now)
+        # Opened on what they said: a closed conversation is picked back up only
+        # by a message about the same thing (threads.continues).
+        t = threads.open("teams", c["counterpart"], chat=c["chat"], now=now,
+                         text="\n".join(c["new"]), entities=threads.entities_in(" ".join(c["new"])))
+        c["conversation"] = _transcript(c["chat"], now, begins=threads.started_at(t))
         c["status"] = t.get("status", "open")
         c["so_far"] = t.get("summary", "")
         # What they were already waiting on BEFORE this sweep — read from the

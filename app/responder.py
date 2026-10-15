@@ -758,6 +758,31 @@ def familiar(text: str) -> tuple[bool, str]:
 LOOK_FOR_WAITING_COLLEAGUE = True
 
 
+#: Personal small talk: plans, food, travel, office days, how someone is.
+_PERSONAL = re.compile(
+    r"\b(?:weekend|plans?|holidays?|vacation|trip|travel\w*|going\s+(?:somewhere|out|home)|"
+    r"lunch|dinner|breakfast|snacks?|tea|coffee|movie|party|birthday|wedding|marriage|family|"
+    r"home\s*town|native|how\s+(?:are|r)\s+(?:you|u)|how\s+is\s+(?:it\s+going|life)|"
+    r"what'?s\s+up|wassup|coming\s+to\s+(?:the\s+)?office|office\s+(?:today|tomorrow|tmr|"
+    r"on\s+\w+day)|work\s+from\s+home|wfh|pg\b|flat|room\s?mate|cricket|match|gym|"
+    r"festival|diwali|pongal|onam|leave\s+(?:today|tomorrow|tmr))\b", re.I)
+#: Anything that makes it work after all.
+_WORK = re.compile(
+    r"\b(?:pr|pull|build|deploy\w*|release|prod|preprod|sit|uat|qa|dev|env\w*|error|"
+    r"exception|logs?|booking|order|ticket|jira|incident|bug|defect|fix|code|test\w*|"
+    r"review|merge|branch|pipeline|ci|kafka|temporal|workflow|api|service|config)\b", re.I)
+
+
+def personal(text: str) -> bool:
+    """Small talk between colleagues — "any weekend plans? going somewhere?". It
+    is his to answer or not; nothing in it can be investigated. 15 Oct: Sameer's
+    question started analysis task #341, which searched his chats for his plans,
+    and came back to his phone four times as "still unanswered"."""
+    t = text or ""
+    from . import booking_case
+    return bool(_PERSONAL.search(t)) and not _WORK.search(t) and not booking_case.ids(t)
+
+
 def respond(source: str, who: str, text: str, priority: int | None = None,
             key: str = "", workspace: str = "", sent_at: float | None = None,
             context: str = "", reply_to: str = "", group: bool = False,
@@ -773,6 +798,10 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     import time
 
     from . import steward, tasks
+    if personal(source_text or text):
+        store.record_outcome("responder", "skipped", subject=who[:80],
+                             detail=f"personal chat — his to answer: {(source_text or text)[:100]}")
+        return None
     if group and reply_to:
         from . import chat_watch
         if not chat_watch.mentions_him(source_text):

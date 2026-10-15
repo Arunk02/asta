@@ -85,7 +85,11 @@ _SPEAKER = re.compile(r"^[^:\n]{1,60}:\s")
 FROM_KEY = "thread_from:"
 
 
-def continues(t: dict, text: str = "", entities=()) -> str:
+#: A conversation closed this recently is picked back up by anything said.
+REOPEN_SECONDS = float(os.environ.get("ASTA_THREAD_REOPEN_MINUTES", "20") or 20) * 60
+
+
+def continues(t: dict, text: str = "", entities=(), now: float | None = None) -> str:
     """Why a message picks this CLOSED conversation back up — '' when it is a new one.
 
     15 Oct: one 1:1 with Vinish held eight topics in a day — PR 1252, PR 1483,
@@ -94,6 +98,12 @@ def continues(t: dict, text: str = "", entities=()) -> str:
     at 13:19 still read "share the update on PR 1252 and review PR 1483", and
     the reply mixed the two PRs up. A conversation ends on its subject, not on a
     clock: the same PR, ticket or booking, or words that point back, continue it."""
+    # A quick back-and-forth is one conversation, whatever it turns to. 15 Oct,
+    # Sameer: "how many coming to office?" … "okay cool" … "any weekend plans?"
+    # inside 20 minutes was split into four conversations, each read cold.
+    closed = float(t.get("closed_at") or t.get("last_activity") or 0)
+    if closed and (now if now is not None else time.time()) - closed < REOPEN_SECONDS:
+        return "moments after it closed"
     if set(entities or ()) & set(t.get("entities") or ()):
         return "same subject"
     bodies = [_SPEAKER.sub("", line).strip() for line in (text or "").splitlines()]
@@ -146,7 +156,7 @@ def open(channel: str, counterpart: str, chat: str = "", now: float | None = Non
             _record(key, "opened", "")
         elif t["status"] == "closed":
             why = "they wrote again before it dissolved" if text is None \
-                else continues(t, text, entities)
+                else continues(t, text, entities, now=now)
             if why:
                 conn.execute("UPDATE conv_threads SET status='open', closed_at=NULL, "
                              "checked_in=0, last_activity=? WHERE id=?", (now, key))

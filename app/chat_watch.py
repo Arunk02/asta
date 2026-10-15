@@ -1370,6 +1370,9 @@ async def _acknowledge(tid: str, c: dict) -> bool:
         last = 0.0
     if _t.time() - last < ACK_SECONDS:
         return False
+    from . import responder
+    if responder.personal(c.get("last") or ""):
+        return False                     # small talk is his: no "let me look into this"
     line = steward.ack_line(c["chat"], c.get("last") or "")
     if await _say(c["chat"], line, group=False, since=c.get("sent_at")):
         store.kv_set(key, str(_t.time()))

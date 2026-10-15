@@ -199,6 +199,46 @@ def stage(cid: str, intent: dict) -> None:
     if cid:
         _awaiting[cid] = intent
         _kv("set", cid, json.dumps(intent))
+        _remember_version(cid, intent)
+
+
+#: Each staged wording, so "send the previous one" has something to send. 15 Oct:
+#: a reply to Sameer was revised and he asked three times for the earlier one —
+#: it was gone, so each ask was taken as more feedback and nothing went out.
+_VERSIONS = "staged_versions:"
+VERSION_SECONDS = 2 * 3600
+
+
+def _remember_version(cid: str, intent: dict) -> None:
+    from . import store
+    what = (intent.get("what") or "").strip()
+    if not what:
+        return
+    now = time.time()
+    try:
+        seen = json.loads(store.kv_get(_VERSIONS + cid) or "[]")
+    except ValueError:
+        seen = []
+    seen = [v for v in seen if now - float(v.get("at") or 0) < VERSION_SECONDS]
+    if seen and seen[-1].get("what") == what and seen[-1].get("to") == intent.get("to"):
+        return
+    seen.append({"to": intent.get("to") or "", "what": what, "at": now})
+    store.kv_set(_VERSIONS + cid, json.dumps(seen[-5:]))
+
+
+def previous_version(cid: str, to: str, current: str) -> str:
+    """The wording staged for `to` just before `current`, or ''."""
+    from . import store
+    try:
+        seen = json.loads(store.kv_get(_VERSIONS + cid) or "[]")
+    except ValueError:
+        return ""
+    now = time.time()
+    for v in reversed(seen):
+        if (v.get("to") or "") == (to or "") and v.get("what") != (current or "").strip() \
+                and now - float(v.get("at") or 0) < VERSION_SECONDS:
+            return v.get("what") or ""
+    return ""
 
 
 def awaiting(cid: str) -> dict | None:

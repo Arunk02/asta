@@ -510,15 +510,75 @@ async def turn_evidence(text: str) -> str:
     if not found or not _CHECKING.search(text or ""):
         return ""
     from . import agent
-    env = env_of(text) or "all"
+    named = env_of(text)
+    env = named or "all"
+    # Each step stops on its own just inside the cap, so what was found is kept.
+    deadline = asyncio.get_running_loop().time() + TURN_EVIDENCE_SECONDS - 0.5
+
+    async def one(booking: str) -> str:
+        counts = await agent.log_counts(booking, env=env, hours=72)
+        # STATE next — his order (debug-a-case-his-way): every workflow of the
+        # booking with its status, from Temporal, in the env he named or the
+        # ones its logs are in. 2.7 s measured; it is what turns "logged 41
+        # times" into "billing cost COMPLETED, activity plan RUNNING".
+        envs = [named] if named else _envs_with_hits(counts)[:2]
+        left = deadline - asyncio.get_running_loop().time()
+        state = []
+        if envs and left > 1:
+            try:
+                got = await asyncio.wait_for(asyncio.gather(*(
+                    agent.temporal_workflows(env=e, query=f'WorkflowId STARTS_WITH "{booking}"', limit=8)
+                    for e in envs), return_exceptions=True), left)
+            except asyncio.TimeoutError:
+                got = []
+            state = [g for g in got if isinstance(g, str) and g.strip()]
+        # Then the WORDS, at the moment it last ran: Loki keeps a 24 h window,
+        # so a booking that ran yesterday reads "none" in counts while Temporal
+        # still knows when — read the lines around that start, newest first.
+        moment = _newest_start("\n".join(state))
+        left = deadline - asyncio.get_running_loop().time()
+        if moment and left > 2:
+            try:
+                said = await asyncio.wait_for(agent.log_lines(
+                    moment[0], contains=(booking,), at=moment[1], minutes=20, limit=12,
+                    newest_first=True), left)
+                state.append(f"Log lines around its latest workflow start ({moment[0]}, {moment[1]}):\n{said}")
+            except Exception:  # noqa: BLE001 — evidence is a head start, never a blocker
+                pass
+        return "\n".join([counts, *state])
+
     try:
-        outs = await asyncio.wait_for(
-            asyncio.gather(*(agent.log_counts(i, env=env, hours=72) for i in found),
-                           return_exceptions=True), TURN_EVIDENCE_SECONDS)
+        outs = await asyncio.wait_for(asyncio.gather(*(one(i) for i in found), return_exceptions=True),
+                                      TURN_EVIDENCE_SECONDS)
     except asyncio.TimeoutError:
         return ""
     lines = [o for o in outs if isinstance(o, str) and o.strip()]
     if not lines:
         return ""
-    return ("[Evidence fetched in code before this turn — where these ids are logged. Build on "
-            "it (log_lines, temporal_workflow…); do not re-run it.]\n" + "\n".join(lines))
+    return ("[Evidence fetched in code before this turn — where these ids are logged, and their "
+            "Temporal workflows with status. Build on it (log_lines at a workflow's start time, "
+            "temporal_workflow history…); do not re-run it.]\n" + "\n".join(lines))
+
+
+def _newest_start(state: str) -> "tuple[str, str] | None":
+    """(env, ISO start) of the most recent workflow in temporal_workflows output."""
+    best = None
+    env = ""
+    for line in (state or "").splitlines():
+        m = re.match(r"\d+ workflow\(s\) in (\w+) ", line)
+        if m:
+            env = m.group(1)
+        t = re.search(r"started (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)", line)
+        if t and env and (best is None or t.group(1) > best[1]):
+            best = (env, t.group(1))
+    return best
+
+
+def _envs_with_hits(counts: str) -> list[str]:
+    """Environments a log_counts answer found lines in, busiest first."""
+    hits = []
+    for m in re.finditer(r"^- (\w+) \([^)]*\):\s*(.+)$", counts or "", re.M):
+        total = sum(int(n) for n in re.findall(r"\s(\d+)(?:,|$)", m.group(2)))
+        if total:
+            hits.append((total, m.group(1)))
+    return [e for _, e in sorted(hits, reverse=True)]

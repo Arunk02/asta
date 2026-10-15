@@ -327,6 +327,11 @@ async def checks() -> dict[str, str]:
     failing = call_rehearsal.latest_failures()
     if failing:
         problems["calls"] = f"call rehearsal failing: {failing}"
+    elif (since := call_rehearsal.stale()):
+        from .workworld import nightly
+        if nightly.enabled():
+            problems["calls"] = (f"call rehearsal has not run since {since} — "
+                                 "a broken call path would not be seen")
     # Production's own eyes. A token that expired or a certificate that was never
     # fetched looks, from a task's side, exactly like "there was nothing to find".
     from . import grafana, temporal

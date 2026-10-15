@@ -973,6 +973,10 @@ def _constitution(sc: Scenario, world: W.World, state: dict) -> list[str]:
 
 # --- the whole run ------------------------------------------------------------
 
+#: Seconds one live run may take (30 Sep: four took 549 s in all).
+LIVE_RUN_TIMEOUT = 600.0
+
+
 async def run_scenario(sc: Scenario, k: int = 1, live: bool = False) -> Result:
     """pass^k: k runs, and the scenario counts only if every one of them passes.
 
@@ -984,7 +988,15 @@ async def run_scenario(sc: Scenario, k: int = 1, live: bool = False) -> Result:
     t0 = time.monotonic()
     failures: list[str] = []
     for seed in range(max(1, k)):
-        got = await run(sc, seed=seed, live=live)
+        if live:
+            # One hung live run took the whole night's hour from 7 to 15 Oct
+            # and left no result at all. Capped, it fails by name instead.
+            try:
+                got = await asyncio.wait_for(run(sc, seed=seed, live=True), LIVE_RUN_TIMEOUT)
+            except asyncio.TimeoutError:
+                got = [f"timed out after {LIVE_RUN_TIMEOUT:.0f}s"]
+        else:
+            got = await run(sc, seed=seed, live=live)
         failures += [f"[run {seed}] {f}" for f in got]
     return Result(scenario=sc, passed=not failures, failures=failures,
                   variants=max(1, k), seconds=time.monotonic() - t0)

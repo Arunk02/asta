@@ -666,5 +666,17 @@ def latest_failures(max_age_hours: float = 48) -> str:
     return f"{', '.join(bad)} ({len(bad)}/{len(data.get('results', []))})" if bad else ""
 
 
+def stale(max_age_hours: float = 48) -> str:
+    """'' while a rehearsal has run recently (or none ever has), else since when.
+    A rehearsal that stopped running reads exactly like one that passes."""
+    try:
+        at = float(json.loads(_latest_file().read_text()).get("at") or 0)
+    except (OSError, ValueError):
+        return ""
+    if not at or time.time() - at <= max_age_hours * 3600:
+        return ""
+    return time.strftime("%d %b", time.localtime(at))
+
+
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main(sys.argv[1:])))

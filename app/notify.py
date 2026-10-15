@@ -18,6 +18,9 @@ def bridge_url() -> str:
     return os.environ.get("WA_BRIDGE_URL", "http://127.0.0.1:8323")
 
 
+WA_SEND_TIMEOUT = float(os.environ.get("ASTA_WA_SEND_TIMEOUT", "60"))
+
+
 async def wa_send(text: str, done: bool = False) -> bool:
     """Push a message through the WhatsApp bridge; False if bridge is down/unpaired.
 
@@ -27,7 +30,9 @@ async def wa_send(text: str, done: bool = False) -> bool:
     pushes had been arriving with `**bold**` spelled out in literal asterisks.
     """
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
+        # The bridge waits out a dropped connection (up to ~55 s) instead of
+        # failing — the link drops 60-70 times a day and is back in seconds.
+        async with httpx.AsyncClient(timeout=WA_SEND_TIMEOUT) as c:
             r = await c.post(
                 f"{bridge_url()}/send",
                 json={"text": wa_format.for_whatsapp(text), "done": bool(done)},
@@ -58,7 +63,7 @@ async def wa_document(path: str, caption: str = "") -> bool:
     """Send a FILE to his phone. False when the bridge is down or unpaired."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=60) as c:
+        async with httpx.AsyncClient(timeout=WA_SEND_TIMEOUT + 60) as c:
             r = await c.post(f"{bridge_url()}/send-document",
                              headers={"Authorization": f"Bearer {os.environ.get('ASTA_TOKEN', '')}"},
                              json={"path": str(path), "caption": caption})
@@ -71,7 +76,7 @@ async def wa_voice(path: str, seconds: int = 1) -> bool:
     """Send a voice note (PTT) to his phone. False when the bridge will not take it."""
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=60) as c:
+        async with httpx.AsyncClient(timeout=WA_SEND_TIMEOUT + 60) as c:
             r = await c.post(f"{bridge_url()}/send-voice",
                              headers={"Authorization": f"Bearer {os.environ.get('ASTA_TOKEN', '')}"},
                              json={"path": str(path), "seconds": int(seconds)})
@@ -254,9 +259,11 @@ async def deliver(text: str, *, force: bool = False, keys: tuple = ()) -> dict:
     if not force and quiet_rule() is not None:
         _keep_for_quiet(text, "batch", keys)
         return {"bell": True, "held": True, "quiet": True, "whatsapp": False, "telegram": False}
-    store.record_outcome("notify", "pushed", detail=text[:120])
     wa = await wa_send(text)
     tg = await telegram.send(text)
+    # Recorded after the send, as what happened: "pushed" used to be written
+    # before it, so four failed tries of one batch counted as four buzzes.
+    store.record_outcome("notify", "pushed" if (wa or tg) else "push_failed", detail=text[:120])
     if tg and not wa:
         _note_on_phone(text)
     delivery.note_sent()

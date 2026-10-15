@@ -146,6 +146,13 @@ async def checks() -> dict[str, str]:
     problems: dict[str, str] = {}
     try:
         wa = await notify.wa_status()
+        # The link drops 60-70 times a day and is back in 3-30 s; "not paired"
+        # at 06:06 on 15 Oct was a reconnect mid-dark-wake. Look again first.
+        for _ in range(WA_RECHECKS):
+            if wa.get("up") and wa.get("paired"):
+                break
+            await asyncio.sleep(WA_RECHECK_SECONDS)
+            wa = await notify.wa_status()
         if not wa.get("up"):
             problems["whatsapp"] = "bridge not running"
         elif not wa.get("paired"):
@@ -462,28 +469,38 @@ async def loop() -> None:
 VITALS_SECONDS = int(os.environ.get("ASTA_VITALS_SECONDS", "120"))
 #: Teams not read for this long while awake and logged in is an outage.
 TEAMS_STALE_SECONDS = 15 * 60
+#: Looks, 10 s apart, before WhatsApp is called down — it reconnects in seconds.
+WA_RECHECKS = 4
+WA_RECHECK_SECONDS = 10.0
 #: The ring check runs every few seconds; this long without one is missed calls.
 CALLS_STALE_SECONDS = 5 * 60
 
 
 def vitals(now: float | None = None, started: float = 0.0) -> dict[str, str]:
     """What is broken right now that leaves him on his own — {} when nothing is."""
-    from . import agent, incoming, teams_bridge
+    from . import agent, incoming, teams_bridge, wake
     from .workworld import world as bench_world
     now = now or time.time()
     out: dict[str, str] = {}
+    # A wake is a fresh start, like a restart. 14-15 Oct: the lid shut on
+    # battery (31%, then 8%) and the Mac slept ~100 times a day between dark
+    # wakes; "Teams has not been read for 121 min" was the sleep, not a fault,
+    # and every one of those alerts was noise. Staleness counts from the later
+    # of the last read and the last wake — a Mac awake that long and still not
+    # reading is the real outage, and that is still told.
+    started = max(started, wake.last_gap()[0])
     if bench_world.installed():
         out["test_world"] = ("running inside a test world — Teams is not read and "
                              "replies go nowhere")
     teams_up = (teams_bridge.enabled() and teams_bridge.logged_in_once()
                 and store.kv_get("teams_session_ok") != "0" and not teams_bridge.in_a_call())
     if teams_up:
-        last = teams_bridge._last_read() or started
+        last = max(teams_bridge._last_read() or 0, started)
         if last and now - last > TEAMS_STALE_SECONDS:
             out["teams_read"] = f"Teams has not been read for {int((now - last) / 60)} min"
         if incoming.enabled():
             try:
-                checked = float(store.kv_get(incoming.CHECKED_KEY) or 0) or started
+                checked = max(float(store.kv_get(incoming.CHECKED_KEY) or 0), started)
             except ValueError:
                 checked = started
             if checked and now - checked > CALLS_STALE_SECONDS:

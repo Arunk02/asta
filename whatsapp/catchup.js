@@ -68,3 +68,31 @@ export function timesOf(messages) {
     new Date(tsOf(m) * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }));
   return t.length < 2 ? t.join("") : `${t.slice(0, -1).join(", ")} and ${t[t.length - 1]}`;
 }
+
+/**
+ * Run `send` on a live connection. The link to WhatsApp drops 60-70 times a day
+ * (code 408, 15 Oct) and is back in 3-30 s; a push that met a dead socket was
+ * reported failed and retried a minute later — "Held (10)" went four times.
+ * So: wait for the connection, send, and if the socket dies under the send
+ * (it throws), wait for the next live window and send once more. A send that
+ * only times out is NOT retried — it may have gone, and twice is worse.
+ */
+export async function whenLive(isLive, send, { waitMs = 20000, tries = 2, stepMs = 250, sendMs = 15000 } = {}) {
+  for (let i = 0; i < tries; i++) {
+    const until = Date.now() + waitMs;
+    while (!isLive() && Date.now() < until) await new Promise((r) => setTimeout(r, stepMs));
+    if (!isLive()) return false;
+    let timer;
+    const late = new Promise((r) => { timer = setTimeout(() => r("timeout"), sendMs); });
+    try {
+      const got = await Promise.race([send(), late]);
+      if (got === "timeout") { console.log("send timed out — not retried, it may have gone"); return false; }
+      return got;
+    } catch (e) {
+      console.log(`send failed (${e?.message || e}) — ${i + 1 < tries ? "retrying when the connection is back" : "giving up"}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return false;
+}

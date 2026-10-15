@@ -237,3 +237,34 @@ def test_good_news_goes_to_the_digest_and_a_failure_to_his_phone(monkeypatch):
     assert len(digest.pending()) == 2
     asyncio.run(ci_watch.announce("🔴 CI failure: asta · build.yml (main) — x\nhttps://gh/2"))
     assert len(pushed) == 1 and "CI failure" in pushed[0]
+
+
+# --- 15 Oct: a failed look at his runs must not mean "everyone's runs" ---------------
+
+def test_when_his_runs_cannot_be_read_nothing_is_reported_and_nothing_is_lost(monkeypatch):
+    _prime(monkeypatch, [_run("1", concl="success")], ["1"], [])
+    bot = _run("2", workflow="Auto merge PR")
+    mine = _run("3", workflow="build.yml", branch="feature/x")
+
+    async def flaky(*args, timeout=30):
+        if "--user" in args:
+            return 1, "gh timed out"
+        return 0, json.dumps([bot, mine])
+
+    monkeypatch.setattr(ci_watch, "_run_gh", flaky)
+    assert _poll() == []                       # used to report the bot's failure
+    _gh(monkeypatch, [bot, mine], ["3"], [])   # next poll can read them
+    notes = _poll()
+    assert len(notes) == 1 and "build.yml" in notes[0]
+
+
+def test_no_login_means_no_reports(monkeypatch):
+    _prime(monkeypatch, [_run("1", concl="success")], ["1"], [])
+    _gh(monkeypatch, [_run("2")], ["2"], [])
+
+    async def nobody():
+        return ""
+
+    monkeypatch.setattr(ci_watch, "my_login", nobody)
+    monkeypatch.setattr(ci_watch.repo_ops, "office_login", lambda repo: "")
+    assert _poll() == []

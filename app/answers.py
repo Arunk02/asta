@@ -157,7 +157,10 @@ def render(who: str, need: str, analysis: str, reply: str, note: str = "",
     # `need` is what they want ("the PR approved"). A few callers pass what
     # happened instead ("wrote to you"); "Komal asked about wrote to you" went to
     # his phone on 13 Oct. Those read as a sentence of their own.
-    if re.match(r"(?:wrote|sent|asked|messaged|pinged|replied|called)\b", need, re.I):
+    # "wants to know Arun's weekend plans" is a sentence too: "asked about wants
+    # to know…" reached his phone on 15 Oct.
+    if re.match(r"(?:wrote|sent|asked|messaged|pinged|replied|called|wants?|needs?|"
+                r"would\s+like|is\s+asking|requests?)\b", need, re.I):
         head = f"*{who}* {need}."
     else:
         head = (f"*{who}* asked about {need[0].lower() + need[1:]}." if need
@@ -417,6 +420,46 @@ async def _show(cid: str, intent: dict) -> None:
     store.record_outcome("answer", "presented", subject=str(intent.get("task_id") or ""),
                          detail=f"{intent['who']}: {intent.get('need', '')}"[:200])
     await notify.notify(text, "answer", urgency="direct", considered=True)
+
+
+#: Words that are not a person: "send it", "send the previous one".
+_NOT_A_NAME = {"it", "this", "that", "the", "a", "previous", "earlier", "original", "first",
+               "old", "older", "last", "all", "both", "them", "one", "draft", "reply", "msg",
+               "message", "version", "now", "pls", "please", "bro", "also", "too", "as", "well"}
+
+
+def name_tokens(name: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z]+", (name or "").lower()) if t not in _NOT_A_NAME]
+
+
+def is_for(item: dict, name: str) -> bool:
+    """This draft goes to the person he named — any of their names: Teams has
+    'Brundavanam Subha Prabhakara Sameer', he says 'Sameer'."""
+    named = name_tokens(name)
+    if not named:
+        return False
+    theirs = set(re.findall(r"[a-z]+", f"{item.get('to') or ''} {item.get('who') or ''}".lower()))
+    return all(t in theirs for t in named)
+
+
+def pick(name: str, current: dict | None = None) -> dict | None:
+    """Take the waiting draft for the person he named out of the queue. The one
+    in front of him, if any, goes back to the head of the queue — he chose the
+    order, nothing is dropped."""
+    q = _load_queue()
+    for i, item in enumerate(q):
+        if item.get("type") in ("answer", None) and item.get("what") and is_for(item, name):
+            q.pop(i)
+            if current:
+                back = {k: v for k, v in current.items() if k not in ("_shown",)}
+                back.setdefault("type", "answer")
+                back.setdefault("_at", time.time())     # undated reads as too old and is retired
+                q.insert(0, back)
+            store.kv_set(_QUEUE, json.dumps(q))
+            store.record_outcome("answer", "picked", subject=str(item.get("task_id") or ""),
+                                 detail=f"{item.get('who')}: by name '{name}'"[:200])
+            return item
+    return None
 
 
 def _load_queue() -> list[dict]:

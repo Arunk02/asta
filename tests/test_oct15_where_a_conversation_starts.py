@@ -16,10 +16,10 @@ PR_1473 = "github.com/acme/booking/pull/1473"
 
 
 def _closed_about_1252(now):
-    t = threads.open("teams", "Vinish Kumar", now=now - 600)
+    t = threads.open("teams", "Vinish Kumar", now=now - 4000)
     threads.update(t["id"], need="Share the update on PR 1252",
                    summary="Vinish asked for PR 1252", entities=[PR_1252])
-    threads.close(t["id"], why="he replied", now=now - 300)
+    threads.close(t["id"], why="he replied", now=now - 3600)
     return t["id"]
 
 
@@ -71,8 +71,8 @@ def test_without_the_message_it_reopens_as_before():
 def test_the_transcript_marks_where_this_conversation_starts(monkeypatch):
     now = time.time()
     tid = _closed_about_1252(now)
-    rows = [{"sender": "Vinish Kumar", "text": "PR 1252 update?", "sent_at": now - 700},
-            {"sender": "Arunkumar K", "text": "merged bro", "sent_at": now - 400},
+    rows = [{"sender": "Vinish Kumar", "text": "PR 1252 update?", "sent_at": now - 3900},
+            {"sender": "Arunkumar K", "text": "merged bro", "sent_at": now - 3700},
             {"sender": "Arunkumar K", "text": "Vinish once u free call me bro", "sent_at": now - 60},
             {"sender": "Vinish Kumar", "text": "In call with TMS bro", "sent_at": now - 5}]
     monkeypatch.setattr(store, "teams_messages", lambda **k: rows)
@@ -90,10 +90,21 @@ def test_after_it_dissolves_the_next_one_starts_where_it_ended():
     tid = _closed_about_1252(now - 3 * 3600)
     threads.dissolve_due(now=now)
     t = threads.open("teams", "Vinish Kumar", now=now, text="Vinish Kumar: Good Morning!")
-    assert abs(threads.started_at(t) - (now - 3 * 3600 - 300)) < 1
+    assert abs(threads.started_at(t) - (now - 3 * 3600 - 3600)) < 1
     assert t["id"] == tid
 
 
 def test_no_known_end_marks_nothing():
     t = threads.open("teams", "Someone New", now=time.time(), text="Someone New: hi")
     assert threads.started_at(t) == 0.0
+
+
+def test_a_quick_back_and_forth_stays_one_conversation():
+    """15 Oct, Sameer: office, PG, "okay cool", "any weekend plans?" — inside 20
+    minutes, split into four conversations, each read cold."""
+    now = time.time()
+    t = threads.open("teams", "Sameer", now=now - 900)
+    threads.update(t["id"], need="", summary="Sameer asked how many are coming to office")
+    threads.close(t["id"], why="closing", now=now - 600)
+    t = threads.open("teams", "Sameer", now=now, text="Sameer: Any weekend plans?")
+    assert t["summary"] == "Sameer asked how many are coming to office"

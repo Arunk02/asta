@@ -3300,18 +3300,27 @@ _AFFIRM = re.compile(
     r"post(?:\s+(?:it|this|that|the\s+(?:review(?:\s+comments?)?|comments?)))?|👍|✅)"
     r"(?:[,\s]+(?:now|please|pls|go\s+ahead|do\s+it|post\s+it|send\s+it))*\s*[.!]*\s*$",
     re.I)
-_SEND_TO = re.compile(r"^\s*(?:please\s+)?send(?:\s+it)?\s+to\s+([\w.' -]+?)\s*[.!]*$", re.I)
+#: "send to Sameer", "send Sameer's one", "send to Sameer as well", "ok send Vinish".
+_SEND_TO = re.compile(
+    r"^\s*(?:(?:no|ok(?:ay)?|yes|pls|please)[,\s]+)*send(?:\s+it)?\s+(?:to\s+)?"
+    r"([a-z][\w.' -]*?)(?:'s)?(?:\s+(?:one|draft|reply|msg|message))?"
+    r"(?:\s+(?:as\s+well|also|too|now|bro|pls|please))*\s*[.!]*$", re.I)
+#: "send the previous msg", "no send the earlier draft message", "send the original one".
+_SEND_PREVIOUS = re.compile(
+    r"^\s*(?:(?:no|ok(?:ay)?|yes|pls|please)[,\s]+)*send\s+(?:the\s+)?"
+    r"(?:previous|earlier|original|first|old(?:er)?)\s*(?:one|draft|reply|msg|message|version)?"
+    r"(?:\s+(?:one|draft|reply|msg|message|version))?\s*[.!]*$", re.I)
 
 
 def _send_to_staged(text: str, staged: dict) -> bool:
-    """An explicit send to the person on this draft is its approval."""
+    """An explicit send to the person on this draft is its approval — by any of
+    their names: Teams has "Brundavanam Subha Prabhakara Sameer", he says
+    "send to Sameer as well" (15 Oct; it was read as feedback and never sent)."""
     m = _SEND_TO.match(text or "")
     if not m or staged.get("channel") != "teams" or staged.get("to_group"):
         return False
-    destination = (staged.get("to") or "").strip().casefold().split()
-    named = m.group(1).strip().casefold().split()
-    return bool(named and destination and
-                (named == destination or (len(named) == 1 and named[0] == destination[0])))
+    from . import answers as _answers
+    return _answers.is_for(staged, m.group(1))
 
 #: The same words spelled out, for the near-miss check below. Kept beside the
 #: regex and pinned to it by a test, because two lists of "what yes looks like"
@@ -4192,9 +4201,31 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None
+    if staged and _SEND_PREVIOUS.match(user_text or ""):
+        # "send the previous msg": the wording before the last change, as is.
+        earlier = loop.previous_version(cid, staged.get("to") or "", staged.get("what") or "")
+        if not earlier:
+            await sink.send({"type": "note", "text": (
+                "There's no earlier version of this draft to send — only the one shown. "
+                "Say “send” for it, or tell me the words.")})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+        staged = {**staged, "what": earlier}
+        loop.stage(cid, staged)
+    if staged and not _send_to_staged(user_text, staged):
+        # "send Sameer" while another draft is in front: the one he named, from the
+        # queue. The one in front goes back to the head of the queue.
+        from . import answers as _answers
+        m = _SEND_TO.match(user_text or "")
+        named = _answers.pick(m.group(1), current=staged) if m else None
+        if named:
+            staged = {**named, "type": "answer"}
+            loop.stage(cid, staged)
     if staged and (user_text or "").strip():
         approved, read_as = _affirmation(user_text)
-        approved = approved or _send_to_staged(user_text, staged)
+        approved = approved or _send_to_staged(user_text, staged) \
+            or bool(_SEND_PREVIOUS.match(user_text or ""))
         if approved and staged.get("type") == "answer" and not answers.origin_allowed(staged):
             loop.clear_awaiting(cid)
             answers._record_rejected_origin(staged)
@@ -4278,7 +4309,10 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             # 3.1.6" typed at a waiting draft was a new instruction, and the
             # draft was re-staged as a label of itself (30 Sep).
             prompt = (f"Arun did NOT approve sending the draft as-is. His feedback:\n"
-                      f"{user_text.strip()}\n\nRevise accordingly. When it's ready to send "
+                      f"{user_text.strip()}\n\nRevise accordingly — change only what he asked "
+                      f"for, in his words, and add nothing from his other conversations (15 Oct: "
+                      f"a reply to Sameer was rewritten to 'going out tmr' from a chat with "
+                      f"someone else). When it's ready to send "
                       f"again, stage it with prepare_to_send; otherwise just continue the work. "
                       f"If what he typed is a new instruction rather than a change to the "
                       f"draft, do that instead and do NOT stage the draft again — it is "

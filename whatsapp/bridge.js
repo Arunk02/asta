@@ -19,7 +19,7 @@ import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaile
 import qrcode from "qrcode-terminal";
 import QRCode from "qrcode";
 import pino from "pino";
-import { takeCatchup, backoffMs, tsOf, timesOf } from "./catchup.js";
+import { takeCatchup, backoffMs, tsOf, timesOf, whenLive } from "./catchup.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -266,7 +266,13 @@ async function handle(msg) {
 
 // A file, not a paragraph about a file. His ask from the start was a spreadsheet
 // he can open on his phone; a path to his Mac is not that.
+// Every send waits out a dropped connection (see whenLive).
 async function sendDocument(filePath, caption) {
+  if (!config.enabled || !targetJid()) return false;
+  return whenLive(() => !!sock && paired, () => sendDocumentNow(filePath, caption), { sendMs: 60000 });
+}
+
+async function sendDocumentNow(filePath, caption) {
   let jid = targetJid();
   if (!config.enabled || !sock || !paired || !jid) return false;
   if (selfLid && normJid(jid) === normJid(selfJid)) jid = selfLid;
@@ -291,7 +297,13 @@ async function sendDocument(filePath, caption) {
 // A voice note is a PTT message, not an audio file: WhatsApp shows it as the
 // waveform he can hold-to-play, which is the whole reason for sending one
 // instead of a paragraph. Baileys needs the Opus/ogg container for that.
+// Every send waits out a dropped connection (see whenLive).
 async function sendVoiceNote(filePath, seconds) {
+  if (!config.enabled || !targetJid()) return false;
+  return whenLive(() => !!sock && paired, () => sendVoiceNoteNow(filePath, seconds), { sendMs: 60000 });
+}
+
+async function sendVoiceNoteNow(filePath, seconds) {
   let jid = targetJid();
   if (!config.enabled || !sock || !paired || !jid) return false;
   if (selfLid && normJid(jid) === normJid(selfJid)) jid = selfLid;
@@ -355,7 +367,13 @@ async function finishOldest(emoji) {
   }
 }
 
+// Every send waits out a dropped connection (see whenLive).
 async function send(text) {
+  if (!config.enabled || !targetJid()) return false;
+  return whenLive(() => !!sock && paired, () => sendNow(text));
+}
+
+async function sendNow(text) {
   let jid = targetJid();
   if (!config.enabled || !sock || !paired || !jid) return false;
   // lid-migrated accounts: the self-chat must be addressed by LID, else the

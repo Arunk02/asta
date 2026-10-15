@@ -197,17 +197,23 @@ async def _poll_repo(repo: str) -> list[str]:
     if rc != 0:
         return []  # transient API/network error — next poll catches up
     runs = json.loads(out or "[]")
+    # Fail CLOSED. When his login or his own runs could not be read, this used
+    # to keep EVERY run — 15 Oct: a bot's nightly "Auto merge PR" failures in
+    # empv3-tenant-intake reached his phone five times. Nothing is marked seen
+    # here, so the next poll that can read them catches up.
     me = repo_ops.office_login(repo) or await my_login()
-    if me:
-        rc2, out2 = await _run_gh(
-            "run", "list", "-R", repo, "--limit", "10", "--user", me, "--json", "databaseId")
-        if rc2 == 0:
-            mine = {str(r["databaseId"]) for r in json.loads(out2 or "[]")}
-            branches = await _my_branches(repo)
-            runs = [r for r in runs
-                    if str(r["databaseId"]) in mine
-                    or r.get("headBranch") in branches
-                    or _subscribed(repo, r)]
+    if not me:
+        return []
+    rc2, out2 = await _run_gh(
+        "run", "list", "-R", repo, "--limit", "10", "--user", me, "--json", "databaseId")
+    if rc2 != 0:
+        return []
+    mine = {str(r["databaseId"]) for r in json.loads(out2 or "[]")}
+    branches = await _my_branches(repo)
+    runs = [r for r in runs
+            if str(r["databaseId"]) in mine
+            or r.get("headBranch") in branches
+            or _subscribed(repo, r)]
     seen_key, wb_key = f"ci_seen:{repo}", f"ci_wb:{repo}"
     seen = json.loads(store.kv_get(seen_key) or "{}")
     wb = json.loads(store.kv_get(wb_key) or "{}")

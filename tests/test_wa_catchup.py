@@ -107,3 +107,76 @@ def test_the_bridge_answers_a_caught_up_batch_not_only_live_messages():
 @needs_node
 def test_the_bridge_still_parses():
     assert subprocess.run([NODE, "--check", str(BRIDGE)], capture_output=True).returncode == 0
+
+
+# --- 15 Oct: a push that met a dropped connection -------------------------------------
+
+def _live(script: str):
+    code = (f"import * as c from {json.dumps(str(ROOT / 'whatsapp' / 'catchup.js'))};\n"
+            f"const out = await (async () => {{ {script} }})();\nconsole.log(JSON.stringify(out));")
+    res = subprocess.run([NODE, "--input-type=module", "-e", code],
+                         capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout.strip().splitlines()[-1])
+
+
+@needs_node
+def test_a_send_waits_for_the_connection_to_come_back():
+    out = _live("""
+      let live = false, sent = 0; setTimeout(() => { live = true; }, 300);
+      const ok = await c.whenLive(() => live, async () => { sent++; return true; }, { waitMs: 2000, stepMs: 20 });
+      return {ok, sent};""")
+    assert out == {"ok": True, "sent": 1}
+
+
+@needs_node
+def test_a_socket_that_dies_under_the_send_is_tried_once_more():
+    out = _live("""
+      let n = 0;
+      const ok = await c.whenLive(() => true, async () => { if (++n === 1) throw new Error("Connection Closed"); return true; },
+                                  { waitMs: 100, stepMs: 10 });
+      return {ok, n};""")
+    assert out == {"ok": True, "n": 2}
+
+
+@needs_node
+def test_a_send_that_only_times_out_is_never_sent_twice():
+    out = _live("""
+      let n = 0;
+      const ok = await c.whenLive(() => true, () => { n++; return new Promise(() => {}); },
+                                  { waitMs: 100, stepMs: 10, sendMs: 100 });
+      return {ok, n};""")
+    assert out == {"ok": False, "n": 1}
+
+
+@needs_node
+def test_no_connection_at_all_gives_up_without_sending():
+    out = _live("""
+      let n = 0;
+      const ok = await c.whenLive(() => false, async () => { n++; return true; }, { waitMs: 100, stepMs: 10 });
+      return {ok, n};""")
+    assert out == {"ok": False, "n": 0}
+
+
+@needs_node
+def test_every_bridge_send_goes_through_when_live():
+    js = BRIDGE.read_text()
+    for name in ("send", "sendDocument", "sendVoiceNote"):
+        assert f"return whenLive(() => !!sock && paired, () => {name}Now(" in js
+
+
+def test_a_failed_push_is_not_counted_as_pushed(monkeypatch):
+    import asyncio
+
+    from app import notify, store, telegram
+
+    async def down(*a, **k):
+        return False
+
+    monkeypatch.setattr(notify, "wa_send", down)
+    monkeypatch.setattr(telegram, "send", down)
+    monkeypatch.setattr(notify, "quiet_rule", lambda: None)
+    asyncio.run(notify.deliver("🔕 Held (10) — waited long enough"))
+    with store._connect() as conn:
+        rows = [r[0] for r in conn.execute("SELECT outcome FROM outcomes WHERE kind='notify'")]
+    assert rows[-1] == "push_failed"

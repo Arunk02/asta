@@ -73,11 +73,65 @@ def get(thread_id: str) -> dict | None:
     return _row(r) if r else None
 
 
-def open(channel: str, counterpart: str, chat: str = "", now: float | None = None) -> dict:
-    """The live conversation with this person, created or reopened.
+#: Saying the conversation is not over: "also", "one more thing", "any update",
+#: "same one", "still failing". A closed conversation is picked back up by these.
+_BACK = re.compile(
+    r"\b(?:also|one\s+more|another\s+(?:thing|one|doubt)|same(?:\s+one)?|that\s+one|"
+    r"any\s+update|update\s*\?|status\s*\?|done\s*\?|still|again|as\s+well|"
+    r"follow(?:ing)?[\s-]*up|regarding\s+(?:that|this|the\s+same)|"
+    r"what\s+about\s+(?:that|it)|were\s+you\s+able)\b", re.I)
+_SPEAKER = re.compile(r"^[^:\n]{1,60}:\s")
+#: kv: where the live conversation's messages begin, when it began after a close.
+FROM_KEY = "thread_from:"
 
-    A closed one that has not dissolved yet is REOPENED rather than replaced:
-    "thanks" followed by "oh, one more thing" is one conversation.
+
+def continues(t: dict, text: str = "", entities=()) -> str:
+    """Why a message picks this CLOSED conversation back up — '' when it is a new one.
+
+    15 Oct: one 1:1 with Vinish held eight topics in a day — PR 1252, PR 1483,
+    Komal's PR, a CT failure, the LD issue, SendGrid keys, the config map, a SIT
+    test — and every new one "reopened" the last, carrying its need: an opener
+    at 13:19 still read "share the update on PR 1252 and review PR 1483", and
+    the reply mixed the two PRs up. A conversation ends on its subject, not on a
+    clock: the same PR, ticket or booking, or words that point back, continue it."""
+    if set(entities or ()) & set(t.get("entities") or ()):
+        return "same subject"
+    bodies = [_SPEAKER.sub("", line).strip() for line in (text or "").splitlines()]
+    body = " ".join(b for b in bodies if b)
+    return "refers back" if _BACK.search(body) else ""
+
+
+def _fresh_start(conn, key: str, t: dict, now: float) -> None:
+    """The closed conversation becomes history; this row starts the next one."""
+    if t.get("need") or t.get("summary"):
+        remember_episode(t["channel"], t["counterpart"], need=t["need"], summary=t["summary"],
+                         entities=t["entities"], outcome="closed", opened_at=t["opened_at"],
+                         closed_at=t.get("closed_at") or t["last_activity"])
+    conn.execute("UPDATE conv_threads SET status='open', need='', summary='', entities='[]', "
+                 "continues=NULL, asked_back=0, checked_in=0, asta_spoke=0, opened_at=?, "
+                 "last_activity=?, closed_at=NULL WHERE id=?", (now, now, key))
+    # What both sides said since the last one closed belongs to this one — his
+    # own "once u free call me bro" is often what it is about.
+    store.kv_set(FROM_KEY + key, str(t.get("closed_at") or now))
+
+
+def started_at(t: dict) -> float:
+    """Where this conversation's messages begin: when the last one with this
+    person ended. 0 when none is known — nothing is marked over."""
+    try:
+        return float(store.kv_get(FROM_KEY + str(t.get("id") or "")) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def open(channel: str, counterpart: str, chat: str = "", now: float | None = None,
+         text: str | None = None, entities=()) -> dict:
+    """The live conversation with this person, created, picked back up, or begun anew.
+
+    A closed one that has not dissolved yet is REOPENED when the new message
+    continues it — "thanks" then "oh, one more thing" is one conversation — and
+    replaced by a fresh one when it does not (`continues`). Without `text` the
+    message is unknown and a closed one is reopened, as before.
     """
     now = time.time() if now is None else now
     key = tid(channel, counterpart)
@@ -91,9 +145,16 @@ def open(channel: str, counterpart: str, chat: str = "", now: float | None = Non
                  "open", now, now))
             _record(key, "opened", "")
         elif t["status"] == "closed":
-            conn.execute("UPDATE conv_threads SET status='open', closed_at=NULL, "
-                         "checked_in=0, last_activity=? WHERE id=?", (now, key))
-            _record(key, "reopened", "they wrote again before it dissolved")
+            why = "they wrote again before it dissolved" if text is None \
+                else continues(t, text, entities)
+            if why:
+                conn.execute("UPDATE conv_threads SET status='open', closed_at=NULL, "
+                             "checked_in=0, last_activity=? WHERE id=?", (now, key))
+                _record(key, "reopened", why)
+            else:
+                _fresh_start(conn, key, t, now)
+                _record(key, "new conversation",
+                        f"nothing in common with the last one ({(t.get('need') or t.get('summary') or '')[:120]})")
         else:
             conn.execute("UPDATE conv_threads SET last_activity=? WHERE id=?", (now, key))
     return get(key) or {}
@@ -159,6 +220,8 @@ def dissolve_due(now: float | None = None) -> list[dict]:
                              closed_at=t.get("closed_at") or t["last_activity"])
         with store._connect() as conn:
             conn.execute("DELETE FROM conv_threads WHERE id=?", (t["id"],))
+        # The next conversation with them starts where this one ended.
+        store.kv_set(FROM_KEY + t["id"], str(t.get("closed_at") or t["last_activity"]))
         _record(t["id"], "dissolved", (t.get("summary") or "")[:160])
     return rows
 

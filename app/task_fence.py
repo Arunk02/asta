@@ -31,6 +31,12 @@ SHIMS = Path(__file__).resolve().parent / "shims"
 #: In ANY task: decisions that are his.
 _GH_HIS = ("pr review", "pr merge", "pr close", "pr reopen")
 
+#: In ANY task: waiting on CI. 16 Oct, task #345 sat on `gh run watch` for a
+#: develop run parked at a deploy approval — a run that never "finishes" — and
+#: its answer came half an hour late. A task reports the state it finds; Asta's
+#: CI watcher (app/ci_watch.py) follows the build and tells him when it moves.
+_GH_WAIT = ("run watch",)
+
 #: Also refused when a task may change nothing outside this machine.
 _GH_OUTWARD = ("pr create", "pr edit", "pr comment", "pr ready",
                "issue create", "issue comment", "issue close", "issue edit",
@@ -53,7 +59,7 @@ def denied(mode: str) -> list[str]:
     """The commands refused in this mode, as "gh pr review"-style prefixes."""
     if not mode:
         return []
-    out = [f"gh {c}" for c in _GH_HIS]
+    out = [f"gh {c}" for c in (*_GH_HIS, *_GH_WAIT)]
     if mode != "code":
         out += [f"gh {c}" for c in _GH_OUTWARD] + list(_GIT_OUTWARD)
     return out

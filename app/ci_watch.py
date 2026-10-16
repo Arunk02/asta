@@ -158,6 +158,49 @@ def _subscribed(repo: str, run: dict) -> bool:
     return False
 
 
+#: The branches his merges land on. Their builds are his to know about, whoever
+#: merged: the run after booking PR 1487 was Vinish's merge, so "runs he
+#: triggered" never saw it (16 Oct).
+BASE_BRANCHES = re.compile(os.environ.get("ASTA_CI_BASE_BRANCHES",
+                                          r"^(?:main|master|develop|release/.+)$"))
+
+
+#: Which of a branch's workflows are its build. Not the bots: empv3's "Auto merge
+#: PR" on main is the noise he stopped on 15 Oct; label checks and scans neither.
+BRANCH_WORKFLOWS = re.compile(r"build|deploy|\bci\b|test|pipeline|release", re.I)
+_NOT_A_BUILD = re.compile(r"auto.?merge|label|codeql|scan|stale|dependabot|lint", re.I)
+
+
+def _is_branch_build(run: dict) -> bool:
+    name = run.get("workflowName") or ""
+    return (run.get("event") == "push" and bool(BASE_BRANCHES.match(run.get("headBranch") or ""))
+            and bool(BRANCH_WORKFLOWS.search(name)) and not _NOT_A_BUILD.search(name))
+
+
+def _seen_id(run: dict) -> str:
+    """A re-run is a new result for the same run: attempt 3 can pass after 1 and 2 failed."""
+    rid, attempt = str(run["databaseId"]), int(run.get("attempt") or 1)
+    return rid if attempt <= 1 else f"{rid}:{attempt}"
+
+
+async def _jobs_verdict(repo: str, rid: str) -> tuple[str, list[str]]:
+    """('failure', [jobs]) / ('success', []) for a run parked at an approval gate,
+    or ('', []) while any job is still running."""
+    rc, out = await _run_gh("run", "view", rid, "-R", repo, "--json", "jobs")
+    if rc != 0:
+        return "", []
+    try:
+        jobs = json.loads(out or "{}").get("jobs") or []
+    except json.JSONDecodeError:
+        return "", []
+    failed = [j.get("name", "") for j in jobs if (j.get("conclusion") or "") in BAD]
+    if failed:
+        return "failure", failed
+    if any(j.get("status") == "in_progress" for j in jobs):
+        return "", []
+    return "success", []
+
+
 async def _my_branches(repo: str) -> set[str]:
     """Head branches of the open PRs he authored.
 
@@ -193,7 +236,7 @@ async def _poll_repo(repo: str) -> list[str]:
     """
     rc, out = await _run_gh(
         "run", "list", "-R", repo, "--limit", "10", "--json",
-        "databaseId,status,conclusion,workflowName,headBranch,displayTitle,url,event")
+        "databaseId,status,conclusion,workflowName,headBranch,displayTitle,url,event,attempt")
     if rc != 0:
         return []  # transient API/network error — next poll catches up
     runs = json.loads(out or "[]")
@@ -213,7 +256,17 @@ async def _poll_repo(repo: str) -> list[str]:
     runs = [r for r in runs
             if str(r["databaseId"]) in mine
             or r.get("headBranch") in branches
-            or _subscribed(repo, r)]
+            or _subscribed(repo, r)
+            or _is_branch_build(r)]
+    # A branch build waiting at a deploy approval is as finished as CI gets:
+    # judge it by its jobs (16 Oct: develop's component test failed twice after
+    # booking PR 1487 merged, and the run sat at "waiting" for SIT/QA approval,
+    # so it never "completed" and nothing was said).
+    for r in runs:
+        if r.get("status") == "waiting" and _is_branch_build(r):
+            concl, failed = await _jobs_verdict(repo, str(r["databaseId"]))
+            if concl:
+                r["status"], r["conclusion"], r["_failed_jobs"] = "completed", concl, failed
     seen_key, wb_key = f"ci_seen:{repo}", f"ci_wb:{repo}"
     seen = json.loads(store.kv_get(seen_key) or "{}")
     wb = json.loads(store.kv_get(wb_key) or "{}")
@@ -227,7 +280,7 @@ async def _poll_repo(repo: str) -> list[str]:
     # CI pushes to 22 Sep were that.
     moved: dict[str, dict] = {}
     for r in runs:
-        rid, concl = str(r["databaseId"]), (r.get("conclusion") or "")
+        rid, concl = _seen_id(r), (r.get("conclusion") or "")
         if r.get("status") != "completed" or seen.get(rid) == "completed":
             continue
         seen[rid] = "completed"
@@ -248,8 +301,9 @@ async def _poll_repo(repo: str) -> list[str]:
         if concl in BAD:
             if before in BAD:
                 continue  # he already knows this workflow+branch is red; one ping is enough
+            jobs = f" — {', '.join(r['_failed_jobs'])} failed" if r.get("_failed_jobs") else ""
             notes.append(f"🔴 CI {concl}: {name} · {r['workflowName']} "
-                         f"({r['headBranch']}) — {r['displayTitle'][:60]}\n{r['url']}")
+                         f"({r['headBranch']}){jobs} — {r['displayTitle'][:60]}\n{r['url']}")
         elif concl == "success" and before in BAD:
             after = f" after {m['fails']} failures" if m["fails"] > 1 else ""
             notes.append(f"🟢 CI recovered{after}: {name} · {r['workflowName']} "

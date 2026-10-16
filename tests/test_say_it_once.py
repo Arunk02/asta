@@ -1259,7 +1259,7 @@ def test_the_watchdog_takes_the_browser_from_a_stuck_holder(monkeypatch):
             raise asyncio.CancelledError
         return False
 
-    monkeypatch.setattr(tb, "reset", reset)
+    monkeypatch.setattr(tb, "free", reset)       # free(): close the browser, or cancel the holder
     monkeypatch.setattr(wake, "sleep", tick)
     monkeypatch.setattr(tb, "in_a_call", lambda: False)
     tb._HELD["since"] = time.time() - tb.STUCK_SECONDS - 5

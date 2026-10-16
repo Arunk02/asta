@@ -110,9 +110,18 @@ async def supervise(name: str, body: Callable[[], Awaitable[None]]) -> None:
             await body()
             reason = "returned"
         except asyncio.CancelledError:
-            # Shutdown, not failure. Propagate so the process can actually exit.
-            _record(name, stopped=time.time())
-            raise
+            if name in _FREED:
+                # The Teams watchdog took the browser lock back from it: a stuck
+                # step, not shutdown. Restarted like any other failure.
+                _FREED.discard(name)
+                task = asyncio.current_task()
+                if task is not None:
+                    task.uncancel()
+                reason = "cancelled by the Teams watchdog — held the browser too long"
+            else:
+                # Shutdown, not failure. Propagate so the process can actually exit.
+                _record(name, stopped=time.time())
+                raise
         except BaseException as exc:  # noqa: BLE001 — nothing may escape here
             reason = f"{type(exc).__name__}: {exc}"
             log.exception("daemon %s crashed", name)
@@ -130,6 +139,15 @@ async def supervise(name: str, body: Callable[[], Awaitable[None]]) -> None:
 
         await asyncio.sleep(delay)
         delay = min(delay * 2, BACKOFF_MAX)
+
+
+#: Daemons whose next cancellation is the Teams watchdog freeing the browser.
+_FREED: set = set()
+
+
+def freed(name: str) -> None:
+    """Mark that `name` is about to be cancelled to free a stuck lock — restart it."""
+    _FREED.add(name)
 
 
 def start(name: str, body: Callable[[], Awaitable[None]]) -> asyncio.Task:

@@ -369,7 +369,7 @@ class Ambiguous(NotFound):
 #: When the Teams lock was last taken — 0 when free — and by whom. The watchdog
 #: reads it. "who" exists because 86 resets in a week (to 14 Oct) all said "an
 #: operation held the browser" and none could say which one.
-_HELD: dict = {"since": 0.0, "who": ""}
+_HELD: dict = {"since": 0.0, "who": "", "task": None}
 #: Launching Chrome and loading Teams, at most this long.
 LAUNCH_TIMEOUT = 150.0
 #: Any one operation holding the browser longer than this is stuck (a live call
@@ -381,8 +381,11 @@ STUCK_SECONDS = float(os.environ.get("ASTA_TEAMS_STUCK_SECONDS", "240"))
 
 def _caller() -> str:
     """module.function of whoever asked for the browser, for the watchdog's report."""
+    # asyncio's own frames too: every hold was reported as "tasks.wait_for" —
+    # asyncio/tasks.py — which named nobody (16 Oct).
     f = sys._getframe(1)
-    while f is not None and f.f_code.co_filename.endswith(("teams_bridge.py", "contextlib.py")):
+    while f is not None and (f.f_code.co_filename.endswith(("teams_bridge.py", "contextlib.py"))
+                             or f"{os.sep}asyncio{os.sep}" in f.f_code.co_filename):
         f = f.f_back
     return f"{Path(f.f_code.co_filename).stem}.{f.f_code.co_name}" if f is not None else "?"
 
@@ -405,6 +408,38 @@ def peek_page():
         return None if page is None or page.is_closed() else page
     except Exception:                                          # noqa: BLE001
         return None
+
+
+def _cancel_holder(why: str) -> bool:
+    """Take the lock back from an operation that holds it with no browser to fail.
+
+    16 Oct: a wake reset closed the browser at 04:07 with something still
+    holding the lock. `reset` frees a hold by closing the browser — with none
+    open it did nothing, every reader waited behind the hold, and Teams and
+    Outlook went unread for seven hours, every daemon "alive". Cancelling the
+    holder releases the lock; a daemon so cancelled is restarted, not stopped."""
+    task = _HELD.get("task")
+    if task is None or task.done() or task is asyncio.current_task():
+        return False
+    name = task.get_name()
+    if name.startswith("daemon:"):
+        from . import daemon
+        daemon.freed(name.removeprefix("daemon:"))
+    store.record_outcome("browser", "cancelled holder", subject="teams",
+                         detail=f"{why} — {holder() or name}"[:200])
+    task.cancel()
+    return True
+
+
+async def free(why: str) -> None:
+    """Free a stuck hold: close the browser if one is open (the operation fails
+    and lets go); with none open, cancel the holder."""
+    if in_a_call():
+        return
+    if _POOL:
+        await reset(why)
+    else:
+        _cancel_holder(why)
 
 
 async def reset(why: str) -> None:
@@ -434,6 +469,7 @@ async def teams_page():
     async with _lock:
         _HELD["since"] = time.time()
         _HELD["who"] = who
+        _HELD["task"] = asyncio.current_task()
         try:
             page = await _pooled_page()
         except BaseException:
@@ -490,8 +526,11 @@ async def site_page(url: str, timeout: int = 60000, watch=None, failed_watch=Non
     it got "Target page, context or browser has been closed" mid-read. One
     browser, one lock, a throwaway tab per operation.
     """
+    who = _caller()
     async with _lock:
         _HELD["since"] = time.time()
+        _HELD["who"] = who
+        _HELD["task"] = asyncio.current_task()
         await _pooled_page()                      # makes sure a context exists
         ctx = _POOL.get("ctx")
         if ctx is None:
@@ -555,13 +594,13 @@ async def watchdog_loop() -> None:
             # a page that froze under it; waiting out STUCK_SECONDS after waking
             # is minutes of unread Teams for nothing.
             if stuck_for() > 0 and not in_a_call():
-                await reset(f"held across sleep by {holder() or '?'}")
+                await free(f"held across sleep by {holder() or '?'}")
                 reset_at = _t.time()
             continue
         try:
             held = stuck_for()
             if held > STUCK_SECONDS and not in_a_call():
-                await reset(f"an operation held the browser for {int(held)}s ({holder() or '?'})")
+                await free(f"an operation held the browser for {int(held)}s ({holder() or '?'})")
                 reset_at = _t.time()
                 continue
             if not (enabled() and logged_in_once()) or in_a_call():

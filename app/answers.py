@@ -80,8 +80,10 @@ by asking Arun whether to ask them. Never promise work Arun has not agreed to.
 A question is open ("which part should change on booking?"), never a choice
 between your own guesses ("you mean A, or B?"). The REPLY is about their
 subject only — never about your process: no "I checked twice", "so I stop
-guessing", "my earlier read was wrong", "task complete". If you were corrected,
-answer the new information plainly. Nothing after the REPLY.
+guessing", "my earlier read was wrong", "task complete". It goes out AS Arun:
+never mention tools, access, "from here", "on my side" or what an assistant can
+or cannot do — write what Arun would say ("I'll create the story"). If you were
+corrected, answer the new information plainly. Nothing after the REPLY.
 
 If what they asked for is Arun himself — a call, a discussion — the ANALYSIS
 prepares him for it (where the topic stands, what changed, what is still open)
@@ -144,6 +146,13 @@ def phone_conversation() -> str:
     return (store.kv_get("wa_conversation") or store.kv_get("telegram_conversation") or "").strip()
 
 
+#: A need that starts with what to do.
+_DO_VERB = re.compile(
+    r"(?:create|update|check|review|share|fix|merge|approve|add|send|confirm|look|"
+    r"investigate|provide|raise|deploy|test|run|help|call|join|verify|explain|tell|"
+    r"remove|change|move|rerun|re-run|trigger|analy[sz]e|clarify|decide|assign)\b", re.I)
+
+
 def render(who: str, need: str, analysis: str, reply: str, note: str = "",
            lead: str = "") -> str:
     """Exactly what he needs to decide, said the way a colleague would say it.
@@ -162,6 +171,10 @@ def render(who: str, need: str, analysis: str, reply: str, note: str = "",
     if re.match(r"(?:wrote|sent|asked|messaged|pinged|replied|called|wants?|needs?|"
                 r"would\s+like|is\s+asking|requests?)\b", need, re.I):
         head = f"*{who}* {need}."
+    elif _DO_VERB.match(need):
+        # "Create a story for the schema updates" is a thing to do, not a topic:
+        # "asked about create a story…" reached his phone on 16 Oct.
+        head = f"*{who}* wants you to {need[0].lower() + need[1:]}."
     else:
         head = (f"*{who}* asked about {need[0].lower() + need[1:]}." if need
                 else f"*{who}* asked me something.")
@@ -202,6 +215,25 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
         store.record_outcome("answer", "duplicate", subject=str(task_id or ""),
                              detail=f"{who}: {need}"[:200])
         return False
+    later = _taken_over_by(task_id, who)
+    if later:
+        # 16 Oct: Vinish's ask was clarified ("update the schema in booking
+        # service, for cams"), he said yes to code task #347 — and #346's answer
+        # to the first, vaguer reading arrived two minutes later with a draft.
+        # What it found still reaches him; a reply to the old reading does not.
+        first = (who or "them").split()[0]
+        await notify.notify(
+            f"🔎 What I found on {first}'s earlier ask — #{later} has taken it over, so "
+            f"no reply drafted:\n\n{(analysis or reply).strip()[:1500]}",
+            "answer", urgency="fyi", considered=True)
+        store.record_outcome("answer", "taken over", subject=str(task_id or ""),
+                             detail=f"by #{later}: {who}: {need}"[:200])
+        return True
+    if talks_about_itself(reply):
+        # Not rewritten behind his back — shown, so he edits before "send".
+        note = ((note + "\n") if note else "") + (
+            "⚠️ This draft talks about my own tools/access — it would go out as you. "
+            "Edit it before you say send.")
     more = followups(task_id)
     if more:
         first = (who or "They").split()[0]
@@ -499,6 +531,20 @@ _DENIES_ASTA = re.compile(
     r"\bnot\s+(?:asta|aasta|a\s+bot|an?\s+(?:ai|assistant|bot))\b"
     r"|\b(?:it'?s|its|this\s+is)\s+(?:me|really\s+me|arun)\b[^.?!]{0,20}\b(?:not|no)\b"
     r"|\bno\s+(?:tool|assistant|bot|ai)\s+(?:is\s+)?involved\b", re.I)
+
+
+#: Talk about the assistant's own reach, in a reply that goes out as Arun.
+#: 16 Oct, to Vinish, sent with his yes: "Can't create the story from here — no
+#: Jira create tool on my side, I'll raise it myself."
+_SELF_TALK = re.compile(
+    r"\bno\s+(?:\w+\s+){0,3}tools?\b|\bmy\s+tools?\b"
+    r"|\b(?:can'?t|cannot|unable\s+to)\b[^.!?]{0,40}\bfrom\s+here\b"
+    r"|\bas\s+an?\s+(?:ai|assistant|bot)\b|\b(?:asta|the\s+assistant)\s+(?:can'?t|cannot|is\s+not)\b",
+    re.I)
+
+
+def talks_about_itself(reply: str) -> bool:
+    return bool(_SELF_TALK.search(reply or ""))
 
 
 def unfit_to_send(reply: str) -> str:
@@ -889,6 +935,31 @@ def invalidate_answer(task_id: int) -> bool:
     return bool(staged and staged.get("task_id") == task_id) or len(keep) != len(queue)
 
 
+def _new_subject(text: str, task: dict, meta: dict) -> bool:
+    """`text` names a ticket, PR or booking that this task never mentioned."""
+    from . import booking_case, threads
+    mine = f"{task.get('prompt') or ''}\n{task.get('title') or ''}\n{meta.get('source_text') or ''}" \
+           f"\n{meta.get('need') or ''}".lower()
+    named = [e.lower() for e in threads.entities_in(text)] + [i.lower() for i in booking_case.ids(text)]
+    return bool(named) and not any(n in mine for n in named)
+
+
+def _taken_over_by(task_id: int | None, who: str) -> int | None:
+    """A newer task for the same person, started after this one, or None."""
+    if not task_id or not who:
+        return None
+    mine = store.get_task(task_id) or {}
+    born = float(mine.get("created_at") or 0)
+    for t in sorted(store.list_tasks(limit=40), key=lambda t: t["id"]):
+        if t["id"] <= task_id or float(t.get("created_at") or 0) <= born \
+                or t["status"] in ("failed", "cancelled", "rejected", "superseded"):
+            continue
+        meta = _meta(t["id"])
+        if meta.get("who") == who or (who in (t.get("prompt") or "")[:600]):
+            return t["id"]
+    return None
+
+
 def _meta(task_id: int) -> dict:
     try:
         d = json.loads(store.kv_get(f"answer_meta:{task_id}") or "{}")
@@ -957,6 +1028,11 @@ async def note_followup(thread: str, who: str, text: str, now: float | None = No
             continue
         if now - float(t.get("created_at") or 0) < 20 or text[:80] in " ".join((t.get("prompt") or "").split()):
             return None                     # the message that started it, not a follow-up
+        if _new_subject(text, t, meta):
+            # A ticket, PR or booking that task never mentioned is a new ask,
+            # not more of the old one (16 Oct: BEPTELIKOS-11443 was filed under
+            # the schema analysis #346).
+            continue
         kept = followups(t["id"])
         if text in kept:
             return t["id"]

@@ -91,11 +91,20 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
     t = _task(tid)
     mark = f"graph_leg:{tid}"
     session = _has_session(tid)
+    carry = f"graph_leg_prompt:{tid}"
     if session and store.kv_get(mark) == stage:
-        prompt = RESUME_PROMPT + outcome.rider(tid, fresh=False)
+        # 16 Oct, #347: his 13:02 answer — "copy the whole json from main and
+        # paste it in booking service" — went into a leg that hit the usage
+        # limit seconds later. The resume said only "carry on", the answer was
+        # never delivered, and the task asked him the same question again.
+        carried = store.kv_get(carry) or ""
+        prompt = RESUME_PROMPT + (
+            "\n\nThe step that stopped was carrying this — act on it now if you had not "
+            f"already:\n{carried}" if carried else "") + outcome.rider(tid, fresh=False)
     elif session:
-        prompt = (resume_prompt if resume_prompt is not None else fresh_prompt) \
-            + outcome.rider(tid, fresh=False)
+        body = resume_prompt if resume_prompt is not None else fresh_prompt
+        store.kv_set(carry, body[:6000])
+        prompt = body + outcome.rider(tid, fresh=False)
     else:
         from app import context_pack
         prompt = (fresh_prompt + context_pack.build(tid, "plan" if stage == "plan" else "implement")
@@ -107,6 +116,7 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
                                          resume=session, effort=effort,
                                          workspace=t["workspace"])
     store.kv_del(mark)
+    store.kv_del(carry)
     _task(tid)                       # rejected while the leg ran: stop here
     return text, outcome.read(tid, text, since, "plan" if stage == "plan" else "implement")
 

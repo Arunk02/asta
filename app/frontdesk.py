@@ -90,6 +90,11 @@ def task_card(task_id: int) -> str:
         from . import prname
         lines.append(f"PR: {t.get('pr_state') or 'open'} · "
                      + prname.name_links(t["pr_urls"].splitlines()[0]))
+    if t["status"] == "running":
+        from . import tasks
+        doing = tasks.now_doing(task_id)
+        if doing:
+            lines.append(f"now: {doing}")
     events = [e for e in store.task_events(task_id, 8) if e["kind"] != "created"][-4:]
     for e in events:
         lines.append(f"  {time.strftime('%H:%M', time.localtime(e['created_at']))} "

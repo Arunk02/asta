@@ -10,7 +10,6 @@ for d in "${dirs[@]}"; do
   [ "$(cd "$d" 2>/dev/null && pwd)" = "$here" ] && continue
   if [ -x "$d/gh" ]; then real="$d/gh"; break; fi
 done
-[ -z "$real" ] && { echo "gh: not found" >&2; exit 127; }
 
 mode="${ASTA_TASK_WRITES:-}"
 refuse() {
@@ -30,9 +29,16 @@ for a in "$@"; do
 done
 cmd="${words[0]} ${words[1]}"
 
+refuse_wait() {
+  echo "asta: 'gh $*' is blocked in this task — do not wait on CI. Report the state it is in now (gh run view / gh pr checks); Asta's CI watcher follows the build and tells Arun when it moves." >&2
+  exit 3
+}
+
 if [ -n "$mode" ]; then
   case "$cmd" in
     "pr review"|"pr merge"|"pr close"|"pr reopen") refuse "$@" ;;
+    "run watch") refuse_wait "$@" ;;
+    "pr checks") printf '%s\n' "$@" | grep -qx -- "--watch" && refuse_wait "$@" ;;
   esac
   if [ "${words[0]}" = "api" ]; then
     method="GET"; prev=""; has_fields=0
@@ -61,4 +67,5 @@ if [ -n "$mode" ]; then
     esac
   fi
 fi
+[ -z "$real" ] && { echo "gh: not found" >&2; exit 127; }
 exec "$real" "$@"

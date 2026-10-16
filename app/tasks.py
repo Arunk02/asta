@@ -1767,6 +1767,48 @@ def _progress_watcher(task_id: int, title: str):
     return on_progress
 
 
+def now_doing(task_id: int) -> str:
+    """The task's latest step, read from its own session — "11:29 running `gh run
+    watch 38854502635…`". 16 Oct: the card said only "tier: T2 / route: plan"
+    while #345 sat 25 minutes on one command; what it was doing was nowhere."""
+    import datetime as _dt
+    sid = next((store.kv_get(f"task_session:{task_id}:{ex}") for ex in ("claude", "copilot")
+                if store.kv_get(f"task_session:{task_id}:{ex}")), "")
+    if not sid:
+        return ""
+    files = list((Path.home() / ".claude" / "projects").glob(f"*/{sid}.jsonl"))
+    if not files:
+        return ""
+    try:
+        with open(files[0], "rb") as fh:
+            fh.seek(0, 2)
+            start = max(0, fh.tell() - 65536)
+            fh.seek(start)
+            lines = fh.read().decode(errors="replace").splitlines()[1 if start else 0:]
+    except OSError:
+        return ""
+    for raw in reversed(lines):
+        try:
+            row = _json.loads(raw)
+        except ValueError:
+            continue
+        if row.get("type") != "assistant":
+            continue
+        when = ""
+        with contextlib.suppress(Exception):
+            when = _dt.datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00")) \
+                .astimezone().strftime("%H:%M")
+        for part in reversed((row.get("message") or {}).get("content") or []):
+            if part.get("type") == "tool_use":
+                args = part.get("input") or {}
+                what = args.get("command") or args.get("file_path") or args.get("pattern") \
+                    or args.get("description") or ""
+                return f"{when} running {part.get('name')}: {clip.clip(str(what).splitlines()[0] if what else '', 90)}".strip()
+            if part.get("type") == "text" and part.get("text", "").strip():
+                return f"{when} {clip.clip(part['text'].strip().splitlines()[0], 100)}".strip()
+    return ""
+
+
 def plan_approved(task_id: int) -> bool:
     """Has Arun approved this task's plan yet?
 
@@ -2824,9 +2866,38 @@ REPLAN_WITH_NOTE = ("Revise the plan: Arun told you this after you started, so t
                     "above was written without it. Follow it.")
 
 
+#: A "plan" that proposes no change: it is findings, not something to approve.
+_NO_CHANGE = re.compile(
+    r"\bno (?:fix|code change|change)s? (?:was |is )?(?:made|needed|required|proposed|to make)\b"
+    r"|\bnothing (?:in [\w' ]{1,40} )?to (?:fix|change)\b|\bno code changes? (?:are )?(?:needed|required)\b",
+    re.I)
+
+
+def proposes_no_change(result: str) -> bool:
+    return bool(_NO_CHANGE.search(result or ""))
+
+
 async def announce_plan(task_id: int, t: dict, result: str) -> None:
     """Park the task at its plan gate and put the plan on his phone."""
     from . import notify
+    if proposes_no_change(result) and not note_waiting(task_id):
+        # 16 Oct, #345: "investigate the CT failures" came back as findings —
+        # "no fix made, nothing in this PR's diff to fix" — and reached him as
+        # "📋 PLAN #345 … approve task 345". An answer read as a plan is an
+        # answer he does not see. Findings are said as findings.
+        managed = _graph().manages(task_id)
+        if not managed:
+            store.update_task(task_id, status="done", result=result, finished_at=time.time())
+            store.add_task_event(task_id, "status", "findings — no change proposed, closed")
+        else:
+            store.kv_set(f"task_gate:{task_id}", "plan")
+            store.update_task(task_id, status="awaiting_approval", result=result)
+        await notify.notify(
+            f"🔎 *#{task_id} — what I found* (no code change proposed)\n{clip.clip(t['title'], 90)}\n\n"
+            f"{_phone_text(_ASK_LINE.sub('', result).rstrip(), 1500, head_first=True)}"
+            + (f"\n\n— — —\nSay *reject task {task_id}* to close it, or tell me what to change."
+               if managed else ""), "task")
+        return
     store.kv_set(f"task_gate:{task_id}", "plan")
     # The brain signs off with its own "Reply 'PLAN APPROVED' to proceed",
     # and the push below adds the real buttons underneath it. Two asks in a

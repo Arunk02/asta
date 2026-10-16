@@ -2844,10 +2844,28 @@ def readable_outcome(result: str) -> str:
     return prose
 
 
+def with_reported(task_id: int, result: str, within: float = 900) -> str:
+    """The run's text, or — when that is a bare sign-off — what it REPORTED.
+
+    16 Oct, #347: it re-checked the schema on master as told, found the vendored
+    copy byte-identical and asked one question — all in report_outcome — then
+    ended "Filed as needs_input again". That line was all he got."""
+    from .graph import outcome
+    row = outcome.reported(task_id, time.time() - within)
+    if not row or len(readable_outcome(result or "").strip()) >= 400:
+        return result
+    parts = [row.get("summary") or ""]
+    if row.get("questions"):
+        parts.append("\n".join(f"• {q}" for q in row["questions"]))
+    told = "\n\n".join(p for p in parts if p.strip())
+    return told or result
+
+
 async def announce_context_check(task_id: int, t: dict, result: str) -> None:
     """The cheap early gate — intent unclear, asked before any discovery spend.
     Shared by both task engines, so the question reads the same either way."""
     from . import notify
+    result = with_reported(task_id, result)
     store.kv_set(f"task_gate:{task_id}", "context")
     store.update_task(task_id, status="awaiting_approval", result=result)
     await notify.notify(

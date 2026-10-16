@@ -973,6 +973,28 @@ _PROGRESS_ONLY = re.compile(
     r"(?:\s+(?:in)?to)?(?:\s+(?:it|this|that|the|your|ur|PR|pr|details|change|changes|now|once|"
     r"and|update|you|u|shortly|soon|\d+))*\s*[.!]?$",
     re.I)
+#: Asta's own receipts (steward.ack_line) — progress, whatever the subject.
+_ACK_LINE = re.compile(
+    r"^(?:looking into the (?:pr details|booking)|checking the (?:build|ticket details)|"
+    r"looking into what went wrong|let me look into this|"
+    r"got it, checking what .{1,40} needs for this)[.!]?$", re.I)
+_TRAILING_ADDRESS = re.compile(r"[,\s]+(?:bro|da|machi|sir|buddy|boss)\s*[.!]?$", re.I)
+
+
+def progress_only(line: str) -> bool:
+    """A line that only says work is under way — "Looking into the PR details,
+    bro". Not worth his yes, and not a reply to what they asked."""
+    t = _TRAILING_ADDRESS.sub("", " ".join((line or "").split()))
+    return bool(_PROGRESS_ONLY.match(t) or _ACK_LINE.match(t))
+
+
+async def _answered_already(c: dict) -> bool:
+    """He wrote back after their newest message — telling him they wrote is old
+    news. 16 Oct: Vinish's "Bro, that cam's one" (12:40) reached his phone at
+    12:43:50, after his own "bro what exactly is it…" at 12:43:34."""
+    if c.get("handled_by_him"):
+        return True
+    return await he_replied_since(c["chat"], c.get("sent_at"))
 
 
 async def _say(chat: str, line: str, *, group: bool = False,
@@ -1001,6 +1023,14 @@ async def _say(chat: str, line: str, *, group: bool = False,
         # needs to approve it?" from Asta two minutes later. The reply was to
         # HIM; he decides what to say. He sees it and the line, nothing is sent.
         from . import answers
+        if progress_only(line):
+            # 16 Oct: Vinish asked for a story AND a schema change; his phone got
+            # "Here's what I'd send: Looking into the PR details, bro — send it?"
+            # A progress line in his own conversation is not a draft: not said,
+            # not shown. What they asked reaches him with the finding.
+            store.record_outcome("thread", "held back", subject=chat[:80],
+                                 detail=f"his conversation, progress line not shown — not said: {line}"[:200])
+            return False
         store.record_outcome("thread", "held back", subject=chat[:80],
                              detail=f"his conversation — not said: {line}"[:200])
         await answers.present(who=chat, need="replied to you", chat=chat, group=False,
@@ -1013,7 +1043,7 @@ async def _say(chat: str, line: str, *, group: bool = False,
     from . import steward, understand
     problem = "you asked me to send nothing without your yes" if not steward.say_without_yes() \
         else understand.unapproved_line_problem(line)
-    if problem and _PROGRESS_ONLY.match(" ".join(line.split())):
+    if problem and progress_only(line):
         # "Looking into the PR details" is not worth his yes: it went to his phone
         # as a draft to approve (13 Oct) while the real answer was still coming.
         # Not said, not shown — the finding is what he hears about.
@@ -1850,10 +1880,11 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 # theirs. "hi Arunkumar, sorry saw the ping now" was Shabda
                 # replying to Arun's own message (1 Oct) and got "Hi Shabda,
                 # what's the issue?" back. Nothing to ask: his conversation.
-                line = f"💬 {who.split()[0]} replied to your message: " \
-                       f"{summarise(' / '.join(c['new']), limit=140)}"
-                if _worth_telling(tid, line, fyi=False, group=False, now=now):
-                    red.append(line)
+                if not await _answered_already(c):
+                    line = f"💬 {who.split()[0]} replied to your message: " \
+                           f"{summarise(' / '.join(c['new']), limit=140)}"
+                    if _worth_telling(tid, line, fyi=False, group=False, now=now):
+                        red.append(line)
                 continue
             # The model's question when it knows what this is about and asks it
             # politely ("is this about the event-history defect?"); otherwise
@@ -1909,6 +1940,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             # agreed is his to agree).
             for k in c["keys"]:
                 attention.mark_dropped(k)
+            if await _answered_already(c):
+                continue
             line = f"💬 {who.split()[0]} replied to you: " \
                    f"{summarise(' / '.join(c['new']), limit=200)}"
             asked = his_last_words(c["chat"], before=c.get("first_at") or c.get("sent_at"))
@@ -2015,7 +2048,13 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 except (RuntimeError, ValueError) as exc:
                     store.record_outcome("review", "verification failed",
                                          subject=next(iter(refs))[:80], detail=str(exc)[:200])
-        live = _live_work(tid, f"{ask_text}\n{recent}")
+        # Their own words decide which live work this is when they name a thing
+        # of their own. 16 Oct: Vinish's new "can you check BEPTELIKOS-11443?"
+        # was matched, through the PR 25750 link still in the recent chat, to the
+        # CAMS schema task #347 and folded into it — never investigated. The
+        # recent chat only fills in for a message that names nothing ("this PR").
+        own = threads.entities_in(ask_text)
+        live = _live_work(tid, ask_text if own else f"{ask_text}\n{recent}")
         if live and live[0] == "code":
             # Arun already has the change in hand: their words join that task.
             from . import notify as alerts, tasks as _tasks

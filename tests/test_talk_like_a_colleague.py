@@ -140,7 +140,7 @@ def test_the_decision_reads_like_a_person(phone):
                                 reply="Checked it — no trace in logs. Is the ref right?",
                                 task_id=5))
     text = phone["pushed"][0]["text"]
-    assert text.startswith("*Vinish Kumar* asked about check booking H65ZMWX52B2.")
+    assert text.startswith("*Vinish Kumar* wants you to check booking H65ZMWX52B2.")
     assert "> Checked it — no trace in logs. Is the ref right?" in text
     assert "send it?" in text.lower()
     assert "———" not in text and "🔎" not in text

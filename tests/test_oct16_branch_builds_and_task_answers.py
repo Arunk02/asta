@@ -22,21 +22,38 @@ REPO = "Maersk-Global/telikos-booking-service"
 
 
 def _run(rid, branch="develop", event="push", status="completed", concl="success", attempt=1,
-         workflow="MSS-Build and deploy to lower envioronments"):
+         workflow="MSS-Build and deploy to lower envioronments", pr=1487):
     return {"databaseId": rid, "status": status, "conclusion": concl, "workflowName": workflow,
-            "headBranch": branch, "displayTitle": "Merge pull request #1487", "url": f"https://gh/{rid}",
-            "event": event, "attempt": attempt}
+            "headBranch": branch, "displayTitle": f"Merge pull request #{pr} from Maersk-Global/feature/x",
+            "url": f"https://gh/{rid}", "event": event, "attempt": attempt}
 
 
-def _gh(monkeypatch, runs, jobs=None):
+CI_OK = [{"name": "cicd / Build", "status": "completed", "conclusion": "success"},
+         {"name": "cicd / Component test", "status": "completed", "conclusion": "success"},
+         {"name": "cicd / Docker Build and Push", "status": "completed", "conclusion": "success"},
+         {"name": "cicd / DEV_Sanity", "status": "completed", "conclusion": "failure"},
+         {"name": "cicd / DEV", "status": "completed", "conclusion": "failure"},
+         {"name": "cicd / SIT", "status": "waiting", "conclusion": ""}]
+CI_RED = [{"name": "cicd / Build", "status": "completed", "conclusion": "success"},
+          {"name": "cicd / Component test", "status": "completed", "conclusion": "failure"},
+          {"name": "cicd / DEV_Sanity", "status": "completed", "conclusion": "failure"}]
+CI_RUNNING = [{"name": "cicd / Build", "status": "completed", "conclusion": "success"},
+              {"name": "cicd / Component test", "status": "in_progress", "conclusion": ""}]
+
+
+def _gh(monkeypatch, runs, jobs=None, authors=None):
+    authors = {"1487": "Arunk540", "1488": "VinishKumar1", **(authors or {})}
+
     async def fake(*args, timeout=30):
         args = list(args)
+        if args[:2] == ["pr", "view"]:
+            return 0, authors.get(args[2], "someone")
         if args[0] == "pr":
             return 0, "[]"
         if "--user" in args:
-            return 0, "[]"                       # none of these runs are his
+            return 0, "[]"                       # the merge runs are not "his" runs
         if args[:2] == ["run", "view"]:
-            return 0, json.dumps({"jobs": (jobs or {}).get(args[2], [])})
+            return 0, json.dumps({"jobs": (jobs or {}).get(args[2], CI_OK)})
         return 0, json.dumps(runs)
 
     monkeypatch.setattr(ci_watch, "_run_gh", fake)
@@ -45,48 +62,60 @@ def _gh(monkeypatch, runs, jobs=None):
         return "Arunk540"
 
     monkeypatch.setattr(ci_watch, "my_login", me)
+    monkeypatch.setattr(ci_watch.repo_ops, "office_login", lambda repo: "Arunk540")
 
 
 def _poll():
     return asyncio.run(ci_watch._poll_repo(REPO))
 
 
-def test_a_develop_build_someone_else_merged_is_followed(monkeypatch):
+def _baseline(monkeypatch):
     _gh(monkeypatch, [_run(1)])
-    _poll()                                              # baseline, silent
-    _gh(monkeypatch, [_run(1), _run(2, concl="failure")])
+    _poll()                                              # first look baselines, silent
+
+
+def test_ci_passing_after_his_merge_is_told_so_he_can_share_the_build(monkeypatch):
+    _baseline(monkeypatch)
+    _gh(monkeypatch, [_run(1), _run(2, status="waiting", concl="")])
     notes = _poll()
-    assert len(notes) == 1 and "🔴" in notes[0] and "(develop)" in notes[0]
+    assert len(notes) == 1 and "✅ CI passed on develop after your booking PR 1487" in notes[0]
+    assert "ready to share for deploy" in notes[0]
+    assert _poll() == []                                 # once
 
 
-def test_a_run_waiting_at_a_deploy_approval_is_judged_by_its_jobs(monkeypatch):
-    _gh(monkeypatch, [_run(1)])
+def test_ci_failing_after_his_merge_names_the_job_not_sanity_or_deploy(monkeypatch):
+    _baseline(monkeypatch)
+    _gh(monkeypatch, [_run(1), _run(2, concl="failure")], {"2": CI_RED})
+    notes = _poll()
+    assert len(notes) == 1 and "🔴 CI failed on develop" in notes[0]
+    assert "Component test failed" in notes[0] and "Sanity" not in notes[0]
+
+
+def test_a_re_run_that_passes_is_told_too(monkeypatch):
+    _baseline(monkeypatch)
+    _gh(monkeypatch, [_run(1), _run(2, concl="failure")], {"2": CI_RED})
     _poll()
-    jobs = {"2": [{"name": "cicd / Build", "status": "completed", "conclusion": "success"},
-                  {"name": "cicd / DEV_Sanity", "status": "completed", "conclusion": "failure"},
-                  {"name": "cicd / SIT", "status": "waiting", "conclusion": ""}]}
-    _gh(monkeypatch, [_run(1), _run(2, status="waiting", concl="")], jobs)
+    _gh(monkeypatch, [_run(1), _run(2, attempt=3, status="waiting", concl="")], {"2": CI_OK})
     notes = _poll()
-    assert len(notes) == 1 and "DEV_Sanity failed" in notes[0]
+    assert len(notes) == 1 and "passed (re-run)" in notes[0]
 
 
 def test_still_running_says_nothing_yet(monkeypatch):
-    _gh(monkeypatch, [_run(1)])
-    _poll()
-    jobs = {"2": [{"name": "cicd / Component test", "status": "in_progress", "conclusion": ""},
-                  {"name": "cicd / SIT", "status": "waiting", "conclusion": ""}]}
-    _gh(monkeypatch, [_run(1), _run(2, status="waiting", concl="")], jobs)
+    _baseline(monkeypatch)
+    _gh(monkeypatch, [_run(1), _run(2, status="in_progress", concl="")], {"2": CI_RUNNING})
     assert _poll() == []
 
 
-def test_a_re_run_that_passes_is_a_recovery(monkeypatch):
-    _gh(monkeypatch, [_run(1)])
-    _poll()
-    _gh(monkeypatch, [_run(1), _run(2, concl="failure")])
-    _poll()
-    _gh(monkeypatch, [_run(1), _run(2, concl="success", attempt=3)])
-    notes = _poll()
-    assert len(notes) == 1 and "🟢" in notes[0]
+def test_someone_elses_merge_is_not_his(monkeypatch):
+    _baseline(monkeypatch)
+    _gh(monkeypatch, [_run(1), _run(2, concl="failure", pr=1488)], {"2": CI_RED})
+    assert _poll() == []
+
+
+def test_only_sanity_or_deploy_red_is_a_pass(monkeypatch):
+    _baseline(monkeypatch)
+    _gh(monkeypatch, [_run(1), _run(2, concl="failure")], {"2": CI_OK})
+    assert "✅" in _poll()[0]
 
 
 BUILD = "MSS-Build and deploy to lower envioronments"
@@ -95,7 +124,6 @@ BUILD = "MSS-Build and deploy to lower envioronments"
 @pytest.mark.parametrize("branch,event,workflow,followed", [
     ("main", "push", BUILD, True), ("release/2.2.4", "push", BUILD, True),
     ("develop", "pull_request", BUILD, False), ("feature/x", "push", BUILD, False),
-    # Not builds — the bot noise of 15 Oct must not come back through here.
     ("main", "push", "Auto merge PR", False), ("main", "push", "Internal Label Check", False),
     ("develop", "push", "CodeQL", False), ("develop", "push", "Run IaC Security Scan", False)])
 def test_which_builds_are_branch_builds(branch, event, workflow, followed):

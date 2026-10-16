@@ -165,6 +165,11 @@ BASE_BRANCHES = re.compile(os.environ.get("ASTA_CI_BASE_BRANCHES",
                                           r"^(?:main|master|develop|release/.+)$"))
 
 
+#: Jobs that are not CI: the Sanity runs ("sanity error is fine, ignore") and
+#: the deploy stages ("if any error in deploy, they will tell us") — 16 Oct.
+IGNORED_JOBS = re.compile(os.environ.get(
+    "ASTA_CI_IGNORE_JOBS", r"sanity|sleep|\b(?:dev|qa|sit|spt|uat|perf|preprod|prod)\s*$"), re.I)
+
 #: Which of a branch's workflows are its build. Not the bots: empv3's "Auto merge
 #: PR" on main is the noise he stopped on 15 Oct; label checks and scans neither.
 BRANCH_WORKFLOWS = re.compile(r"build|deploy|\bci\b|test|pipeline|release", re.I)
@@ -193,12 +198,64 @@ async def _jobs_verdict(repo: str, rid: str) -> tuple[str, list[str]]:
         jobs = json.loads(out or "{}").get("jobs") or []
     except json.JSONDecodeError:
         return "", []
-    failed = [j.get("name", "") for j in jobs if (j.get("conclusion") or "") in BAD]
+    ci = [j for j in jobs if not IGNORED_JOBS.search(j.get("name") or "")]
+    failed = [j.get("name", "") for j in ci if (j.get("conclusion") or "") in BAD]
     if failed:
         return "failure", failed
-    if any(j.get("status") == "in_progress" for j in jobs):
+    if not ci or any(j.get("status") != "completed" for j in ci):
         return "", []
     return "success", []
+
+
+_MERGED_PR = re.compile(r"Merge pull request #(\d+)|\(#(\d+)\)\s*$", re.I)
+
+
+async def _his_merge(repo: str, run: dict, me: str) -> str:
+    """The number of HIS pull request this branch build is the merge of, or ''."""
+    m = _MERGED_PR.search(run.get("displayTitle") or "")
+    if not m or not me:
+        return ""
+    number = m.group(1) or m.group(2)
+    key = f"ci_pr_author:{repo}#{number}"
+    author = store.kv_get(key)
+    if author is None:
+        rc, out = await _run_gh("pr", "view", number, "-R", repo, "--json", "author",
+                                "-q", ".author.login")
+        if rc != 0:
+            return ""
+        author = out.strip()
+        store.kv_set(key, author)
+    return number if author.lower() == me.lower() else ""
+
+
+async def _merged_results(repo: str, merges: list[dict], me: str) -> list[str]:
+    """One line per new CI result of a build after his merge — the first poll
+    only baselines. A re-run is a new result."""
+    key = f"ci_merged:{repo}"
+    seen = json.loads(store.kv_get(key) or "{}")
+    first = not seen and not store.kv_get(key)
+    notes = []
+    service = repo.split("/")[-1].removeprefix("telikos-").removesuffix("-service")
+    for r in sorted(merges, key=lambda r: int(r["databaseId"])):
+        sid = _seen_id(r)
+        if sid in seen:
+            continue
+        concl, failed = await _jobs_verdict(repo, str(r["databaseId"]))
+        if not concl:
+            continue                                     # CI still running
+        seen[sid] = concl
+        if first:
+            continue
+        number = await _his_merge(repo, r, me)
+        again = " (re-run)" if int(r.get("attempt") or 1) > 1 else ""
+        if concl == "success":
+            notes.append(f"✅ CI passed{again} on {r['headBranch']} after your {service} PR "
+                         f"{number} — the build is ready to share for deploy.\n{r['url']}")
+        else:
+            notes.append(f"🔴 CI failed{again} on {r['headBranch']} after your {service} PR "
+                         f"{number} — {', '.join(failed)} failed.\n{r['url']}")
+    store.kv_set(key, json.dumps(dict(list(seen.items())[-60:])))
+    return notes
 
 
 async def _my_branches(repo: str) -> set[str]:
@@ -253,20 +310,19 @@ async def _poll_repo(repo: str) -> list[str]:
         return []
     mine = {str(r["databaseId"]) for r in json.loads(out2 or "[]")}
     branches = await _my_branches(repo)
-    runs = [r for r in runs
-            if str(r["databaseId"]) in mine
-            or r.get("headBranch") in branches
-            or _subscribed(repo, r)
-            or _is_branch_build(r)]
-    # A branch build waiting at a deploy approval is as finished as CI gets:
-    # judge it by its jobs (16 Oct: develop's component test failed twice after
-    # booking PR 1487 merged, and the run sat at "waiting" for SIT/QA approval,
-    # so it never "completed" and nothing was said).
+    # The build on develop/main/release after HIS pull request merged: told once
+    # per result, pass or fail — "post merge, my PR only; once CI passes tell me
+    # and we share the build for deploy" (16 Oct). Other people's merges, and the
+    # deploy stages after CI, are not his.
+    merges = []
     for r in runs:
-        if r.get("status") == "waiting" and _is_branch_build(r):
-            concl, failed = await _jobs_verdict(repo, str(r["databaseId"]))
-            if concl:
-                r["status"], r["conclusion"], r["_failed_jobs"] = "completed", concl, failed
+        if _is_branch_build(r) and await _his_merge(repo, r, me):
+            merges.append(r)
+    merged_notes = await _merged_results(repo, merges, me)
+    runs = [r for r in runs if r not in merges and (
+            str(r["databaseId"]) in mine
+            or r.get("headBranch") in branches
+            or _subscribed(repo, r))]
     seen_key, wb_key = f"ci_seen:{repo}", f"ci_wb:{repo}"
     seen = json.loads(store.kv_get(seen_key) or "{}")
     wb = json.loads(store.kv_get(wb_key) or "{}")
@@ -313,7 +369,7 @@ async def _poll_repo(repo: str) -> list[str]:
                          f"({r['headBranch']})")
     store.kv_set(seen_key, json.dumps(dict(list(seen.items())[-40:])))
     store.kv_set(wb_key, json.dumps(wb))
-    return notes
+    return merged_notes + notes
 
 
 def _analyse_payload(note: str) -> dict | None:

@@ -780,11 +780,43 @@ def repair_rungs() -> list[tuple[str, object]]:
 APP_MARKERS = '[data-tid="app-bar"], [data-tid="chat-list"], [data-tid="app-layout-area--main"]'
 
 
+#: Teams asking to be restarted before it will show the app.
+_RESTART_ASKED = re.compile(r"please restart teams|restart teams to see|language changes detected", re.I)
+
+
+async def _answer_restart_banner(page) -> bool:
+    """Teams' own "restart Teams" banner, answered once: its Restart/Apply
+    button, else a reload. 19 Oct: "Language changes detected (English). Please
+    restart Teams to see the change." stood in front of the app on relaunch, and
+    every Outlook read for 12½ hours failed with "Teams app did not load"."""
+    try:
+        text = await page.evaluate("() => (document.body ? document.body.innerText : '').slice(0, 600)")
+    except Exception:                                          # noqa: BLE001
+        return False
+    if not _RESTART_ASKED.search(text or ""):
+        return False
+    how = "reloaded"
+    try:
+        button = page.get_by_role("button", name=re.compile(r"restart|apply|reload|refresh", re.I)).first
+        if await button.count():
+            await button.click(timeout=5000)
+            how = "pressed its restart"
+        else:
+            await page.reload(wait_until="domcontentloaded", timeout=60000)
+    except Exception:                                          # noqa: BLE001
+        with contextlib.suppress(Exception):
+            await page.reload(wait_until="domcontentloaded", timeout=60000)
+    store.record_outcome("browser", "restart banner", subject="teams",
+                         detail=f"{how}: {' '.join((text or '').split())[:120]}")
+    return True
+
+
 async def _open_teams(ctx, timeout: float = 75.0):
     """Navigate to Teams; poll until the authenticated app renders or we land on login."""
     page = ctx.pages[0] if ctx.pages else await ctx.new_page()
     await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
     deadline = asyncio.get_event_loop().time() + timeout
+    answered = False
     while asyncio.get_event_loop().time() < deadline:
         url = page.url
         if "microsoftonline" in url or "/login" in url or "signin" in url:
@@ -794,6 +826,9 @@ async def _open_teams(ctx, timeout: float = 75.0):
                 return page
         except Exception:
             pass  # navigation in flight — poll again once the new document is up
+        if not answered and await _answer_restart_banner(page):
+            answered = True
+            deadline = max(deadline, asyncio.get_event_loop().time() + 45)
         await asyncio.sleep(1)
     # Say WHAT is on screen, not just that the marker never appeared. The URL
     # alone cannot tell a slow render from an account picker from a dialog, and

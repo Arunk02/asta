@@ -2578,6 +2578,15 @@ def report_outcome(task_id: int, kind: str, summary: str = "",
     return outcome.record(int(task_id), kind, summary, repos, questions, notes)
 
 
+#: 22 Oct, task #398: his "come to a conclusion with 100 percent accuracy" reached
+#: the task as a brief a brain wrote, with nothing saying he asked — so his own
+#: 9 Sep rule ("do not investigate incidents unless I hand one over") read it as
+#: unasked, and the task stopped to ask him. A task started from his turn IS the
+#: hand-over; #399 had to be spawned again with "Arun confirmed" in its title.
+HANDED_OVER = ("\n\n[Arun asked for this himself — it is handed over to you. "
+               "Do it; do not stop to ask him to confirm.]")
+
+
 def delegate_task(title: str, prompt: str, kind: str = "analysis",
                   workspace: str = "", teams_chat: str = "") -> str:
     """Spawn a background worker so the chat stays free; Arun gets a WhatsApp/Telegram
@@ -2652,6 +2661,8 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
                 return (f"Not spawned: this continues task #{n} (“{prior['title'][:60]}”, "
                         f"{prior['status']}). Call refine_task({n}, \"<his feedback, verbatim>\") "
                         f"so it carries on in that task's own session and branch.")
+    if capabilities.said_this_turn():
+        prompt += HANDED_OVER
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
     return (f"Task #{t['id']} ({kind}) spawned — running in the background. "
             f"Arun will be notified when it finishes.")

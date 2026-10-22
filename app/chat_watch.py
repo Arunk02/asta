@@ -1446,7 +1446,8 @@ def held(chat: str) -> dict:
 
 def hold(chat: str, msgs: list[dict], why: str, since: float) -> None:
     allh = _held_all()
-    allh[chat] = {"since": since, "why": why,
+    first = float((allh.get(chat) or {}).get("first") or time.time())
+    allh[chat] = {"since": since, "why": why, "first": first,
                   "msgs": [{k: m.get(k) for k in ("sender", "text", "sent_at")} for m in msgs]}
     store.kv_set(_HELD_KEY, json.dumps(allh))
 
@@ -1470,12 +1471,27 @@ def _next_held(now: float) -> float | None:
     return min(waits) if waits else None
 
 
+#: They are still writing while their newest message is this fresh. 22 Oct,
+#: Vinish: "…why is it failing only for this one?" then, 9 s later, "Is this
+#: specific to a multi-stop case?" — one question in two messages, answered as
+#: two: the first with an old finding, the second by a task of its own.
+QUIET_SECONDS = float(os.environ.get("ASTA_CHAT_QUIET_SECONDS", "40"))
+STILL_WRITING = "still writing — waiting for the rest"
+#: However long they keep typing, this is the longest a conversation is held.
+MAX_HOLD_SECONDS = 3 * 60
+
+
 def _wait_reason(c: dict, now: float) -> str:
     """Why this conversation should wait for the next message, or ''."""
     from . import booking_case
     if c["handled_by_him"] or not c["raw"]:
         return ""
     h = held(c["chat"])
+    if h and now - float(h.get("first") or h.get("since") or now) >= MAX_HOLD_SECONDS:
+        return ""                                   # held long enough, whatever is coming
+    last = float(c.get("sent_at") or 0)
+    if QUIET_SECONDS > 0 and last and 0 <= now - last < QUIET_SECONDS:
+        return STILL_WRITING
     if h and now - float(h.get("since") or 0) >= HOLD_SECONDS:
         return ""                                   # waited long enough: read it now
     texts = [(m.get("text") or "") for m in c["raw"]]
@@ -1707,6 +1723,10 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         why_wait = _wait_reason(c, now)
         if why_wait:
             since = float(held(c["chat"]).get("since") or now)
+            if why_wait == STILL_WRITING:
+                # Due QUIET_SECONDS after their newest message — each new one
+                # moves it on, up to MAX_HOLD_SECONDS in all.
+                since = float(c.get("sent_at") or now) - (HOLD_SECONDS - QUIET_SECONDS)
             hold(c["chat"], c["raw"], why_wait, since)
             store.record_outcome("chatwatch", "held", subject=c["chat"][:80],
                                  detail=f"{why_wait} — {(c['last'] or '')[:100]}")

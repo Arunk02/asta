@@ -170,6 +170,9 @@ def _no_machine_side_effects(monkeypatch):
     # "checking, will update you" acknowledgement has its own tests.
     from app import chat_watch as _chat_watch
     monkeypatch.setattr(_chat_watch, "ACKNOWLEDGE", False)
+    # Messages in tests are written "now"; the wait for the rest of them has its
+    # own tests (test_oct22_wait_till_they_finish).
+    monkeypatch.setattr(_chat_watch, "QUIET_SECONDS", 0.0)
     # Telegram is the same door on another channel. It is dead in tests only by
     # accident today (the chat id lives in the isolated database), and a test
     # that stores one would push to his phone for real.

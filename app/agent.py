@@ -3184,6 +3184,10 @@ async def teams_send_message(chat: str, text: str, to_group: bool = False) -> st
         return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."
     if not teams_bridge.logged_in_once():
         return "Not logged in — Arun must run: .venv/bin/python -m app.teams_bridge login"
+    from . import loop
+    refused = loop.rejected_again(text)
+    if refused:
+        return refused
     try:
         where = await teams_bridge.send_message(chat, text, allow_group=to_group)
         return f"Sent — delivered to: {where}"

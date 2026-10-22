@@ -66,3 +66,25 @@ sent to billing", and it lived — and was sent — in QA.
 - **The logs decide; the code explains.** A cause the logs do not show is a hypothesis —
   say so.
 - **Don't re-run** a query whose answer you already have; build the next one on it.
+
+## Judging an analysis — lessons from 22 Oct
+
+A colleague's analysis of a failed cancellation was right; Asta's reply called the
+event an amend, offered an unproven "why only this one", and had to be corrected.
+
+- **A log message is a label, not the event's type.** A consumer may log "Amend …
+  events" for every event on its topic. Name an event by its payload (`eventName`,
+  the workflow type) or by the handler that ran next — never by a consumer's message.
+- **Verdict per claim.** Asked "whose analysis is right — theirs, ours, both, neither?":
+  split each analysis into its claims and give each one *correct / wrong / unproven*
+  with the line that decides it. Agree plainly when the data agrees; never invent a
+  difference to have something to add.
+- **"Why only this one" needs this case against a normal one.** Without data showing
+  what differs, say it is unknown and name the data that would settle it.
+- **A field the flow rewrites is not evidence of earlier state.** If the code path
+  resets a status or bumps a version, that value says nothing about before.
+- **Two sources merged → compare both.** When an object is built from an inbound event
+  plus a DB read, put the ids from each side next to each other before blaming either.
+- **Know where history ends.** Logs age out and a record saved in place keeps no
+  versions. Say the origin cannot be recovered from here and name what could (an
+  event-history service, the producer's own store) — never fill the gap with a guess.

@@ -54,8 +54,14 @@ _RUNNING = ("queued", "running", "planning", "working", "pending", "in_progress"
 _DONE = ("done", "completed", "awaiting_approval")
 
 
-def key_for(kind: str, text: str) -> str:
-    """The same case, environment and question may share a finding."""
+def key_for(kind: str, text: str, question: str = "") -> str:
+    """The same case, environment and QUESTION may share a finding.
+
+    `question` is what was asked this time, when `text` also carries the
+    conversation around it. 22 Oct: Vinish's "why only this booking — we have so
+    many cancelled ones?" keyed like his earlier "is this our code issue?" (same
+    booking, TO and container ids, same surrounding chat) and got that old
+    answer back. Two questions about one case are two findings."""
     from . import booking_case, knowledge, threads
     ents = threads.entities_in(text or "")
     if ents:
@@ -63,13 +69,15 @@ def key_for(kind: str, text: str) -> str:
         scope = booking_case.case_scope(text)
         if scope:
             subject += f"|env:{scope[1]}"
-            generic = knowledge._CHATTER | {
-                "look", "see", "tell", "know", "quick", "now", "booking", "bookings",
-                "check", "why", "how", "can", "could", "please", "failed", "failure",
-                "done", "status", "in", *booking_case._ENV_NAMES,
-            }
-            topics = {w for w in knowledge.terms(text[:350])
-                      if w not in generic and w.upper() not in booking_case.ids(text)}
+        asked = (question or text or "")[:350]
+        generic = knowledge._CHATTER | {
+            "look", "see", "tell", "know", "quick", "now", "booking", "bookings",
+            "check", "why", "how", "can", "could", "please", "failed", "failure",
+            "done", "status", "in", *booking_case._ENV_NAMES,
+        }
+        topics = {w for w in knowledge.terms(asked)
+                  if w not in generic and w.upper() not in booking_case.ids(asked)}
+        if scope or question:
             subject += "|topic:" + "|".join(sorted(topics))
     else:
         chatter = knowledge._CHATTER | {"look", "see", "tell", "know", "quick", "now"}

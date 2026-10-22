@@ -241,6 +241,56 @@ def previous_version(cid: str, to: str, current: str) -> str:
     return ""
 
 
+#: Drafts he said no to — their exact wording may not go out after all.
+_REJECTED = "rejected_drafts"
+REJECTED_SECONDS = 3600
+
+
+def _plain(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def note_rejected(intent: dict) -> None:
+    """He answered this draft with anything but a yes: its words are refused."""
+    from . import store
+    what = _plain(intent.get("what") or "")
+    if not what:
+        return
+    now = time.time()
+    try:
+        rows = json.loads(store.kv_get(_REJECTED) or "[]")
+    except ValueError:
+        rows = []
+    rows = [r for r in rows if now - float(r.get("at") or 0) < REJECTED_SECONDS]
+    rows.append({"what": what, "to": intent.get("to") or "", "at": now})
+    store.kv_set(_REJECTED, json.dumps(rows[-10:]))
+
+
+def rejected_again(text: str) -> str:
+    """Why these words must not be sent — '' unless they are a draft he said no to.
+
+    22 Oct: he answered a draft to Vinish with "No — compare with his latest
+    messages … suggest him clearly", and the chat brain sent the same draft,
+    unchanged, fifteen seconds later."""
+    import difflib
+    from . import store
+    said = _plain(text)
+    if not said:
+        return ""
+    try:
+        rows = json.loads(store.kv_get(_REJECTED) or "[]")
+    except ValueError:
+        return ""
+    now = time.time()
+    for r in rows:
+        if now - float(r.get("at") or 0) >= REJECTED_SECONDS:
+            continue
+        if difflib.SequenceMatcher(None, said, r.get("what") or "").ratio() >= 0.9:
+            return ("Not sent: this is the draft Arun just said no to. Revise it as he asked "
+                    "and stage it with prepare_to_send — do not send the old wording.")
+    return ""
+
+
 def awaiting(cid: str) -> dict | None:
     if not cid:
         return None

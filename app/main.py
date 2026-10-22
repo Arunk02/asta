@@ -4308,6 +4308,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             # "Revise accordingly" is one reading. "enable MX … in develop and
             # 3.1.6" typed at a waiting draft was a new instruction, and the
             # draft was re-staged as a label of itself (30 Sep).
+            loop.note_rejected(staged)
             prompt = (f"Arun did NOT approve sending the draft as-is. His feedback:\n"
                       f"{user_text.strip()}\n\nRevise accordingly — change only what he asked "
                       f"for, in his words, and add nothing from his other conversations (15 Oct: "

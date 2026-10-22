@@ -903,7 +903,8 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         ck = (f"review_request:{review_revision}:"
               f"{hashlib.sha256(scope.encode()).hexdigest()[:12]}" if review_revision else "")
     else:
-        ck = "" if kind == "pr_review" else results_cache.key_for(kind or "ask", grounds)
+        ck = "" if kind == "pr_review" else results_cache.key_for(kind or "ask", grounds,
+                                                                  question=text)
     hit = results_cache.lookup(ck) if ck else None
     if hit:
         done = hit["state"] == "done"

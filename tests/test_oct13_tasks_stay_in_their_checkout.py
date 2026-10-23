@@ -211,3 +211,40 @@ def test_a_resumed_leg_frees_the_branch_too(ws, monkeypatch):
     asyncio.run(tasks._run_code_leg(me, "continue", tasks.task_cwd(me, "booking"),
                                     resume=True, effort="", workspace="booking"))
     assert not worktrees.exists(ws, held)
+
+
+# --- 23 Oct: a PR's branch held by the task that shipped it --------------------------------
+
+def _held_branch(tid):
+    path = Path(tasks.task_cwd(tid, "booking")) / "telikos-email-service"
+    return subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_a_shipped_task_frees_the_pr_branch_a_new_task_needs(ws):
+    """#353 shipped PR 1489 and kept its checkout; #404 was asked to fix that PR and
+    git refused the branch. The holder is freed — clean and pushed only."""
+    held = _checkout(ws, "shipped")
+    freed = asyncio.run(tasks.free_branch_holders(ws, {_held_branch(held)}, but=999))
+    assert held in freed and not worktrees.exists(ws, held)
+
+
+def test_a_shipped_task_keeps_a_branch_nobody_asked_for(ws):
+    held = _checkout(ws, "shipped")
+    asyncio.run(tasks.free_branch_holders(ws, {"feature/something-else"}, but=999))
+    assert worktrees.exists(ws, held)
+
+
+def test_a_shipped_task_with_unpushed_work_is_never_freed(ws):
+    held = _checkout(ws, "shipped", unpushed=True)
+    asyncio.run(tasks.free_branch_holders(ws, {_held_branch(held)}, but=999))
+    assert worktrees.exists(ws, held)
+
+
+def test_the_refusal_says_why_the_checkout_failed(ws):
+    """The 🌿 note is ambient and never reached him; the ❌ must carry the reason."""
+    tid = _task()
+    store.kv_set(tasks._CHECKOUT_PROBLEM + str(tid),
+                 "telikos-booking-service: could not check out the PR branch x: already checked out")
+    with pytest.raises(RuntimeError, match="already checked out"):
+        tasks.refuse_shared_tree(tid, str(ws), "booking")

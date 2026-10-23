@@ -951,6 +951,9 @@ _CLEANED = "worktree_cleaned:"
 _FINAL_FOR_GOOD = ("merged", "pr_closed", "cancelled", "rejected")
 #: Finished, but he may come back to it: kept a while, restored if he does.
 _FINISHED_FOR_NOW = ("done", "failed", "sent", "send_failed")
+#: Why a task's private checkout could not be made — read back into its failure,
+#: since the 🌿 note is ambient and never reaches him while he is at the laptop.
+_CHECKOUT_PROBLEM = "checkout_problem:"
 CHECKOUT_KEEP_DAYS = float(os.environ.get("ASTA_CHECKOUT_KEEP_DAYS", "14"))
 
 
@@ -1045,6 +1048,34 @@ async def free_idle_checkouts(ws_root: Path, but: int) -> list[int]:
         if root.resolve() != Path(ws_root).resolve() or not worktrees.exists(root, t["id"]):
             continue
         if await _unpushed(t["id"], root):
+            continue
+        notes = await remove_checkout(t["id"], t)
+        if notes and not any("uncommitted" in n for n in notes):
+            freed.append(t["id"])
+    return freed
+
+
+async def free_branch_holders(ws_root: Path, branches: set[str], but: int) -> list[int]:
+    """Free the checkout of an open-PR task that holds a branch this task needs.
+
+    `free_idle_checkouts` keeps a shipped task's checkout for its CI and review
+    follow-ups. But when a new task is asked to work on that same PR, git lets the
+    branch be checked out once: 23 Oct, #404 ("fix … in PR 1489") failed because
+    #353, which shipped PR 1489, still held its branch. Clean and fully pushed
+    only; `ensure_checkout` brings it back if #353 is resumed."""
+    from . import worktrees
+    freed: list[int] = []
+    for t in store.list_tasks(limit=500):
+        if t["id"] == but or t.get("kind") != "code" or t.get("status") not in SHIPPED_STATUSES \
+                or not worktrees.exists(ws_root, t["id"]):
+            continue
+        root = worktrees.root_for(ws_root, t["id"])
+        held = set()
+        for repo in (p for p in root.iterdir() if p.is_dir() and (p / ".git").exists()):
+            rc, name = await repo_ops.git(repo, "git", "rev-parse", "--abbrev-ref", "HEAD")
+            if rc == 0:
+                held.add(name.strip())
+        if not held & branches or await _unpushed(t["id"], ws_root):
             continue
         notes = await remove_checkout(t["id"], t)
         if notes and not any("uncommitted" in n for n in notes):
@@ -1920,9 +1951,10 @@ def refuse_shared_tree(task_id: int, cwd: str, workspace: str | None) -> None:
         return
     if not worktrees.repos_in(root):
         return
+    why = store.kv_get(_CHECKOUT_PROBLEM + str(task_id)) or "see the 🌿 note"
     raise RuntimeError(
         f"no private checkout for task #{task_id}, so it would work in {root} — the tree "
-        "Arun has open. Refusing. The 🌿 note above says why the checkout could not be made.")
+        f"Arun has open. Refusing. Why the checkout could not be made: {why}")
 
 
 async def other_trees(workspace: str | None, cwd: str) -> dict[str, str]:
@@ -3296,6 +3328,8 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
         # nothing is named, because under-preparing breaks a run and
         # over-preparing only costs a fetch.
         head = await pr_head_branch(t, root)
+        if head:
+            await free_branch_holders(root, set(head.values()), task_id)
         results = await worktrees.create(root, task_id, branch,
                                          t.get("title") or "", t.get("goal") or "",
                                          t.get("prompt") or "", existing=head)
@@ -3307,6 +3341,8 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
     # Only speak when there is something he would want to know: a repo that
     # could not be prepared, a base that was not develop, or uncommitted work
     # that is now riding along on the new branch.
+    failed = [f"{r['repo']}: {r.get('note') or 'could not prepare'}" for r in results if not r["ok"]]
+    store.kv_set(_CHECKOUT_PROBLEM + str(task_id), "; ".join(failed))
     notable = [r for r in results if not r["ok"] or r.get("note") or r.get("dirty")]
     if notable:
         lines = []

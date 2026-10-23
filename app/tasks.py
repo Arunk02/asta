@@ -2930,6 +2930,9 @@ def proposes_no_change(result: str) -> bool:
 async def announce_plan(task_id: int, t: dict, result: str) -> None:
     """Park the task at its plan gate and put the plan on his phone."""
     from . import notify
+    # 23 Oct, #406: the plan went to report_outcome and the run ended "Plan's
+    # posted and waiting on your approval" — the card carried that line and no plan.
+    result = with_reported(task_id, result)
     if proposes_no_change(result) and not note_waiting(task_id):
         # 16 Oct, #345: "investigate the CT failures" came back as findings —
         # "no fix made, nothing in this PR's diff to fix" — and reached him as

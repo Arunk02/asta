@@ -26,6 +26,11 @@ KINDS = ("plan_ready", "needs_input", "escalate", "done", "blocked", "failed")
 _FENCED = re.compile(r"```outcome\s*(\{.*?\})\s*```", re.S | re.I)
 
 
+#: A plan reported here is the plan card's text when the run ends on a sign-off;
+#: 600 cut #406's plan mid-word. The card itself shows 1500.
+SUMMARY_CAP = 1500
+
+
 def _key(task_id: int) -> str:
     return f"task_outcome:{task_id}"
 
@@ -38,7 +43,7 @@ def record(task_id: int, kind: str, summary: str = "", repos: list[str] | None =
         raise ValueError(f"kind must be one of {', '.join(KINDS)} — got {kind!r}")
     if not store.get_task(int(task_id)):
         raise ValueError(f"no task #{task_id}")
-    row = {"kind": kind, "summary": (summary or "")[:600],
+    row = {"kind": kind, "summary": (summary or "")[:SUMMARY_CAP],
            "repos": [r for r in (repos or []) if isinstance(r, str) and r.strip()][:8],
            "questions": [q for q in (questions or []) if isinstance(q, str)][:6],
            "at": time.time()}

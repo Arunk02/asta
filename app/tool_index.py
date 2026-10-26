@@ -442,7 +442,7 @@ def select_sticky(conv_id: str, query: str, k: int = TOP_K) -> list[str] | None:
 #: How many tools a conversation may carry between turns. Eight are picked per
 #: turn, so this is roughly three turns of memory plus the floor — enough for a
 #: follow-up, far short of the whole registry.
-STICKY_MAX_TOOLS = int(os.environ.get("ASTA_TOOL_STICKY_MAX", "24"))
+STICKY_MAX_TOOLS = int(os.environ.get("ASTA_TOOL_STICKY_MAX", "25"))
 
 
 #: Eviction only starts above this, and then trims back to STICKY_MAX_TOOLS.

@@ -110,3 +110,11 @@ def test_a_build_leg_does_not_resume_an_oversized_session(monkeypatch):
     assert code_graph._too_large(tid, store.get_task(tid)) == 330000
     monkeypatch.setattr(token_audit, "context_tokens", lambda cwd, sid: 90000)
     assert code_graph._too_large(tid, store.get_task(tid)) == 0
+
+
+def test_the_tool_that_steers_a_task_is_always_reachable():
+    """His feedback on a delivered task must reach it on any turn, whatever the
+    ranker thought the message was about — or the brain offers a new task."""
+    from app import capabilities
+    assert "refine_task" in capabilities.ALWAYS
+    assert "refine_task" in capabilities.registry()

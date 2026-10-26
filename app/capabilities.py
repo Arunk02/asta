@@ -39,8 +39,12 @@ from typing import Callable
 #: `tasks.cancel` kills the worker. A capability that can start irreversible work
 #: on every turn must be matched by the one that stops it on every turn, or the
 #: floor guarantees a start it cannot take back.
+#: refine_task sits beside delegate_task (26 Oct, #419): "yes ask it can go in the
+#: same existing activity" never reached the task — refine_task was ranked out of
+#: the turn, so the brain tried curl, was blocked, asked him to confirm again, and
+#: offered a NEW task. What starts work is always reachable; so is what steers it.
 ALWAYS = ("remember", "search_memory", "load_skill", "ask_user",
-          "delegate_task", "list_background_tasks", "reject_task",
+          "delegate_task", "refine_task", "list_background_tasks", "reject_task",
           "continue_working", "prepare_to_send")
 
 

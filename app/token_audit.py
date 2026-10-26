@@ -312,6 +312,26 @@ def trend_verdict(history: list | None = None) -> str:
 # Discovery + trend (the "each iteration" loop)
 # --------------------------------------------------------------------------- #
 
+def context_tokens(cwd: str | Path, session_id: str) -> int:
+    """How big a Claude session's context was on its last turn — what the next
+    resumed turn will re-read. 0 when the log is not there (copilot, a new id)."""
+    f = CLAUDE_PROJECTS / _encode_project(cwd) / f"{session_id}.jsonl"
+    if not f.is_file():
+        return 0
+    last = 0
+    for line in _lines(f):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        msg = row.get("message") if isinstance(row, dict) else None
+        usage = msg.get("usage") if isinstance(msg, dict) else None
+        if row.get("type") == "assistant" and isinstance(usage, dict):
+            last = (usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+                    + usage.get("cache_creation_input_tokens", 0))
+    return last
+
+
 def _session_file(task_id: int) -> Path | None:
     """Resolve the session log a finished worker task actually wrote."""
     from . import tasks

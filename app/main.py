@@ -4908,9 +4908,14 @@ def _task_inquiry_target(cid: str, text: str) -> int | None:
                  text, re.I):
         return None
     named = _explicit_task(text)
-    if named is not None:
-        return named
     about_ci, _ = frontdesk.ci_inquiry(text)
+    if named is not None:
+        # 26 Oct: "task 419 : one question can't we keep that inside the existing
+        # activity process?" got the task's status card — an event log — and no
+        # answer. Only a question about its state or its CI is the card's to answer.
+        # "Task 419 check thay" is still the PR check it always was.
+        asks = about_ci or frontdesk.asks_status(text) or re.search(r"\bcheck\b", text, re.I)
+        return named if asks else None
     if not about_ci or re.search(r"\bPR\s*#?\s*\d+\b", text, re.I):
         return None
     candidates = set(tasks.live_tasks_for(cid) + tasks.refinable_for(cid))

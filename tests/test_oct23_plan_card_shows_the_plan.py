@@ -41,3 +41,17 @@ def test_a_plan_is_not_cut_at_600_characters():
     long = "step " * 250
     outcome.record(tid, "plan_ready", long)
     assert len(json.loads(store.kv_get(f"task_outcome:{tid}"))["summary"]) > 600
+
+
+def test_a_long_cause_does_not_push_the_fix_off_the_card():
+    """26 Oct, #419: "## 1. CAUSE" filled the card; "## 2. PLAN" was cut."""
+    plan = ("## 1. CAUSE\n\n" + "\n".join(f"Cause detail line {i} " + "x" * 80 for i in range(30))
+            + "\n\n## 2. PLAN\n\nMove the LaunchDarkly check inside the existing activities.")
+    card = tasks._phone_text(plan, 1800, head_first=True)
+    assert "## 2. PLAN" in card and "inside the existing activities" in card
+    assert "Cause detail line 0" in card
+
+
+def test_a_plan_without_a_cause_section_reads_as_before():
+    plan = "## Plan\n\n1. Add the field.\n2. Map it."
+    assert tasks._phone_text(plan, 1800, head_first=True) == plan

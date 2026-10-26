@@ -118,3 +118,69 @@ def test_the_tool_that_steers_a_task_is_always_reachable():
     from app import capabilities
     assert "refine_task" in capabilities.ALWAYS
     assert "refine_task" in capabilities.registry()
+
+
+def test_a_fresh_re_plan_carries_the_plan_it_revises():
+    tid = _task("running")
+    store.kv_set(f"task_plan:{tid}", "Add evaluateOneClickFlag as its own activity.")
+    note = code_graph._fresh_note(tid, "plan")
+    assert "evaluateOneClickFlag as its own activity" in note and "git log" in note
+    assert code_graph._fresh_note(tid, "implement") == code_graph.FRESH_AFTER_LARGE
+
+
+def test_a_plan_leg_drops_an_oversized_session(monkeypatch):
+    tid = _task("running")
+    monkeypatch.setattr(tasks, "_resolve_executor", lambda _tid: "claude")
+    monkeypatch.setattr(tasks, "task_cwd", lambda _tid, _ws: "/x/task")
+    store.kv_set(f"task_session:{tid}:claude", "sid")
+    store.kv_set(f"task_plan:{tid}", "the old plan")
+    monkeypatch.setattr(token_audit, "context_tokens", lambda cwd, sid: 330000)
+    seen = {}
+
+    async def leg(_tid, prompt, cwd, *, resume, effort, workspace):
+        seen.update(prompt=prompt, resume=resume)
+        return "plan text"
+
+    monkeypatch.setattr(tasks, "_run_code_leg", leg)
+    monkeypatch.setattr("app.graph.outcome.read", lambda *a, **k: {})
+    asyncio.run(code_graph._leg(tid, "plan", "PLAN THIS", effort="medium", resume_prompt="his answer"))
+    assert seen["resume"] is False
+    assert "PLAN THIS" in seen["prompt"] and "the old plan" in seen["prompt"]
+    assert not store.kv_get(f"task_session:{tid}:claude")
+
+
+# --- a yes at the proposed-change gate is a yes -------------------------------------------
+
+@pytest.mark.parametrize("text", ["approve task 419 — implement it, then push and update PR 1505",
+                                  "yes go ahead", "PLAN APPROVED", "approved"])
+def test_a_yes_with_words_after_it_approves_the_proposal(text):
+    assert tasks.approves_proposal(text)
+
+
+@pytest.mark.parametrize("text", ["approve but change the retry to 5",
+                                  "move the check into the utility instead",
+                                  "no, keep it in the activity"])
+def test_changes_are_not_a_yes(text):
+    assert not tasks.approves_proposal(text)
+
+
+def test_approving_the_proposal_implements_and_grants_the_push(monkeypatch):
+    tid = _task("awaiting_approval")
+    store.kv_set(f"task_gate:{tid}", "change")
+    store.kv_set(f"task_proposal:{tid}", json.dumps({"plan": "move the check", "status": "shipped"}))
+    seen = {}
+
+    async def _refine(task_id, brief, **k):
+        seen.update(brief=brief, **k)
+
+    monkeypatch.setattr(tasks, "refine", _refine)
+
+    async def drive():
+        out = tasks.reply(tid, "approve task 419 — implement it, then push and update PR 1505")
+        await asyncio.sleep(0)
+        return out
+
+    out = asyncio.run(drive())
+    assert "plan approved" in out
+    assert "move the check" in seen["brief"] and "push and update PR 1505" in seen["brief"]
+    assert seen.get("approved_plan") and go.ships(tid)

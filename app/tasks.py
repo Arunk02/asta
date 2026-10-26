@@ -1905,6 +1905,43 @@ def context_boot_paths(prompt: str, cwd: str, workspace: str | None) -> str:
               f"YOUR checkout, never in {root}.")
 
 
+async def _clean_repos(cwd: str) -> list[Path]:
+    """The repos under this checkout with nothing uncommitted — the ones a
+    planning leg must leave exactly as they are."""
+    out = []
+    for repo in _repos_under(Path(cwd)):
+        rc, dirty = await repo_ops.git(repo, "git", "status", "--porcelain")
+        if rc == 0 and not dirty.strip():
+            out.append(repo)
+    return out
+
+
+async def _set_aside_plan_writes(task_id: int, clean: list[Path]) -> str:
+    """A planning leg that changed files anyway: the changes go to a named stash
+    — kept, never deleted — and the run says so.
+
+    26 Oct, #419: with Edit and Write denied, the re-plan wrote the whole change
+    through Bash and python and staged it; only `git commit` stopped it. The deny
+    list blocks tools, not a shell, so the rule is checked on the tree itself."""
+    moved = []
+    for repo in clean:
+        rc, dirty = await repo_ops.git(repo, "git", "status", "--porcelain")
+        if rc != 0 or not dirty.strip():
+            continue
+        rc, _ = await repo_ops.git(repo, "git", "stash", "push", "--include-untracked", "-m",
+                                   f"asta: task #{task_id} planning step wrote files")
+        if rc == 0:
+            moved.append(repo.name)
+    if not moved:
+        return ""
+    store.record_outcome("task", "plan leg wrote files", subject=str(task_id),
+                         detail=", ".join(moved))
+    store.add_task_event(task_id, "fence", f"planning step changed {', '.join(moved)} — stashed")
+    return (f"\n\n⚠️ This planning step changed files in {', '.join(moved)} although it "
+            "may not before approval. The changes were set aside with `git stash` (kept, "
+            "not applied). The plan above is what to approve.")
+
+
 async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
                         resume: bool, effort: str, workspace: str | None = None) -> str:
     """A code leg inside the task fence: it may push its branch and open its own
@@ -1919,11 +1956,16 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         await free_idle_checkouts(Path(code_cwd(ws)), task_id)
     refuse_shared_tree(task_id, cwd, ws)
     before = await other_trees(ws, cwd)
+    planning = not plan_approved(task_id)
+    clean = await _clean_repos(cwd) if planning else []
     token = task_fence.MODE.set("code")
     try:
-        return await _code_leg(task_id, prompt + workspace_context_note(ws, cwd, prompt)
-                               + task_fence.prompt_line("code") + _stay_inside(cwd),
-                               cwd, resume=resume, effort=effort, workspace=workspace)
+        out = await _code_leg(task_id, prompt + workspace_context_note(ws, cwd, prompt)
+                              + task_fence.prompt_line("code") + _stay_inside(cwd),
+                              cwd, resume=resume, effort=effort, workspace=workspace)
+        if clean:
+            out += await _set_aside_plan_writes(task_id, clean)
+        return out
     finally:
         task_fence.MODE.reset(token)
         with contextlib.suppress(Exception):

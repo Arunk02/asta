@@ -20,6 +20,7 @@ reported and Arun decides.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -193,6 +194,96 @@ def trust_note(workspace: str, min_behind: int = 25) -> str:
             "'Not in the index' is not 'not in the repo'.")
 
 
+ENRICH_CONTRACT = Path(__file__).resolve().parent.parent / "skills" / "workspace-context" / "ENRICH.md"
+ENRICH_TIMEOUT = int(os.environ.get("ASTA_ENRICH_TIMEOUT", "2700") or 2700)
+CONTEXT_DIR = ".asta-context"
+
+ENRICH_BRIEF = (
+    "Arun approved refreshing the '{workspace}' project context. Bring the DRIFTED "
+    "mini-skills under {context_dir}/ up to date with the code, following the enrichment "
+    "contract below exactly. What drifted:\n{detail}\n\n"
+    "Rules for this run:\n"
+    "- Edit files under {context_dir}/ ONLY. Read the service repos to verify; never edit, "
+    "commit, stash or check out anything in them.\n"
+    "- For each drifted mini-skill: read the commits in its range that touch what it "
+    "describes, patch at most 10 lines where the context is now wrong or missing, and "
+    "stamp verified_against = the repo's HEAD sha even when nothing changed.\n"
+    "- Update {context_dir}/repos/<repo>/_index.json for any new or moved fact, or it "
+    "cannot be found.\n"
+    "- Do not commit; Asta commits what you changed.\n"
+    "- End with a short report: per repo, the files you patched and one line each on why, "
+    "and the files reviewed with nothing to change.\n\n")
+
+
+async def _porcelain(root: Path) -> set[str]:
+    rc, out = await _run(["git", "status", "--porcelain", "--untracked-files=all"], root)
+    return {ln[3:].strip() for ln in out.splitlines() if ln.strip()} if rc == 0 else set()
+
+
+async def enrich(workspace: str, detail: str = "") -> str:
+    """Do the refresh his yes to "context is stale" asked for — as a job that can write.
+
+    26 Oct: his "go ahead" ran the offer as a chat turn, and chat turns may not edit
+    files (ASTA_CHAT_MAY_EDIT=0), so the mini-skills could never change; and nothing
+    called note_enriched, so even a good pass stayed "27 days stale". The brain edits
+    only the context directory; Asta commits exactly what it changed there, locally,
+    and stamps the workspace as enriched."""
+    from . import claude_cli, task_fence
+    ws = ws_mod.get(workspace)
+    if ws is None or not ws.exists():
+        return f"Unknown workspace '{workspace}'."
+    root = Path(ws.path)
+    if not detail:
+        with contextlib.suppress(ValueError, OSError):
+            _stale, detail = await ws_mod.drift(workspace)
+    before = await _porcelain(root)
+    prompt = (ENRICH_BRIEF.format(workspace=workspace, context_dir=CONTEXT_DIR,
+                                  detail=(detail or "(run the drift check)")[:3000])
+              + ENRICH_CONTRACT.read_text())
+    token = task_fence.MODE.set("none")      # nothing outward: no push, no PR, no posts
+    try:
+        report = await claude_cli.one_shot(prompt, cwd=str(root), timeout=ENRICH_TIMEOUT,
+                                           effort="medium")
+    finally:
+        task_fence.MODE.reset(token)
+    after = await _porcelain(root)
+    touched = sorted(after - before)
+    ours = [f for f in touched if f.startswith(CONTEXT_DIR + "/")]
+    elsewhere = [f for f in touched if not f.startswith(CONTEXT_DIR + "/")]
+    committed = ""
+    if ours:
+        rc, _ = await _run(["git", "add", "--", *ours], root)
+        if rc == 0:
+            msg = f"Refresh {workspace} workspace context against current code"
+            rc, out = await _run(["git", "commit", "-q", "-m", msg, "--", *ours], root)
+            committed = "committed" if rc == 0 else f"not committed: {out[-200:]}"
+    note_enriched(workspace)
+    lines = [f"🗂 {workspace} context refreshed — {len(ours)} file(s) updated"
+             + (f", {committed}" if committed else "")]
+    if elsewhere:
+        lines.append(f"⚠️ Files outside {CONTEXT_DIR}/ changed during the run and were left "
+                     f"as they are: {', '.join(elsewhere[:8])}")
+    lines.append(report.strip()[-1500:])
+    summary = "\n\n".join(lines)
+    await notify.notify(summary, "info", urgency="direct")
+    store.record_outcome("context", "enriched", subject=workspace,
+                         detail=f"{len(ours)} files; outside={len(elsewhere)}")
+    return summary
+
+
+def enrich_in_background(workspace: str, detail: str = "") -> None:
+    """Start `enrich` without holding the turn; a failure is said, never swallowed."""
+    async def _run_it() -> None:
+        try:
+            await enrich(workspace, detail)
+        except Exception as exc:                            # noqa: BLE001
+            store.record_outcome("context", "enrich failed", subject=workspace,
+                                 detail=str(exc)[:300])
+            await notify.notify(f"❌ {workspace} context refresh failed: {str(exc)[:300]}",
+                                "info", urgency="direct")
+    asyncio.get_running_loop().create_task(_run_it())
+
+
 def note_enriched(workspace: str, now: float | None = None) -> None:
     """Stamp that the context was actually brought up to date — not merely checked.
 
@@ -259,7 +350,7 @@ async def _report_stale(workspace: str, ws_root, detail: str, lines: list[str],
                 f"10 lines per mini-skill, keep every fact carrying (source: path:line), "
                 f"and where a commit changed nothing the context claims, change nothing "
                 f"and say so. Then re-index and stamp verified_against = HEAD."),
-        payload={"workspace": workspace})
+        payload={"workspace": workspace, "enrich": True, "detail": detail[:3000]})
     await notify.notify(o.render(), "info",
                         priority=priority if attention.enabled() else None,
                         considered=True)   # attention.consider ran above

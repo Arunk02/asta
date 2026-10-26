@@ -85,12 +85,25 @@ def _overrides(tid: int) -> str:
     return tasks.CODE_OVERRIDES if tasks._pipeline_for(tid) == "full" else ""
 
 
-#: Said to a build leg that starts fresh because its session grew too large.
+#: Said to a leg that starts fresh because its session grew too large.
 FRESH_AFTER_LARGE = (
     "\n\nThis task already has work in this checkout: an earlier session built part of "
     "it and was closed because it had grown too large. Check `git log --oneline -10`, "
     "`git status` and the diff against the base first, keep what is there, and do only "
     "what is still missing.\n")
+
+
+def _fresh_note(tid: int, stage: str) -> str:
+    """What a fresh leg needs from the session it replaces. A re-plan revises the
+    plan it can no longer see, so that plan rides along."""
+    if stage != "plan":
+        return FRESH_AFTER_LARGE
+    last = (store.kv_get(f"task_plan:{tid}") or "").strip()
+    return ("\n\nThis task has history: an earlier session planned it (and may have built "
+            "part of it) and was closed because it had grown too large. Check "
+            "`git log --oneline -10` and the diff against the base to see what is already "
+            "built, then plan only the change asked for now.\n"
+            + (f"\nYour previous plan, which this one revises:\n{last[:3000]}\n" if last else ""))
 
 
 def session_cap() -> int:
@@ -123,12 +136,14 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
     t = _task(tid)
     mark = f"graph_leg:{tid}"
     session = _has_session(tid)
-    large = _too_large(tid, t) if session and stage == "implement" else 0
+    # Plan legs too (26 Oct): #419's re-plan after shipping resumed the 332k session.
+    large = _too_large(tid, t) if session and stage in ("plan", "implement") else 0
     if large:
         store.kv_del(f"task_session:{tid}:{tasks._resolve_executor(tid)}")
-        notes.add(tid, f"Build continued in a fresh session — the last one was {large // 1000}k tokens")
+        notes.add(tid, f"{stage.capitalize()} continued in a fresh session — the last one "
+                       f"was {large // 1000}k tokens")
         session = False
-        fresh_prompt += FRESH_AFTER_LARGE
+        fresh_prompt += _fresh_note(tid, stage)
     carry = f"graph_leg_prompt:{tid}"
     if session and store.kv_get(mark) == stage:
         # 16 Oct, #347: his 13:02 answer — "copy the whole json from main and

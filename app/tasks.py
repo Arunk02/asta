@@ -1533,6 +1533,31 @@ def _unfence_plan(lines: list[str]) -> list[str]:
     return out
 
 
+#: The heading that opens what will be DONE: "## 2. PLAN", "**Fix**", "Changes:".
+_FIX_HEAD = re.compile(
+    r"^\s*(?:#+\s*|\*\*\s*)?(?:\d+[.)]\s*)?(?:the\s+)?"
+    r"(?:plan|fix|the\s+fix|changes?|proposed\s+change|what\s+changes)\b[^a-z]*$", re.I)
+
+
+def _cause_kept_short(lines: list[str], budget: int, share: float = 0.35) -> list[str]:
+    """When a plan opens with its cause, keep the cause to a share of the card so
+    the fix is on it too. 26 Oct, #419: "## 1. CAUSE" filled the whole card and
+    "## 2. PLAN" became "… (the rest is in the app)" — he read the cause, never the fix."""
+    j = next((i for i, ln in enumerate(lines) if i and _FIX_HEAD.match(ln.strip())), -1)
+    if j < 0:
+        return lines
+    allowed = int(budget * share)
+    head, total = [], 0
+    for ln in lines[:j]:
+        if total + len(ln) + 1 > allowed:
+            head.append("…")
+            head.append("")
+            break
+        head.append(ln)
+        total += len(ln) + 1
+    return head + lines[j:]
+
+
 def _phone_text(result: str, limit: int = 1100, head_first: bool = False) -> str:
     """A gate's output, made readable on a phone.
 
@@ -1595,6 +1620,7 @@ def _phone_text(result: str, limit: int = 1100, head_first: bool = False) -> str
     if head_first:
         # A plan is read from the top: what changes, in which files. 9 Oct, #272:
         # the phone got "5. Tests…" onwards and the four changes above it were cut.
+        rest = _cause_kept_short(rest, budget)
         out, total = [], 0
         for line in rest:
             if total + len(line) + 1 > budget - 40:
@@ -3534,12 +3560,42 @@ async def _worker(task_id: int) -> None:
         await notify.notify(f"❌ Task #{task_id} failed — {t['title']}: {str(exc)[:200]}", "task")
 
 
+#: His yes, at the front of what he wrote: "approve task 419 — implement it…",
+#: "yes go ahead", "PLAN APPROVED". A "no" or "don't" after it is not one.
+_APPROVE_LEAD = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|yes|pls|please)[\s,]+)*"
+    r"(?:approve[ds]?|plan\s+approved|go\s*ahead|yes)\b(?:\s+(?:the\s+)?(?:task|plan))?"
+    r"\s*#?\s*\d{0,5}", re.I)
+
+
+def approves_proposal(text: str) -> bool:
+    lead = _APPROVE_LEAD.match(text or "")
+    return bool(lead) and not re.search(r"\b(?:but|except|don'?t|do not|instead|change)\b",
+                                         (text or "")[lead.end():lead.end() + 60], re.I)
+
+
 def reply(task_id: int, text: str) -> str:
     """Resume a code task paused at its plan gate — 'PLAN APPROVED' or feedback.
     The pipeline continues in its own session with full context."""
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
+    if t["status"] == "awaiting_approval" and store.kv_get(f"task_gate:{task_id}") == "change" \
+            and approves_proposal(text):
+        # 26 Oct, #419: "approve task 419 — implement it, then push and update PR
+        # 1505" was taken as changes to the plan and started a whole re-plan.
+        # A yes with words after it is still a yes; the words ride with the plan.
+        from . import go
+        plan, back = _apply_proposal(task_id)
+        store.update_task(task_id, status=back if back in REFINABLE else "done")
+        mark_approved(task_id)
+        if go.wants_pr(text):
+            go.grant(task_id, text, ship=True)
+        extra = _APPROVE_LEAD.sub("", text).strip(" —-,.:")
+        brief = plan + (f"\n\nArun, approving it: {extra}" if extra else "")
+        asyncio.get_running_loop().create_task(
+            refine(task_id, brief, code_change=True, approved_plan=True))
+        return f"Task #{task_id}: plan approved — implementing now."
     if t["status"] == "awaiting_approval" and store.kv_get(f"task_gate:{task_id}") == "change":
         raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
         store.update_task(task_id, status=raw.get("status") or "done")
@@ -4778,15 +4834,18 @@ def refinable_match(title: str, prompt: str, workspace: str = "",
 _PLAN_FIRST = re.compile(
     r"\b(?:ct|component\s+tests?|cucumber|feature\s+files?|scenarios?|test\s*cases?|"
     r"unit\s+tests?|uts?|tests?|ci|build|pipeline|checks?)\b", re.I)
+#: Short, because he reads it on his phone. 26 Oct, #419: a 13,000-character plan
+#: spent the card on its cause; his words — "trim the unwanted, keep it simpler,
+#: cleaner, why it has to tell cause this much".
 _PLAN_ONLY_BRIEF = (
-    "\n\nPLAN ONLY — change NO file in this step. Report:\n"
-    "1. CAUSE: the failing line or the gap, and its root cause, with file:line evidence.\n"
-    "2. PLAN: each file to change, what changes, and why it fixes the cause (not the "
-    "symptom). For tests: which existing scenario/test, the exact steps and assertions, "
-    "and what each asserts against in the code. Never weaken, skip or delete an "
-    "assertion, and never change the expected value to the observed one, unless the "
-    "cause shows the expectation itself was wrong — say so explicitly.\n"
-    "3. RISK: what else it touches.\n"
+    "\n\nPLAN ONLY — change NO file in this step. Keep it short and clean: under 15 "
+    "lines, no narration, no quoted docs, no restated code. Report:\n"
+    "1. CAUSE: one or two lines, with file:line.\n"
+    "2. PLAN: one line per file — file → what changes. For tests: which test, and what "
+    "it asserts. Never weaken, skip or delete an assertion, and never change the "
+    "expected value to the observed one, unless the cause shows the expectation itself "
+    "was wrong — say so explicitly.\n"
+    "3. RISK: one line.\n"
     "Arun approves the plan before anything is changed.")
 
 

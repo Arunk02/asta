@@ -225,12 +225,13 @@ def test_a_failing_capability_is_a_502_with_its_reason(monkeypatch):
     broken = dataclasses.replace(real, fn=boom)
     monkeypatch.setattr(capabilities, "get",
                         lambda name: broken if name == "list_background_tasks" else real)
-    monkeypatch.delenv("ASTA_TOKEN", raising=False)
+    monkeypatch.setenv("ASTA_TOKEN", "fixture-token")
 
     async def call():
         transport = httpx.ASGITransport(app=main.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-            return await c.post("/api/_invoke", json={"tool": "list_background_tasks", "args": {}})
+            return await c.post("/api/_invoke", json={"tool": "list_background_tasks", "args": {}},
+                                headers={"Authorization": "Bearer fixture-token"})
 
     r = asyncio.run(call())
     assert r.status_code == 502

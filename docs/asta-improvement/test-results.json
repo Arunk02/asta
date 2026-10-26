@@ -1,0 +1,27 @@
+{
+  "base_commit": "27d85374782f05b2fe66b78d58509e70a76f70e8",
+  "full_regression": {
+    "passed": 5083,
+    "skipped": 28,
+    "warnings": 4,
+    "seconds": 445.68
+  },
+  "teams_dom": {
+    "passed": 11,
+    "skipped": 0,
+    "seconds": 7.99
+  },
+  "subsequent_bridge_status_checks": {
+    "passed": 40,
+    "seconds": 3.81
+  },
+  "syntax": {
+    "node": "passed",
+    "bash": "passed",
+    "git_diff_check": "passed"
+  },
+  "live_deployment": false,
+  "live_acceptance_benchmark": "not run",
+  "token_savings": "not measured",
+  "note": "Suite counts overlap. Bridge status authentication received focused checks after the full suite started."
+}

@@ -56,8 +56,11 @@ async def _bridge_answering() -> bool:
     url = os.environ.get("WA_BRIDGE_URL", f"http://127.0.0.1:{_port()}")
     try:
         async with httpx.AsyncClient(timeout=3) as c:
-            r = await c.get(f"{url}/status")
-            return r.status_code == 200
+            r = await c.get(f"{url}/status", headers={
+                "Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")})
+            # An auth failure still means the port is occupied; spawning another
+            # bridge would only create a restart loop, never repair its token.
+            return r.status_code in (200, 401)
     except Exception:
         return False
 

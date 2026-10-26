@@ -61,7 +61,8 @@ async def _warn(promise: dict):
         left = max(0, int((float(promise.get("due_at") or 0) - time.time()) / 3600))
         body = (f"⏰ {promise.get('goal', 'your promise')} — {left}h to go, "
                 f"{state or 'nothing has moved'}.")
-    await notify.notify(f"{body}\nSay *chase them* or *leave it*.",
+    tail = "\nContinuing the authorized follow-up." if promise.get("authorized") else "\nSay *chase them* or *leave it*."
+    await notify.notify(f"{body}{tail}",
                         "warn", urgency="direct")
 
 
@@ -72,10 +73,15 @@ async def tick_promise(row: dict) -> dict:
     records it synchronously the moment he says it, and the thread picks it up
     here. Recorded first, applied second — a restart in between changes nothing.
     """
+    from app import followup
     follow_through.WATCHER = _watch
     follow_through.NUDGER = _nudge
     follow_through.WARNER = _warn
     fid = row["id"]
+    if followup.authorized(row) and store.kv_get(engine.waiting_key("promise", fid)) \
+            and engine.answer_waiting("promise", fid) is None:
+        return await engine.answer("promise", fid, follow_through.build,
+                                   {"text": "Continue the already authorized follow-up"})
     if store.kv_get(engine.waiting_key("promise", fid)) and \
             engine.answer_waiting("promise", fid) is not None:
         return await engine.resume("promise", fid, follow_through.build)
@@ -83,7 +89,8 @@ async def tick_promise(row: dict) -> dict:
                               {"goal": row.get("goal", ""), "id": fid,
                                "person": row.get("person", ""),
                                "urls": row.get("urls") or [],
-                               "due_at": row.get("due_at") or 0})
+                               "due_at": row.get("due_at") or 0,
+                               "authorized": followup.authorized(row)})
 
 
 async def answer_promise(fid: int, text: str) -> dict:

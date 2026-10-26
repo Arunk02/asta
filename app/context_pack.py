@@ -21,7 +21,10 @@ mid-line, and a job only ever sees its own notes and plan.
 
 from __future__ import annotations
 
-from . import people, policy, store
+import json
+import time
+
+from . import people, policy, store, task_spec
 
 #: Characters a pack may add, per kind of leg. A plan reads widely and needs the
 #: least carried in; an implementation leg after a fresh start needs the plan.
@@ -29,10 +32,8 @@ CAPS = {"plan": 4500, "implement": 5000, "analysis": 2500, "draft": 1500}
 
 
 def _approved_plan(task_id: int) -> str:
-    plan = store.kv_get(f"task_plan:{task_id}") or ""
-    if not plan:
-        from . import task_spec
-        plan = task_spec.get(task_id)
+    # task_plan is updated even when history capture is explicitly disabled.
+    plan = store.kv_get(f"task_plan:{task_id}") or task_spec.get(task_id) or ""
     return plan.strip()
 
 
@@ -71,7 +72,15 @@ def build(task_id: int, stage: str) -> str:
     if stage != "plan":
         plan = _approved_plan(task_id)
         if plan:
-            parts.append("[The plan Arun approved — the definition of done]\n" + plan[:3000])
+            parts.append("[The plan Arun approved — the definition of done]\n"
+                         + task_spec.prompt_block(task_id, plan, limit=min(3000, cap // 2)))
+
+    # Reserve project evidence before optional conversational notes. Previously
+    # a full notes block could silently evict the very flow docs used to plan.
+    if stage == "plan":
+        flow = _how_it_works(t)
+        if flow:
+            parts.append(flow)
 
     job_notes = notes.block(task_id).strip()
     if job_notes:
@@ -87,15 +96,21 @@ def build(task_id: int, stage: str) -> str:
         parts.append("[What is known about the people and systems this names — dated]\n"
                      + "\n".join(f"- {people.line(r)}" for r in known))
 
-    if stage == "plan":
-        flow = _how_it_works(t)
-        if flow:
-            parts.append(flow)
-
-    out, size = [], 0
+    out, size, omitted = [], 0, []
+    # Leave room for a visible omission notice, including when every block is too big.
+    reserve = 260
     for p in parts:
-        if size + len(p) > cap:
-            continue            # whole blocks only: half a plan is worse than none
+        if size + len(p) + 2 > cap - reserve:
+            omitted.append(p.split("\n", 1)[0][:100])
+            continue
         out.append(p)
-        size += len(p)
+        size += len(p) + 2
+    if omitted:
+        out.append("[Context budget: omitted " + str(len(omitted)) + " block(s): "
+                   + "; ".join(omitted)[:120]
+                   + ". Retrieve required evidence before acting; absence here does not mean it was checked.]")
+    store.kv_set(f"context_manifest:{task_id}:{stage}", json.dumps({
+        "at": time.time(), "workspace": t.get("workspace"), "stage": stage,
+        "cap_chars": cap, "included": [p.split("\n", 1)[0][:100] for p in out],
+        "omitted": omitted}))
     return ("\n\n" + "\n\n".join(out)) if out else ""

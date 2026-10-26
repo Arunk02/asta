@@ -123,7 +123,9 @@ def evolve(history: list[dict] | None = None, min_count: int = 2) -> list[dict]:
     for cat in recurring(hist, min_count):
         if cat in done:
             continue
-        path = learn.write_skill(FIX_MAP[cat], source="evolution")
+        # These are code-shipped templates covered by test_skill_evolution,
+        # not procedures invented by a model at runtime.
+        path = learn.write_skill(FIX_MAP[cat], source="evolution", validated=True)
         if path:
             evolved.append({"category": cat, "skill": path.stem, "path": str(path)})
             done.add(cat)

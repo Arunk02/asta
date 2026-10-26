@@ -227,7 +227,12 @@ async def do(app_name: str, goal: str, *, context: str = "", confirmed: bool = F
         code, out = await osascript(script)
         if code == 0:
             ccode, seen = await osascript(plan.get("check") or 'return ""')
-            proof = seen if ccode == 0 and seen else "(the check returned nothing)"
+            if ccode != 0 or not seen.strip() or seen.strip().lower() == "false":
+                proof = seen.strip() or "the check returned nothing"
+                _record(app, goal, plan, "unverified", proof)
+                return (f"{note}The action ran in {app}, but I couldn't verify the result: "
+                        f"{proof[:200]}. I haven't repeated it; it may already have taken effect.")
+            proof = seen
             _record(app, goal, plan, "done", proof)
             return f"{note}Done in {app}: {(plan.get('changes') or goal).rstrip('.')}. Checked: {proof[:200]}"
         hint = _permission_hint(out, app)

@@ -88,7 +88,9 @@ async def wa_voice(path: str, seconds: int = 1) -> bool:
 async def wa_status() -> dict:
     try:
         async with httpx.AsyncClient(timeout=3) as c:
-            r = await c.get(f"{bridge_url()}/status")
+            r = await c.get(f"{bridge_url()}/status", headers={
+                "Authorization": "Bearer " + os.environ.get("ASTA_TOKEN", "")})
+            r.raise_for_status()
             return r.json()
     except Exception:
         return {"up": False, "paired": False}

@@ -52,8 +52,8 @@ def test_should_extract(rounds, escalated, status, expected):
 
 # --- writing -----------------------------------------------------------------
 
-def test_write_skill_produces_a_loadable_skill():
-    path = learn.write_skill(GOOD)
+def test_validated_skill_produces_a_loadable_skill():
+    path = learn.write_skill(GOOD, validated=True)
     assert path is not None
     found = {s["name"]: s for s in skills.discover()}
     name = learn._slug(GOOD["title"])
@@ -74,8 +74,8 @@ def test_a_skill_with_no_procedure_is_discarded():
 
 def test_rewriting_the_same_skill_replaces_it():
     """Two procedures for one situation is how a memory starts contradicting itself."""
-    learn.write_skill(GOOD)
-    learn.write_skill({**GOOD, "procedure": ["A different step"]})
+    learn.write_skill(GOOD, validated=True)
+    learn.write_skill({**GOOD, "procedure": ["A different step"]}, validated=True)
     matching = [s for s in skills.discover() if s["name"] == learn._slug(GOOD["title"])]
     assert len(matching) == 1
     assert "A different step" in matching[0]["body"]
@@ -140,7 +140,7 @@ def test_extraction_is_recorded_as_an_outcome(monkeypatch):
 # --- usage and pruning --------------------------------------------------------
 
 def test_loading_a_skill_counts_as_use(monkeypatch):
-    learn.write_skill(GOOD)
+    learn.write_skill(GOOD, validated=True)
     name = learn._slug(GOOD["title"])
     from app import agent
     agent.load_skill(name)
@@ -148,7 +148,7 @@ def test_loading_a_skill_counts_as_use(monkeypatch):
 
 
 def test_prune_drops_only_old_unused_low_confidence_skills():
-    learn.write_skill({**GOOD, "confidence": 0.65})
+    learn.write_skill({**GOOD, "confidence": 0.65}, validated=True)
     name = learn._slug(GOOD["title"])
     usage = learn._usage()
     usage[name]["created"] = 0.0          # long ago
@@ -158,7 +158,7 @@ def test_prune_drops_only_old_unused_low_confidence_skills():
 
 
 def test_prune_keeps_a_used_skill():
-    learn.write_skill({**GOOD, "confidence": 0.65})
+    learn.write_skill({**GOOD, "confidence": 0.65}, validated=True)
     name = learn._slug(GOOD["title"])
     learn.record_use(name)
     usage = learn._usage()
@@ -168,7 +168,7 @@ def test_prune_keeps_a_used_skill():
 
 
 def test_prune_keeps_a_confident_skill():
-    learn.write_skill(GOOD)          # confidence 0.9
+    learn.write_skill(GOOD, validated=True)          # confidence 0.9
     usage = learn._usage()
     usage[learn._slug(GOOD["title"])]["created"] = 0.0
     learn._save_usage(usage)

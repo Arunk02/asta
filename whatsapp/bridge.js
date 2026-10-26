@@ -388,6 +388,11 @@ async function sendNow(text) {
 http
   .createServer(async (req, res) => {
     const auth = req.headers.authorization || "";
+    // Status includes account identifiers and a pairing QR, so reads need the
+    // same authentication as sends. An unset token must never disable it.
+    if (!TOKEN || auth !== `Bearer ${TOKEN}`) {
+      res.writeHead(401); res.end(); return;
+    }
     if (req.method === "GET" && req.url === "/status") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
@@ -400,9 +405,6 @@ http
     if (req.method === "POST" && req.url === "/create-group") {
       // Creates a WhatsApp group with just you in it, named after the assistant —
       // a dedicated chat so your "Message yourself" stays clean. Locks the bridge to it.
-      if (TOKEN && auth !== `Bearer ${TOKEN}`) {
-        res.writeHead(401); res.end(); return;
-      }
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", async () => {
@@ -422,9 +424,6 @@ http
       return;
     }
     if (req.method === "POST" && req.url === "/config") {
-      if (TOKEN && auth !== `Bearer ${TOKEN}`) {
-        res.writeHead(401); res.end(); return;
-      }
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", () => {
@@ -442,9 +441,6 @@ http
       return;
     }
     if (req.method === "POST" && req.url === "/send-voice") {
-      if (TOKEN && auth !== `Bearer ${TOKEN}`) {
-        res.writeHead(401); res.end(); return;
-      }
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", async () => {
@@ -461,9 +457,6 @@ http
     }
 
     if (req.method === "POST" && req.url === "/send-document") {
-      if (TOKEN && auth !== `Bearer ${TOKEN}`) {
-        res.writeHead(401); res.end(); return;
-      }
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", async () => {
@@ -479,9 +472,6 @@ http
       return;
     }
     if (req.method === "POST" && req.url === "/done") {
-      if (TOKEN && auth !== `Bearer ${TOKEN}`) {
-        res.writeHead(401); res.end(); return;
-      }
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", async () => {
@@ -494,9 +484,6 @@ http
       return;
     }
     if (req.method === "POST" && req.url === "/send") {
-      if (TOKEN && auth !== `Bearer ${TOKEN}`) {
-        res.writeHead(401); res.end(); return;
-      }
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", async () => {

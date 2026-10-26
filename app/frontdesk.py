@@ -314,7 +314,11 @@ _TASK_NON_CODE_EDIT = re.compile(
 _TASK_EXTERNAL_DELIVERY = re.compile(
     r"\b(?:send|share|notify|inform|tell)\s+(?:(?:it|this|the\s+(?:pr|link|result))\s+)?"
     r"(?:to|with)\b", re.I)
-_CI_SUBJECT = re.compile(r"\b(?:ci|checks|builds?|pipelines?|workflows?)\b", re.I)
+#: A bare "workflow" is usually Temporal here: "never fails the workflow" sent
+#: task feedback to the CI report (26 Oct). Only a CI-shaped workflow counts.
+_CI_SUBJECT = re.compile(
+    r"\b(?:ci|checks|builds?|pipelines?|(?:github|gh|ci)\s+(?:actions?|workflows?)|"
+    r"workflow\s+runs?|actions?\s+runs?)\b", re.I)
 _CI_HISTORY = re.compile(
     r"\b(?:why|reason|root cause|histor(?:y|ical)|previous|earlier|"
     r"intermittent|flak(?:e|es|y)|fail(?:ed|ing|ure|ures)?|logs?)\b", re.I)
@@ -338,6 +342,19 @@ def task_intent(text: str) -> str:
     if _TASK_READ.search(t) or "?" in t:
         return "read"
     return "ambiguous"
+
+
+#: A question about where a task stands — what its card answers. Anything else
+#: about a task (a design question, "why", "can't we…") needs an answer.
+_STATUS_ASK = re.compile(
+    r"\b(?:status|progress|update|state|eta|how long|how far|stuck|running|started|"
+    r"finish(?:ed)?|complete(?:d)?|what happened|where (?:is|are) (?:it|we|that|this))\b"
+    r"|\b(?:is|was|has)\s+(?:it|this|that|task\s*#?\d+|#?\d+)\s+(?:done|over|merged|shipped)\b",
+    re.I)
+
+
+def asks_status(text: str) -> bool:
+    return bool(_STATUS_ASK.search(text or ""))
 
 
 def ci_inquiry(text: str) -> tuple[bool, bool]:

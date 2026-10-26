@@ -28,6 +28,7 @@ leg's typed outcome (see outcome.py).
 
 from __future__ import annotations
 
+import os
 import time
 from typing import TypedDict
 
@@ -84,6 +85,37 @@ def _overrides(tid: int) -> str:
     return tasks.CODE_OVERRIDES if tasks._pipeline_for(tid) == "full" else ""
 
 
+#: Said to a build leg that starts fresh because its session grew too large.
+FRESH_AFTER_LARGE = (
+    "\n\nThis task already has work in this checkout: an earlier session built part of "
+    "it and was closed because it had grown too large. Check `git log --oneline -10`, "
+    "`git status` and the diff against the base first, keep what is there, and do only "
+    "what is still missing.\n")
+
+
+def session_cap() -> int:
+    return int(os.environ.get("ASTA_TASK_SESSION_MAX_TOKENS", "150000") or 0)
+
+
+def _too_large(tid: int, t: dict) -> int:
+    """The session's size when a build leg should not resume it, else 0.
+
+    26 Oct, #419: plan, re-plan and five build legs shared one session. It grew
+    from 176k to 332k tokens and every turn re-read all of it — 53.5M tokens over
+    233 turns. Chat sessions were already retired by size; task sessions were not."""
+    cap = session_cap()
+    ex = _tasks()._resolve_executor(tid)
+    sid = store.kv_get(f"task_session:{tid}:{ex}") or ""
+    if not cap or ex != "claude" or not sid:
+        return 0
+    from app import token_audit
+    try:
+        size = token_audit.context_tokens(_tasks().task_cwd(tid, t["workspace"]), sid)
+    except Exception:                                       # noqa: BLE001
+        return 0
+    return size if size > cap else 0
+
+
 async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
                resume_prompt: str | None = None) -> tuple[str, dict]:
     """One brain leg for `stage` — fresh, continued, or picked up after a stop."""
@@ -91,6 +123,12 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
     t = _task(tid)
     mark = f"graph_leg:{tid}"
     session = _has_session(tid)
+    large = _too_large(tid, t) if session and stage == "implement" else 0
+    if large:
+        store.kv_del(f"task_session:{tid}:{tasks._resolve_executor(tid)}")
+        notes.add(tid, f"Build continued in a fresh session — the last one was {large // 1000}k tokens")
+        session = False
+        fresh_prompt += FRESH_AFTER_LARGE
     carry = f"graph_leg_prompt:{tid}"
     if session and store.kv_get(mark) == stage:
         # 16 Oct, #347: his 13:02 answer — "copy the whole json from main and

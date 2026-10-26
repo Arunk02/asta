@@ -2840,6 +2840,11 @@ async def _followup_changed_nothing(task_id: int, t: dict, result: str) -> bool:
             return False
     from . import notify, prname
     store.kv_del(_FOLLOWUP + str(task_id))
+    if not _pr_links(store.get_task(task_id) or t) and await _already_pushed(task_id, t):
+        # 26 Oct, #419: the follow-up pushed and opened PR 1505 itself. Its HEAD did
+        # not move, so it read as "no change made" — and the PR was never linked,
+        # so nothing watched its CI. complete() adopts it and marks it shipped.
+        return False
     back = start.get("status") or "done"
     store.update_task(task_id, status=back if back in REFINABLE else "done",
                       result=result, finished_at=time.time())
@@ -2848,11 +2853,22 @@ async def _followup_changed_nothing(task_id: int, t: dict, result: str) -> bool:
     prs = _pr_links(store.get_task(task_id) or t)
     where = (" " + ", ".join(prname.name_links(u) for u in prs) + " is unchanged"
              + (" and still red." if back == "pr_ci_failed" else ".")) if prs else ""
-    await notify.notify(
-        f"⚠️ #{task_id} {t['title']} — no change made. It stopped at: “{stopped}”."
-        f"{where} Say 'fix #{task_id}' to try again.", "task")
+    if _ALREADY_IN.search(result or ""):
+        # Nothing failed: what he asked for is already there. "⚠️ … Say 'fix #419'
+        # to try again" was answered "Fix 419" — a 14-minute leg asking what to fix.
+        await notify.notify(f"✅ #{task_id} {t['title']} — already in place, nothing to "
+                            f"change: “{stopped}”.{where}", "task")
+    else:
+        await notify.notify(
+            f"⚠️ #{task_id} {t['title']} — no change made. It stopped at: “{stopped}”."
+            f"{where} Say 'fix #{task_id}' to try again.", "task")
     store.record_outcome("task", "followup_no_change", subject=str(task_id), detail=stopped[:200])
     return True
+
+
+_ALREADY_IN = re.compile(
+    r"\balready\s+(?:in\s+place|there|done|applied|implemented|matches|handled|up\s+and\s+open|pushed)\b"
+    r"|\bnothing\s+(?:more|further|else)\s+(?:to\s+(?:change|do)|needed)\b", re.I)
 
 
 def readable_outcome(result: str) -> str:
@@ -3040,6 +3056,19 @@ async def ship_as_told(task_id: int) -> None:
                             "task", urgency="direct")
 
 
+#: A note that is nothing but a go-ahead to push: "Task 419 : push and raise PR",
+#: "Go ahead, push and raise the PR now — Arun approved."
+_SHIP_ONLY = re.compile(
+    r"^(?:task\s*#?\s*\d+|#?\d+|go\s*ahead|ok(?:ay)?|yes|approved?|arun\s+approved|"
+    r"push(?:\s+it)?|raise|ship(?:\s+it)?|the|a|pr|pull\s+request|and|now|please|pls|"
+    r"[\s,.:;!\-\u2013\u2014])+$", re.I)
+
+
+def only_ship(note: str) -> bool:
+    lines = [ln.strip() for ln in (note or "").splitlines() if ln.strip()]
+    return bool(lines) and all(_SHIP_ONLY.match(ln) for ln in lines)
+
+
 async def _note_arrived_while_building(task_id: int, t: dict, result: str) -> bool:
     """He wrote to the task while it built and that note was never delivered.
 
@@ -3047,11 +3076,16 @@ async def _note_arrived_while_building(task_id: int, t: dict, result: str) -> bo
     announced "Local implementation ready" — the note would never have been
     applied. Not ready, then: the note is applied first (a correction plans
     again; anything else continues in the same session)."""
-    from . import notify
+    from . import go, notify
     note = note_waiting(task_id)
     if not note:
         return False
     store.kv_set(f"task_addenda:{task_id}", "")
+    if only_ship(note):
+        # 26 Oct, #419: "push and raise PR" ran a whole build leg in a 330k-token
+        # session, and the brain pushed and opened the PR itself, outside ship().
+        go.grant(task_id, note, ship=True)
+        return False                          # complete() ships it, as told
     store.update_task(task_id, status="done", result=result, finished_at=time.time())
     correction = corrects_design(note)
 
@@ -4835,6 +4869,12 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
         raise ValueError(f"task #{task_id} is not a code task (kind={t['kind']})")
     from . import frontdesk
     intent = "edit" if code_change else frontdesk.task_intent(feedback)
+    if intent == "external" and t["status"] in LIVE_STATUSES:
+        # 26 Oct, #419: "approve and raise PR, make it keep on retry until it gets a
+        # response" was refused as "a different action" while the task built, and
+        # the brain told him it could not take feedback. A running task keeps it:
+        # the push/PR half is Asta's own step when it finishes (_drain_addenda).
+        return await note_for_live_task(task_id, feedback, code_change=True)
     if intent in ("read", "external"):
         raise ValueError(f"task #{task_id} was not resumed: that is "
                          + ("a read-only question" if intent == "read"

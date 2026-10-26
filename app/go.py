@@ -183,7 +183,11 @@ _PLAN_ASKS = re.compile(
     r"|\bopen\s+questions?\b"
     r"|\bI'?ll\s+implement\s+(?:as\s+soon\s+as|once|when)\s+you\b"
     r"|\bneeds?\s+(?:your|arun'?s|his)\s+(?:answer|decision|confirmation|input)\b"
-    r"|\bplease\s+confirm\b", re.I)
+    r"|\bplease\s+confirm\b"
+    # 26 Oct, #419: "Still waiting on Arun for the exhausted-retries behavior …
+    # (a) … (b) … (c) … Recommended (c)" went ahead as a small change.
+    r"|\bwaiting\s+(?:on|for)\s+(?:you|arun|him)\b"
+    r"|\(a\)[^\n]{0,400}?\(b\)", re.I)
 
 
 def _asks_outside_approval(text: str) -> str:
@@ -216,6 +220,16 @@ def waits_for_someone(task_id: int) -> str:
     return _asks_outside_approval(f"{t.get('prompt') or ''}\n{words(task_id)}")
 
 
+def reviewed_by_him(task_id: int) -> bool:
+    """He answered an earlier plan on this task with changes, not a yes.
+
+    26 Oct, #419: he pushed back on the first plan ("can't you do inside the rfp
+    first activity…"); the revision was sized one file and went ahead on its own.
+    A plan he is in the middle of reviewing comes back to him, whatever its size."""
+    return any(e.get("kind") == "gate" and str(e.get("detail") or "").startswith("answer:")
+               for e in store.task_events(task_id))
+
+
 def no_ask(task_id: int, plan: str) -> str:
     """Why this plan goes ahead without waiting for him — "" when it must wait.
 
@@ -226,7 +240,7 @@ def no_ask(task_id: int, plan: str) -> str:
         return ""
     # Before "as you said": a go-ahead for the task is not a go-ahead to skip the
     # approval he asked someone else for, nor to skip the plan's own questions.
-    if waits_for_someone(task_id) or _PLAN_ASKS.search(plan or ""):
+    if waits_for_someone(task_id) or _PLAN_ASKS.search(plan or "") or reviewed_by_him(task_id):
         return ""
     if granted(task_id):
         return "as you said"

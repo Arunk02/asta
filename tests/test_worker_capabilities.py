@@ -193,3 +193,16 @@ def test_workspace_reader_rejects_sibling_prefix_and_symlink_escape(tmp_path, mo
     for path in ('../project-private/secret', 'link/secret'):
         with pytest.raises(ValueError, match='escapes'):
             workspace.read_workspace_file('booking', path)
+
+
+def test_prune_removes_only_records_that_can_no_longer_authenticate():
+    live, conv = work()
+    ended, _ = work('other')
+    live_token, _ = worker_auth.issue(live['id'], conv['id'], now=1000)
+    old_token, _ = worker_auth.issue(live['id'], conv['id'], now=0)
+    ended_token, _ = worker_auth.issue(ended['id'], now=1000)
+    store.update_task(ended['id'], status='done')
+    store.kv_set('worker_scope:garbage', 'not json')
+    assert worker_auth.prune(now=worker_auth.TTL_SECONDS + 1) == 3
+    assert worker_auth.authenticate(live_token, now=worker_auth.TTL_SECONDS + 1)['task_id'] == live['id']
+    assert set(store.kv_like('worker_scope:%')) == {worker_auth._key(live_token)}

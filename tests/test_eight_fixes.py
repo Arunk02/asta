@@ -23,7 +23,10 @@ from app import attention, chat_watch, incoming, outlook, responder, store, task
 def test_a_task_run_gets_astas_own_tools(monkeypatch):
     monkeypatch.setenv("ASTA_CLI_MCP", "1")
     monkeypatch.setenv("ASTA_DEV_MCP", "")            # the dev servers stay off
-    cfg = tasks.task_tools(1, "/tmp/ws")
+    from app import worker_auth
+    task = store.create_task('Read the service', 'analysis', 'Check it', None)
+    with worker_auth.session(task['id']):
+        cfg = tasks.task_tools(task['id'], "/tmp/ws")
     assert cfg, "a task run with no MCP config is the bug this closes"
     assert "asta" in cfg.lower()
 

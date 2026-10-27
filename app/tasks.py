@@ -1984,9 +1984,11 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
     clean = await _clean_repos(cwd) if planning else []
     token = task_fence.MODE.set("code")
     try:
-        out = await _code_leg(task_id, prompt + workspace_context_note(ws, cwd, prompt)
-                              + task_fence.prompt_line("code") + _stay_inside(cwd),
-                              cwd, resume=resume, effort=effort, workspace=workspace)
+        from . import worker_auth
+        with worker_auth.session(task_id):
+            out = await _code_leg(task_id, prompt + workspace_context_note(ws, cwd, prompt)
+                                  + task_fence.prompt_line("code") + _stay_inside(cwd),
+                                  cwd, resume=resume, effort=effort, workspace=workspace)
         if clean:
             out += await _set_aside_plan_writes(task_id, clean)
         return out
@@ -2190,7 +2192,9 @@ async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
         refuse_shared_tree(task_id, task_cwd(task_id, t.get("workspace")), t.get("workspace"))
     token = task_fence.MODE.set(mode)
     try:
-        return await _simple_leg(task_id, t, prompt + task_fence.prompt_line(mode))
+        from . import worker_auth
+        with worker_auth.session(task_id):
+            return await _simple_leg(task_id, t, prompt + task_fence.prompt_line(mode))
     finally:
         task_fence.MODE.reset(token)
 

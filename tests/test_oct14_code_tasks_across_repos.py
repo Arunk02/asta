@@ -116,7 +116,8 @@ def test_every_code_leg_gets_the_note(tmp_path, monkeypatch):
         return {}
 
     monkeypatch.setattr(tasks, "other_trees", trees)
-    asyncio.run(tasks._run_code_leg(1, "fix it", str(tmp_path / "out"), resume=False,
+    task = store.create_task("Fix it", "code", "fix it", "booking")
+    asyncio.run(tasks._run_code_leg(task["id"], "fix it", str(tmp_path / "out"), resume=False,
                                     effort="", workspace="booking"))
     assert "[Workspace context]" in seen["prompt"]
 

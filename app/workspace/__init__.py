@@ -116,7 +116,7 @@ def read_workspace_file(workspace: str, rel_path: str,
     """Read (a slice of) a file inside a workspace. Paths outside are refused."""
     root = _root(workspace).resolve()
     path = (root / rel_path).resolve()
-    if not str(path).startswith(str(root)):
+    if path != root and root not in path.parents:
         raise ValueError("Path escapes the workspace root.")
     if not path.is_file():
         raise ValueError(f"Not a file: {rel_path}")

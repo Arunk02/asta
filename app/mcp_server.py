@@ -91,6 +91,8 @@ def _allowed_tools() -> set[str] | None:
     if not raw:
         return None
     names = {t.strip() for t in raw.split(",") if t.strip()}
+    if os.environ.get('ASTA_MCP_SCOPED') == '1':
+        return names  # the chat floor contains writes; it cannot enlarge a worker scope
     return names | set(capabilities.ALWAYS)
 
 
@@ -105,7 +107,7 @@ def build_server():
     for cap in capabilities.registry().values():
         if allow is not None and cap.name not in allow:
             continue
-        if os.environ.get("ASTA_MCP_READ_ONLY") == "1" and cap.name not in capabilities.SIDE_READS:
+        if os.environ.get("ASTA_MCP_READ_ONLY") == "1" and cap.name not in capabilities.SIDE_READS | {'load_skill'}:
             continue
         server.add_tool(_proxy(cap), name=cap.name, description=_describe(cap))
     return server
@@ -159,6 +161,17 @@ def config_entry(tools: list[str] | None = None, conv_id: str = "",
     if conv_id:
         env["ASTA_MCP_CONV"] = conv_id
     if task_id:
+        from . import worker_auth
+        current = worker_auth.CURRENT.get()
+        if current is None or str(current[1]['task_id']) != str(task_id):
+            raise worker_auth.Refused('Task MCP configuration requires a server-issued execution scope')
+        credential, scope = current
+        env['ASTA_TOKEN'] = credential
+        env['ASTA_MCP_CONV'] = scope['conv_id']
+        env['ASTA_MCP_TOOLS'] = ','.join(scope['tools'])
+        # The server forces read-only per tool from the credential's record;
+        # a blanket flag here would hide the staging tools the scope grants.
+        env['ASTA_MCP_SCOPED'] = '1'
         env["ASTA_MCP_TASK"] = str(task_id)
     if read_only:
         env["ASTA_MCP_READ_ONLY"] = "1"

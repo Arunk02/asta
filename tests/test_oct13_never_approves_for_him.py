@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from app import answers, chat_watch, claude_cli, copilot_cli, responder, review, task_fence
+from app import answers, chat_watch, claude_cli, copilot_cli, responder, review, store, task_fence
 
 PR = "https://github.com/Maersk-Global/telikos-booking-service/pull/1479"
 
@@ -173,7 +173,8 @@ def test_an_analysis_task_runs_inside_the_fence(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(tasks, "_simple_leg", leg)
-    asyncio.run(tasks._run_simple(1, {"kind": "analysis"}, "look at PR 1479"))
+    task = store.create_task('Read PR', 'analysis', 'look at PR 1479', None)
+    asyncio.run(tasks._run_simple(task['id'], task, "look at PR 1479"))
     assert seen["mode"] == "none"
     assert "please approve" in seen["prompt"] and "blocked here" in seen["prompt"]
     assert task_fence.MODE.get() == "", "the fence ends with the leg"
@@ -188,7 +189,8 @@ def test_a_code_leg_runs_inside_the_code_fence(monkeypatch):
         return "ok"
 
     monkeypatch.setattr(tasks, "_code_leg", leg)
-    asyncio.run(tasks._run_code_leg(1, "fix it", "/tmp", resume=False, effort=""))
+    task = store.create_task('Fix it', 'code', 'fix it', None)
+    asyncio.run(tasks._run_code_leg(task['id'], "fix it", "/tmp", resume=False, effort=""))
     assert seen["mode"] == "code"
 
 

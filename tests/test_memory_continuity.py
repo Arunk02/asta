@@ -104,3 +104,28 @@ def test_http_memory_tools_preserve_workspace_and_source(mem, monkeypatch):
     excluded = client.get('/api/memory/search', headers=headers, params={'q':'quasar', 'workspace':'beta'})
     assert 'Quasar protocol' in found.json()['result']
     assert excluded.json()['result'] == 'No matching memories.'
+
+
+def test_a_busy_project_cannot_crowd_the_asked_project_out_of_recall(mem):
+    """Scope is applied before the candidate limit, not after it."""
+    for i in range(30):
+        memory.remember(f'Retry timeout tuning note {i}',
+                        f'Retry timeout retry timeout: the retry timeout is {i}s.', workspace='billing')
+    memory.remember('Booking note', 'Booking retry timeout is 45s.', workspace='booking')
+    unscoped = store.memory_search('retry timeout', 16)
+    assert 'Booking note' not in [h['title'] for h in unscoped], "the crowd-out this guards against"
+    hits = memory.recall('retry timeout', workspace='booking')
+    assert [h['title'] for h in hits] == ['Booking note']
+    assert all(h['workspace'] in ('booking', '') for h in store.memory_search(
+        'retry timeout', 12, workspace='booking'))
+
+
+def test_an_index_built_before_scoping_is_rebuilt_and_still_searchable(mem):
+    with store._connect() as conn:
+        conn.execute('DROP TABLE IF EXISTS memory_fts')
+        conn.execute('CREATE VIRTUAL TABLE memory_fts USING fts5(path, title, mtype, body, date UNINDEXED)')
+        conn.execute("INSERT INTO memory_fts VALUES ('facts/x.md','Old note','fact','LegacyThing','')")
+    assert store.memory_search('LegacyThing', workspace='booking')   # old table: no scope, no crash
+    memory.remember('Scoped note', 'LegacyThing in booking.', workspace='booking')
+    cols = [r[1] for r in store._connect().execute('PRAGMA table_info(memory_fts)').fetchall()]
+    assert 'workspace' in cols

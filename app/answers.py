@@ -808,6 +808,14 @@ async def present_task_draft(task_id: int, t: dict, *, answered: bool = False) -
         store.record_outcome("answer", "task draft dropped", subject=str(task_id),
                              detail="its REPLY was presented")
         return False
+    from . import task_inform
+    told = task_inform.get(task_id)
+    if told and told["person"].casefold() == (intent.get("to") or "").strip().casefold():
+        # He already said to tell this person at the milestone; the worker's own
+        # draft to them would be the same news twice, and a second ask.
+        store.record_outcome("answer", "task draft dropped", subject=str(task_id),
+                             detail=f"covered by his instruction to tell {told['person']}")
+        return False
     from . import tasks
     cid = phone_conversation() or tasks.conversation_of(task_id)
     if not cid:

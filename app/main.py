@@ -4180,13 +4180,29 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
         is_go, wanted_task = go.command(go_part)
         note = await go.rerun(go_part)
         if note or is_go:
+            # The task his go-ahead means, read before acting moves it on.
+            meant = go.target(wanted_task)[0] if tell_part and is_go else None
             note = note or await go.act(go_part, wanted_task)
             if note:
                 frontdesk.record("command", "go")
                 store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
                 store.add_ui_message(cid, "assistant", note, {"via": "go", "channel": channel})
                 await sink.send({"type": "note", "text": note})
-                if tell_part:
+                # "…and inform Vinish" on a code task is part of the same
+                # instruction: sent at its milestone, never staged to ask again.
+                from . import task_inform
+                saved = meant and task_inform.record(meant["id"], f"{go_part} {tell_part}")
+                if saved:
+                    now = store.get_task(meant["id"]) or meant
+                    stage = ("merged" if now.get("status") == "merged"
+                             else "pr" if now.get("pr_urls") else "")
+                    told = await task_inform.reached(meant["id"], stage) if stage else None
+                    line = told or (f"I'll tell {saved['person']} once "
+                                    + ("it's merged." if saved["stage"] == "merged"
+                                       else "the PR is up."))
+                    store.add_ui_message(cid, "assistant", line, {"via": "go", "channel": channel})
+                    await sink.send({"type": "note", "text": line})
+                elif tell_part:
                     return _start_turn(conv, f"{tell_part}\n\n[Done just now, at his word: "
                                              f"{note}]", sink, channel)
                 if channel == "web":

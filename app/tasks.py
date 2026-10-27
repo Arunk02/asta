@@ -4924,6 +4924,13 @@ async def pr_watch_loop() -> None:
             # 1470" while he sat at the laptop asking whether it had passed
             # (7 Oct, 22:59) — and he had asked the same three times on 30 Sep.
             await notify.notify(note, "task", urgency="direct")
+        # Standalone "merge if good" PRs, waiting on GitHub's requirements.
+        from . import pr_authority
+        try:
+            for note in await pr_authority.sweep():
+                await notify.notify(note, "task", urgency="direct")
+        except Exception:                                      # noqa: BLE001
+            pass       # a transient gh failure; the next poll reads it again
 
 
 #: How long after a task finishes its work is still "the thing we were just

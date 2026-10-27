@@ -332,12 +332,15 @@ def target(wanted: int | None, now: float | None = None) -> tuple[dict | None, s
 
 async def act(text: str, wanted: int | None) -> str:
     """Carry out his go-ahead. "" when there is nothing it can mean."""
-    from . import tasks
+    from . import pr_authority, tasks
+    ended = pr_authority.revoke(wanted) if _STOP_MERGE.match(text or '') else 0
+    stopped = (f"Stopped: {ended} saved PR instruction{'s' if ended != 1 else ''} revoked — "
+               f"nothing more is approved or merged under {'them' if ended != 1 else 'it'}.")
     t, problem = target(wanted)
     if problem:
-        return problem
+        return stopped if ended else problem
     if not t or t.get("kind") != "code":
-        return ""
+        return stopped if ended else ""
     tid, pr = t["id"], wants_pr(text) or wants_merge(text)
     if _STOP_MERGE.match(text or ''):
         grant(tid, text, ship=False)

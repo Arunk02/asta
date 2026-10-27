@@ -1566,6 +1566,14 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
             current, good = await review.revision(origin["ref"])
         except (RuntimeError, ValueError) as exc:
             return f"Not staged: could not verify the PR — {exc}"
+        from . import pr_authority
+        if pr_authority.get(task_id):
+            verdict = next((line for line in (notes or "").strip().splitlines()
+                            if line.upper().startswith("VERDICT")), "")
+            done = await pr_authority.on_review(task_id, current=current, good=good,
+                                                action=action, findings=findings, body=verdict)
+            if done is not None:
+                return done
         if current != origin["revision"]:
             return "Not staged: the PR head or CI changed while the review was running."
     else:
@@ -1620,14 +1628,34 @@ async def review_pr(pr: str, workspace: str = "", repo: str = "") -> str:
         # in the reply (7 Oct, #258 → #259). It reviews here, itself.
         return (f"You are already running as task #{running} — do this review yourself, "
                 f"in this session, from the material below. Do not start another task.\n\n{text}")
-    from . import prname
+    from . import go, pr_authority, prname
+    # "…approve and merge if good" in HIS words for this PR: one instruction,
+    # carried by the review task. Read from his turn, never from the arguments.
+    said = capabilities.said_this_turn()
+    current = ""
+    if pr_authority.wants_approve(said) or go.wants_merge(said):
+        try:
+            current, _ = await review.revision(meta.get("url") or pr)
+        except (RuntimeError, ValueError):
+            current = ""
     named = prname.from_url(meta.get("url") or "") or prname.label(
         (meta.get("headRepository") or {}).get("name") or repo or "", meta["number"])
     t = tasks.spawn(f"Review {named}: {meta['title'][:60]}", text,
                     "analysis", workspace or None)
+    granted = current and pr_authority.record(
+        t["id"], current.rsplit("@", 1)[0], current, said, url=meta.get("url") or "",
+        author=(meta.get("author") or {}).get("login", ""), workspace=workspace, repo=repo)
+    if granted:
+        import json
+        store.kv_set(f"review_origin:{t['id']}", json.dumps(
+            {"ref": granted["ref"], "revision": current}))
+    acts = " and ".join(a for a in ("approve", "merge") if granted and granted[a])
     return (f"Task #{t['id']} — reviewing PR #{meta['number']} "
             f"({meta.get('changedFiles', 0)} files, +{meta.get('additions', 0)}/"
-            f"-{meta.get('deletions', 0)}). Arun gets the notes when it finishes.")
+            f"-{meta.get('deletions', 0)}). "
+            + (f"If the review is good I'll {acts} it under your instruction; otherwise "
+               f"the findings come to you." if acts else
+               "Arun gets the notes when it finishes."))
 
 
 def quality_report(days: int = 7) -> str:

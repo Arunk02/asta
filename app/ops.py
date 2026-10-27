@@ -185,9 +185,9 @@ async def _pr_review_inline(pr: str = "", workspace: str = "", repo: str = "",
 
 @op("pr_note", lambda a: f"Add to {a.get('where', 'description')} of the PR for task "
                          f"#{a.get('task_id', '?')}")
-async def _pr_note(task_id: int = 0, text: str = "", where: str = "description") -> str:
+async def _pr_note(task_id: int = 0, text: str = "", where: str = "description", pr_url: str = "") -> str:
     from . import tasks
-    return await tasks.pr_note(int(task_id), text, where)
+    return await tasks.pr_note(int(task_id), text, where, pr_url=pr_url)
 
 
 @op("pr_merge", lambda a: f"Merge PR #{str(a.get('pr', '?')).lstrip('#')} "

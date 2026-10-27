@@ -487,27 +487,35 @@ def wants_to_start(text: str) -> str:
     t = text or ""
     if not _START.search(t):
         return ""
-    m = _TASK.search(t)
-    if m:
-        return f"task {m.group(1) or m.group(2)}"
     pr = _PR.search(t)
     if pr:
         return pr.group(0)
     said = _PR_SAID.search(t)
     if said:
-        return _task_for_pr(said.group(1)) or ""
+        reference = _START.sub('', t).strip()
+        reference = re.sub(r'\b(?:pr|pull\s*request)\s*(?:number\s*)?', 'PR ', reference, flags=re.I)
+        return _task_for_pr(said.group(1), reference=reference) or ""
+    m = _TASK.search(t)
+    if m:
+        return f"task {m.group(1) or m.group(2)}"
     if _LAST.search(t):
         return _last_code_task()
     return ""
 
 
-def _task_for_pr(number: str) -> str:
+def _task_for_pr(number: str, reference: str = '') -> str:
     """'task N' (or the PR link) for a PR number Asta raised in one of his tasks."""
+    from . import prname
+    candidates = []
     for t in store.list_tasks(limit=200):
         blob = f"{t.get('pr_urls') or ''} {t.get('result') or ''}"
-        m = re.search(rf"https://github\.com/[\w.-]+/[\w.-]+/pull/{number}\b", blob)
-        if m:
-            return f"task {t['id']}" if t.get("kind") == "code" else m.group(0)
+        for url in set(re.findall(r'https://github\.com/[\w.-]+/[\w.-]+/pull/\d+\b', blob)):
+            candidates.append((t, url))
+    url = prname.select(reference or f'PR {number}', [u for _, u in candidates])
+    owners = [t for t, u in candidates if u == url]
+    if len(owners) == 1:
+        t = owners[0]
+        return f"task {t['id']}" if t.get("kind") == "code" else url
     return ""
 
 

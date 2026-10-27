@@ -458,7 +458,7 @@ _TABLE: tuple[Capability, ...] = (
                     "itself — only when Arun has seen the diff and said ship. The task "
                     "stays OPEN afterwards, tracked until the PR merges or closes."),
     Capability("update_task_pr", "ops",
-               http='POST /api/tasks/{id}/pr-note {"text":"…","where":"description|comment"} '
+               http='POST /api/tasks/{id}/pr-note {"text":"…","where":"description|comment","pr_url":"…"} '
                     '· POST /api/tasks/{id}/rerun-ci',
                write=True,
                note="His OWN task's PR: append to its description, comment on it, or "

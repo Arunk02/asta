@@ -74,6 +74,44 @@ def parse(text: str) -> tuple[str, str]:
     return "", ""
 
 
+def select(text: str, urls: list[str]) -> str | None:
+    """Resolve one recorded PR, preserving owner/repository identity.
+
+    A number alone is usable only when it identifies one candidate. Explicit
+    URLs never fall back to another repository with the same number.
+    """
+    candidates = {}
+    for url in urls:
+        match = re.fullmatch(r'https?://' + _URL.pattern + r'/?', url.strip(), re.I)
+        if match:
+            candidates[tuple(s.casefold() for s in match.groups())] = url
+    # Requiring the URL boundary prevents example.com/github.com/... from
+    # masquerading as the requested GitHub target.
+    explicit = re.findall(r'(?<![\w./])https?://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)\b', text, re.I)
+    qualified = re.findall(r'(?<![\w/])([\w.-]+)/([\w.-]+)#(\d+)\b', text, re.I)
+    identities = {tuple(s.casefold() for s in parts) for parts in explicit + qualified}
+    if identities:
+        return candidates.get(next(iter(identities))) if len(identities) == 1 else None
+    if re.search(r'https?://|/pull/', text, re.I):
+        return None  # malformed/unrecognized URL, not a bare-number reference
+    numbers = set(re.findall(r'\bPR\s*#?(\d+)\b', text, re.I))
+    if len(numbers) != 1:
+        return None
+    number = next(iter(numbers))
+    named_repo, _ = parse(text)
+    names = {key[1] for key in candidates if re.search(
+        r'(?<![\w-])' + re.escape(key[1]) + r'(?![\w-])', text, re.I)}
+    if named_repo:
+        names.add(named_repo.casefold())
+    if len(names) > 1:
+        return None
+    if not names and not re.fullmatch(r'\s*PR\s*#?\d+\s*[.!]?\s*', text, re.I):
+        return None
+    matches = [url for (_, repo, num), url in candidates.items()
+               if num == number and (not names or repo in names)]
+    return matches[0] if len(matches) == 1 else None
+
+
 #: The office gh. A module constant so the suite can point it at nothing.
 GH = "gh"
 

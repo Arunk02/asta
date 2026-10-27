@@ -2912,13 +2912,14 @@ async def ship_task(task_id: int) -> str:
         return f"Ship failed: {exc}"
 
 
-async def update_task_pr(task_id: int, action: str = "describe", text: str = "") -> str:
+async def update_task_pr(task_id: int, action: str = "describe", text: str = "", pr_url: str = "") -> str:
     """Act on the PR of one of Arun's OWN tasks. He asked, it is his PR: do it at
     once with this tool — never stage it with prepare_to_send, and never try `gh`
     yourself (a chat turn cannot write to GitHub; this can).
 
     action="describe"  append `text` (exact markdown) to the PR description
     action="comment"   post `text` as a PR comment
+    pr_url             exact recorded PR URL; required for multi-PR notes
     action="rerun_ci"  re-run the failed CI jobs — every failed run on the PR,
                        the push-triggered one and the pull_request one alike
     """
@@ -2927,7 +2928,7 @@ async def update_task_pr(task_id: int, action: str = "describe", text: str = "")
         if action == "rerun_ci":
             return await tasks.rerun_ci(task_id)
         return await tasks.pr_note(task_id, text,
-                                   "comment" if action == "comment" else "description")
+                                   "comment" if action == "comment" else "description", pr_url=pr_url)
     except (ValueError, RuntimeError) as exc:
         return f"Not done — {exc}"
 

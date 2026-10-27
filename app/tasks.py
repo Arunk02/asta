@@ -1073,17 +1073,8 @@ def owner_of_pr(text: str, but: int = 0) -> dict | None:
     26 Oct: "Analyse on our booking PR why CT failed and fix it" became task #430,
     a stranger to PR 1505, while #419 — which wrote and shipped it — was already
     planning that very fix. The new task then could not even check out the branch."""
-    from . import prname
-    repo, number = prname.parse(text or "")
-    if not number:
-        return None
-    for t in store.list_tasks(limit=300):
-        if t["id"] == but or t.get("kind") != "code" or t.get("status") in CLOSED_STATUSES:
-            continue
-        for url in _pr_links(t):
-            if url.rstrip("/").endswith(f"/pull/{number}") and (not repo or f"/{repo}/" in url):
-                return t
-    return None
+    resolved = resolve_task_pr(text, active_only=True, but=but)
+    return resolved[0] if resolved else None
 
 
 async def free_branch_holders(ws_root: Path, branches: set[str], but: int) -> list[int]:
@@ -4643,7 +4634,7 @@ async def rerun_ci(task_id: int) -> str:
     return f"🔁 #{task_id}: " + "; ".join(done) + ". I'll tell you how it ends."
 
 
-async def pr_note(task_id: int, text: str, where: str = "description") -> str:
+async def pr_note(task_id: int, text: str, where: str = "description", pr_url: str = "") -> str:
     """Add to his own PR: a section on its description, or a comment.
 
     Done by Asta with the recorded words. On 30 Sep "add that in PR description"
@@ -4658,7 +4649,15 @@ async def pr_note(task_id: int, text: str, where: str = "description") -> str:
     text = (text or "").strip()
     if not text:
         raise ValueError("nothing to add")
-    url = links[0]
+    if pr_url:
+        from . import prname
+        url = prname.select(pr_url, links)
+        if not url:
+            raise ValueError("the requested PR is not recorded on this task")
+    elif len(links) == 1:
+        url = links[0]
+    else:
+        raise ValueError("this task has multiple PRs; name the exact PR to update")
     if where == "comment":
         rc, out = await repo_ops.git(ROOT, "gh", "pr", "comment", url, "--body-file", "-",
                                      stdin=text, timeout=120)
@@ -4679,22 +4678,29 @@ async def pr_note(task_id: int, text: str, where: str = "description") -> str:
         raise RuntimeError(f"description update failed: {out.strip()[:300]}")
     rc, check = await repo_ops.git(ROOT, "gh", "pr", "view", url, "--json", "body",
                                    "--jq", ".body", timeout=60)
-    if rc == 0 and text.splitlines()[0][:60] not in check:
-        raise RuntimeError("the description did not change after the update — treat as NOT done")
+    if rc != 0 or text not in check:
+        raise RuntimeError("the updated description could not be verified — check GitHub before retrying")
     store.add_task_event(task_id, "pr", "description: " + text[:160])
     return f"📝 Added to the description of {url}"
 
 
 def task_for_pr(ref: str) -> int | None:
     """The task whose PR this is — from a url, or "PR #1252 — repo-name"."""
-    m = re.search(r"/pull/(\d+)|\bPR\s*#?(\d+)", ref or "", re.I)
-    if not m:
+    resolved = resolve_task_pr(ref)
+    return resolved[0]['id'] if resolved else None
+
+
+def resolve_task_pr(ref: str, *, active_only: bool = False, but: int = 0) -> tuple[dict, str] | None:
+    """One task and its exact recorded PR; ambiguity never picks the newest."""
+    from . import prname
+    candidates = [t for t in store.list_tasks(limit=500)
+                  if t['id'] != but and t.get('kind') == 'code'
+                  and (not active_only or t.get('status') not in CLOSED_STATUSES)]
+    url = prname.select(ref or '', [u for t in candidates for u in _pr_links(t)])
+    if not url:
         return None
-    num = m.group(1) or m.group(2)
-    for t in store.list_tasks(limit=80):
-        if any(u.rstrip("/").endswith(f"/pull/{num}") for u in _pr_links(t)):
-            return t["id"]
-    return None
+    owners = [t for t in candidates if prname.select(url, _pr_links(t))]
+    return (owners[0], url) if len(owners) == 1 else None
 
 
 def _checks_verdict(pr: dict) -> str:

@@ -819,6 +819,7 @@ def test_an_approved_pr_draft_is_a_recorded_call_not_a_prompt(monkeypatch):
         "channel": "pr", "to": "PR #1252 — svc",
         "what": "Add to PR #1252 description (svc):\n\n**Known follow-up:** ATD is not whitelisted."})
     assert op == {"name": "pr_note", "args": {"task_id": tid, "where": "description",
+                                              "pr_url": "https://github.com/acme/svc/pull/1252",
                                               "text": "**Known follow-up:** ATD is not whitelisted."}}
 
 

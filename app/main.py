@@ -1576,7 +1576,7 @@ async def api_task_pr_note(task_id: int, request: Request):
     b = await request.json()
     try:
         return {"ok": True, "detail": await tasks.pr_note(
-            task_id, b.get("text", ""), b.get("where", "description"))}
+            task_id, b.get("text", ""), b.get("where", "description"), pr_url=b.get("pr_url", ""))}
     except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
@@ -3439,15 +3439,17 @@ def _mechanical_send(staged: dict) -> dict | None:
         # A note for one of his own PRs is a recorded call too. Handed back to
         # a brain it was approved with "send" and never landed: the chat brain
         # cannot run `gh pr edit` (30 Sep, PR #1252).
-        tid = tasks.task_for_pr(f"{staged.get('to') or ''} {staged.get('what') or ''}")
+        resolved = tasks.resolve_task_pr(staged.get('to') or staged.get('what') or '')
         what = (staged.get("what") or "").strip()
-        if not tid or not what:
+        if not resolved or not what:
             return None
+        task, pr_url = resolved
         # Drop the brain's own lead-in ("Add to PR #1252 description (repo):").
         what = re.sub(r"^\s*add\s+(?:this\s+)?to\s+(?:the\s+)?pr\b[^\n]*:\s*\n+", "", what,
                       flags=re.I).strip()
         where = "comment" if re.search(r"\bcomment\b", staged.get("to") or "", re.I) else "description"
-        return {"name": "pr_note", "args": {"task_id": tid, "text": what, "where": where}}
+        return {"name": "pr_note", "args": {"task_id": task['id'], "text": what,
+                                             "where": where, "pr_url": pr_url}}
     if (staged.get("channel") or "").strip().lower() != "teams":
         return None
     to, what = (staged.get("to") or "").strip(), (staged.get("what") or "").strip()

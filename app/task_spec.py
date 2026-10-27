@@ -1,70 +1,91 @@
-"""The approved plan, kept as a durable definition of done.
+"""Versioned approved plans, independent of a model session.
 
-GSD's one good idea worth stealing: the plan a task is built against should be a
-first-class artifact that survives session boundaries — not something that lives
-only inside the brain's session and evaporates the moment that context is
-compacted or handed to a fresh window. Asta already gates on a plan (solo.md
-Stage 2) and records whether Arun approved it as-is; this keeps the approved plan
-itself and re-anchors a resumed implementation leg to it, so a worker that lost
-its context rebuilds against the SAME definition of done instead of drifting into
-a subtly different change.
-
-Captured at the one unambiguous moment it means something: when Arun approves the
-plan. That approved text IS the definition of done — no fragile mid-output marker
-parsing. Off behind ASTA_TASK_SPEC; additive; a pure no-op until flipped, exactly
-like the verify and relevance gates.
+The latest approval is authoritative. Older versions remain available for
+review; prompt budgets never truncate the stored definition of done.
 """
-
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import time
+from pathlib import Path
 
 from . import store
 
-_TRUEY = ("1", "true", "yes", "on")
-_MAX = 2000     # a plan, not a transcript — keep the tail where the plan lives
-
 
 def enabled() -> bool:
-    return os.environ.get("ASTA_TASK_SPEC", "").strip().lower() in _TRUEY
+    return (os.environ.get('ASTA_TASK_SPEC') or '1').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def _key(task_id: int) -> str:
-    return f"task_spec:{task_id}"
+    return f'task_spec:{task_id}'
 
 
 def capture(task_id: int, plan_text: str) -> None:
-    """Record the approved plan as the task's definition of done — once.
+    """Keep the full approved revision atomically; identical approvals are no-ops."""
+    if not enabled() or not (plan_text or '').strip():
+        return
+    text = plan_text.strip()
+    key = _key(task_id)
+    with store._connect() as conn:
+        # Acquire the write lock before reading the current version. Another
+        # process cannot overwrite the history between the read and the update.
+        conn.execute('INSERT OR IGNORE INTO kv(key,value) VALUES (?,?)', (key, ''))
+        prior = conn.execute('SELECT value FROM kv WHERE key=?', (key,)).fetchone()['value']
+        if prior == text:
+            return
+        history_key = f'task_spec_history:{task_id}'
+        row = conn.execute('SELECT value FROM kv WHERE key=?', (history_key,)).fetchone()
+        history = json.loads(row['value']) if row else []
+        if prior and not history:
+            history.append({'version': 1, 'text': prior, 'approved_at': None,
+                            'sha256': hashlib.sha256(prior.encode()).hexdigest()})
+        history.append({'version': len(history) + 1, 'text': text, 'approved_at': time.time(),
+                        'sha256': hashlib.sha256(text.encode()).hexdigest()})
+        for name, value in ((history_key, json.dumps(history)), (key, text),
+                            (f'task_plan:{task_id}', text)):
+            conn.execute('INSERT INTO kv(key,value) VALUES (?,?) ON CONFLICT(key) '
+                         'DO UPDATE SET value=excluded.value', (name, value))
 
-    A later re-plan-and-approve does NOT overwrite the first: the original bar is
-    what the finished work should still be judged against, so the earliest
-    approved plan wins. Keeps the tail, where the plan sits after discovery.
-    """
-    if not enabled():
-        return
-    plan_text = (plan_text or "").strip()
-    if not plan_text or store.kv_get(_key(task_id)):
-        return
-    store.kv_set(_key(task_id), plan_text[-_MAX:])
+
+def history(task_id: int) -> list[dict]:
+    return json.loads(store.kv_get(f'task_spec_history:{task_id}') or '[]')
 
 
 def get(task_id: int) -> str:
-    """The stored definition of done, or "" — safe to read even when disabled."""
-    return store.kv_get(_key(task_id)) or ""
+    return store.kv_get(_key(task_id)) or ''
+
+
+def artifact(task_id: int, text: str | None = None) -> Path:
+    """An immutable file for workers to read on demand; the DB remains canonical."""
+    text = get(task_id) if text is None else text
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    folder = store.DB_PATH.parent / 'task-plans' / str(int(task_id)) / digest
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / 'plan.md'
+    if not path.exists() or path.read_text() != text:
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', dir=folder, delete=False) as out:
+            out.write(text)
+            temp = Path(out.name)
+        temp.replace(path)
+    return path.resolve()
+
+
+def prompt_block(task_id: int, text: str, limit: int = 3000) -> str:
+    if len(text) <= limit:
+        return text
+    path = artifact(task_id, text)
+    return (f'The full approved plan is in {path}. Read it before changing files or '
+            'claiming completion. It was omitted from this prompt for size; this '
+            'pointer is not a substitute for the plan.')
 
 
 def preamble(task_id: int) -> str:
-    """A prompt block re-anchoring a resumed worker to the approved plan, or "".
-
-    Cheap under prompt caching and authoritative: the safety net for an
-    implementation leg whose session context was compacted or started fresh, so it
-    rebuilds against the plan Arun signed off rather than re-deriving one.
-    """
-    if not enabled():
-        return ""
-    spec = get(task_id)
+    spec = get(task_id) if enabled() else ''
     if not spec:
-        return ""
-    return ("[Definition of done — the plan Arun approved. Implement exactly this, "
-            "no more and no less; if it proves wrong, say so and stop rather than "
-            f"silently substituting another.]\n{spec}\n\n")
+        return ''
+    return ('[Definition of done — the latest plan Arun approved. Implement exactly this; '
+            'report a material conflict rather than silently changing scope.]\n'
+            + prompt_block(task_id, spec) + '\n\n')

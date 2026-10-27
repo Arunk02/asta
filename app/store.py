@@ -776,6 +776,20 @@ def update_task(task_id: int, **fields) -> None:
                          (task_id, "status", f"{before} → {fields['status']}", time.time()))
 
 
+def claim_draft(task_id: int, chat: str, text: str) -> bool:
+    """One sender owns the exact approved draft, across workers and restarts."""
+    with _connect() as conn:
+        changed = conn.execute(
+            "UPDATE tasks SET status='sending', error='' WHERE id=? "
+            "AND kind='teams_draft' AND status='awaiting_approval' "
+            "AND teams_chat=? AND result=?", (task_id, chat, text)).rowcount
+        if changed:
+            conn.execute("INSERT INTO task_events (task_id, kind, detail, created_at) "
+                         "VALUES (?, 'status', 'awaiting_approval → sending', ?)",
+                         (task_id, time.time()))
+    return bool(changed)
+
+
 def add_task_event(task_id: int, kind: str, detail: str = "") -> None:
     with _connect() as conn:
         conn.execute("INSERT INTO task_events (task_id, kind, detail, created_at) "

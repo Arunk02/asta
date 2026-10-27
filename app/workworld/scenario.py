@@ -310,7 +310,7 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
         seq = [_shaped(spec.get("before") or {}), _shaped(spec.get("after") or {})]
         calls = {"n": 0}
 
-        async def measure(k: int = 1):
+        async def measure(k: int = 1, *, overrides=None):
             calls["n"] += 1
             return seq[0] if calls["n"] == 1 else seq[1]
 

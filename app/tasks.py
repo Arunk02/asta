@@ -950,7 +950,7 @@ _CLEANED = "worktree_cleaned:"
 #: Finished for good: the checkout goes a day after the last activity.
 _FINAL_FOR_GOOD = ("merged", "pr_closed", "cancelled", "rejected")
 #: Finished, but he may come back to it: kept a while, restored if he does.
-_FINISHED_FOR_NOW = ("done", "failed", "sent", "send_failed")
+_FINISHED_FOR_NOW = ("done", "failed", "sent", "send_failed", "send_uncertain")
 #: Why a task's private checkout could not be made — read back into its failure,
 #: since the 🌿 note is ambient and never reaches him while he is at the laptop.
 _CHECKOUT_PROBLEM = "checkout_problem:"
@@ -3729,10 +3729,14 @@ def record_answer(task_id: int, t: dict, text: str) -> tuple[bool, str]:
     # ASTA_TASK_SPEC is on) so a later compacted leg can re-anchor to it.
     if approved:
         from . import routing, task_spec
-        task_spec.capture(task_id, t.get("result") or "")
+        approved_plan = t.get("result") or ""
+        amendment = text.strip()[len("PLAN APPROVED"):].strip()
+        if amendment:
+            approved_plan += f"\n\nArun's approved amendment:\n{amendment}"
+        task_spec.capture(task_id, approved_plan)
         # Always kept: a later FRESH leg (a brain switch, an escalation, a lost
         # session) is handed this in its context pack as the definition of done.
-        store.kv_set(f"task_plan:{task_id}", (t.get("result") or "")[:6000])
+        store.kv_set(f"task_plan:{task_id}", approved_plan)
         if routing.enabled():
             # Two-stage routing: the plan he approved says how big the change
             # really is, and the implementation runs at that tier.
@@ -4019,6 +4023,10 @@ async def recover_orphans() -> list[int]:
     from . import responder
     stale: list[dict] = []
     for t in store.list_tasks(limit=200):
+        if t["kind"] == "teams_draft" and t["status"] == "sending":
+            store.update_task(t["id"], status="send_uncertain",
+                              error="restart during delivery; check the chat before any retry")
+            continue
         # "queued" too: the investigation gate is in memory, so a restart dropped
         # every waiting task while its row still said queued. 14 Oct: ten
         # colleague asks sat 5-8 hours with nothing running — seven restarts that
@@ -4101,6 +4109,8 @@ async def approve(task_id: int) -> str:
             return reply(task_id, "PLAN APPROVED")
         return reply(task_id, "PLAN APPROVED")
     if t["kind"] != "teams_draft" or t["status"] != "awaiting_approval":
+        if t["kind"] == "teams_draft" and t["status"] in ("sending", "sent", "send_uncertain"):
+            return f"Task #{task_id}: {t['status']} — the approved draft will not be sent again."
         raise ValueError(f"task #{task_id} is not a draft awaiting approval "
                          f"(kind={t['kind']}, status={t['status']})")
     if _notes_about(t["result"] or "", t["teams_chat"]):
@@ -4108,15 +4118,21 @@ async def approve(task_id: int) -> str:
         return (f"Not sent — #{task_id} reads as notes about {t['teams_chat']}, not a message "
                 f"to them. Kept as a finding for you.")
     from . import senior
+    if not store.claim_draft(task_id, t["teams_chat"], t["result"]):
+        return f"Task #{task_id}: draft changed or already claimed; nothing sent again."
     try:
         with senior.approved():       # he approved this draft
             await teams_bridge.send_message(t["teams_chat"], t["result"])
-    except RuntimeError as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         msg = ("Teams session expired — run: python -m app.teams_bridge login"
                if "SESSION_EXPIRED" in str(exc) else str(exc)[:300])
-        store.update_task(task_id, status="send_failed", error=msg)
-        await notify.notify(f"❌ Task #{task_id}: sending to '{t['teams_chat']}' failed — {msg}", "task")
-        return f"Send failed: {msg}"
+        # A browser/transport error can occur AFTER delivery. Keep the durable
+        # claim; never infer that it is safe to send the same text again.
+        store.update_task(task_id, status="send_uncertain", error=msg or "delivery interrupted")
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        await notify.notify(f"⚠️ Task #{task_id}: delivery to '{t['teams_chat']}' is unconfirmed — {msg}. Check the chat before retrying.", "task")
+        return f"Send unconfirmed: {msg}. Check the chat before retrying."
     store.update_task(task_id, status="sent")
     store.record_outcome("draft", "sent_unedited", subject=str(task_id))
     await notify.notify(f"📨 Task #{task_id}: message sent to Teams chat '{t['teams_chat']}'.", "task")
@@ -4921,6 +4937,7 @@ _PLAN_ONLY_BRIEF = (
     "expected value to the observed one, unless the cause shows the expectation itself "
     "was wrong — say so explicitly.\n"
     "3. RISK: one line.\n"
+    "When behavior changes, include a tiny Mermaid before/after flow in simple terms.\n"
     "Arun approves the plan before anything is changed.")
 
 
@@ -4976,6 +4993,10 @@ async def _propose_worker(task_id: int, prompt: str) -> None:
 def _apply_proposal(task_id: int) -> tuple[str, str]:
     """(the plan he approved, the status to resume from)."""
     raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
+    from . import task_spec
+    approved = readable_outcome(raw.get("plan") or "")
+    task_spec.capture(task_id, approved)
+    store.kv_set(f"task_plan:{task_id}", approved)
     store.kv_del(f"task_proposal:{task_id}")
     store.kv_del(f"task_gate:{task_id}")
     return (f"Arun approved this plan — implement exactly it, nothing else:\n"

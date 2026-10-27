@@ -8,7 +8,8 @@ Three properties keep that from becoming a licence:
 
   EARNED. A permission is only ever PROPOSED after ten of that exact kind — same
   act, same person — have been approved as-is. Never for a new recipient, never
-  for a new kind of act, never proposed twice.
+  for a new kind of act, never proposed twice. This only governs unsolicited
+  proposals: a standing permission HE explicitly requests takes effect immediately.
 
   CAPPED. Each grant carries a daily limit. Past it, the act is staged for his
   yes again, exactly as before.
@@ -70,6 +71,45 @@ def grant(act: str, target: str, per_day: int = 1, words: str = "") -> Grant:
         gid = cur.lastrowid
     store.record_outcome("authority", "granted", subject=str(gid), detail=f"{act} {target}"[:200])
     return next(g for g in grants() if g.id == gid)
+
+
+def explicitly_names(words: str, target: str) -> bool:
+    """A full recipient name, never a substring or an ambiguous first name."""
+    name = " ".join((target or "").split())
+    return bool(name and re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)",
+                                  " ".join((words or "").split()), re.I))
+
+
+def requested_followup(words: str, target: str) -> bool:
+    from . import consent
+    verbs = re.compile(r"\b(?:follow[ -]?up(?:\s+with)?|chase|keep\s+(?:checking|following))\b", re.I)
+    return any(explicitly_names(clause, target) and any(
+        not consent._negated(clause, m.start()) for m in verbs.finditer(clause))
+        for clause in re.split(r"[;\n]|\bbut\b", words or "", flags=re.I))
+
+
+def record_explicit_contact(target: str, per_day: int = 20) -> Grant:
+    """Persist his standing instruction immediately, without earning ten approvals.
+
+    The instruction comes from the turn boundary, never from a tool's arguments.
+    This is one exact 1:1 contact and messaging only.
+    """
+    from . import capabilities, consent, scorecard
+    said = scorecard.his_words(capabilities.said_this_turn())
+    standing = re.compile(r"\b(?:going\s+forward|from\s+now\s+on|always|standing\s+permission)\b", re.I)
+    verbs = re.compile(r"\b(?:message|send|reply|replies|talk|conversations?|follow[ -]?ups?)\b", re.I)
+    clauses = re.split(r"[;\n]|\bbut\b", said, flags=re.I)
+    if not any(standing.search(clause) and explicitly_names(clause, target) and any(
+            not consent._negated(clause, m.start()) for m in verbs.finditer(clause)) for clause in clauses):
+        raise ValueError("No explicit standing messaging instruction for this exact contact in your message")
+    if any(c in target for c in (",", "+", ";")):
+        raise ValueError("Standing contact permission is for one named person")
+    limit = re.search(r"\b(\d+)\s+(?:messages?|times?)\s+(?:per|a|each)\s+day\b", said, re.I)
+    if limit:
+        per_day = int(limit.group(1))
+    if int(per_day) < 1:
+        raise ValueError("A zero daily limit does not grant permission; revoke the existing permission instead")
+    return grant("send", target, per_day=max(1, min(int(per_day), 100)), words=said)
 
 
 def revoke(grant_id: int) -> bool:
@@ -194,12 +234,38 @@ def propose(act: str, target: str, per_day: int = 1) -> str:
 async def send_now(g: Grant, to: str, what: str, to_group: bool = False) -> str:
     """Send under a permission, count it, and tell him it went — after it has."""
     from . import notify, ops
+    if to_group or g.act != "send" or g.target.strip().casefold() != to.strip().casefold():
+        raise PermissionError("This permission covers only the exact 1:1 recipient")
+    if not claim_use(g):
+        raise PermissionError("Permission revoked, held, or its daily limit is reached")
     line = await ops.REGISTRY["teams_send"]["run"](to=to, text=what, to_group=to_group)
-    note_use(g, f"{to}: {what[:80]}")
+    if not line.startswith("✅ Sent to "):
+        raise RuntimeError(f"Delivery unconfirmed: {line}")
     await notify.notify(f"📨 Sent to {to} under permission {g.id} "
                         f"({g.render()}):\n\n{what[:300]}\n\nSay “revoke {g.id}” to end it.",
                         "teams", urgency="direct", considered=True)
     return line
+
+
+def claim_use(g: Grant, now: float | None = None) -> bool:
+    """Reserve a permission use atomically, before yielding to a transport.
+
+    Failed or interrupted sends retain their reservation: delivery can be
+    uncertain. A fresh authorization check also honors revocation after staging.
+    """
+    from . import policy, steward
+    if steward.sends_held() or not policy.check(g.act, g.target).ok:
+        return False
+    key = _used_key(g.id, now)
+    with store._connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO kv(key,value) VALUES (?, '0')", (key,))
+        grant_row = conn.execute("SELECT per_day FROM authority WHERE id=? AND active=1", (g.id,)).fetchone()
+        used = int(conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()["value"])
+        if grant_row is None or used >= int(grant_row['per_day']):
+            return False
+        conn.execute("UPDATE kv SET value=? WHERE key=?", (str(used + 1), key))
+    store.record_outcome("authority", "used", subject=str(g.id), detail="reserved before delivery")
+    return True
 
 
 def summary() -> str:

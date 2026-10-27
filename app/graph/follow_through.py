@@ -17,9 +17,9 @@ he says back ("chase them", "leave it", "I'll do it myself") has to be waited
 for, across a restart, without the chase carrying on underneath it. A daemon
 loop cannot wait; a checkpointed thread can.
 
-  THE NUDGE IS STAGED, NEVER SENT. Unchanged from `followup`, and the reason is
-  his standing rule: nothing leaves the machine without his yes. A tracker that
-  messages his colleagues at 3am is the thing that rule exists to prevent.
+  THE NUDGE USES DURABLE AUTHORITY. `followup` sends only within an existing
+  task/contact grant and its limits. Other nudges remain drafts. An authorized
+  chase does not wait at the deadline gate for the same permission again.
 
   A CLOSED PROMISE IS RECORDED. The outcome says what actually happened —
   merged, abandoned, overtaken — rather than the thread simply going quiet, so
@@ -52,10 +52,11 @@ class Promise(TypedDict, total=False):
     warned: bool
     answer: dict         # what he said when warned
     outcome: str         # kept | dropped | his_call
+    authorized: bool    # durable task/contact grant; checked again before sending
 
 
 #: Injected: WATCHER(promise) -> {"state": …, "moved": bool, "done": bool};
-#: NUDGER(promise) stages a message (never sends); WARNER(promise) tells him.
+#: NUDGER(promise) checks authority, then sends or stages a message; WARNER(promise) tells him.
 WATCHER = None
 NUDGER = None
 WARNER = None
@@ -90,7 +91,7 @@ def judge(state: Promise) -> str:
 
 
 async def nudge(state: Promise) -> dict:
-    """Staged for his yes. This node never reaches the person."""
+    """Delegate to the follow-up executor, which rechecks durable authority."""
     await _call(NUDGER, state)
     return {"nudges": int(state.get("nudges") or 0) + 1}
 
@@ -134,7 +135,8 @@ def build() -> StateGraph:
                              "warn": "warn", "close": "close"})
     # A nudge ends the run: the next look is the next tick, not a spin.
     g.add_edge("nudge", END)
-    g.add_edge("warn", "gate")
+    g.add_conditional_edges("warn", lambda s: "nudge" if s.get("authorized") else "gate",
+                            {"nudge": "nudge", "gate": "gate"})
     g.add_conditional_edges("gate", after_gate, {"watch": END, "close": "close"})
     g.add_edge("close", END)
     return g

@@ -1918,7 +1918,7 @@ async def _send_as_asked(cid: str, to: str, body: str) -> None:
         line = await ops.run({"name": "teams_send", "args": {"to": to, "text": body,
                                                              "to_group": False}})
     except Exception as exc:                                   # noqa: BLE001
-        line = f"⚠️ Could not send to {to} — {type(exc).__name__}: {exc}. Nothing went out."
+        line = f"⚠️ Could not confirm delivery to {to} — {type(exc).__name__}: {exc}. Check the chat before retrying."
     quoted = "> " + body.replace("\n", "\n> ")
     store.add_ui_message(cid, "assistant", f"{line}\n\n{quoted}", {"via": "sent-as-asked"})
     await notify.notify(f"{line}\n\n{quoted}", "action", urgency="direct", considered=True)
@@ -2804,6 +2804,21 @@ async def reply_to_task(task_id: int, text: str) -> str:
         return str(exc)
 
 
+def allow_contact_messages(person: str, per_day: int = 20) -> str:
+    """Record an explicitly requested standing permission for this exact 1:1 contact.
+
+    Use when Arun says to handle messages, replies or follow-ups with the named
+    person going forward. His instruction is the approval; no ten-approval wait.
+    Name the full contact. This does not authorize groups, calls or other actions.
+    """
+    from . import authority
+    try:
+        g = authority.record_explicit_contact(person, per_day)
+        return f"Permission {g.id}: {g.render()}. Active until you revoke {g.id}."
+    except ValueError as exc:
+        return str(exc)
+
+
 def track_until_done(goal: str, urls: list[str], person: str = "",
                      when: str = "") -> str:
     """Keep following something through until it is finished — the tool for
@@ -2816,12 +2831,14 @@ def track_until_done(goal: str, urls: list[str], person: str = "",
     Asta then polls those PRs on its own, tells him what is BLOCKING each one
     (CI red, no review, changes requested) before the deadline rather than
     after, and when nothing has moved for hours it drafts a chase to `person`
-    and asks him to send it. It never sends anything by itself.
+    and asks him to send it unless he already authorized the chase or granted
+    standing messaging permission for that exact contact. Authorized chases
+    carry through restarts without another yes, within working hours and limits.
 
     Use it whenever he asks you to chase, track, follow up or "make sure it
     lands" — a chat answer forgets the moment the turn ends.
     """
-    from . import followup, reminders
+    from . import authority, capabilities, followup, reminders, scorecard
     due = 0.0
     if when:
         # A deadline Asta could not read is worse than none: it would track
@@ -2831,7 +2848,9 @@ def track_until_done(goal: str, urls: list[str], person: str = "",
         except (ValueError, TypeError):
             return (f"I can't read '{when}' as a deadline — give it as a local "
                     f"ISO timestamp like 2026-09-08T18:00 and I'll track it.")
-    row = followup.track(goal, urls, person, due)
+    said = scorecard.his_words(capabilities.said_this_turn())
+    authorized = said if authority.requested_followup(said, person) else ""
+    row = followup.track(goal, urls, person, due, authorized_words=authorized)
     due_txt = (" · due " + _dt.datetime.fromtimestamp(row["due_at"]).strftime("%a %-I%p")
                if row.get("due_at") else "")
     who = f" · chasing {row['person']}" if row.get("person") else ""

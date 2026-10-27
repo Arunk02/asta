@@ -59,7 +59,7 @@ def _token() -> str:
 def _token_ok(request: Request) -> bool:
     expected = _token()
     if not expected:
-        return True
+        return False
     auth = request.headers.get("authorization", "")
     supplied = auth.removeprefix("Bearer ").strip() if auth else (
         request.query_params.get("token") or request.cookies.get("asta_token") or ""
@@ -76,6 +76,8 @@ def require_auth(request: Request) -> None:
 async def _no_stale_ui(request: Request, call_next):
     """The UI shell must always revalidate — Chrome's heuristic caching otherwise
     serves week-old app.js after edits (no Cache-Control header = guess freshness)."""
+    if request.url.path.startswith("/graph/") and not _token_ok(request):
+        return JSONResponse({"detail": "Invalid or missing token"}, status_code=401)
     resp = await call_next(request)
     p = request.url.path
     if p == "/" or p.startswith("/ui"):
@@ -1844,10 +1846,11 @@ async def _telegram_turn(text: str) -> str:
 async def api_login(request: Request):
     body = await request.json()
     supplied = body.get("token", "")
-    if _token() and not secrets.compare_digest(supplied, _token()):
+    if not _token() or not isinstance(supplied, str) or not secrets.compare_digest(supplied, _token()):
         raise HTTPException(401, "Wrong token")
     resp = JSONResponse({"ok": True})
-    resp.set_cookie("asta_token", supplied, max_age=90 * 86400, samesite="lax")
+    resp.set_cookie("asta_token", supplied, max_age=90 * 86400, samesite="lax",
+                    httponly=True, secure=request.url.scheme == "https")
     return resp
 
 
@@ -2737,7 +2740,7 @@ async def ws_voice_mode(ws: WebSocket) -> None:
     """The Asta Voice menu-bar helper: hotkeys and mic in, speech out."""
     expected = _token()
     supplied = ws.query_params.get("token", "")
-    if expected and not secrets.compare_digest(supplied, expected):
+    if not expected or not secrets.compare_digest(supplied, expected):
         await ws.close(code=4401)
         return
     await ws.accept()
@@ -2775,7 +2778,7 @@ async def api_voice_mode_say(request: Request):
 async def ws_chat(ws: WebSocket) -> None:
     expected = _token()
     supplied = ws.query_params.get("token", "") or ws.cookies.get("asta_token", "")
-    if expected and not secrets.compare_digest(supplied, expected):
+    if not expected or not secrets.compare_digest(supplied, expected):
         await ws.close(code=4401)
         return
     await ws.accept()

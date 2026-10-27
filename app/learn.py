@@ -16,8 +16,9 @@ Two halves, and they only pay off together:
 
 Guards, because a memory that fills with noise is worse than an empty one:
   - only runs that took ≥2 rounds or escalated are candidates;
-  - the model must return usable JSON with a confidence, and below MIN_CONFIDENCE
-    nothing is written;
+  - model output is a candidate outside the active catalog; confidence is only
+    an extraction filter, never validation;
+  - independent checks of the exact candidate are required before promotion;
   - a near-duplicate title updates the existing skill instead of adding a rival;
   - unused low-confidence skills are pruned.
 
@@ -28,6 +29,7 @@ after every substantial task.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import time
@@ -275,11 +277,14 @@ def merge_delta(old: dict, new: dict) -> tuple[dict, int]:
     return merged, added
 
 
-def write_skill(data: dict, source: str = "extracted") -> Path | None:
-    """Persist one extracted skill. None when it didn't clear the bar.
+def write_skill(data: dict, source: str = "extracted", *, validated: bool = False) -> Path | None:
+    """Persist a candidate; only trusted validation may activate it.
 
-    A skill that already exists is updated in DELTAS (merge_delta), never
-    replaced — see there for why."""
+    `validated` is an internal evaluator/importer argument, never read from the
+    model's JSON. Code-shipped evolution templates use it after regression tests.
+    Runtime extractions always remain outside the active skill catalog until
+    validate_candidate runs an independent evaluator against this exact content.
+    """
     title = (data.get("title") or "").strip()
     confidence = float(data.get("confidence") or 0)
     if not title or confidence < MIN_CONFIDENCE:
@@ -288,23 +293,77 @@ def write_skill(data: dict, source: str = "extracted") -> Path | None:
         return None
     data = {**data, "source": source}
     slug = _slug(title)
-    existing = _existing_match(slug)
-    path = existing or (skills.SKILLS_DIR / f"{slug}.md")
+    active = _existing_match(slug)
+    candidates = skills.SKILLS_DIR / ".candidates"
+    existing = active if validated else (candidates / f"{slug}.md")
+    if not validated and not existing.exists():
+        existing = active
+    path = (active or skills.SKILLS_DIR / f"{slug}.md") if validated else candidates / f"{slug}.md"
     skills.SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     if existing:
         try:
             data, _added = merge_delta(_sections(existing.read_text()), data)
             data["title"] = title
         except OSError:
             pass
+    if validated and active:
+        old = active.read_text()
+        archive = skills.SKILLS_DIR / ".history" / slug
+        archive.mkdir(parents=True, exist_ok=True)
+        (archive / (hashlib.sha256(old.encode()).hexdigest() + ".md")).write_text(old)
     path.write_text(_render(data))
+    if not validated:
+        path.with_suffix(".json").write_text(json.dumps({"data": data,
+            "base_sha256": hashlib.sha256(active.read_bytes()).hexdigest() if active else None}))
     usage = _usage()
     entry = usage.setdefault(slug, {"uses": 0, "created": time.time()})
-    entry["confidence"] = confidence
-    entry["source"] = source
-    entry["updated"] = time.time()
+    if not validated and active:
+        # A speculative update must not lower the active playbook's pruning
+        # score or replace its provenance before it has passed validation.
+        entry["pending_candidate"] = {"confidence": confidence, "source": source,
+                                      "updated": time.time()}
+    else:
+        entry["confidence"] = confidence
+        entry["source"] = source
+        entry["updated"] = time.time()
+        entry["candidate"] = not validated
+        entry.pop("pending_candidate", None)
     _save_usage(usage)
     return path
+
+
+async def validate_candidate(name: str, evaluator) -> Path:
+    """Evaluate a candidate without activating it, then promote only on evidence.
+
+    evaluator(path) is a trusted test harness, not an LLM response. Its report
+    must identify the run and contain a positive number of all-passing checks.
+    Failed, stale or modified candidates remain quarantined; previous active
+    content is archived when promotion succeeds.
+    """
+    if name != _slug(name):
+        raise ValueError("invalid candidate name")
+    path = skills.SKILLS_DIR / ".candidates" / f"{name}.md"
+    body = path.read_bytes()
+    metadata = path.with_suffix(".json").read_bytes()
+    result = await evaluator(path)
+    total, passed = result.get("total"), result.get("passed")
+    digest = hashlib.sha256(body).hexdigest()
+    record = {"sha256": digest, "at": time.time(), "result": result}
+    store.kv_set(f"skill_validation:{name}:{digest}", json.dumps(record))
+    if not (result.get("run_id") and type(total) is int and total > 0
+            and type(passed) is int and passed == total):
+        raise ValueError("candidate did not pass independent validation")
+    if path.read_bytes() != body or path.with_suffix(".json").read_bytes() != metadata:
+        raise ValueError("candidate changed during validation")
+    payload = json.loads(metadata)
+    active = _existing_match(name)
+    current = hashlib.sha256(active.read_bytes()).hexdigest() if active else None
+    if payload["base_sha256"] != current:
+        raise ValueError("active skill changed; rebase and validate the candidate again")
+    promoted = write_skill(payload["data"], source=payload["data"]["source"], validated=True)
+    store.record_outcome("skill", "promoted", subject=name, detail=f"validated by {result['run_id']}: {digest}")
+    return promoted
 
 
 def _parse(raw: str) -> dict | None:
@@ -368,7 +427,7 @@ async def extract(title: str, transcript: str, *, outcome: str = "done",
         path = write_skill(data, source=("correction" if outcome in STOPPED_BY_HIM
                                  else "teacher" if escalated else source))
         if path:
-            store.record_outcome("skill", "written", subject=path.stem,
+            store.record_outcome("skill", "candidate", subject=path.stem,
                                  detail=f"confidence={data.get('confidence')} escalated={escalated}")
         return path
     except Exception:

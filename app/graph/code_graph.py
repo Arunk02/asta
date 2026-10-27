@@ -99,11 +99,13 @@ def _fresh_note(tid: int, stage: str) -> str:
     if stage != "plan":
         return FRESH_AFTER_LARGE
     last = (store.kv_get(f"task_plan:{tid}") or "").strip()
+    from app import task_spec
+    last = task_spec.prompt_block(tid, last) if last else ""
     return ("\n\nThis task has history: an earlier session planned it (and may have built "
             "part of it) and was closed because it had grown too large. Check "
             "`git log --oneline -10` and the diff against the base to see what is already "
             "built, then plan only the change asked for now.\n"
-            + (f"\nYour previous plan, which this one revises:\n{last[:3000]}\n" if last else ""))
+            + (f"\nYour previous plan, which this one revises:\n{last}\n" if last else ""))
 
 
 def session_cap() -> int:

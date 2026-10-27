@@ -386,12 +386,21 @@ def remember(title: str, fact: str, mtype: str = "fact") -> str:
     """Persist a durable fact. mtype: fact | preference | gotcha | fix."""
     ensure_dirs()
     slug = slugify(title)
-    path = FACTS_DIR / f"{slug}.md"
     today = dt.date.today().isoformat()
-    path.write_text(
-        f"---\nname: {slug}\ntitle: {title}\ntype: {mtype}\ndate: {today}\n---\n\n{fact.strip()}\n"
-    )
-    _index_add_line(f"- [{title}](facts/{slug}.md) — {mtype}")
+    # Exclusive creation preserves earlier facts, including concurrent writers
+    # and different titles that normalize to the same slug. Corrections remain
+    # separate dated evidence rather than silently replacing the old fact.
+    suffix = 0
+    while True:
+        name = slug if not suffix else f"{slug}-{suffix}"
+        path = FACTS_DIR / f"{name}.md"
+        try:
+            with path.open("x") as out:
+                out.write(f"---\nname: {name}\ntitle: {title}\ntype: {mtype}\ndate: {today}\n---\n\n{fact.strip()}\n")
+            break
+        except FileExistsError:
+            suffix += 1
+    _index_add_line(f"- [{title}](facts/{name}.md) — {mtype}")
     reindex()
     return str(path.relative_to(MEMORY_DIR))
 
@@ -526,7 +535,7 @@ def recall_block(query: str) -> str:
 
 def read_memory_file(rel_path: str) -> str | None:
     path = (MEMORY_DIR / rel_path).resolve()
-    if not str(path).startswith(str(MEMORY_DIR)) or not path.is_file():
+    if not path.is_relative_to(MEMORY_DIR.resolve()) or not path.is_file():
         return None
     return path.read_text()
 

@@ -31,6 +31,14 @@ from test_round4_phase_d import phone  # noqa: F401
 from app import store
 
 
+@pytest.fixture(autouse=True)
+def _offline_review_revision(monkeypatch):
+    from app import review
+    async def revision(ref):
+        return "fixture-revision", False
+    monkeypatch.setattr(review, "revision", revision)
+
+
 # --- the thread store -------------------------------------------------------------------
 
 def test_one_thread_per_person_per_channel():

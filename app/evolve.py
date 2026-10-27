@@ -166,7 +166,7 @@ def _score(summary: dict) -> tuple[float, int, int]:
             int(day.get("pushes") or 0), int(day.get("missed") or 0))
 
 
-async def measure(k: int = 1) -> dict:
+async def measure(k: int = 1, *, overrides: dict | None = None) -> dict:
     """Run the bench and the day as they stand now — INCLUDING what has been tuned.
 
     In a SEPARATE PROCESS, never this one. It used to run inside the live server,
@@ -188,6 +188,10 @@ async def measure(k: int = 1) -> dict:
     env = dict(os.environ)
     for name, value in settings.overrides().items():
         env[name] = str(value)
+    for name, value in (overrides or {}).items():
+        if not settings.within_bounds(name, value):
+            raise ValueError(f"candidate outside allowed bounds: {name}")
+        env[name] = str(value)
     root = Path(__file__).resolve().parent.parent
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "summary.json"
@@ -205,6 +209,8 @@ async def measure(k: int = 1) -> dict:
         if not out.exists():
             raise RuntimeError(f"bench wrote no summary (exit {proc.returncode}): "
                                f"{(tail or b'').decode(errors='replace')[-300:]}")
+        if proc.returncode != 0:
+            raise RuntimeError(f"bench exited unsuccessfully: {proc.returncode}")
         return json.loads(out.read_text())
 
 
@@ -246,27 +252,18 @@ async def guard_loop(interval: int = 60) -> None:
 
 async def prove(c: Candidate, k: int = 1, baseline: dict | None = None) -> dict:
     """Measure the candidate against the version running now. Never promotes."""
-    base = baseline or await measure(k)
-    before = c.before()
-    settings.set_override(c.knob, c.after)
-    was = os.environ.get(c.knob)
-    # The bench runs in a sandbox with its own database, so the override above
-    # cannot reach it; the environment can.
-    os.environ[c.knob] = str(c.after)
-    try:
-        after = await measure(k)
-    finally:
-        if was is None:
-            os.environ.pop(c.knob, None)
-        else:
-            os.environ[c.knob] = was
-        # The measurement is over: put it back, whatever happens next. Promotion
-        # is a separate, recorded decision.
-        _restore(c.knob, before)
+    if not settings.within_bounds(c.knob, c.after):
+        raise ValueError(f"candidate outside allowed bounds: {c.knob}")
+    base = baseline if baseline is not None else await measure(k)
+    # Only the child's environment sees the candidate. No live DB/environment
+    # mutation, including while another coroutine runs or if this one dies.
+    after = await measure(k, overrides={c.knob: c.after})
     b_rate, b_push, b_missed = _score(base)
     a_rate, a_push, a_missed = _score(after)
     sets = (after.get("sets") or {}).get(CONSTITUTION) or {}
-    constitution_ok = sets.get("total", 0) == sets.get("passed", 0)
+    total, passed = sets.get("total"), sets.get("passed")
+    constitution_ok = (type(total) is int and type(passed) is int
+                       and total > 0 and total == passed)
     better = (a_rate > b_rate) or (a_rate == b_rate and a_push < b_push)
     ok = bool(constitution_ok and better and a_missed <= b_missed and a_rate >= b_rate)
     return {"ok": ok, "constitution_ok": constitution_ok,
@@ -303,10 +300,11 @@ def record(c: Candidate, state: str, gain: str = "") -> int:
 
 def promote(c: Candidate, gain: str) -> int:
     """Apply a proven change, and start the day it has to survive."""
+    before = c.before()
     eid = record(c, "promoted", gain)
     settings.set_override(c.knob, c.after)
     store.kv_set(f"evolve_canary:{eid}", json.dumps(
-        {"knob": c.knob, "before": c.before(), "until": time.time() + 24 * 3600}))
+        {"knob": c.knob, "before": before, "until": time.time() + 24 * 3600}))
     return eid
 
 

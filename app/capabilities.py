@@ -424,14 +424,19 @@ _TABLE: tuple[Capability, ...] = (
                     "or the answer to a question it asked. Text starting 'PLAN APPROVED' "
                     "implements with those changes; anything else re-plans. Approving and "
                     "THEN sending the feedback builds the unamended plan first."),
+    Capability("allow_contact_messages", "tasks", write=True,
+               http='POST /api/_invoke {"tool":"allow_contact_messages",'
+                    '"args":{"person":"…","per_day":20},"conv_id":"…","message_id":123}',
+               note="Only an explicit standing instruction from Arun authorizes this exact 1:1 contact."),
     Capability("track_until_done", "tasks",
                http='POST /api/followups {"goal":"…","urls":["…"],"person":"…",'
                     '"when":"2026-09-08T18:00"}', write=True,
                note="Keeps chasing pull requests towards a deadline after this turn "
                     "ends — polls each PR, names what is blocking it (CI red, no "
                     "review, changes requested) BEFORE the deadline, and drafts a "
-                    "reminder to the reviewer when a PR stops moving. Drafts only; it "
-                    "never messages anyone by itself. Reach for it when he asks you to "
+                    "reminder to the reviewer when a PR stops moving. An explicitly "
+                    "authorized chase executes without another approval; otherwise it drafts. "
+                    "Reach for it when he asks you to "
                     "chase or follow up a PR with somebody by a given time."),
     Capability("stop_investigating", "tasks",
                http='POST /api/responder/mute {"kind":"incident"}', write=True,

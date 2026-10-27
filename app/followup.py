@@ -15,10 +15,9 @@ What this adds, and deliberately nothing more:
 * Any PR by URL, whoever raised it.
 * A DEADLINE, warned before it lands. "Let me know if it isn't done" said after
   EOD is a report; said four hours before, it is still something he can act on.
-* A NUDGE to the person, when a PR has not moved. Staged as a `teams_draft`
-  task, never sent — his standing rule is that nothing leaves the machine
-  without his yes, and a tracker that quietly messages his colleagues at 3am is
-  exactly the thing that rule exists to prevent.
+* A NUDGE to the person, when a PR has not moved. An authorized task or contact
+  grant covers it without another yes. Otherwise it stays a `teams_draft`.
+  Authorized reminders observe working hours and durable attempt limits.
 """
 
 from __future__ import annotations
@@ -52,7 +51,8 @@ def _save(rows: list[dict]) -> None:
     store.kv_set(KEY, json.dumps(rows[-50:]))
 
 
-def track(goal: str, urls: list[str], person: str = "", due_at: float = 0.0) -> dict:
+def track(goal: str, urls: list[str], person: str = "", due_at: float = 0.0,
+          *, authorized_words: str = "") -> dict:
     """Start following something through. Idempotent on the same URL set, so
     saying it twice does not produce two trackers both nudging the same person."""
     urls = [u.strip() for u in (urls or []) if u and u.strip()]
@@ -64,6 +64,9 @@ def track(goal: str, urls: list[str], person: str = "", due_at: float = 0.0) -> 
             r["goal"] = goal or r["goal"]
             r["person"] = person or r.get("person", "")
             r["due_at"] = due_at or r.get("due_at", 0.0)
+            if authorized_words:
+                r["authorization"] = {"person": person.strip(), "urls": sorted(urls),
+                                      "words": authorized_words, "at": time.time()}
             _save(rows)
             return r
     now = time.time()
@@ -72,6 +75,9 @@ def track(goal: str, urls: list[str], person: str = "", due_at: float = 0.0) -> 
            "person": (person or "").strip(), "due_at": float(due_at or 0),
            "created_at": now, "seen": {}, "last_moved_at": now,
            "last_nudged_at": 0.0, "warned": False, "status": "open"}
+    if authorized_words:
+        row["authorization"] = {"person": person.strip(), "urls": sorted(urls),
+                                "words": authorized_words, "at": now}
     rows.append(row)
     _save(rows)
     return row
@@ -163,15 +169,62 @@ async def check_one(row: dict, now: float | None = None) -> tuple[list[str], boo
 def _draft_pending(who: str) -> bool:
     """A nudge to this person is already waiting on Arun's yes."""
     return any(t.get("kind") == "teams_draft"
-               and t.get("status") == "awaiting_approval"
+               and t.get("status") in ("awaiting_approval", "sending", "send_uncertain")
                and (t.get("teams_chat") or "") == who
                for t in store.list_tasks(limit=60))
 
 
+def task_authorized(row: dict) -> bool:
+    scope = row.get("authorization") or {}
+    return bool(scope.get("words") and scope.get("person") == row.get("person")
+                and scope.get("urls") == sorted(row.get("urls") or []))
+
+
+def authorized(row: dict) -> bool:
+    from . import authority, policy, steward
+    who = row.get("person") or ""
+    if row.get("status") != "open" or steward.sends_held() or not policy.check("send", who, asked=True).ok:
+        return False
+    if authority.may("send", who):
+        return True
+    return task_authorized(row)
+
+
+def _reserve_authorized_nudge(row: dict, now: float) -> bool:
+    """Durable daily/contact and total/task limits, claimed before any send.
+
+    A crash after the claim consumes the attempt: uncertain delivery is never
+    automatically repeated. The receipt is kept separately from graph state.
+    """
+    import hashlib
+    stamp = time.localtime(now)
+    if stamp.tm_wday >= 5 or not 9 <= stamp.tm_hour < 18:
+        return False
+    who = hashlib.sha256(row["person"].strip().casefold().encode()).hexdigest()
+    day = time.strftime("%Y-%m-%d", stamp)
+    key, count_key = f"followup_send:{who}:{day}", f"followup_send_count:{row['id']}"
+    with store._connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO kv(key,value) VALUES (?, '0')", (count_key,))
+        count = int(conn.execute("SELECT value FROM kv WHERE key=?", (count_key,)).fetchone()["value"])
+        if count >= 3:
+            return False
+        claimed = conn.execute("INSERT OR IGNORE INTO kv(key,value) VALUES (?,?)",
+                               (key, json.dumps({"followup": row["id"], "at": now}))).rowcount
+        if not claimed:
+            return False
+        conn.execute("UPDATE kv SET value=? WHERE key=?", (str(count + 1), count_key))
+    return True
+
+
 async def _nudge(row: dict, blockers: int, now: float) -> str:
-    """Stage — never send — a chase to the person on the hook."""
+    """Execute an authorized chase once; otherwise preserve the draft path."""
     from . import tasks
     who = row.get("person") or ""
+    current = next((r for r in _load() if r["id"] == row["id"]), None)
+    if current is None or current.get("status") != "open":
+        return ""
+    if current.get("person") != who or current.get("urls") != row.get("urls"):
+        return ""  # a stale graph cannot send to a target the user has changed
     if not who or now - row.get("last_nudged_at", 0) < NUDGE_EVERY:
         return ""
     if now - row.get("last_moved_at", now) < STALL_SECONDS:
@@ -184,12 +237,31 @@ async def _nudge(row: dict, blockers: int, now: float) -> str:
     # extra steps.
     if _draft_pending(who):
         return ""
+    automatic = authorized(current)
+    if automatic and not _reserve_authorized_nudge(current, now):
+        if int(store.kv_get(f"followup_send_count:{row['id']}") or 0) >= 3:
+            with store._connect() as conn:
+                first = conn.execute("INSERT OR IGNORE INTO kv(key,value) VALUES (?, '1')",
+                                     (f"followup_limit_reported:{row['id']}",)).rowcount
+            if first:
+                return (f"Follow-up #{row['id']}: three reminders attempted; still watching "
+                        "for resolution, with no further automatic reminders.")
+        return ""
+    if automatic and not task_authorized(current):
+        from . import authority
+        grant = authority.may("send", who)
+        if grant is None or not authority.claim_use(grant):
+            return ""
     row["last_nudged_at"] = now
     body = ("Hi — any chance you can take a look at these today? "
             + " ".join(row["urls"]))
     t = store.create_task(f"Nudge {who} — {row['goal'][:60]}", "teams_draft",
                           body, None, teams_chat=who)
     store.update_task(t["id"], status="awaiting_approval", result=body)
+    if automatic:
+        result = await tasks.approve(t["id"])
+        store.record_outcome("followup", "authorized nudge", subject=str(row["id"]), detail=result)
+        return f"Follow-up #{row['id']}: {result}"
     return (f"✍️ #{t['id']} — {blockers} still stuck and nothing has moved. "
             f"Draft ready for {who}:\n\n{body}\n\n"
             f"👍 *approve task {t['id']}* to send · 👎 *reject task {t['id']}*")

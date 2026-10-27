@@ -1,7 +1,7 @@
 """The approved plan is kept as a durable definition of done (GSD's one good idea).
 
-Two guarantees: off by default it changes nothing (no capture, no prompt change),
-and when on, the plan Arun approves is what a later compacted implementation leg is
+Two guarantees: explicitly disabling capture adds no spec preamble,
+and by default the latest plan Arun approves is what a later implementation leg is
 re-anchored to — not a fresh guess. Captured at approval, the one moment the text
 is unambiguously the definition of done.
 """
@@ -18,7 +18,7 @@ from app import store, task_spec, tasks
 # --- the artifact itself --------------------------------------------------------
 
 def test_disabled_captures_nothing_and_injects_nothing(monkeypatch):
-    monkeypatch.delenv("ASTA_TASK_SPEC", raising=False)
+    monkeypatch.setenv("ASTA_TASK_SPEC", "0")
     task_spec.capture(1, "PLAN READY\nchange retry.py: add backoff")
     assert task_spec.get(1) == ""
     assert task_spec.preamble(1) == ""
@@ -30,19 +30,23 @@ def test_enabled_keeps_the_approved_plan(monkeypatch):
     assert "add backoff" in task_spec.get(1)
 
 
-def test_the_first_approved_plan_wins(monkeypatch):
+def test_the_latest_approved_plan_wins_and_preserves_history(monkeypatch):
     monkeypatch.setenv("ASTA_TASK_SPEC", "1")
     task_spec.capture(1, "PLAN: original bar")
     task_spec.capture(1, "PLAN: a different, later bar")
-    assert task_spec.get(1) == "PLAN: original bar"   # not overwritten
+    assert task_spec.get(1) == "PLAN: a different, later bar"
+    assert [h["text"] for h in task_spec.history(1)] == ["PLAN: original bar", "PLAN: a different, later bar"]
 
 
-def test_capture_keeps_the_tail_where_the_plan_lives(monkeypatch):
+def test_capture_preserves_the_whole_plan_and_uses_an_artifact_for_long_prompts(monkeypatch):
     monkeypatch.setenv("ASTA_TASK_SPEC", "1")
     long_head = "x" * 5000
     task_spec.capture(1, long_head + "\nPLAN READY\nthe actual plan is here")
     assert "the actual plan is here" in task_spec.get(1)
-    assert len(task_spec.get(1)) <= task_spec._MAX
+    assert task_spec.get(1) == long_head + "\nPLAN READY\nthe actual plan is here"
+    assert task_spec.artifact(1).read_text() == task_spec.get(1)
+    assert "Read it before" in task_spec.preamble(1)
+    assert len(task_spec.preamble(1)) < 1000
 
 
 def test_preamble_carries_the_plan_and_the_do_exactly_this_instruction(monkeypatch):
@@ -111,7 +115,7 @@ def test_the_implementation_leg_is_re_anchored_to_the_spec(monkeypatch):
 
 
 def test_disabled_resume_prompt_is_unchanged(monkeypatch):
-    monkeypatch.delenv("ASTA_TASK_SPEC", raising=False)
+    monkeypatch.setenv("ASTA_TASK_SPEC", "0")
     t = store.create_task("add retry", "code", "add a retry", None)
     store.kv_set(f"task_spec:{t['id']}", "some captured plan")   # even if one exists
 

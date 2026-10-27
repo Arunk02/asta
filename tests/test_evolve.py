@@ -67,7 +67,7 @@ def _measure(rate, pushes, missed, constitution=(5, 5)):
 def _proves(monkeypatch, before, after):
     calls = {"n": 0}
 
-    async def measure(k=1):
+    async def measure(k=1, *, overrides=None):
         calls["n"] += 1
         return before if calls["n"] == 1 else after
 

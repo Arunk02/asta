@@ -104,7 +104,8 @@ def test_calls_per_turn_is_measured_separately_from_context(monkeypatch):
     now = time.time()
     monkeypatch.setattr(scorecard, "_rows", lambda sql, args=(): [
         {"channel": "whatsapp", "total_ms": 20000, "first_token_ms": 9000,
-         "input_tokens": 10, "cached_tokens": 150_000, "context_tokens": 30_000}])
+         "input_tokens": 10, "cached_tokens": 150_000, "context_tokens": 30_000,
+         "cache_write_tokens": 0, "measured": True}])
     r = scorecard.replies(now - 3600, now)
     assert round(r["calls_per_turn_avg"]) == 5 and r["context_per_call_avg"] == 30_000
 

@@ -72,16 +72,18 @@ def test_a_pr_link_needs_no_clone_at_all(workspace, monkeypatch):
 
     async def git(cwd, *args, timeout=120, stdin=""):
         ran.append(list(args))
-        return 0, json.dumps({"number": 1251, "state": "OPEN", "statusCheckRollup": [],
+        return 0, json.dumps({"number": 1251, "state": "MERGED" if len(ran) > 2 else "OPEN", "statusCheckRollup": [],
+                              "headRefOid": "a" * 40, "baseRefName": "develop",
                               "mergeable": "MERGEABLE", "reviewDecision": "APPROVED"})
 
     monkeypatch.setattr(review.repo_ops, "git", git)
     asyncio.run(review.merge(
         "https://github.com/Maersk-Global/telikos-activityplanworkflow-service/pull/1251",
         "booking"))
-    merge_call = ran[-1]
+    merge_call = ran[-2]
     assert merge_call[:3] == ["gh", "pr", "merge"]
     assert "-R" in merge_call and "Maersk-Global/telikos-activityplanworkflow-service" in merge_call
+    assert merge_call[merge_call.index('--match-head-commit') + 1] == 'a' * 40
 
 
 def test_a_task_he_names_comes_with_its_links():

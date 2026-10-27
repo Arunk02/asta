@@ -1055,6 +1055,37 @@ async def free_idle_checkouts(ws_root: Path, but: int) -> list[int]:
     return freed
 
 
+def refine_soon(task_id: int, feedback: str) -> None:
+    """`refine` from a caller that cannot await it; a refusal is said, not lost."""
+    async def _go() -> None:
+        from . import notify
+        try:
+            await refine(task_id, feedback, code_change=True)
+        except ValueError as exc:
+            await notify.notify(f"⚠️ #{task_id} could not take this: {exc}", "task",
+                                urgency="direct")
+    asyncio.get_running_loop().create_task(_go())
+
+
+def owner_of_pr(text: str, but: int = 0) -> dict | None:
+    """The code task whose PR this text names ("booking PR 1505"), if one owns it.
+
+    26 Oct: "Analyse on our booking PR why CT failed and fix it" became task #430,
+    a stranger to PR 1505, while #419 — which wrote and shipped it — was already
+    planning that very fix. The new task then could not even check out the branch."""
+    from . import prname
+    repo, number = prname.parse(text or "")
+    if not number:
+        return None
+    for t in store.list_tasks(limit=300):
+        if t["id"] == but or t.get("kind") != "code" or t.get("status") in CLOSED_STATUSES:
+            continue
+        for url in _pr_links(t):
+            if url.rstrip("/").endswith(f"/pull/{number}") and (not repo or f"/{repo}/" in url):
+                return t
+    return None
+
+
 async def free_branch_holders(ws_root: Path, branches: set[str], but: int) -> list[int]:
     """Free the checkout of an open-PR task that holds a branch this task needs.
 
@@ -1066,7 +1097,9 @@ async def free_branch_holders(ws_root: Path, branches: set[str], but: int) -> li
     from . import worktrees
     freed: list[int] = []
     for t in store.list_tasks(limit=500):
-        if t["id"] == but or t.get("kind") != "code" or t.get("status") not in SHIPPED_STATUSES \
+        # Any task not actively running — #419 sat at its plan gate holding PR
+        # 1505's branch, and #430 failed for it (26 Oct). Clean and pushed only.
+        if t["id"] == but or t.get("kind") != "code" or t.get("status") in ("running", "queued") \
                 or not worktrees.exists(ws_root, t["id"]):
             continue
         root = worktrees.root_for(ws_root, t["id"])

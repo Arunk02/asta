@@ -2663,6 +2663,15 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
                         f"so it carries on in that task's own session and branch.")
     if capabilities.said_this_turn():
         prompt += HANDED_OVER
+    if kind == "code":
+        owner = tasks.owner_of_pr(f"{title}\n{prompt}")
+        if owner:
+            # Work on a PR belongs to the task that wrote it: its session knows the
+            # change, and its checkout holds the branch.
+            tasks.refine_soon(owner["id"], prompt)
+            return (f"Not a new task: this PR belongs to task #{owner['id']} "
+                    f"(“{owner['title'][:60]}”), so it was sent there and continues in that "
+                    f"task's own session and checkout. Arun will be told how it goes.")
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
     return (f"Task #{t['id']} ({kind}) spawned — running in the background. "
             f"Arun will be notified when it finishes.")

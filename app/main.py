@@ -4378,6 +4378,17 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             if open_offer.mechanical():
                 await _run_staged_op(open_offer, cid, sink, channel)
                 return None
+            if (open_offer.payload or {}).get("enrich"):
+                # 26 Oct: a context refresh run as a chat turn cannot write a file,
+                # so "go ahead" changed nothing. It runs as its own job instead.
+                ws_enrich = open_offer.payload.get("workspace", "")
+                refresh.enrich_in_background(ws_enrich, open_offer.payload.get("detail", ""))
+                await sink.send({"type": "note", "text":
+                                 f"🗂 Refreshing the {ws_enrich} context in the background — "
+                                 "I'll tell you what changed when it's done."})
+                if channel == "web":
+                    await sink.send({"type": "done", "tools": []})
+                return None
             # A CI-failure offer carries the workspace its repo lives in. Adopt it
             # for the conversation so the analysis — and the fix and PR that follow
             # from it — run against that project's code and context, not Asta's own

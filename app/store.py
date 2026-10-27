@@ -1385,7 +1385,9 @@ def memory_search(query: str, k: int = 4, workspace: str = "") -> list[dict]:
                 scope, args = " AND (workspace = ? OR workspace = '')", [match, workspace]
         rows = conn.execute(
             f"SELECT path, title, mtype, date, {extra}rank AS score, "
-            "snippet(memory_fts, 4, '', '', ' … ', 40) AS snippet "
+            # Column 3 is the body. It read 4 (`date`) since the date column was
+            # added, so every recalled memory arrived as just its date.
+            "snippet(memory_fts, 3, '', '', ' … ', 40) AS snippet "
             f"FROM memory_fts WHERE memory_fts MATCH ?{scope} ORDER BY rank LIMIT ?",
             (*args, k),
         ).fetchall()

@@ -983,6 +983,48 @@ def model_settings(name: str):
 
 # --- agent tools -------------------------------------------------------------
 
+def correct_memory(path: str, title: str, fact: str, why: str = "",
+                   workspace: str = "", source: str = "") -> str:
+    """Correct a stored fact that turned out to be wrong.
+
+    path: the fact's path as search_memory shows it (facts/….md). The correct fact
+    is stored, the old one is marked as superseded by it and stops being recalled,
+    and both are kept in history. Use this — not `remember` — when a fact changed or
+    was wrong, so the two never contradict each other in recall."""
+    if not (title or "").strip() or not (fact or "").strip():
+        return "Not corrected: give the corrected fact a title and the fact itself."
+    try:
+        new = memory.supersede(path, title, fact, why, workspace=workspace, source=source)
+    except ValueError as exc:
+        return f"Not corrected: {exc}"
+    return (f"Corrected: {path} is superseded by {new}. The old fact is kept in history "
+            f"and is no longer recalled.")
+
+
+def forget_memory(path: str, purge: bool = False) -> str:
+    """Delete a stored fact, only because Arun asked for it to be forgotten.
+
+    path: as search_memory shows it. It leaves the facts folder, search and the
+    index, and stays restorable from history unless purge=True — which he must ask
+    for explicitly ("permanently", "for good", "everywhere"), because it removes
+    every recorded copy."""
+    from . import capabilities, scorecard
+    said = scorecard.his_words(capabilities.said_this_turn())
+    if not re.search(r"\b(?:forget|delete|remove|erase|purge|drop)\b", said, re.I):
+        return "Not deleted: Arun has to ask for a memory to be forgotten, in his own words."
+    if purge and not re.search(r"\b(?:purge|permanently|for\s+good|everywhere|history)\b",
+                               said, re.I):
+        return ("Not purged: deleting every recorded copy needs him to say so "
+                "(“permanently”). Without purge it stays restorable.")
+    try:
+        done = memory.forget(path, purge=purge)
+    except ValueError as exc:
+        return f"Not deleted: {exc}"
+    return (f"Forgot {done['deleted']}: removed from memory, search and the index"
+            + ("; every recorded copy was purged as well." if purge
+               else "; a copy stays in history and can be restored."))
+
+
 def remember(title: str, fact: str, kind: str = "fact", workspace: str = "", source: str = "") -> str:
     """Store a durable memory. kind: fact | preference | gotcha | fix.
     Use for corrections, preferences, root causes, environment quirks.

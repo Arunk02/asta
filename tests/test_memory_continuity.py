@@ -129,3 +129,9 @@ def test_an_index_built_before_scoping_is_rebuilt_and_still_searchable(mem):
     memory.remember('Scoped note', 'LegacyThing in booking.', workspace='booking')
     cols = [r[1] for r in store._connect().execute('PRAGMA table_info(memory_fts)').fetchall()]
     assert 'workspace' in cols
+
+
+def test_a_recalled_memory_carries_its_content_not_its_date(mem):
+    memory.remember('Grafana proxy', 'The grafana proxy needs the VPN for monitoring.')
+    hit, = store.memory_search('grafana proxy')
+    assert 'VPN' in hit['snippet'] and hit['snippet'] != hit['date']

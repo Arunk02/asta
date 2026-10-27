@@ -533,6 +533,22 @@ def api_remember(body: dict):
                                          source=str(body.get('source') or ''))}
 
 
+@app.post("/api/memory/correct", dependencies=[Depends(require_auth)])
+def api_correct_memory(body: dict):
+    body = body or {}
+    return {"result": agent_mod.correct_memory(
+        str(body.get("path") or ""), str(body.get("title") or ""), str(body.get("fact") or ""),
+        why=str(body.get("why") or ""), workspace=str(body.get("workspace") or ""),
+        source=str(body.get("source") or ""))}
+
+
+@app.post("/api/memory/forget", dependencies=[Depends(require_auth)])
+def api_forget_memory(body: dict):
+    body = body or {}
+    return {"result": agent_mod.forget_memory(str(body.get("path") or ""),
+                                               purge=bool(body.get("purge")))}
+
+
 @app.get("/api/memory/search", dependencies=[Depends(require_auth)])
 def api_search_memory(q: str, workspace: str = ""):
     if not q.strip():

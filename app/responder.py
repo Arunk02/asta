@@ -838,7 +838,10 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         # handed over a reference PR. Rechecking the same reading again is how
         # Vinish was told "nothing to do" twice (7 Oct).
         kind = "port"
-    key = key or attention.key_for(text)
+    # Feed keys identify a message, not a topic. The default must also include
+    # its sender and complete body: attention.key_for clips each input, which
+    # silently dropped another person's report or a changed build late in it.
+    key = key or attention.key_for(source, who, hashlib.sha256(text.encode()).hexdigest())
     why_not = should_respond(kind, priority, key, now=time.time(),
                              broadcast=is_broadcast(who, text), sent_at=sent_at)
     if why_not:
@@ -906,6 +909,11 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         ck = "" if kind == "pr_review" else results_cache.key_for(kind or "ask", grounds,
                                                                   question=text)
     hit = results_cache.lookup(ck) if ck else None
+    from . import issue_links
+    report_scope = issue_links.scope(text, kind or "ask") if not original else None
+    linked = issue_links.find(report_scope) if not hit else None
+    if linked and linked["state"] == "running":
+        hit = linked
     if hit:
         done = hit["state"] == "done"
         if not done and reply_to:
@@ -919,6 +927,8 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
                 "reused": done, "joined": not done, "result": hit.get("result", ""),
                 "at": hit.get("at")}
     brief = brief_for(kind, who, grounds)
+    if linked and linked["state"] == "related":
+        brief += issue_links.previous_context(linked)
     if original:
         from . import answers
         prior = answers._meta(correction_of)
@@ -959,6 +969,11 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
             {"ref": review_revision.rsplit("@", 1)[0], "revision": review_revision}))
     if ck:
         results_cache.start(ck, kind or "ask", t["id"])
+    issue_links.remember(t["id"], report_scope)
+    if linked and linked["state"] == "related":
+        store.kv_set(f"issue_predecessor:{t['id']}", str(linked["task_id"]))
+        store.record_outcome("responder", "related recheck", subject=str(t['id']),
+                             detail=f"Prior investigation #{linked['task_id']}; {who}")
     return t
 
 

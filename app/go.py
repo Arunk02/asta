@@ -58,7 +58,7 @@ _PHRASE = (r"(?:approval|approved?|go\s+ahead|do\s+(?:it|that|the\s+changes?)|ju
            r"push\s+(?:it\s+)?(?:to|in)\s+(?:the\s+)?(?:same\s+)?(?:pr|branch)(?:\s+#?\d+)?|"
            r"push(?:\s+(?:it|this|that|the\s+(?:changes?|branch|code)))?|"
            r"(?:raise|create|open)\s+(?:a\s+|the\s+)?(?:pr|prs|pull\s+requests?)|"
-           r"ship(?:\s+(?:it|this|that))?)")
+           r"ship(?:\s+(?:it|this|that))?|merge(?:\s+(?:it|this|that))?)")
 _FILL = r"(?:now\s+itself|now|fast|please|pls|asap|quickly|directly|right\s+away)"
 #: A message that is ENTIRELY a go-ahead. Anchored at both ends, like the
 #: approve command: "push the ETA fix after CI is green" is an ordinary message.
@@ -69,6 +69,8 @@ _COMMAND = re.compile(
     rf"(?:\s+{_FILL})*\s*[.!]*\s*$", re.I)
 
 RECENT_SECONDS = 24 * 3600
+_STOP_MERGE = re.compile(r"^\s*(?:don'?t|do\s+not|stop|hold)\s+(?:the\s+)?merg(?:e|ing)"
+                         r"(?:\s+(?:for\s+)?(?:task\s*)?#?\s*(\d{1,5}))?\s*[.!]*$", re.I)
 
 
 def enabled() -> bool:
@@ -87,14 +89,19 @@ def wants_pr(text: str) -> bool:
 
 def command(text: str) -> tuple[bool, int | None]:
     """(is this whole message a go-ahead?, the task number he named)."""
+    stop = _STOP_MERGE.match(text or '')
+    if stop:
+        return True, int(stop.group(1)) if stop.group(1) else None
     m = _COMMAND.match(text or "")
     if not m:
         return False, None
+    if wants_merge(text) and m.group(1) and not re.search(r'\btask\s*#?\s*' + m.group(1) + r'\b', text, re.I):
+        return False, None  # a bare merge number may identify a PR, not a task
     low = (text or "").lower()
     # "go ahead" / "do it" on their own answer whatever he was last asked — a
     # draft, an offer. Only with the PR words, or the word approval itself, do
     # they belong to a code task.
-    if not (wants_pr(text) or "approv" in low):
+    if not (wants_pr(text) or wants_merge(text) or "approv" in low):
         return False, None
     return True, (int(m.group(1)) if m.group(1) else None)
 
@@ -127,8 +134,14 @@ async def rerun(text: str) -> str:
 
 def grant(task_id: int, words: str = "", *, ship: bool = True) -> None:
     prior = granted(task_id) or {}
+    merge = bool(prior.get('merge'))
+    if re.search(r"\b(?:don'?t|do\s+not|never|stop|hold)\s+(?:the\s+)?merg", words, re.I):
+        merge = False
+    elif wants_merge(words):
+        merge = True
     store.kv_set(f"task_go:{task_id}", json.dumps(
         {"ship": bool(ship or prior.get("ship")), "words": (words or "")[:300],
+         "merge": merge, "merge_words": words if wants_merge(words) else prior.get('merge_words', ''),
          "at": time.time()}))
     store.add_task_event(task_id, "go", f"he said go{' + PR' if ship else ''}: {(words or '')[:160]}")
 
@@ -143,6 +156,25 @@ def granted(task_id: int) -> dict | None:
 
 def ships(task_id: int) -> bool:
     return bool((granted(task_id) or {}).get("ship"))
+
+
+def wants_merge(text: str) -> bool:
+    """A positive merge instruction, not a mention of resolving merge conflicts."""
+    if re.search(r"\b(?:how\s+to|whether\s+to|should\s+(?:i|we))\s+merge\b", text, re.I):
+        return False
+    if re.search(r"\b(?:explain|describe|simulate|dry.run)\b[^.;\n]{0,80}\bmerge\b", text, re.I):
+        return False
+    for m in re.finditer(r"\bmerge\b(?!\s+(?:conflicts?|strategy|base|approval|branch\s+into)\b)",
+                         text or '', re.I):
+        before = text[:m.start()]
+        if not _NOT.search(before) and re.search(
+                r"(?:^|[,.;\n]|\b(?:and|then|please|pls|you))\s*$", before, re.I):
+            return True
+    return False
+
+
+def merges(task_id: int) -> bool:
+    return bool((granted(task_id) or {}).get('merge'))
 
 
 def words(task_id: int) -> str:
@@ -259,7 +291,7 @@ def no_ask(task_id: int, plan: str) -> str:
 
 def on_spawn(task_id: int, said: str) -> bool:
     """His own ask said "…and raise the PR": the go-ahead rides with the task."""
-    if not enabled() or not wants_pr(said):
+    if not enabled() or not (wants_pr(said) or wants_merge(said)):
         return False
     grant(task_id, said, ship=True)
     return True
@@ -306,7 +338,10 @@ async def act(text: str, wanted: int | None) -> str:
         return problem
     if not t or t.get("kind") != "code":
         return ""
-    tid, pr = t["id"], wants_pr(text)
+    tid, pr = t["id"], wants_pr(text) or wants_merge(text)
+    if _STOP_MERGE.match(text or ''):
+        grant(tid, text, ship=False)
+        return f"Task #{tid}: saved merge permission revoked; its other work can continue."
     title = (t.get("title") or "")[:50]
     store.record_outcome("command", "go", subject=str(tid), detail=(text or "")[:120])
     status = t["status"]
@@ -329,9 +364,14 @@ async def act(text: str, wanted: int | None) -> str:
             return (f"#{tid} {title} is finished and committed locally — "
                     f"say *raise PR* and I'll push it.")
         try:
+            grant(tid, text, ship=True)
             return await tasks.ship(tid)
         except (ValueError, RuntimeError) as exc:
             return f"❌ #{tid}: couldn't raise the PR — {exc}"
     if t.get("pr_urls"):
+        if wants_merge(text):
+            grant(tid, text, ship=True)
+            result = await tasks.check_pr(tid)
+            return result or f"#{tid}: merge instruction saved; watching its checks and review requirements."
         return f"#{tid} is already up:\n{t['pr_urls']}"
     return ""

@@ -4734,17 +4734,18 @@ async def check_pr(task_id: int) -> str | None:
     from . import prname
     was = t.get("pr_state") or "OPEN"
     title = t["title"][:60]
-    for url in links:
-        pr = await _pr_state(url)
+    states = {url: await _pr_state(url) for url in links}
+    if all(pr and (pr.get('state') == 'MERGED' or pr.get('mergedAt')) for pr in states.values()):
+        store.update_task(task_id, status="merged", pr_state="MERGED", finished_at=time.time())
+        store.record_outcome("ship", "merged", subject=str(task_id), detail=' '.join(links))
+        return f"🎉 Merged — #{task_id} {title}\n" + '\n'.join(links)
+    for url, pr in states.items():
         if not pr:
             continue
         store.update_task(task_id, pr_checked_at=time.time())
 
         if pr.get("state") == "MERGED" or pr.get("mergedAt"):
-            store.update_task(task_id, status="merged", pr_state="MERGED",
-                              finished_at=time.time())
-            store.record_outcome("ship", "merged", subject=str(task_id), detail=url)
-            return f"🎉 Merged — {prname.from_url(url)} (#{task_id} {title})\n{url}"
+            continue  # a multi-repository task finishes only when ALL its PRs merge
         if pr.get("state") == "CLOSED":
             store.update_task(task_id, status="pr_closed", pr_state="CLOSED",
                               finished_at=time.time())
@@ -4754,6 +4755,11 @@ async def check_pr(task_id: int) -> str | None:
 
         decision = (pr.get("reviewDecision") or "").upper()
         checks = _checks_verdict(pr)
+        from . import go
+        if checks == 'green' and go.merges(task_id):
+            result = await _merge_as_asked(task_id, url, t)
+            if result:
+                return result
         # One state string carries both signals, so a change in EITHER is a
         # transition worth reporting and a repeat of both is silence.
         now_state = f"{checks}/{decision or 'NONE'}"
@@ -4835,6 +4841,51 @@ async def check_pr(task_id: int) -> str | None:
             return (f"✅ CI green on {prname.from_url(url)} (#{task_id} {title})\n{url}\n"
                     f"Waiting on review.")
     return None
+
+
+async def _merge_as_asked(task_id: int, url: str, task: dict) -> str | None:
+    """Complete a task-bound merge instruction once, after current GitHub checks."""
+    import hashlib
+    from . import go, review, policy
+    if not go.merges(task_id) or url not in _pr_links(task):
+        return None
+    if not policy.check('merge', url, asked=True).ok:
+        return None
+    receipt = 'task_merge:' + str(task_id) + ':' + hashlib.sha256(url.encode()).hexdigest()
+    if store.kv_get(receipt):
+        return None  # uncertain delivery is reconciled by read-only PR polling
+    try:
+        state = await review.merge_state(url, task.get('workspace') or '')
+    except RuntimeError:
+        return None
+    if review.merge_blockers(state) or not state.get('checks') or not state.get('head_oid') or not go.merges(task_id):
+        return None
+    # Claim before yielding. A second poll or restart must never issue another
+    # write while the first request may still have reached GitHub.
+    with store._connect() as conn:
+        claimed = conn.execute('INSERT OR IGNORE INTO kv(key,value) VALUES (?,?)',
+                               (receipt, _json.dumps({'state': 'sending', 'url': url,
+                                                     'head': state['head_oid'], 'at': time.time()})))
+        if claimed.rowcount != 1:
+            return None
+    try:
+        result = await review.merge(url, task.get('workspace') or '', delete_branch=False,
+                                    expected_head=state['head_oid'],
+                                    authorized=lambda: go.merges(task_id) and
+                                    url in _pr_links(store.get_task(task_id) or {}) and
+                                    policy.check('merge', url, asked=True).ok)
+    except review.MergeBlocked:
+        store.kv_del(receipt)  # no write occurred; current evidence can be checked again
+        return None
+    except (RuntimeError, asyncio.CancelledError) as exc:
+        store.kv_set(receipt, _json.dumps({'state': 'uncertain', 'url': url,
+                                         'head': state['head_oid'], 'at': time.time()}))
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        return f"Merge not confirmed for task #{task_id}: {exc}. Checking GitHub before any retry."
+    store.kv_set(receipt, _json.dumps({'state': 'requested', 'url': url, 'result': result,
+                                     'head': state['head_oid'], 'at': time.time()}))
+    return f"🔀 Task #{task_id}: {result} — under your saved merge instruction.\n{url}"
 
 
 def open_prs() -> list[int]:

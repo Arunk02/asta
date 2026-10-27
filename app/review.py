@@ -589,7 +589,7 @@ async def merge_state(pr: str, workspace: str, repo: str = "") -> dict:
     number, where, cwd = _where(pr, workspace, repo)
     rc, out = await _gh(cwd, "pr", "view", number, *where, "--json",
                         "number,title,state,isDraft,mergeable,mergeStateStatus,"
-                        "reviewDecision,statusCheckRollup,headRefName,baseRefName")
+                        "reviewDecision,statusCheckRollup,headRefName,headRefOid,baseRefName,url")
     if rc != 0:
         raise RuntimeError(f"could not read PR {pr}: {out.strip()[:200]}")
     try:
@@ -599,10 +599,10 @@ async def merge_state(pr: str, workspace: str, repo: str = "") -> dict:
     checks = data.get("statusCheckRollup") or []
     failing = [c.get("name") or c.get("context") or "?" for c in checks
                if (c.get("conclusion") or c.get("state") or "").upper()
-               in ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT")]
+               in ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED")]
     pending = [c.get("name") or c.get("context") or "?" for c in checks
                if (c.get("conclusion") or c.get("state") or "").upper()
-               in ("", "PENDING", "IN_PROGRESS", "QUEUED", "EXPECTED")]
+               not in ("SUCCESS", "NEUTRAL", "SKIPPED", "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED")]
     return {
         "number": data.get("number"), "title": data.get("title", ""),
         "state": data.get("state", ""), "draft": bool(data.get("isDraft")),
@@ -610,6 +610,7 @@ async def merge_state(pr: str, workspace: str, repo: str = "") -> dict:
         "merge_state": data.get("mergeStateStatus", ""),
         "review": data.get("reviewDecision", ""),
         "head": data.get("headRefName", ""), "base": data.get("baseRefName", ""),
+        "head_oid": data.get("headRefOid", ""), "url": data.get("url", ""),
         "failing": failing, "pending": pending, "checks": len(checks),
     }
 
@@ -630,12 +631,18 @@ def merge_blockers(state: dict) -> list[str]:
         out.append("it is still a draft")
     if (state.get("mergeable") or "").upper() == "CONFLICTING":
         out.append(f"it conflicts with {state.get('base') or 'the base branch'}")
+    elif (state.get("mergeable") or "").upper() != "MERGEABLE":
+        out.append("GitHub has not confirmed mergeability")
+    if (state.get('merge_state') or '').upper() in ('BLOCKED', 'BEHIND', 'DIRTY', 'DRAFT'):
+        out.append("GitHub merge requirements are not satisfied: " + state['merge_state'])
     if state.get("failing"):
         out.append("CI is red: " + ", ".join(state["failing"][:4]))
     if state.get("pending"):
         out.append("CI has not finished: " + ", ".join(state["pending"][:4]))
     if (state.get("review") or "").upper() == "CHANGES_REQUESTED":
         out.append("a reviewer has requested changes")
+    if (state.get("review") or "").upper() == "REVIEW_REQUIRED":
+        out.append("the required review is not approved yet")
     return out
 
 
@@ -651,8 +658,12 @@ def merge_summary(state: dict) -> str:
             f"{state.get('head', '?')} → {state.get('base', '?')} · {checks} · {review}")
 
 
+class MergeBlocked(RuntimeError):
+    """Preflight refused before any merge request was sent."""
+
+
 async def merge(pr: str, workspace: str, repo: str = "", method: str = "squash",
-                delete_branch: bool = True) -> str:
+                delete_branch: bool = True, *, expected_head: str = "", authorized=None) -> str:
     """Merge the PR. Re-checks the blockers immediately before doing it.
 
     Re-checked rather than trusted: the state was read when the offer was made,
@@ -667,14 +678,26 @@ async def merge(pr: str, workspace: str, repo: str = "", method: str = "squash",
     state = await merge_state(pr, workspace, repo)
     blockers = merge_blockers(state)
     if blockers:
-        raise RuntimeError("did NOT merge — " + "; ".join(blockers))
+        raise MergeBlocked("did NOT merge — " + "; ".join(blockers))
+    head = state.get('head_oid') or ''
+    if not re.fullmatch(r'[0-9a-fA-F]{40,64}', head):
+        raise MergeBlocked('did NOT merge — current head revision is unavailable')
+    if expected_head and head != expected_head:
+        raise MergeBlocked('did NOT merge — revision changed; recheck its evidence')
+    if authorized is not None and not authorized():
+        raise MergeBlocked('did NOT merge — task permission changed')
     number, where, cwd = _where(pr, workspace, repo)
-    args = ["pr", "merge", number, *where, flag]
+    args = ["pr", "merge", number, *where, flag, "--match-head-commit", head]
     if delete_branch:
         args.append("--delete-branch")
     rc, out = await _gh(cwd, *args, timeout=180)
     if rc != 0:
         raise RuntimeError(f"merge failed: {out.strip()[:300]}")
+    confirmed = await merge_state(pr, workspace, repo)
+    if confirmed.get('state', '').upper() != 'MERGED':
+        return f"merge requested for #{state['number']}; GitHub has not confirmed it merged yet"
+    if confirmed.get('head_oid') != head:
+        raise RuntimeError('PR is merged, but its revision differs from the verified head; reconcile the result')
     return (f"merged #{state['number']} ({method}) into {state['base']}"
             + (" and deleted the branch" if delete_branch else ""))
 

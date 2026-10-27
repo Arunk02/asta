@@ -218,6 +218,9 @@ async def startup() -> None:
     # with nothing that knew which task it belonged to.
     daemon.start("pr_watch", tasks.pr_watch_loop)
     daemon.start("followup", followup.loop)
+    # "Delivery not confirmed" settled from the chat history, never by resending.
+    from . import reconcile
+    daemon.start("reconcile_delivery", reconcile.loop)
     # Task checkouts of finished work, and stale PR review copies, removed so
     # they stop piling up (29 and 1.3 GB in the workspace IntelliJ has open).
     daemon.start("checkout_sweep", tasks.checkout_sweeper)
@@ -531,6 +534,22 @@ def api_remember(body: dict):
     return {"result": agent_mod.remember(title, fact, (body or {}).get("kind", "fact"),
                                          workspace=str(body.get('workspace') or ''),
                                          source=str(body.get('source') or ''))}
+
+
+@app.post("/api/memory/correct", dependencies=[Depends(require_auth)])
+def api_correct_memory(body: dict):
+    body = body or {}
+    return {"result": agent_mod.correct_memory(
+        str(body.get("path") or ""), str(body.get("title") or ""), str(body.get("fact") or ""),
+        why=str(body.get("why") or ""), workspace=str(body.get("workspace") or ""),
+        source=str(body.get("source") or ""))}
+
+
+@app.post("/api/memory/forget", dependencies=[Depends(require_auth)])
+def api_forget_memory(body: dict):
+    body = body or {}
+    return {"result": agent_mod.forget_memory(str(body.get("path") or ""),
+                                               purge=bool(body.get("purge")))}
 
 
 @app.get("/api/memory/search", dependencies=[Depends(require_auth)])

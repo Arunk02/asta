@@ -23,7 +23,8 @@ def test_fresh_implementation_receives_latest_complete_plan(tmp_path):
     prompt = context_pack.build(t['id'], 'implement')
     assert 'old plan' not in prompt
     assert str(task_spec.artifact(t['id'])) in prompt
-    assert task_spec.artifact(t['id']).read_text() == full
+    written = task_spec.artifact(t['id']).read_text()
+    assert written.startswith(full) and written.rstrip().endswith(task_spec.receipt(full))
     assert len(prompt) <= context_pack.CAPS['implement']
     task_spec.capture(t['id'], full)
     assert len(task_spec.history(t['id'])) == 2

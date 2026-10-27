@@ -144,12 +144,15 @@ async def reached(task_id: int, stage: str) -> str | None:
         await answers.present_task_draft(task_id, task)
         return f"Not sent to {person} on my own — {why}. The message is waiting for your yes."
     from . import chat_watch, ops, teams_bridge
-    store.kv_set(RECEIPT + name, json.dumps({"state": "sending", "to": person, "at": time.time()}))
+    started = time.time()
+    store.kv_set(RECEIPT + name, json.dumps({"state": "sending", "to": person, "text": text,
+                                             "at": started}))
     token = teams_bridge._automatic_send.set(person)
     try:
         line = await ops.REGISTRY["teams_send"]["run"](to=person, text=text, to_group=False)
     except (Exception, asyncio.CancelledError) as exc:       # noqa: BLE001
-        store.kv_set(RECEIPT + name, json.dumps({"state": "uncertain", "to": person,
+        store.kv_set(RECEIPT + name, json.dumps({"state": "uncertain", "to": person, "text": text,
+                                                 "at": started,
                                                  "why": f"{type(exc).__name__}: {exc}"[:200]}))
         _end(task_id, rec, "uncertain")
         if isinstance(exc, asyncio.CancelledError):
@@ -160,7 +163,8 @@ async def reached(task_id: int, stage: str) -> str | None:
         teams_bridge._automatic_send.reset(token)
     ok = line.startswith("✅ Sent to ")
     store.kv_set(RECEIPT + name, json.dumps({"state": "sent" if ok else "uncertain",
-                                             "to": person, "line": line[:200], "at": time.time()}))
+                                             "to": person, "text": text, "line": line[:200],
+                                             "at": started}))
     _end(task_id, rec, "sent" if ok else "uncertain")
     if ok:
         chat_watch.note_asta_said(person, text)

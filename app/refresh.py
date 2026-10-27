@@ -170,7 +170,7 @@ def context_gap(workspace: str) -> list[dict]:
     return sorted(out, key=lambda r: r["behind"], reverse=True)
 
 
-def trust_note(workspace: str, min_behind: int = 25) -> str:
+def trust_note(workspace: str, min_behind: int = 0) -> str:
     """What a code task must be told before it trusts the context map, or "".
 
     Only the repos far enough behind to matter, so a healthy workspace adds
@@ -178,6 +178,7 @@ def trust_note(workspace: str, min_behind: int = 25) -> str:
     told everywhere else to route through the map and never scan blind, so
     without an explicit exception it treats a silent map as an authoritative "no".
     """
+    min_behind = min_behind or STALE_BEHIND
     bad = [r for r in context_gap(workspace)
            if r["behind"] < 0 or r["behind"] >= min_behind]
     if not bad:
@@ -229,15 +230,21 @@ async def enrich(workspace: str, detail: str = "") -> str:
     only the context directory; Asta commits exactly what it changed there, locally,
     and stamps the workspace as enriched."""
     from . import claude_cli, task_fence
+    from .workspace.providers.indexed import context_dirname
     ws = ws_mod.get(workspace)
     if ws is None or not ws.exists():
         return f"Unknown workspace '{workspace}'."
     root = Path(ws.path)
+    # The directory THIS workspace uses. A hardcoded .asta-context treated the
+    # booking workspace's .contmark edits as stray files: never committed, yet
+    # the run was stamped as a successful refresh.
+    ctx_dir = context_dirname(root)
     if not detail:
         with contextlib.suppress(ValueError, OSError):
             _stale, detail = await ws_mod.drift(workspace)
     before = await _porcelain(root)
-    prompt = (ENRICH_BRIEF.format(workspace=workspace, context_dir=CONTEXT_DIR,
+    gap_before = {r["repo"]: r for r in context_gap(workspace)}
+    prompt = (ENRICH_BRIEF.format(workspace=workspace, context_dir=ctx_dir,
                                   detail=(detail or "(run the drift check)")[:3000])
               + ENRICH_CONTRACT.read_text())
     token = task_fence.MODE.set("none")      # nothing outward: no push, no PR, no posts
@@ -248,8 +255,8 @@ async def enrich(workspace: str, detail: str = "") -> str:
         task_fence.MODE.reset(token)
     after = await _porcelain(root)
     touched = sorted(after - before)
-    ours = [f for f in touched if f.startswith(CONTEXT_DIR + "/")]
-    elsewhere = [f for f in touched if not f.startswith(CONTEXT_DIR + "/")]
+    ours = [f for f in touched if f.startswith(ctx_dir + "/")]
+    elsewhere = [f for f in touched if not f.startswith(ctx_dir + "/")]
     committed = ""
     if ours:
         rc, _ = await _run(["git", "add", "--", *ours], root)
@@ -257,18 +264,54 @@ async def enrich(workspace: str, detail: str = "") -> str:
             msg = f"Refresh {workspace} workspace context against current code"
             rc, out = await _run(["git", "commit", "-q", "-m", msg, "--", *ours], root)
             committed = "committed" if rc == 0 else f"not committed: {out[-200:]}"
-    note_enriched(workspace)
+    # Verified, not assumed: a repo is refreshed when its verified_against moved.
+    gap_after = {r["repo"]: r for r in context_gap(workspace)}
+    repos = []
+    for name in sorted(set(gap_before) | set(gap_after)):
+        b, a = gap_before.get(name, {}), gap_after.get(name, {})
+        repos.append({"repo": name, "verified_before": b.get("verified", ""),
+                      "verified_after": a.get("verified", ""),
+                      "behind_before": b.get("behind", -1), "behind_after": a.get("behind", -1)})
+    stale_before = [r for r in repos if r["behind_before"] < 0 or r["behind_before"] >= STALE_BEHIND]
+    moved = [r for r in repos if r["verified_after"] and r["verified_after"] != r["verified_before"]]
+    still = [r for r in stale_before if r not in moved]
+    fresh = bool(ours) and (not stale_before or bool(moved))
+    if fresh:
+        note_enriched(workspace)
+    store.kv_set(f"context_provenance:{workspace}", json.dumps({
+        "at": time.time(), "fresh": fresh, "context_dir": ctx_dir, "files": ours,
+        "committed": committed, "repos": repos}))
     lines = [f"🗂 {workspace} context refreshed — {len(ours)} file(s) updated"
              + (f", {committed}" if committed else "")]
+    for r in moved:
+        lines.append(f"✓ {r['repo']}: verified {r['verified_before'] or 'never'} → "
+                     f"{r['verified_after']} ({_behind(r['behind_before'])} → "
+                     f"{_behind(r['behind_after'])})")
+    if not fresh:
+        lines[0] = f"⚠️ {workspace} context NOT brought up to date — {len(ours)} file(s) changed"
+        lines.append("Still stale: " + (", ".join(
+            f"{r['repo']} ({_behind(r['behind_after'])})" for r in still) or
+            f"nothing under {ctx_dir}/ changed") + ". It stays marked stale.")
+    elif still:
+        lines.append("Not re-verified this run: " + ", ".join(
+            f"{r['repo']} ({_behind(r['behind_after'])})" for r in still))
     if elsewhere:
-        lines.append(f"⚠️ Files outside {CONTEXT_DIR}/ changed during the run and were left "
+        lines.append(f"⚠️ Files outside {ctx_dir}/ changed during the run and were left "
                      f"as they are: {', '.join(elsewhere[:8])}")
     lines.append(report.strip()[-1500:])
     summary = "\n\n".join(lines)
     await notify.notify(summary, "info", urgency="direct")
-    store.record_outcome("context", "enriched", subject=workspace,
-                         detail=f"{len(ours)} files; outside={len(elsewhere)}")
+    store.record_outcome("context", "enriched" if fresh else "enrich unverified", subject=workspace,
+                         detail=f"{len(ours)} files; moved={len(moved)}; outside={len(elsewhere)}")
     return summary
+
+
+#: A repo this many commits behind its context map counts as stale (trust_note too).
+STALE_BEHIND = 25
+
+
+def _behind(n: int) -> str:
+    return "never verified" if n < 0 else f"{n} behind"
 
 
 def enrich_in_background(workspace: str, detail: str = "") -> None:

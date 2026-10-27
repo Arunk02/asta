@@ -44,7 +44,9 @@ def test_capture_preserves_the_whole_plan_and_uses_an_artifact_for_long_prompts(
     task_spec.capture(1, long_head + "\nPLAN READY\nthe actual plan is here")
     assert "the actual plan is here" in task_spec.get(1)
     assert task_spec.get(1) == long_head + "\nPLAN READY\nthe actual plan is here"
-    assert task_spec.artifact(1).read_text() == task_spec.get(1)
+    written = task_spec.artifact(1).read_text()
+    assert written.startswith(task_spec.get(1)) and written.rstrip().endswith(
+        task_spec.receipt(task_spec.get(1)))           # the whole plan, then its read receipt
     assert "Read it before" in task_spec.preamble(1)
     assert len(task_spec.preamble(1)) < 1000
 

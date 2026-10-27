@@ -83,6 +83,14 @@ _TABLE: tuple[Capability, ...] = (
                note="Durable memory across ALL conversations. kind: fact | preference "
                     "| gotcha | fix. Include workspace and evidence source for project facts."),
     Capability("search_memory", "memory", http="GET /api/memory/search?q={query}&workspace={workspace}"),
+    Capability("correct_memory", "memory",
+               http='POST /api/memory/correct {"path":"facts/…md","title":"…","fact":"…","why":"…"}',
+               note="A stored fact turned out wrong: supersede it with the correct one. "
+                    "Never remember a second, contradicting fact instead."),
+    Capability("forget_memory", "memory",
+               http='POST /api/memory/forget {"path":"facts/…md","purge":false}',
+               note="Deletes a stored fact. ONLY when Arun asks to forget/delete it in so "
+                    "many words; purge (no restore) only when he says permanently."),
     Capability("make_file", "hands", write=True,
                http='POST /api/files {"kind":"xlsx","name":"topics","title":"…","rows":[["Env","Topic"],["dev","x"]]}',
                note="THE way to answer “give me this in Excel / a sheet / a report”. Code "

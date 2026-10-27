@@ -57,29 +57,67 @@ def get(task_id: int) -> str:
     return store.kv_get(_key(task_id)) or ''
 
 
-def artifact(task_id: int, text: str | None = None) -> Path:
-    """An immutable file for workers to read on demand; the DB remains canonical."""
-    text = get(task_id) if text is None else text
-    digest = hashlib.sha256(text.encode()).hexdigest()
-    folder = store.DB_PATH.parent / 'task-plans' / str(int(task_id)) / digest
+#: Above this, a worker gets a pointer to the plan file instead of the plan.
+PROMPT_LIMIT = 3000
+
+
+def receipt(text: str) -> str:
+    """The line at the END of a plan file: quoting it shows the whole file was read."""
+    return 'Plan receipt: PLAN-' + hashlib.sha256(text.encode()).hexdigest()[:10]
+
+
+def _write(folder: Path, name: str, content: str) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / 'plan.md'
-    if not path.exists() or path.read_text() != text:
+    path = folder / name
+    if not path.exists() or path.read_text() != content:
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', dir=folder, delete=False) as out:
-            out.write(text)
+            out.write(content)
             temp = Path(out.name)
         temp.replace(path)
     return path.resolve()
 
 
-def prompt_block(task_id: int, text: str, limit: int = 3000) -> str:
+def artifact(task_id: int, text: str | None = None) -> Path:
+    """An immutable file for workers to read on demand; the DB remains canonical."""
+    text = get(task_id) if text is None else text
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    folder = store.DB_PATH.parent / 'task-plans' / str(int(task_id)) / digest
+    return _write(folder, 'plan.md', f'{text}\n\n---\n{receipt(text)}\n')
+
+
+def preview(task_id: int, text: str, title: str = '') -> Path:
+    """The whole plan as a readable file for HIM, before he approves it.
+
+    His phone gets a cut of the plan; this is the rest. One file per revision —
+    a revised plan is a new file, never an overwrite of the one he read."""
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    folder = store.DB_PATH.parent / 'task-plans' / str(int(task_id)) / digest
+    head = f'# Plan for task #{task_id}' + (f' — {title.strip()}' if title.strip() else '')
+    return _write(folder, f'plan-{int(task_id)}.md',
+                  f'{head}\n\nRevision {digest[:10]}\n\n{text.strip()}\n')
+
+
+def prompt_block(task_id: int, text: str, limit: int = PROMPT_LIMIT) -> str:
     if len(text) <= limit:
         return text
     path = artifact(task_id, text)
     return (f'The full approved plan is in {path}. Read it before changing files or '
             'claiming completion. It was omitted from this prompt for size; this '
-            'pointer is not a substitute for the plan.')
+            'pointer is not a substitute for the plan. Its last line is a "Plan receipt"; '
+            'quote that line exactly in your final report.')
+
+
+def unread(task_id: int, result: str) -> str:
+    """The receipt a worker should have quoted and did not, or ''.
+
+    Only when it was handed a pointer: a plan short enough to sit in the prompt
+    was read by construction."""
+    spec = get(task_id) if enabled() else ''
+    if len(spec) <= PROMPT_LIMIT:
+        return ''
+    expected = receipt(spec)
+    return '' if expected in (result or '') else expected
 
 
 def preamble(task_id: int) -> str:

@@ -385,7 +385,7 @@ def learn_from_correction(conv_id: str, user_text: str) -> str | None:
 # --- write path --------------------------------------------------------------
 
 def remember(title: str, fact: str, mtype: str = "fact", *, workspace: str = "",
-             source: str = "") -> str:
+             source: str = "", supersedes: str = "") -> str:
     """Persist a durable fact. mtype: fact | preference | gotcha | fix."""
     ensure_dirs()
     slug = slugify(title)
@@ -400,7 +400,7 @@ def remember(title: str, fact: str, mtype: str = "fact", *, workspace: str = "",
         try:
             with path.open("x") as out:
                 meta = _metadata(title=title, type=mtype, date=today,
-                                 workspace=workspace, source=source)
+                                 workspace=workspace, source=source, supersedes=supersedes)
                 out.write(f"---\nname: {name}\n{meta}---\n\n{fact.strip()}\n")
             break
         except FileExistsError:
@@ -588,6 +588,7 @@ def list_memories() -> list[dict]:
                 "title": meta.get("title", p.stem),
                 "type": meta.get("type", mtype),
                 "date": meta.get("date", ""),
+                "superseded_by": meta.get("superseded_by", ""),
             })
     return out
 
@@ -617,6 +618,8 @@ def reindex() -> int:
         for p in d.glob("*.md"):
             text = p.read_text()
             meta = _parse_frontmatter(text)
+            if meta.get("superseded_by"):
+                continue        # kept on disk and in history; recall serves the correction
             docs.append({
                 "path": str(p.relative_to(MEMORY_DIR)),
                 "title": meta.get("title", p.stem),
@@ -670,7 +673,7 @@ def consolidate() -> str:
     # Rewrite MEMORY.md from surviving files.
     lines = [INDEX_HEADER.rstrip(), ""]
     for m in list_memories():
-        if m["type"] != "episode":
+        if m["type"] != "episode" and not m.get("superseded_by"):
             lines.append(f"- [{m['title']}]({m['path']}) — {m['type']}")
     recent = [m for m in list_memories() if m["type"] == "episode"][-7:]
     if recent:
@@ -681,6 +684,170 @@ def consolidate() -> str:
     n = reindex()
     report.append(f"reindexed {n} memory docs")
     return "\n".join(report) if report else "nothing to do"
+
+
+# --- correction, restore and explicit deletion --------------------------------
+#
+# A wrong fact used to have two fates: stay, contradicting the new one, or be
+# deleted with nothing to say it ever existed. Neither is how a correction works.
+# A correction SUPERSEDES: the new fact names the old one, the old one is marked
+# and leaves recall, and both stay on disk and in .history. Deleting is only on
+# his explicit word, and says exactly what it removes from where.
+
+HISTORY = ".history"
+PURGED = "purged.json"
+
+
+def _history_dir() -> Path:
+    path = MEMORY_DIR / HISTORY
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _preserve(path: Path) -> str:
+    """Content-addressed copy into .history before any change. Returns the digest."""
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    saved = _history_dir() / f"{digest}.md"
+    try:
+        with saved.open("xb") as out:
+            out.write(raw)
+    except FileExistsError:
+        if saved.read_bytes() != raw:
+            raise RuntimeError(f"Corrupt memory history: {digest}")
+    return digest
+
+
+def _fact_path(rel_path: str) -> Path:
+    path = (MEMORY_DIR / rel_path).resolve()
+    if not path.is_relative_to(FACTS_DIR.resolve()) or not path.is_file():
+        raise ValueError(f"No stored fact at {rel_path}")
+    return path
+
+
+def _index_drop(rel_path: str) -> None:
+    if INDEX_FILE.exists():
+        kept = [line for line in INDEX_FILE.read_text().splitlines()
+                if f"]({rel_path})" not in line]
+        INDEX_FILE.write_text("\n".join(kept) + "\n")
+
+
+def supersede(rel_path: str, title: str, fact: str, why: str = "", *,
+              workspace: str = "", source: str = "") -> str:
+    """Record a correction to a stored fact. Returns the new fact's path.
+
+    The old fact is preserved, marked superseded_by the new one, and leaves
+    recall; its body is never rewritten."""
+    old = _fact_path(rel_path)
+    text = old.read_text()
+    meta = _parse_frontmatter(text)
+    if meta.get("superseded_by"):
+        raise ValueError(f"{rel_path} was already corrected by {meta['superseded_by']}")
+    _preserve(old)
+    new = remember(title, fact, meta.get("type", "fact"),
+                   workspace=workspace or meta.get("workspace", ""), source=source,
+                   supersedes=rel_path)
+    marks = _metadata(superseded_by=new, superseded_at=dt.date.today().isoformat(), why=why)
+    if text.startswith("---\n"):
+        text = "---\n" + marks + text[4:]
+    else:
+        text = "---\n" + marks + "---\n\n" + text
+    old.write_text(text)
+    _index_drop(rel_path)
+    reindex()
+    return new
+
+
+def _snapshot(name: str = "") -> Path:
+    folder = _history_dir()
+    if name:
+        path = folder / name
+        if path.parent != folder or not path.is_file():
+            raise ValueError(f"No memory snapshot {name}")
+        return path
+    snaps = sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    snaps = [p for p in snaps if p.name != PURGED]
+    if not snaps:
+        raise ValueError("No memory snapshot yet — consolidation writes one nightly")
+    return snaps[-1]
+
+
+def _purged() -> set[str]:
+    path = _history_dir() / PURGED
+    return set(json.loads(path.read_text())) if path.exists() else set()
+
+
+def restore(snapshot: str = "", paths: list[str] | None = None, apply: bool = False) -> dict:
+    """The restore drill. Compare memory against a snapshot; with apply, put back
+    what is missing or changed, verifying every byte against its recorded hash.
+
+    A file that differs now is preserved first, so restoring loses nothing either."""
+    snap = _snapshot(snapshot)
+    manifest = json.loads(snap.read_text())
+    purged = _purged()
+    report = {"snapshot": snap.name, "intact": [], "missing": [], "changed": [],
+              "restored": [], "corrupt": [], "purged": []}
+    for rel, digest in sorted(manifest.items()):
+        if paths and rel not in paths:
+            continue
+        if digest in purged:
+            report["purged"].append(rel)
+            continue
+        blob = _history_dir() / f"{digest}.md"
+        if not blob.is_file() or hashlib.sha256(blob.read_bytes()).hexdigest() != digest:
+            report["corrupt"].append(rel)
+            continue
+        current = (MEMORY_DIR / rel).resolve()
+        if not current.is_relative_to(MEMORY_DIR.resolve()):
+            report["corrupt"].append(rel)
+            continue
+        if current.is_file() and hashlib.sha256(current.read_bytes()).hexdigest() == digest:
+            report["intact"].append(rel)
+            continue
+        state = "changed" if current.is_file() else "missing"
+        if not apply:
+            report[state].append(rel)
+            continue
+        if current.is_file():
+            _preserve(current)
+        current.parent.mkdir(parents=True, exist_ok=True)
+        current.write_bytes(blob.read_bytes())
+        if hashlib.sha256(current.read_bytes()).hexdigest() != digest:
+            report["corrupt"].append(rel)
+            continue
+        report["restored"].append(rel)
+    if report["restored"]:
+        reindex()
+    return report
+
+
+def forget(rel_path: str, purge: bool = False) -> dict:
+    """Delete a fact on his explicit word.
+
+    Default: gone from the facts folder, the search index and MEMORY.md, still
+    restorable from .history. purge=True also removes every recorded copy of it
+    from .history and lists those digests in purged.json, so a restore reports
+    them as purged rather than silently skipping or bringing them back."""
+    path = _fact_path(rel_path)
+    digest = _preserve(path)
+    path.unlink()
+    _index_drop(rel_path)
+    reindex()
+    removed = []
+    if purge:
+        digests = {digest}
+        for snap in _history_dir().glob("*.json"):
+            if snap.name != PURGED:
+                d = json.loads(snap.read_text()).get(rel_path)
+                if d:
+                    digests.add(d)
+        for d in digests:
+            blob = _history_dir() / f"{d}.md"
+            if blob.exists():
+                blob.unlink()
+                removed.append(d)
+        (_history_dir() / PURGED).write_text(json.dumps(sorted(_purged() | digests)))
+    return {"deleted": rel_path, "restorable": not purge, "purged_versions": len(removed)}
 
 
 # --- long-chat compaction ----------------------------------------------------

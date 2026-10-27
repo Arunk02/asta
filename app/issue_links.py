@@ -99,3 +99,62 @@ def previous_context(hit: dict) -> str:
             "report; verify current pod/build/log evidence. Do not repeat the full "
             "investigation or copy its reply blindly. If the evidence differs, explain why.\n"
             + hit['result'][:6000])
+
+
+# --- later reports into a running investigation ------------------------------
+#
+# A second person reporting the same failure joined the running task (#171), but
+# what THEY said never reached it: the worker finished on the first report only,
+# and a different build number or a fresh timestamp in the second was lost. Kept
+# here as a colleague's evidence — never as Arun's words (task_addenda is his
+# channel), and always wrapped as data when it reaches a model.
+
+_EVIDENCE = "task_evidence:"
+EVIDENCE_MAX = 5
+
+
+#: Words that add nothing a worker could check: a status ping is not evidence.
+_NOT_EVIDENCE = frozenset("""
+any update updates status still please pls thanks thank same issue issues error errors also
+facing getting seeing again this that there here what when have with from your know can
+help someone anyone look check urgent asap team guys hello hey
+""".split())
+
+
+def new_detail(text: str, already: str) -> set[str]:
+    """Terms in `text` the investigation has not seen — IDs, builds, hosts, words."""
+    seen = set(re.findall(r"[a-z0-9_.:/-]{3,}", (already or "").lower()))
+    return {w for w in re.findall(r"[a-z0-9_.:/-]{3,}", (text or "").lower())
+            if w not in seen and w not in _NOT_EVIDENCE}
+
+
+def add_evidence(task_id: int, who: str, text: str) -> bool:
+    """Queue a later reporter's message for a running task.
+
+    False when it adds nothing the task has not already got (a status ping, a
+    duplicate) or the queue is full."""
+    text = " ".join((text or "").split())[:1000]
+    task = store.get_task(task_id) or {}
+    if not text or not new_detail(text, f"{task.get('title', '')} {task.get('prompt', '')}"):
+        return False
+    key = _EVIDENCE + str(task_id)
+    try:
+        items = json.loads(store.kv_get(key) or "[]")
+    except ValueError:
+        items = []
+    if any(i.get("text") == text for i in items) or len(items) >= EVIDENCE_MAX:
+        return False
+    items.append({"who": (who or "someone")[:80], "text": text})
+    store.kv_set(key, json.dumps(items))
+    store.add_task_event(task_id, "evidence", f"later report from {who}: {text[:120]}")
+    return True
+
+
+def take_evidence(task_id: int) -> list[dict]:
+    key = _EVIDENCE + str(task_id)
+    try:
+        items = json.loads(store.kv_get(key) or "[]")
+    except ValueError:
+        items = []
+    store.kv_del(key)
+    return [i for i in items if isinstance(i, dict) and i.get("text")]

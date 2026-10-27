@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS usage (
     created_at REAL NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    path, title, mtype, body, date UNINDEXED
+    path, title, mtype, body, date UNINDEXED, workspace UNINDEXED
 );
 CREATE TABLE IF NOT EXISTS missions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1321,21 +1321,21 @@ def teams_chats_known() -> list[str]:
 # --- memory FTS index --------------------------------------------------------
 
 def memory_reindex(docs: list[dict]) -> None:
-    """Replace the whole memory index. docs: [{path, title, mtype, body, date}]"""
+    """Replace the whole memory index. docs: [{path, title, mtype, body, date, workspace}]"""
     with _connect() as conn:
-        # `date` was added for recency-weighted recall; an existing DB still has
-        # the 4-column table, and fts5 cannot ALTER, so rebuild it. Costless:
-        # this function repopulates every row anyway.
+        # `date` (recency) and `workspace` (project scope) were added later; an
+        # existing DB has the older table, and fts5 cannot ALTER, so rebuild it.
+        # Costless: this function repopulates every row anyway.
         cols = [r[1] for r in conn.execute("PRAGMA table_info(memory_fts)").fetchall()]
-        if "date" not in cols:
+        if "date" not in cols or "workspace" not in cols:
             conn.execute("DROP TABLE IF EXISTS memory_fts")
             conn.execute("CREATE VIRTUAL TABLE memory_fts USING fts5("
-                         "path, title, mtype, body, date UNINDEXED)")
+                         "path, title, mtype, body, date UNINDEXED, workspace UNINDEXED)")
         conn.execute("DELETE FROM memory_fts")
         conn.executemany(
-            "INSERT INTO memory_fts (path, title, mtype, body, date) "
-            "VALUES (:path, :title, :mtype, :body, :date)",
-            [{**d, "date": d.get("date", "")} for d in docs],
+            "INSERT INTO memory_fts (path, title, mtype, body, date, workspace) "
+            "VALUES (:path, :title, :mtype, :body, :date, :workspace)",
+            [{**d, "date": d.get("date", ""), "workspace": d.get("workspace", "")} for d in docs],
         )
 
 
@@ -1361,7 +1361,7 @@ _RECALL_STOPWORDS = {
 }
 
 
-def memory_search(query: str, k: int = 4) -> list[dict]:
+def memory_search(query: str, k: int = 4, workspace: str = "") -> list[dict]:
     """FTS candidate memories for `query`, best bm25 first, each carrying `score`.
 
     Generic words are stripped before matching (see _RECALL_STOPWORDS). If nothing
@@ -1374,11 +1374,19 @@ def memory_search(query: str, k: int = 4) -> list[dict]:
     if not words:
         return []
     match = " OR ".join(dict.fromkeys(words[:12]))
+    # Scoped BEFORE the limit. Filtering after it let a busy project fill all k
+    # slots, and the one relevant memory of the project asked about never made
+    # the candidate set. Unscoped memories (no workspace recorded) stay eligible.
+    scope, args, extra = "", [match], ""
     with _connect() as conn:
+        if "workspace" in [r[1] for r in conn.execute("PRAGMA table_info(memory_fts)").fetchall()]:
+            extra = "workspace, "
+            if workspace:
+                scope, args = " AND (workspace = ? OR workspace = '')", [match, workspace]
         rows = conn.execute(
-            "SELECT path, title, mtype, date, rank AS score, "
+            f"SELECT path, title, mtype, date, {extra}rank AS score, "
             "snippet(memory_fts, 4, '', '', ' … ', 40) AS snippet "
-            "FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
-            (match, k),
+            f"FROM memory_fts WHERE memory_fts MATCH ?{scope} ORDER BY rank LIMIT ?",
+            (*args, k),
         ).fetchall()
     return [dict(r) for r in rows]

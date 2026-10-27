@@ -916,6 +916,10 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         hit = linked
     if hit:
         done = hit["state"] == "done"
+        if not done:
+            # What they said is evidence for the running investigation too —
+            # a different build or a fresh timestamp must not be lost.
+            issue_links.add_evidence(hit["task_id"], who, source_text or text)
         if not done and reply_to:
             from . import answers
             answers.remember_waiter(hit["task_id"], who=who, need=need or message_of(text)[:160],

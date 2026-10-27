@@ -524,8 +524,9 @@ def recall(query: str, k: int = 4, *, workspace: str = "") -> list[dict]:
     surviving FTS hit is at least on a real topic — take only the few best, and
     lean on the caller framing recall as "ignore if not relevant".
     """
-    hits = store.memory_search(query, max(k * 4, 12))
+    hits = store.memory_search(query, max(k * 4, 12), workspace=workspace)
     if workspace:
+        # Still checked against the file: the index may predate a frontmatter edit.
         scoped = []
         for h in hits:
             raw = read_memory_file(h['path'])
@@ -622,6 +623,7 @@ def reindex() -> int:
                 "mtype": meta.get("type", "fact"),
                 "body": _body(text),
                 "date": meta.get("date", ""),      # drives recency weighting
+                "workspace": meta.get("workspace", ""),   # scopes recall before ranking
             })
     store.memory_reindex(docs)
     return len(docs)

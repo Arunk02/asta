@@ -38,6 +38,8 @@ from . import store
 WINDOW_DAYS = 14
 PHONE_CHANNELS = ("whatsapp", "telegram")
 SNAPSHOT_PREFIX = "scorecard:"
+TOKEN_METRICS_VERSION = 2
+_TOKEN_METRICS = ('tokens_per_turn', 'context_per_call', 'context_avg', 'calls_per_turn')
 #: Where the test bench leaves its last run. A module constant so a test can
 #: point it somewhere else instead of racing the real file.
 WORKWORLD_LAST = Path(__file__).resolve().parent.parent / "data" / "workworld" / "last.json"
@@ -115,14 +117,19 @@ def _judge(value, good, warn, lower_is_better: bool = True) -> str:
 # --- the measurements ---------------------------------------------------------
 
 def replies(since: float, until: float) -> dict:
-    rows = _rows("SELECT channel, total_ms, first_token_ms, input_tokens, cached_tokens, "
+    rows = _rows("SELECT channel, total_ms, first_token_ms, input_tokens, cached_tokens, cache_write_tokens, measured, "
                  "context_tokens FROM traces WHERE created_at >= ? AND created_at < ?",
                  (since, until))
     phone = [r for r in rows if r["channel"] in PHONE_CHANNELS]
     totals = [r["total_ms"] / 1000 for r in phone if r["total_ms"]]
     firsts = [r["first_token_ms"] / 1000 for r in phone if r["first_token_ms"]]
-    per_turn = [(r["input_tokens"] or 0) + (r["cached_tokens"] or 0) for r in rows]
-    ctx = [r["context_tokens"] for r in rows if r["context_tokens"]]
+    measured = [r for r in rows if r['measured']]
+    estimated = [r for r in rows if not r['measured']]
+    def inputs(r):
+        return (r['input_tokens'] or 0) + (r['cached_tokens'] or 0) + (r['cache_write_tokens'] or 0)
+    per_turn = [inputs(r) for r in measured]
+    estimates = [inputs(r) for r in estimated]
+    ctx = [r["context_tokens"] for r in measured if r["context_tokens"]]
     return {
         "turns": len(rows),
         "phone_turns": len(phone),
@@ -130,12 +137,15 @@ def replies(since: float, until: float) -> dict:
         "p90_s": _pct(totals, 0.9),
         "first_word_p50_s": _pct(firsts, 0.5),
         "tokens_per_turn_avg": (sum(per_turn) / len(per_turn)) if per_turn else None,
+        "measured_turns": len(measured),
+        "estimated_turns": len(estimated),
+        "estimated_tokens_per_turn_avg": sum(estimates) / len(estimates) if estimates else None,
         "context_per_call_max": max(ctx) if ctx else None,
         "context_per_call_avg": (sum(ctx) / len(ctx)) if ctx else None,
         # Model calls inside one turn: everything read, over what one call holds.
         # 29 Sep's "141k per turn" was ~5 calls of ~30k, not a 141k context.
         "calls_per_turn_avg": (sum(t / c for t, c in zip(
-            [(r["input_tokens"] or 0) + (r["cached_tokens"] or 0) for r in rows if r["context_tokens"]],
+            [inputs(r) for r in measured if r["context_tokens"]],
             ctx)) / len(ctx)) if ctx else None,
     }
 
@@ -434,7 +444,7 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
         Row("context_per_call", "Largest session context in one call", r["context_per_call_max"],
             _fmt_k(r["context_per_call_max"]), "≤ 100k (sessions retire above it)",
             _judge(r["context_per_call_max"], 100_000, 150_000),
-            "measured from 11 Sep; older turns did not record it"),
+            "executor-reported samples only; estimates are excluded"),
         Row("no_brain", "Messages answered without waking a brain", fd["no_brain_share"],
             _fmt_pct(fd["no_brain_share"]), "rising — status, commands, job replies",
             "na" if fd["no_brain_share"] is None else
@@ -446,15 +456,20 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
             "recorded while ASTA_ROUTING is on"),
         Row("tokens_per_turn", "Tokens read per chat turn (all its calls)", r["tokens_per_turn_avg"],
             _fmt_k(r["tokens_per_turn_avg"]), "≤ 120k", _judge(r["tokens_per_turn_avg"], 120_000, 250_000),
-            "context per call × calls per turn — see the two rows below"),
+            f"{r['measured_turns']} measured turns; fresh input + cache reads + cache writes. "
+            "Retained chat samples, not tokens per successful task."),
+        Row("tokens_per_turn_estimated", "Estimated input tokens per chat turn", r['estimated_tokens_per_turn_avg'],
+            _fmt_k(r['estimated_tokens_per_turn_avg']), "reported separately", "na",
+            f"{r['estimated_turns']} estimated turns; excluded from the measured average."),
         Row("context_avg", "Context one model call holds, on average", r["context_per_call_avg"],
             _fmt_k(r["context_per_call_avg"]), "≤ 40k",
             _judge(r["context_per_call_avg"], 40_000, 80_000),
             "the fixed part is ~25k: the CLI's own prompt, its tools and the tools picked for the turn"),
-        Row("calls_per_turn", "Model calls inside one chat turn", r["calls_per_turn_avg"],
+        Row("calls_per_turn", "Approximate model calls inside one chat turn", r["calls_per_turn_avg"],
             "—" if r["calls_per_turn_avg"] is None else f"{r['calls_per_turn_avg']:.1f}",
-            "≤ 3 (more means it is hunting for a fact)",
-            _judge(r["calls_per_turn_avg"], 3, 6)),
+            "≤ 3 as a rough reference",
+            _judge(r["calls_per_turn_avg"], 3, 6),
+            "Input tokens divided by largest call context; a proxy, not a recorded call count."),
         Row("reply_length", "Asta's phone reply length", ln["avg_chars"],
             "—" if ln["avg_chars"] is None else f"{ln['avg_chars']:.0f} chars",
             "≤ 400 unless asked to elaborate", _judge(ln["avg_chars"], 400, 700),
@@ -535,6 +550,7 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
                             f"· run {ww.get('at', '')}"))
     return {
         "generated_at": until,
+        "token_metrics_version": TOKEN_METRICS_VERSION,
         "window_days": days,
         "rows": [asdict(x) for x in rows],
         "brains": brains_now(),
@@ -555,6 +571,7 @@ def snapshot(day: dt.date | None = None) -> dict:
     end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time()).timestamp()
     card = compute(days=1, now=end)
     compact = {r["key"]: r["value"] for r in card["rows"]}
+    compact['__token_metrics_version'] = TOKEN_METRICS_VERSION
     store.kv_set(_day_key(day), json.dumps(compact))
     return compact
 
@@ -568,7 +585,17 @@ def history(days: int = 30, today: dt.date | None = None) -> list[dict]:
         raw = store.kv_get(_day_key(d))
         if raw:
             try:
-                out.append({"date": d.isoformat(), "values": json.loads(raw)})
+                values = json.loads(raw)
+                if not isinstance(values, dict):
+                    continue
+                version = values.pop('__token_metrics_version', 1)
+                if version != TOKEN_METRICS_VERSION:
+                    # Old snapshots omitted cache writes and mixed estimates.
+                    # Preserve their stored record without drawing a false trend.
+                    for key in _TOKEN_METRICS:
+                        values.pop(key, None)
+                out.append({"date": d.isoformat(), "values": values,
+                            "token_metrics_version": version})
             except ValueError:
                 continue
     return out

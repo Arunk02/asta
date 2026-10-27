@@ -26,12 +26,49 @@ def test_an_empty_system_is_judged_na_not_good():
 def test_replies_are_measured_on_phone_channels_with_first_word():
     for total, first in ((60_000, 48_000), (20_000, 5_000), (30_000, 9_000)):
         store.add_trace("c", "claude_cli", "whatsapp", first, total, 2, 10, 100_000, 0, 5, [],
-                        context_tokens=120_000)
+                        context_tokens=120_000, measured=True)
     card = scorecard.compute()
     row = _row(card, "reply_p50")
     assert row["value"] == 30 and row["state"] == "warn"
     assert "first word 9 s" in row["note"]
     assert _row(card, "context_per_call")["state"] == "warn"
+
+
+def test_input_measurement_includes_cache_writes_and_excludes_estimated_samples():
+    store.add_trace('c', 'claude_cli', 'web', None, 1000, 10, 9, 20, 0, 0, [],
+                    cache_write_tokens=70, context_tokens=50, measured=True)
+    store.add_trace('c', 'copilot', 'web', None, 1000, 9000, 9, 0, 0, 0, [],
+                    context_tokens=9000, measured=False)
+    result = scorecard.replies(time.time() - 60, time.time() + 1)
+    assert result['tokens_per_turn_avg'] == 100
+    assert result['estimated_tokens_per_turn_avg'] == 9000
+    assert result['measured_turns'] == result['estimated_turns'] == 1
+    assert result['context_per_call_avg'] == 50
+    assert result['calls_per_turn_avg'] == 2
+    card = scorecard.compute()
+    assert 'cache writes' in _row(card, 'tokens_per_turn')['note']
+    assert 'proxy' in _row(card, 'calls_per_turn')['note']
+
+
+def test_estimate_only_usage_cannot_be_judged_as_measured_efficiency():
+    store.add_trace('c', 'copilot', 'web', None, 1000, 20, 9, 0, 0, 0, [], measured=False)
+    card = scorecard.compute()
+    assert _row(card, 'tokens_per_turn')['state'] == 'na'
+    assert _row(card, 'tokens_per_turn')['value'] is None
+    assert _row(card, 'tokens_per_turn_estimated')['value'] == 20
+
+
+def test_old_and_new_token_definitions_are_not_drawn_as_one_trend():
+    day = dt.date.today() - dt.timedelta(days=1)
+    old = {'tokens_per_turn': 100, 'calls_per_turn': 2, 'reply_p50': 10}
+    store.kv_set(scorecard._day_key(day), json.dumps(old))
+    history = scorecard.history(1)
+    assert history[0]['values'] == {'reply_p50': 10}
+    assert json.loads(store.kv_get(scorecard._day_key(day))) == old
+    scorecard.snapshot(day)
+    history = scorecard.history(1)
+    assert history[0]['token_metrics_version'] == 2
+    assert 'tokens_per_turn' in history[0]['values']
 
 
 def test_his_words_exclude_what_asta_wrote_itself():

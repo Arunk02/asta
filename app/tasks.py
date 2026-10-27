@@ -1374,7 +1374,10 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
             # run: read from what HE typed, never from the brief a brain wrote.
             with contextlib.suppress(Exception):
                 from . import capabilities, go, scorecard
-                go.on_spawn(t["id"], scorecard.his_words(capabilities.said_this_turn()))
+                said = scorecard.his_words(capabilities.said_this_turn())
+                go.on_spawn(t["id"], said)
+                from . import task_inform
+                task_inform.record(t["id"], said)
         if _agent_for(t) and _graph().enabled():
             _graph().start(t["id"])
             return t
@@ -3296,6 +3299,10 @@ async def complete(task_id: int, t: dict, result: str) -> None:
             f"Already pushed — the PR is updated:\n"
             + "\n".join("• " + prname.name_links(u) for u in pushed)
             + f"\nI'm watching its CI and will tell you how it ends.{waste}", "task")
+        from . import task_inform
+        told = await task_inform.reached(task_id, "pr")
+        if told:
+            await notify.notify(told, "task", urgency="direct")
         return
     if go.enabled() and go.ships(task_id):
         # He already said "…and raise the PR". Asking "say ship" now would be
@@ -4340,6 +4347,11 @@ async def ship(task_id: int) -> str:
            + "\n\nStaying on it — I'll tell you if CI goes red, if review asks "
              "for changes, or when it merges.")
     await notify.notify(msg, "action", urgency="direct")
+    from . import task_inform
+    told = await task_inform.reached(task_id, "pr")
+    if told:
+        await notify.notify(told, "action", urgency="direct")
+        msg += "\n\n" + told
     return msg
 
 
@@ -4748,7 +4760,9 @@ async def check_pr(task_id: int) -> str | None:
     if all(pr and (pr.get('state') == 'MERGED' or pr.get('mergedAt')) for pr in states.values()):
         store.update_task(task_id, status="merged", pr_state="MERGED", finished_at=time.time())
         store.record_outcome("ship", "merged", subject=str(task_id), detail=' '.join(links))
-        return f"🎉 Merged — #{task_id} {title}\n" + '\n'.join(links)
+        from . import task_inform
+        told = await task_inform.reached(task_id, "merged")
+        return f"🎉 Merged — #{task_id} {title}\n" + '\n'.join(links) + (f"\n\n{told}" if told else "")
     for url, pr in states.items():
         if not pr:
             continue

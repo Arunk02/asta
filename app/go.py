@@ -92,6 +92,10 @@ def command(text: str) -> tuple[bool, int | None]:
     stop = _STOP_MERGE.match(text or '')
     if stop:
         return True, int(stop.group(1)) if stop.group(1) else None
+    from . import task_inform
+    quiet, number = task_inform.stop_command(text)
+    if quiet:
+        return True, number
     m = _COMMAND.match(text or "")
     if not m:
         return False, None
@@ -332,7 +336,12 @@ def target(wanted: int | None, now: float | None = None) -> tuple[dict | None, s
 
 async def act(text: str, wanted: int | None) -> str:
     """Carry out his go-ahead. "" when there is nothing it can mean."""
-    from . import pr_authority, tasks
+    from . import pr_authority, task_inform, tasks
+    if task_inform.stop_command(text)[0]:
+        person = task_inform._STOP.match(text).group(1).strip()
+        n = task_inform.revoke(wanted, person)
+        return (f"OK — I won't tell {person or 'them'}; {n} saved update"
+                f"{'s' if n != 1 else ''} cancelled.") if n else ""
     ended = pr_authority.revoke(wanted) if _STOP_MERGE.match(text or '') else 0
     stopped = (f"Stopped: {ended} saved PR instruction{'s' if ended != 1 else ''} revoked — "
                f"nothing more is approved or merged under {'them' if ended != 1 else 'it'}.")

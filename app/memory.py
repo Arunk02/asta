@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
+import json
 import os
 import re
 import sys
@@ -382,7 +384,8 @@ def learn_from_correction(conv_id: str, user_text: str) -> str | None:
 
 # --- write path --------------------------------------------------------------
 
-def remember(title: str, fact: str, mtype: str = "fact") -> str:
+def remember(title: str, fact: str, mtype: str = "fact", *, workspace: str = "",
+             source: str = "") -> str:
     """Persist a durable fact. mtype: fact | preference | gotcha | fix."""
     ensure_dirs()
     slug = slugify(title)
@@ -396,7 +399,9 @@ def remember(title: str, fact: str, mtype: str = "fact") -> str:
         path = FACTS_DIR / f"{name}.md"
         try:
             with path.open("x") as out:
-                out.write(f"---\nname: {name}\ntitle: {title}\ntype: {mtype}\ndate: {today}\n---\n\n{fact.strip()}\n")
+                meta = _metadata(title=title, type=mtype, date=today,
+                                 workspace=workspace, source=source)
+                out.write(f"---\nname: {name}\n{meta}---\n\n{fact.strip()}\n")
             break
         except FileExistsError:
             suffix += 1
@@ -405,12 +410,29 @@ def remember(title: str, fact: str, mtype: str = "fact") -> str:
     return str(path.relative_to(MEMORY_DIR))
 
 
+def _metadata(**values: str) -> str:
+    # Frontmatter is a flat record; a multiline title/source must not inject
+    # another field (for example a different workspace).
+    return "".join(f"{key}: {' '.join(str(value).splitlines())}\n"
+                   for key, value in values.items() if value)
+
+
 def write_episode(conv: dict) -> str | None:
     """Digest a finished conversation into episodes/. Local model first, heuristic fallback."""
     ensure_dirs()
     msgs = store.list_ui_messages(conv["id"])
     if not msgs:
         return None
+    source_hash = hashlib.sha256(json.dumps(
+        {"conversation": conv['id'], "workspace": conv.get('workspace'),
+         "messages": [{k: m.get(k) for k in ('id', 'role', 'content')} for m in msgs]},
+        sort_keys=True).encode()).hexdigest()
+    today = dt.date.today().isoformat()
+    slug = slugify(conv.get("title") or "session")
+    path = EPISODES_DIR / f"{today}-{slug}-{source_hash}.md"
+    if path.exists():
+        store.update_conversation(conv['id'], digested=1)
+        return str(path.relative_to(MEMORY_DIR))
     transcript = "\n".join(f"{m['role']}: {m['content'][:800]}" for m in msgs)[-8000:]
     digest = local_llm_complete(
         "Summarize this dev-assistant chat session in at most 10 short lines of markdown. "
@@ -421,12 +443,14 @@ def write_episode(conv: dict) -> str | None:
         first = next((m["content"] for m in msgs if m["role"] == "user"), "")[:300]
         last = next((m["content"] for m in reversed(msgs) if m["role"] == "assistant"), "")[:500]
         digest = f"**Asked:** {first}\n\n**Outcome:** {last}"
-    today = dt.date.today().isoformat()
-    slug = slugify(conv.get("title") or "session")
-    path = EPISODES_DIR / f"{today}-{slug}-{conv['id'][:6]}.md"
-    path.write_text(
-        f"---\nname: {path.stem}\ntitle: {conv.get('title') or 'Session'}\ntype: episode\ndate: {today}\n---\n\n{digest}\n"
-    )
+    meta = _metadata(title=conv.get('title') or 'Session', type='episode', date=today,
+                     workspace=conv.get('workspace') or '', source=f"conversation:{conv['id']}",
+                     source_hash=source_hash)
+    try:
+        with path.open('x') as out:
+            out.write(f"---\nname: {path.stem}\n{meta}---\n\n{digest}\n")
+    except FileExistsError:
+        pass  # the exact source was already digested by another caller
     store.update_conversation(conv["id"], digested=1)
     reindex()
     return str(path.relative_to(MEMORY_DIR))
@@ -486,7 +510,7 @@ RECENCY_HALFLIFE = float(os.environ.get("ASTA_RECALL_HALFLIFE", "45"))
 RECALL_FLOOR = float(os.environ.get("ASTA_RECALL_FLOOR", "0.35"))
 
 
-def recall(query: str, k: int = 4) -> list[dict]:
+def recall(query: str, k: int = 4, *, workspace: str = "") -> list[dict]:
     """Top-k memories that are actually about the query — or nothing.
 
     FTS5 alone is keyword-only: "what breaks the grafana proxy" misses a fact
@@ -501,6 +525,16 @@ def recall(query: str, k: int = 4) -> list[dict]:
     lean on the caller framing recall as "ignore if not relevant".
     """
     hits = store.memory_search(query, max(k * 4, 12))
+    if workspace:
+        scoped = []
+        for h in hits:
+            raw = read_memory_file(h['path'])
+            meta = _parse_frontmatter(raw or '')
+            project = meta.get('workspace', '')
+            if project and project != workspace:
+                continue
+            scoped.append({**h, 'workspace': project, 'source': meta.get('source', '')})
+        hits = scoped
     if not hits:
         return []
     vecs = local_embed([query] + [f"{h['title']} {h.get('snippet', '')}" for h in hits])
@@ -520,11 +554,13 @@ def recall(query: str, k: int = 4) -> list[dict]:
     return [h for _, h in scored[:k]]
 
 
-def recall_block(query: str) -> str:
-    hits = recall(query)
+def recall_block(query: str, *, workspace: str = "") -> str:
+    hits = recall(query, workspace=workspace) if workspace else recall(query)
     if not hits:
         return ""
-    lines = [f"- **{h['title']}** ({h['mtype']}): {h['snippet']}" for h in hits]
+    lines = [f"- **{h['title']}** ({h['mtype']}, {h.get('date') or 'undated'}, "
+             f"source: {h.get('source') or h['path']}, "
+             f"workspace: {h.get('workspace') or 'not recorded'}): {h['snippet']}" for h in hits]
     # NOT "relevant memories" — that framing is what made the model trust a
     # marginal hit and answer from it. These are candidates; the model must judge
     # each against the actual question and drop the ones that don't bear on it.
@@ -592,7 +628,7 @@ def reindex() -> int:
 
 
 def consolidate() -> str:
-    """Nightly job: digest stale sessions, dedupe facts, rewrite MEMORY.md, reindex."""
+    """Digest sessions and rebuild indexes without deleting source evidence."""
     ensure_dirs()
     report = []
 
@@ -601,31 +637,33 @@ def consolidate() -> str:
         if p:
             report.append(f"digested session {conv['id']} -> {p}")
 
-    # Merge facts whose titles are near-duplicates (same slug prefix).
-    seen: dict[str, Path] = {}
-    for p in sorted(FACTS_DIR.glob("*.md")):
-        key = p.stem[:32]
-        if key in seen:
-            keeper = seen[key]
-            merged = _body(keeper.read_text()) + "\n\n" + _body(p.read_text())
-            summary = local_llm_complete(
-                "Merge these overlapping notes into one concise note (keep every distinct fact, "
-                "drop repetition, max 8 lines):\n\n" + merged,
-                max_tokens=300,
-            )
-            keeper_meta = _parse_frontmatter(keeper.read_text())
-            head = re.match(r"^---\n.*?\n---\n", keeper.read_text(), re.DOTALL).group(0)
-            keeper.write_text(head + "\n" + (summary or merged) + "\n")
-            p.unlink()
-            report.append(f"merged {p.name} into {keeper.name} ({keeper_meta.get('title')})")
-        else:
-            seen[key] = p
-
-    # Keep only the most recent 30 episodes.
-    episodes = sorted(EPISODES_DIR.glob("*.md"))
-    for p in episodes[:-30]:
-        p.unlink()
-        report.append(f"pruned old episode {p.name}")
+    # Similar titles are not proof of identical facts. Keep corrections and
+    # old episodes searchable; token limits belong on the prompt, not on data.
+    # Immutable content-addressed copies support recovery after later edits.
+    history = MEMORY_DIR / '.history'
+    history.mkdir(exist_ok=True)
+    versions = {}
+    for folder in (FACTS_DIR, EPISODES_DIR):
+        for path in sorted(folder.glob('*.md')):
+            raw = path.read_bytes()
+            digest = hashlib.sha256(raw).hexdigest()
+            saved = history / f'{digest}.md'
+            try:
+                with saved.open('xb') as out:
+                    out.write(raw)
+            except FileExistsError:
+                if saved.read_bytes() != raw:
+                    raise RuntimeError(f'Corrupt memory history: {digest}')
+            versions[str(path.relative_to(MEMORY_DIR))] = digest
+    manifest = json.dumps(versions, sort_keys=True, indent=2).encode()
+    snapshot = history / (hashlib.sha256(manifest).hexdigest() + '.json')
+    try:
+        with snapshot.open('xb') as out:
+            out.write(manifest)
+    except FileExistsError:
+        if snapshot.read_bytes() != manifest:
+            raise RuntimeError('Corrupt memory snapshot manifest')
+    report.append(f'preserved {len(versions)} source memories; snapshot {snapshot.name}')
 
     # Rewrite MEMORY.md from surviving files.
     lines = [INDEX_HEADER.rstrip(), ""]

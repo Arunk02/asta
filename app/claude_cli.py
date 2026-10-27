@@ -320,7 +320,7 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         # inbox on one CLI and guesses on the other is two assistants.
         umsg = f"{prefetched}\n\n{umsg}"
     if not is_new:
-        rb = memory.recall_block(user_text)
+        rb = memory.recall_block(user_text, workspace=conv['workspace']) if conv.get('workspace') else memory.recall_block(user_text)
         if rb:
             umsg = f"[{rb}]\n\n{umsg}"
     # Asta's identity, capabilities and rules go in the SYSTEM prompt, NOT the

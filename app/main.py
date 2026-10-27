@@ -524,14 +524,16 @@ def api_remember(body: dict):
     fact = (body or {}).get("fact", "").strip()
     if not title or not fact:
         raise HTTPException(400, "title and fact are required")
-    return {"result": agent_mod.remember(title, fact, (body or {}).get("kind", "fact"))}
+    return {"result": agent_mod.remember(title, fact, (body or {}).get("kind", "fact"),
+                                         workspace=str(body.get('workspace') or ''),
+                                         source=str(body.get('source') or ''))}
 
 
 @app.get("/api/memory/search", dependencies=[Depends(require_auth)])
-def api_search_memory(q: str):
+def api_search_memory(q: str, workspace: str = ""):
     if not q.strip():
         raise HTTPException(400, "q is required")
-    return {"result": agent_mod.search_memory(q)}
+    return {"result": agent_mod.search_memory(q, workspace=workspace)}
 
 
 @app.get("/api/skills/{name}", dependencies=[Depends(require_auth)])
@@ -1860,8 +1862,8 @@ def _load_history(conv: dict) -> list:
     return list(ModelMessagesTypeAdapter.validate_json(conv["history"] or "[]"))
 
 
-def _with_recall(user_text: str) -> str:
-    recall = memory.recall_block(user_text)
+def _with_recall(user_text: str, workspace: str = "") -> str:
+    recall = memory.recall_block(user_text, workspace=workspace) if workspace else memory.recall_block(user_text)
     if not recall:
         return user_text
     return f"{user_text}\n\n<memory-recall>\n{recall}\n</memory-recall>"
@@ -2630,7 +2632,7 @@ async def _run_turn_streaming(out, conv: dict, user_text: str, model_name: str,
     history = _load_history(conv)
     # Recall rides in the user prompt (not instructions) so the instruction
     # prefix stays byte-stable and the Anthropic prompt cache actually hits.
-    prompt = _with_recall(user_text)
+    prompt = _with_recall(user_text, conv.get('workspace') or '')
     # The same per-turn block the Claude and Copilot CLI brains get, from the same
     # function: who he means, how to check one booking, what his documents say.
     # Without it an API-key turn answered a booking question from nothing.
@@ -4867,7 +4869,8 @@ def _remember_if_asked(feedback: str, task: dict) -> str:
     try:
         memory.remember(f"{(task.get('workspace') or 'project')} — {fact[:60]}",
                         f"{fact}\n\n(Arun, on task #{task['id']} “{task.get('title', '')[:80]}”, "
-                        f"{time.strftime('%Y-%m-%d')})")
+                        f"{time.strftime('%Y-%m-%d')})", workspace=task.get('workspace') or '',
+                        source=f"task:{task['id']}")
     except Exception as exc:                                    # noqa: BLE001
         quiet.note("remember.task_feedback", exc)
         return " I could not save it for future work."

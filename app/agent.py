@@ -983,13 +983,14 @@ def model_settings(name: str):
 
 # --- agent tools -------------------------------------------------------------
 
-def remember(title: str, fact: str, kind: str = "fact") -> str:
+def remember(title: str, fact: str, kind: str = "fact", workspace: str = "", source: str = "") -> str:
     """Store a durable memory. kind: fact | preference | gotcha | fix.
-    Use for corrections, preferences, root causes, environment quirks."""
+    Use for corrections, preferences, root causes, environment quirks.
+    For project facts, include the workspace and an evidence/source reference."""
     ruled = _a_rule_not_a_memory(fact)
     if ruled:
         return ruled
-    path = memory.remember(title, fact, kind)
+    path = memory.remember(title, fact, kind, workspace=workspace, source=source)
     # "Remember to check Komal's PR tomorrow morning" is a job with a time, not
     # only a note: a note is read when something recalls it, and nothing did.
     from . import capabilities, reminders, scorecard
@@ -1043,9 +1044,9 @@ def load_skill(name: str) -> str:
     return body
 
 
-def search_memory(query: str) -> str:
+def search_memory(query: str, workspace: str = "") -> str:
     """Search long-term memory for facts/episodes beyond what was auto-recalled."""
-    hits = memory.recall(query, k=6)
+    hits = memory.recall(query, k=6, workspace=workspace)
     if not hits:
         return "No matching memories."
     return "\n".join(f"[{h['mtype']}] {h['title']} ({h['path']}): {h['snippet']}" for h in hits)

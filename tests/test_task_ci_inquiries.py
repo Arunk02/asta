@@ -519,13 +519,18 @@ async def test_feedback_reaches_a_running_task_and_is_remembered(monkeypatch):
                              "plan", "booking")
     store.update_task(task["id"], status="running")
     kept = []
-    monkeypatch.setattr(memory, "remember", lambda title, fact, mtype="fact": kept.append(fact))
+    origins = []
+    def remember(title, fact, mtype="fact", **metadata):
+        kept.append(fact)
+        origins.append(metadata)
+    monkeypatch.setattr(memory, "remember", remember)
     monkeypatch.setattr(tasks, "ci_report", lambda *_a, **_k: pytest.fail("read as a status ask"))
     sink = Sink()
     await main._dispatch(conv, f"task {task['id']} - {DOMAIN_FEEDBACK}", sink, "whatsapp")
     assert "FINANCE_MILESTONE" in (store.kv_get(f"task_addenda:{task['id']}") or "")
     assert "Saved it for future work" in sink.text
     assert kept and "FINANCE_MILESTONE" in kept[0] and "rememember" not in kept[0]
+    assert origins == [{'workspace': 'booking', 'source': f"task:{task['id']}"}]
 
 
 @pytest.mark.asyncio

@@ -218,6 +218,9 @@ async def startup() -> None:
     # with nothing that knew which task it belonged to.
     daemon.start("pr_watch", tasks.pr_watch_loop)
     daemon.start("followup", followup.loop)
+    # "Delivery not confirmed" settled from the chat history, never by resending.
+    from . import reconcile
+    daemon.start("reconcile_delivery", reconcile.loop)
     # Task checkouts of finished work, and stale PR review copies, removed so
     # they stop piling up (29 and 1.3 GB in the workspace IntelliJ has open).
     daemon.start("checkout_sweep", tasks.checkout_sweeper)

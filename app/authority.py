@@ -151,15 +151,32 @@ def may(act: str, target: str, now: float | None = None) -> Grant | None:
     return None
 
 
+def _contact_permission(target: str) -> tuple[bool, Grant | None]:
+    """An explicit grant/revocation takes precedence over the legacy reply list."""
+    with store._connect() as conn:
+        rows = conn.execute("SELECT * FROM authority WHERE act='send' ORDER BY id DESC").fetchall()
+    for row in rows:
+        if row['target'].strip().casefold() == target.strip().casefold():
+            g = _row(row)
+            usable = bool(row['active']) and used_today(g.id) < g.per_day
+            return True, g if usable else None
+    return False, None
+
+
 def auto_reply_to(target: str, group: bool = False) -> bool:
-    """Exact 1:1 recipients Arun named in his private automatic-replies list."""
+    """Exact 1:1 recipients covered by a saved grant or the legacy reply list."""
     if group or not target:
         return False
     from . import steward
     if steward.sends_held():
         return False
     from . import guardrails, policy, senior
-    if senior.is_senior(target) or not policy.check("send", target).ok:
+    if not policy.check("send", target).ok:
+        return False
+    recorded, permission = _contact_permission(target)
+    if recorded:
+        return permission is not None
+    if senior.is_senior(target):
         return False
     names = [re.sub(r"^[-*]\s+", "", line.strip()).casefold()
              for line in guardrails.section("automatic teams replies").splitlines()
@@ -167,10 +184,17 @@ def auto_reply_to(target: str, group: bool = False) -> bool:
     return target.strip().casefold() in names
 
 
+class ReplyNotAuthorized(PermissionError):
+    """Reply preflight refused before invoking any transport."""
+
+
 async def send_reply(target: str, text: str) -> str:
     """Send under the narrow standing rule, without recording a fresh approval."""
     if not auto_reply_to(target):
-        raise PermissionError(f"No automatic Teams reply permission for {target}")
+        raise ReplyNotAuthorized(f"No automatic Teams reply permission for {target}")
+    recorded, permission = _contact_permission(target)
+    if recorded and (permission is None or not claim_use(permission)):
+        raise ReplyNotAuthorized("Permission revoked, held, or its daily limit is reached")
     from . import chat_watch, ops, teams_bridge
     token = teams_bridge._automatic_send.set(target)
     try:

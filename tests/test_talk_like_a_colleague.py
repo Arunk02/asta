@@ -196,7 +196,7 @@ def test_failed_automatic_reply_is_not_claimed_sent(phone, monkeypatch):
     monkeypatch.setitem(ops.REGISTRY, "teams_send", {"run": failed})
     assert asyncio.run(answers.present(who="Vinish Kumar", need="booking", chat="Vinish Kumar",
                                        group=False, analysis="", reply="Checked.", task_id=1))
-    assert loop.awaiting(phone["cid"])["to"] == "Vinish Kumar"
+    assert loop.awaiting(phone["cid"]) is None
     assert "delivery was not confirmed" in phone["pushed"][0]["text"]
 
 

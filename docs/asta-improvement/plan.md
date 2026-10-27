@@ -4,6 +4,8 @@
 
 **Status:** Implementation authorized by Arun on 26 October 2026; proceeding in tested stages. Live deployment is not part of this implementation milestone.
 
+**27 October continuation:** Arun additionally authorized raising and merging the tested batches on his personal GitHub (`Arunk02/asta`). That supersedes the initial milestone's merge exclusion below. Current delivered behavior and outstanding work are tracked in [progress.md](progress.md); the original audit/checkpoint remains historical evidence.
+
 **Repository:** `/Users/arun.k.k/help/asta`
 
 **Audited state:** Initial audit at `a313964` with the then-existing edits. Implementation reconciled against clean `main` / `origin/main` at `27d8537`, including merged PRs #165–#168.

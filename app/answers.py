@@ -280,7 +280,16 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
 
 async def _deliver_automatic_reply(intent: dict) -> bool:
     from . import authority, chat_watch, notify
+    import asyncio
     target = intent.get("to", "")
+    # Persist the delivery boundary, including uncertain results. A retry must
+    # not turn a possibly delivered automatic reply into a new sendable draft.
+    identity = {k: intent.get(k) for k in ('task_id', 'thread', 'to', 'to_group', 'what', 'need', 'source_text')}
+    if not intent.get('task_id'):
+        identity['incoming_at'] = chat_watch.their_last(target)
+    receipt = 'answer_delivery:' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    if store.kv_get(receipt):
+        return True
     if not authority.auto_reply_to(target, group=bool(intent.get("to_group"))):
         return False
     if held_after_correction(intent.get("thread", "")):
@@ -294,14 +303,28 @@ async def _deliver_automatic_reply(intent: dict) -> bool:
         return False
     if await chat_watch.he_replied_since(target, chat_watch.their_last(target)):
         return False
+    with store._connect() as conn:
+        claimed = conn.execute('INSERT OR IGNORE INTO kv(key,value) VALUES (?,?)',
+                               (receipt, json.dumps({'state': 'sending', 'intent': intent, 'at': time.time()})))
+        if claimed.rowcount != 1:
+            return True
     try:
         line = await authority.send_reply(target, intent["what"])
-    except Exception as exc:
+    except authority.ReplyNotAuthorized:
+        store.kv_del(receipt)  # preflight refused; no transport was called
+        return False
+    except (Exception, asyncio.CancelledError) as exc:
+        store.kv_set(receipt, json.dumps({'state': 'uncertain', 'intent': intent, 'at': time.time()}))
         store.record_outcome("answer", "auto reply failed",
                              subject=str(intent.get("task_id") or ""),
                              detail=f"{target}: {type(exc).__name__}: {exc}"[:200])
-        intent["note"] = "Automatic send failed; delivery was not confirmed. Do not resend blindly."
-        return False
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        await notify.notify(f"Automatic reply to {target}: delivery was not confirmed. "
+                            "Check the Teams conversation before retrying; no new send is queued.",
+                            "answer", urgency="direct", considered=True)
+        return True
+    store.kv_set(receipt, json.dumps({'state': 'sent', 'intent': intent, 'at': time.time()}))
     sent({**intent, "review_origin": None}, by_arun=False)
     analysis = (intent.get("analysis") or "").strip()[:1200]
     await notify.notify(f"{line}" + (f"\n\n{analysis}" if analysis else "")

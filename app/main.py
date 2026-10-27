@@ -98,6 +98,10 @@ async def startup() -> None:
     # This is the process that serves, so it is the one allowed to notice that
     # launchd is supervising a DIFFERENT one — see health.unsupervised.
     health.mark_serving()
+    # Worker credentials a crashed leg never revoked (app/worker_auth.py).
+    with contextlib.suppress(Exception):
+        from . import worker_auth
+        worker_auth.prune()
     store.init()
     memory.ensure_dirs()
     # Voice mode starts OFF on every start; if it had been on, he hears so once.

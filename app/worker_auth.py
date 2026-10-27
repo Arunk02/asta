@@ -63,6 +63,29 @@ def revoke(token: str) -> None:
     store.kv_del(_key(token))
 
 
+def prune(now: float | None = None) -> int:
+    """Delete scope records that can no longer authenticate.
+
+    A leg revokes its own record on exit; a process that died mid-leg leaves one
+    behind. Expired, unreadable and finished-task records are removed — never a
+    live one, since its credential is still in a running worker's environment.
+    """
+    now = time.time() if now is None else now
+    gone = 0
+    for key, raw in store.kv_like('worker_scope:%').items():
+        try:
+            scope = json.loads(raw or '{}')
+            task = store.get_task(scope['task_id'])
+            dead = (scope['expires_at'] <= now or not task
+                    or task.get('status') in _STOPPED)
+        except (KeyError, TypeError, ValueError):
+            dead = True
+        if dead:
+            store.kv_del(key)
+            gone += 1
+    return gone
+
+
 def authenticate(token: str, now: float | None = None) -> dict:
     if not token.startswith(PREFIX):
         raise Refused('Invalid worker credential')

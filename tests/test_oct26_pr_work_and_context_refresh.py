@@ -66,7 +66,7 @@ def test_an_approved_refresh_writes_commits_and_stamps(tmp_path, monkeypatch):
     root = _ws(tmp_path)
 
     class WS:
-        path = str(root)
+        path = root                      # Workspace.path is a Path
         def exists(self):
             return True
 
@@ -75,6 +75,10 @@ def test_an_approved_refresh_writes_commits_and_stamps(tmp_path, monkeypatch):
     async def brain(prompt, cwd, timeout, effort):
         assert ".asta-context/ ONLY" in prompt and "Enrichment contract" in prompt
         (Path(cwd) / ".asta-context" / "repos" / "svc" / "flow.md").write_text("new (source: A.java:3)\n")
+        # The brief's rule: stamp verified_against even when nothing else changed.
+        index = Path(cwd) / ".asta-context" / "repos" / Path(cwd).name / "_index.json"
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_text('{"verified_against": "' + "c" * 40 + '"}')
         (Path(cwd) / "notes.txt").write_text("touched by mistake\n")
         return "svc/flow.md: patched the entry point"
 
@@ -86,7 +90,7 @@ def test_an_approved_refresh_writes_commits_and_stamps(tmp_path, monkeypatch):
     monkeypatch.setattr(refresh.notify, "notify", _notify)
     store.kv_set("last_enriched:booking", "1")
     out = asyncio.run(refresh.enrich("booking", "DRIFT svc: a..b"))
-    assert "1 file(s) updated, committed" in out and "notes.txt" in out
+    assert "2 file(s) updated, committed" in out and "notes.txt" in out
     log = subprocess.run(["git", "log", "--name-only", "-1", "--format=%s"], cwd=root,
                          capture_output=True, text=True).stdout
     assert "Refresh booking workspace context" in log and ".asta-context/repos/svc/flow.md" in log

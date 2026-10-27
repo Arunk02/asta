@@ -28,6 +28,13 @@ MODE: contextvars.ContextVar[str] = contextvars.ContextVar("asta_task_writes", d
 
 SHIMS = Path(__file__).resolve().parent / "shims"
 
+#: Credentials only Asta's own server modules use (jira.py, grafana.py,
+#: telegram.py). A worker reaches those tools through Asta's API with its task
+#: credential, so it never needs the secrets themselves. Model keys and the
+#: GitHub token stay: the CLI brains and the dev MCP servers may need them.
+SERVER_ONLY_SECRETS = ("JIRA_API_TOKEN", "TELEGRAM_BOT_TOKEN", "ASTA_GRAFANA_TOKEN",
+                       "ASTA_GRAFANA_TOKEN_URL", "ARM_CLIENT_SECRET")
+
 #: In ANY task: decisions that are his.
 _GH_HIS = ("pr review", "pr merge", "pr close", "pr reopen")
 
@@ -87,6 +94,8 @@ def env(base: dict | None = None, mode: str | None = None) -> dict:
         # The owner API credential must never ride into a task subprocess,
         # including legs with MCP disabled or no issued capability credential.
         env.pop('ASTA_TOKEN', None)
+        for name in SERVER_ONLY_SECRETS:
+            env.pop(name, None)
         if current is not None:
             env['ASTA_TOKEN'] = current[0]
         env["ASTA_TASK_WRITES"] = mode

@@ -206,3 +206,13 @@ def test_prune_removes_only_records_that_can_no_longer_authenticate():
     assert worker_auth.prune(now=worker_auth.TTL_SECONDS + 1) == 3
     assert worker_auth.authenticate(live_token, now=worker_auth.TTL_SECONDS + 1)['task_id'] == live['id']
     assert set(store.kv_like('worker_scope:%')) == {worker_auth._key(live_token)}
+
+
+def test_server_only_secrets_never_reach_a_task_process(monkeypatch):
+    base = {name: 'secret' for name in task_fence.SERVER_ONLY_SECRETS}
+    base.update({'PATH': '/bin', 'ANTHROPIC_API_KEY': 'model-key'})
+    for mode in ('code', 'none'):
+        env = task_fence.env(dict(base), mode=mode)
+        assert not set(task_fence.SERVER_ONLY_SECRETS) & set(env), mode
+        assert env['ANTHROPIC_API_KEY'] == 'model-key', 'the brain still needs its model key'
+    assert task_fence.env(dict(base), mode='')['JIRA_API_TOKEN'] == 'secret', 'chat path unchanged'

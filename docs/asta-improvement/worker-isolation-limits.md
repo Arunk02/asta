@@ -10,11 +10,12 @@ This is the boundary as it stands after #177–#179. It records what is enforced
 | Owner API token | Removed from every fenced task subprocess and task MCP config (`task_fence.env`, `mcp_server.config_entry`). Config fails closed without a worker credential. | A worker presenting the owner token it was handed |
 | GitHub decisions that are his | `gh` wrapper first on PATH (`app/shims`), plus each CLI's deny rules (`task_fence.denied`) | `gh pr review/merge/close/reopen` in any task; pushes, PR edits and comments in analysis and draft tasks |
 | Outward acts after the task | Server-side only: merge (#173), standalone review/merge (#178), named-person update (#179), each with receipts and revocation rechecks | A worker deciding that a merge or a message happens |
+| Asta's service secrets | `task_fence.SERVER_ONLY_SECRETS` (Jira, Telegram, Grafana, Azure) removed from every task process | A worker reading the Jira, Grafana or Telegram tokens from its environment. It reaches those tools through the API instead. |
 | Stale credentials | Revoked when the leg ends, and pruned at startup (expired, unreadable or finished-task records) | Reuse of a credential left behind by a crashed leg |
 
 ## Not enforced
 
-- **Inherited service credentials.** A worker runs as Arun's macOS user, with his environment apart from `ASTA_TOKEN`. A code task must push its branch and open its PR, so `gh` and `git` keep his credential helper, and other provider tokens in the environment remain readable.
+- **Inherited service credentials.** A worker runs as Arun's macOS user, with his environment apart from `ASTA_TOKEN` and the server-only secrets. A code task must push its branch and open its PR, so `gh` and `git` keep his credential helper, and other provider tokens in the environment remain readable.
 - **Files.** Nothing stops a worker reading files his user can read: `.env`, `~/.config/gh`, the keychain via `security`, Asta's SQLite database, other worktrees.
 - **Shell.** The `gh`/`git` wrapper is a PATH entry. An absolute path (`/opt/homebrew/bin/gh`), a different client (`curl` against the GitHub API with a token it found), or a script bypasses it. The CLI deny rules narrow this, but they match command prefixes and are not a sandbox.
 - **Other MCP servers.** Dev MCP servers configured for code tasks (`ASTA_DEV_MCP`) carry their own credentials and are not routed through the worker credential.
@@ -27,7 +28,7 @@ This is the boundary as it stands after #177–#179. It records what is enforced
 
 ## What closes the gap, in order
 
-1. Run workers with a reduced environment: an allowlist of variables instead of `os.environ` minus one token, with provider tokens removed for analysis and draft tasks.
+1. Run workers with a reduced environment. Asta's server-only service secrets are already removed. The next step is an allowlist of variables instead of a denylist, once each CLI's own authentication variables are confirmed live.
 2. Push and open PRs from the server (as `ship` already does for most code tasks) with a short-lived, repository-scoped GitHub token. Workers would then need no `gh` credential at all.
 3. A per-task macOS user, or a VM, for file and shell isolation. This needs Arun's decision and admin setup, so it stays a recommendation here.
 

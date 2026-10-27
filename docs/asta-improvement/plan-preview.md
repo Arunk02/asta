@@ -6,4 +6,6 @@ Each revision is its own content-addressed file, so a revised plan never overwri
 
 **Proof the worker read it all.** A plan longer than 3,000 characters reaches the implementation leg as a pointer to `plan.md`. That file now ends with a `Plan receipt: PLAN-<hash>` line that appears nowhere in the prompt, and the pointer asks the worker to quote it. If the report does not quote it, the task records it and the completion message says the change is "not confirmed against the full approved plan". Shorter plans sit in the prompt and need no receipt.
 
-Limits: the receipt shows the file was read to the end, not that every step was implemented. Coverage of the steps is still for review and CI. The plan's section template (purpose, current flow, diagram, contracts, evidence, tests, authority, recovery) is not enforced yet.
+**Required parts named on the card.** The planner brief already asked for STRUCTURE (what changes), FLOW (the current flow with the change marked, as a simple diagram), checked steps, RISK, ASSUMPTIONS and CONTEXT USED. It now also asks for `ROLLBACK:` (how to undo it) and `SCOPE:` (PR, merge and who is told, exactly as he asked, or local only). The approval card names any part a plan left out ("⚠ This plan does not state: ROLLBACK, SCOPE"), so he never approves a plan blind to a missing part.
+
+Limits: the receipt shows the file was read to the end, not that every step was implemented. Coverage of the steps is still for review and CI. Missing parts are named, not blocked: a plan without them can still be approved.

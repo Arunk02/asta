@@ -240,7 +240,10 @@ CODE_OVERRIDES = """
   After RISK, two short bullets: `ASSUMPTIONS:` what you took as given that he
   did not say (or "none"), and `CONTEXT USED:` the workspace docs you planned
   from (boot.sh resolver hits, integration/flow docs). "none" there means the
-  plan was made from the code alone — say so, never leave it out.
+  plan was made from the code alone — say so, never leave it out. Then
+  `ROLLBACK:` how to undo it if it misbehaves after merge (a revert, a flag, a
+  data fix), and `SCOPE:` what you will do past the code — PR, merge, who is told
+  — exactly as he asked it, or "local only".
 - Working discipline (from Karpathy's notes on LLM coding mistakes; the code
   quality bar itself is his `## Coding` guardrails section):
   · Think before coding: never pick one reading of an ambiguous ask silently —
@@ -3117,7 +3120,7 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
             asyncio.get_running_loop().call_later(
                 go.after_plan_seconds(), lambda: asyncio.ensure_future(_go_on(task_id, born)))
         return
-    full = await _send_full_plan(task_id, t, result)
+    full = await _send_full_plan(task_id, t, result) + _missing_line(result)
     await notify.notify(
         f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
         f"{_phone_text(result, 1500, head_first=True)}\n\n"
@@ -3125,6 +3128,24 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         f"👍 *approve task {task_id}*\n"
         f"👎 *reject task {task_id}*\n"
         f"✏️ …or just reply with the changes", "task")
+
+
+#: The parts a plan must state, by the heading the brief asks for. Missing ones
+#: are named on the card: a plan without ROLLBACK is approved blind to undoing it.
+PLAN_PARTS = (("STRUCTURE", r"structure|class diagram|shape"), ("FLOW", r"flow"),
+              ("RISK", r"risk"), ("ASSUMPTIONS", r"assumptions?"),
+              ("CONTEXT USED", r"context\s+used"), ("ROLLBACK", r"rollback|roll\s*back|undo"),
+              ("SCOPE", r"scope"))
+
+
+def missing_parts(plan: str) -> list[str]:
+    return [name for name, pattern in PLAN_PARTS
+            if not re.search(rf"(?im)^[\s#*`>-]*(?:{pattern})\b\s*[:`*]?", plan or "")]
+
+
+def _missing_line(plan: str) -> str:
+    gone = missing_parts(plan)
+    return f"⚠ This plan does not state: {', '.join(gone)}.\n" if gone else ""
 
 
 async def _send_full_plan(task_id: int, t: dict, plan: str) -> str:

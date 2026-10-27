@@ -104,3 +104,29 @@ def test_an_implementation_that_did_not_quote_the_receipt_is_flagged(monkeypatch
     monkeypatch.setattr(tasks, "_finish_code", finish)
     asyncio.run(tasks._resume_worker(tid, "PLAN APPROVED", approved=True))
     assert ("Not confirmed against the full approved plan" in finished["result"]) is flagged
+
+
+COMPLETE = """STRUCTURE
+  EtaValidator   rejects late ETA
+FLOW
+  vessel feed    sends the ETA
+1. Add the validator → test asserts rejection
+RISK: low
+ASSUMPTIONS: none
+CONTEXT USED: flow docs
+ROLLBACK: revert the commit
+SCOPE: PR only
+PLAN READY"""
+
+
+def test_a_complete_plan_names_nothing_missing():
+    assert tasks.missing_parts(COMPLETE) == []
+
+
+def test_the_card_names_what_a_plan_left_out(phone):
+    tid = _code()
+    asyncio.run(tasks.announce_plan(tid, store.get_task(tid), SHORT))
+    assert "does not state: STRUCTURE, FLOW, RISK, ASSUMPTIONS, CONTEXT USED, ROLLBACK, SCOPE" \
+        in phone["messages"][-1]
+    asyncio.run(tasks.announce_plan(tid, store.get_task(tid), COMPLETE))
+    assert "does not state" not in phone["messages"][-1]

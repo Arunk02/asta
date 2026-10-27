@@ -82,6 +82,13 @@ def env(base: dict | None = None, mode: str | None = None) -> dict:
         from . import buildenv
         env = buildenv.with_java(env)
     if mode:
+        from . import worker_auth
+        current = worker_auth.CURRENT.get()
+        # The owner API credential must never ride into a task subprocess,
+        # including legs with MCP disabled or no issued capability credential.
+        env.pop('ASTA_TOKEN', None)
+        if current is not None:
+            env['ASTA_TOKEN'] = current[0]
         env["ASTA_TASK_WRITES"] = mode
         env["PATH"] = f"{SHIMS}{os.pathsep}{env.get('PATH', '')}"
     return env

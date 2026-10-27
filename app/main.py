@@ -546,8 +546,8 @@ def api_list_services(name: str):
     return {"result": agent_mod.list_services(name)}
 
 
-@app.post("/api/_invoke", dependencies=[Depends(require_auth)])
-async def api_invoke(body: dict):
+@app.post("/api/_invoke")
+async def api_invoke(body: dict, request: Request):
     """Run one capability BY NAME, in this (the live server) process.
 
     This is the seam that lets a CLI brain use native MCP tool calls instead of
@@ -558,11 +558,22 @@ async def api_invoke(body: dict):
     subprocess and both silently break (the worker dies with the subprocess, the
     answer never reaches the orphaned future).
 
-    Generic on purpose: one endpoint, every capability, no per-tool wiring and no
-    parsing of the human-readable `http` specs. It is not new authority — the
-    bearer token already reaches every endpoint these functions back.
+    Owner credentials keep the normal capability path. Worker credentials are
+    accepted only here, with server-bound identity and an explicit read-tool
+    allowlist; they cannot use the owner's other API routes.
     """
     import inspect
+    from . import worker_auth
+    if not _token_ok(request):
+        supplied = request.headers.get('authorization', '').removeprefix('Bearer ').strip()
+        try:
+            scope = worker_auth.authenticate(supplied)
+        except worker_auth.Refused as exc:
+            raise HTTPException(401, str(exc)) from None
+        try:
+            body = worker_auth.authorize(scope, body)
+        except worker_auth.Refused as exc:
+            raise HTTPException(403, str(exc)) from None
     name = (body or {}).get("tool", "")
     args = (body or {}).get("args") or {}
     cap = capabilities.get(name)
@@ -597,7 +608,7 @@ async def api_invoke(body: dict):
     turn_text = capabilities.TURN_TEXT.set(origin or "")
     mcp_turn = capabilities.MCP_TURN.set(True)
     try:
-        if capabilities.READ_ONLY_TURN.get() and name not in capabilities.SIDE_READS:
+        if capabilities.READ_ONLY_TURN.get() and name not in capabilities.SIDE_READS | {'load_skill'}:
             raise HTTPException(403, f"{name} is unavailable in a read-only turn")
         result = cap.fn(**args)
         if inspect.isawaitable(result):

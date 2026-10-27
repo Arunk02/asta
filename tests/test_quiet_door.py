@@ -233,7 +233,7 @@ def test_a_brain_filing_his_weekend_rule_as_a_memory_offers_the_rule_instead(mon
 
 def test_an_ordinary_fact_is_still_remembered(monkeypatch):
     from app import agent, memory
-    monkeypatch.setattr(memory, "remember", lambda title, fact, kind: "memory/facts/x.md")
+    monkeypatch.setattr(memory, "remember", lambda title, fact, kind, **metadata: "memory/facts/x.md")
     assert agent.remember("deploys", "The deploy pipeline is slow on Mondays") == \
         "Remembered in memory/facts/x.md"
 

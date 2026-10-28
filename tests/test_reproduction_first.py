@@ -78,6 +78,7 @@ def test_not_reproduced_runs_writable_test_leg_without_plan_or_code_approval(wor
     async def brain(prompt, **kw):
         calls.append(kw)
         assert reproduction.active(t['id'])
+        assert kw['agent_file'] is None
         assert task_fence.MODE.get() == 'none'
         (root / 'tests').mkdir()
         (root / 'tests' / 'test_amend.py').write_text('def test_amend(): assert True\n')
@@ -202,3 +203,39 @@ def test_real_test_runner_report_is_validated(tmp_path):
         command='pytest test_actual.py --junitxml=report.xml', expected='2', actual='1'))+'\n```'
     proof = reproduction.evidence(text, str(tmp_path), since)
     assert proof['tests'] == proof['failures'] == 1
+
+
+def test_existing_plan_gate_switches_to_reproduction_without_approval(world, monkeypatch):
+    t, root, messages = world
+    store.kv_del(f"reproduction:{t['id']}")
+    from app import go
+    monkeypatch.setattr(go, 'no_ask', lambda *a: '')
+    calls = []
+    async def brain(prompt, **kw):
+        calls.append(kw)
+        return 'PLAN READY: change the real method' if len(calls) == 1 else report(root)
+    monkeypatch.setattr(claude_cli, 'one_shot', brain)
+    async def run():
+        await runner._drive(t['id'], {'task_id': t['id']})
+        assert store.get_task(t['id'])['status'] == 'awaiting_approval'
+        await tasks.reproduce_first(t['id'], 'replicate the scenario first')
+        await tasks._running[t['id']]
+    asyncio.run(run())
+    assert [c['plan_only'] for c in calls] == [True, False]
+    assert store.get_task(t['id'])['status'] == 'done'
+    assert not tasks.plan_approved(t['id'])
+
+
+def test_copilot_reproduction_omits_the_planning_pipeline(world, monkeypatch):
+    from app import copilot_cli
+    t, root, _ = world
+    monkeypatch.setattr(tasks, '_resolve_executor', lambda *a: 'copilot')
+    def forbidden(*a): raise AssertionError('Reproduction inherited the solution planning pipeline')
+    monkeypatch.setattr(tasks, '_with_pipeline', forbidden)
+    async def brain(prompt, **kw):
+        assert not kw['plan_only']
+        assert task_fence.MODE.get() == 'none'
+        return report(root)
+    monkeypatch.setattr(copilot_cli, 'one_shot', brain)
+    asyncio.run(runner._drive(t['id'], {'task_id': t['id']}))
+    assert store.get_task(t['id'])['status'] == 'done'

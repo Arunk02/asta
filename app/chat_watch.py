@@ -1439,6 +1439,63 @@ def _held_all() -> dict:
         return {}
 
 
+# --- messages read but not yet dealt with -------------------------------------------
+#
+# `new_in` marks a message processed the moment it is read, and a sweep then
+# spends many seconds understanding it before anything is said or sent. A restart
+# in that gap lost the message for good: 28 Oct, a colleague's "Hellooo!" was read
+# 53 s before a restart and every later sweep called it "0 new". The sweep now
+# writes what it read here first and clears it only when it has finished with it;
+# the next sweep, after a restart or an exception, takes it back in first.
+
+_INFLIGHT_KEY = "teams_inflight"
+#: Sweeps a message may die in before it is given up on, so one bad message
+#: cannot wedge a chat for ever.
+INFLIGHT_TRIES = 3
+
+
+def _inflight_all() -> dict:
+    try:
+        return json.loads(store.kv_get(_INFLIGHT_KEY) or "{}")
+    except ValueError:
+        return {}
+
+
+def inflight_take(chat: str, fresh: list[dict]) -> list[dict]:
+    """Journal this sweep's messages for `chat`; return what an earlier sweep left
+    unfinished, ahead of the new ones and without duplicates."""
+    allf = _inflight_all()
+    prior = allf.get(chat) or {}
+    left = [m for m in prior.get("msgs") or []]
+    tries = int(prior.get("tries") or 0) + (1 if left else 0)
+    if left and tries > INFLIGHT_TRIES:
+        store.record_outcome("chatwatch", "inflight dropped", subject=chat[:80],
+                             detail=f"{len(left)} message(s) failed {INFLIGHT_TRIES} sweeps")
+        left, tries = [], 0
+    seen = {_ident_hash(m) for m in fresh}
+    left = [m for m in left if _ident_hash(m) not in seen]
+    msgs = [*left, *fresh]
+    if msgs:
+        allf[chat] = {"msgs": [{k: m.get(k) for k in ("key", "sender", "text", "sent_at")}
+                               for m in msgs],
+                      "tries": tries, "since": prior.get("since") or time.time()}
+        store.kv_set(_INFLIGHT_KEY, json.dumps(allf))
+    if left:
+        store.record_outcome("chatwatch", "inflight resumed", subject=chat[:80],
+                             detail=f"{len(left)} message(s) an earlier sweep did not finish")
+    return left
+
+
+def inflight_done(chats) -> None:
+    """These chats' messages were dealt with: nothing to take back in."""
+    allf = _inflight_all()
+    gone = [c for c in chats if c in allf]
+    for c in gone:
+        allf.pop(c, None)
+    if gone:
+        store.kv_set(_INFLIGHT_KEY, json.dumps(allf))
+
+
 def held(chat: str) -> dict:
     """{'since', 'why', 'msgs'} for a chat whose half-ask is waiting, or {}."""
     return _held_all().get(chat) or {}
@@ -1618,6 +1675,9 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
     chats = list(only) if only is not None else await candidates()
     # A held half-ask is read on the next pass whatever the rail says.
     chats += [c for c in _held_all() if c not in chats and only is None]
+    # So is one an earlier sweep read and never finished: the rail no longer shows
+    # it as unread, so nothing else would bring it back.
+    chats += [c for c in _inflight_all() if c not in chats and only is None]
     read_ok: set[str] = set()
     for chat in chats:
         opened += 1
@@ -1634,6 +1694,8 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             failed += 1
             continue                # one unreadable thread must not end the sweep
         read_ok.add(chat)
+        # Read before a restart (or a failed sweep) and never dealt with: first.
+        fresh = [*inflight_take(chat, fresh), *fresh]
         # Half an ask held back last time is read again, before what is new.
         waiting = held(chat)
         if waiting:
@@ -1685,6 +1747,7 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 and now - float(held(chat).get("since") or 0) >= HOLD_SECONDS:
             release(chat)
     if not convs:
+        inflight_done(read_ok)
         return []
 
     # What each conversation already knows, and — for one just opened — the
@@ -1735,6 +1798,7 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         if held(c["chat"]):
             release(c["chat"])
     if not convs:
+        inflight_done(read_ok)
         return []
 
     decisions = await understand.read(list(convs.values()))
@@ -2180,6 +2244,7 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         await notify(body if spoken else "💬 Teams\n" + body, "teams",
                      urgency="direct" if red or started else "ambient",
                      considered=True, keys=tuple(h["key"] for h in handled))
+    inflight_done(read_ok)
     return handled
 
 

@@ -1971,13 +1971,27 @@ _HOLDS = re.compile(r"\b(?:don'?t|do\s+not|never|not\s+yet|hold|wait|show\s+me|l
                     r"preview|before\s+(?:you\s+)?send)\b", re.I)
 
 
+def _his_own_text(what: str) -> bool:
+    """The message is, word for word, text he typed this turn — his, not a brain's.
+
+    The 600-character cap exists so a long message a BRAIN wrote is read before
+    it goes. A long message he dictated "exactly as written" is already read."""
+    from . import capabilities, scorecard
+    said = " ".join(scorecard.his_words(capabilities.said_this_turn()).split())
+    body = " ".join((what or "").split())
+    return len(body) >= 20 and body in said
+
+
 def _approves_waiting_draft(to: str, cid: str) -> bool:
     """His words this turn approve the draft already waiting for THIS person."""
     from . import capabilities, loop, scorecard
     said = scorecard.his_words(capabilities.said_this_turn()).lower()
     if not said or not _APPROVES.search(said) or _HOLDS.search(said):
         return False
-    staged = loop.awaiting(cid) or {}
+    # The draft he answered THIS turn counts too: the chat path clears it before the
+    # brain revises, and "yes send it as is" then came back as a fresh "can I send?".
+    staged = loop.awaiting(cid) or loop.answered_this_turn(
+        cid, scorecard.his_words(capabilities.said_this_turn())) or {}
     waiting_for, now_for = (staged.get("to") or "").lower().split(), (to or "").lower().split()
     return bool(waiting_for and now_for) and waiting_for[0] == now_for[0]
 
@@ -2062,8 +2076,11 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # It goes out as HIM. A sentence about Arun, the assistant or a staged
     # review cannot be his words (Komal, 1 Oct: "Will post once I confirm
     # with Arun", sent in his name). Dropped here, for every brain.
+    dictated = what
     if channel in ("teams", "chat", "whatsapp", "email"):
         what = writing.as_him(what)
+    # Unchanged by as_him and found verbatim in his words: his text, sent as written.
+    verbatim = what == dictated and _his_own_text(what)
     # "Shabda Anubhav, Vinish, +2" is a group by its very shape — a brain that
     # forgot to say so must not turn it into a search for the people in it.
     from . import teams_bridge as _tb
@@ -2088,7 +2105,11 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # Words that deny what he just said never go out on their own. 7 Oct: "tell
     # him updated CT as well" was sent to Vinish as "…since there's no CT
     # coverage for this", from an out-of-date task report.
-    clash = contradicts_him(capabilities.said_this_turn(), what)
+    # His words, not the "did NOT approve … Revise accordingly" wrapper around them:
+    # the wrapper's own boilerplate is not something he asserted.
+    from . import scorecard
+    clash = contradicts_him(scorecard.his_words(capabilities.said_this_turn())
+                            or capabilities.said_this_turn(), what)
     if clash:
         above = True                    # every automatic path below is skipped
     if channel == "teams" and not to_group and not clash and authority.auto_reply_to(to):
@@ -2126,10 +2147,13 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # the revision: one yes, not one per wording.
     if channel in ("teams", "chat") and to and not to_group and not above \
             and not _LABEL_NOT_MESSAGE.match(what.strip()) \
-            and ((_he_asked_to_send(to, cid) and len(what.strip()) <= SEND_WHEN_ASKED_MAX)
+            and ((_he_asked_to_send(to, cid)
+                  and (len(what.strip()) <= SEND_WHEN_ASKED_MAX or verbatim))
                  or _approves_waiting_draft(to, cid)):
         import asyncio
-        body = writing.fit_address(writing.tidy_links(what), to)
+        # His own words go exactly as he wrote them; only a brain's are re-addressed.
+        body = (writing.tidy_links(what) if verbatim
+                else writing.fit_address(writing.tidy_links(what), to))
         try:
             asyncio.get_running_loop()
         except RuntimeError:

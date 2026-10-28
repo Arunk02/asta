@@ -307,12 +307,29 @@ def awaiting(cid: str) -> dict | None:
     return intent
 
 
-def clear_awaiting(cid: str) -> dict | None:
+def clear_awaiting(cid: str, answered_by: str = "") -> dict | None:
+    """Drop the waiting draft. `answered_by`: his words that answered it, so the
+    re-staged revision from the same turn is recognised as already approved."""
     intent = awaiting(cid)
     _awaiting.pop(cid, None)
     if cid:
         _kv("del", cid)
+        if intent and answered_by:
+            _answered[cid] = (intent, " ".join(answered_by.split()))
     return intent
+
+
+#: cid -> (the draft his last message answered, his exact words). In memory: it
+#: only matters inside the one turn those words started.
+_answered: dict[str, tuple[dict, str]] = {}
+
+
+def answered_this_turn(cid: str, his_words: str) -> dict | None:
+    """The draft these exact words (this turn) answered, or None."""
+    got = _answered.get(cid)
+    if got and got[1] and got[1] == " ".join((his_words or "").split()):
+        return got[0]
+    return None
 
 
 def clear(cid: str) -> None:

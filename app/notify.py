@@ -265,7 +265,8 @@ def _hold(text: str, keys=()) -> None:
     store.kv_set(HELD_KEY, json.dumps(held[-HELD_MAX:]))
 
 
-async def deliver(text: str, *, force: bool = False, keys: tuple = ()) -> dict:
+async def deliver(text: str, *, force: bool = False, keys: tuple = (),
+                  retry: bool = True) -> dict:
     """Actually put it on his phone, and remember that something just went out.
 
     Split out of `notify` so the coalescing flush can send a merged batch through
@@ -293,7 +294,71 @@ async def deliver(text: str, *, force: bool = False, keys: tuple = ()) -> dict:
     if not (wa or tg):
         store.kv_set("last_push_failure",
                      json.dumps({"at": time.time(), "text": text[:120]}))
+        if retry:
+            _queue_missed(text)
     return {"bell": True, "held": False, "whatsapp": wa, "telegram": tg}
+
+
+# --- what never reached his phone -------------------------------------------------
+#
+# A push that fails is in the bell and nowhere else. 27 Oct: the Mac slept with the
+# lid closed on battery for two and a half hours, WhatsApp was down, and task
+# failure alerts and the like never reached him — `last_push_failure` was written and
+# read by nothing. Failed pushes now wait here and go out as ONE message the
+# first time a push can land again. (The held digest keeps its own items on
+# failure, so it passes retry=False and is not queued twice.)
+
+MISSED_KEY = "push_missed"
+MISSED_MAX = 30
+#: Older than this is history, not news: counted, not replayed.
+MISSED_FRESH_SECONDS = 12 * 3600
+
+
+def _missed() -> list[dict]:
+    try:
+        return json.loads(store.kv_get(MISSED_KEY) or "[]")
+    except ValueError:
+        return []
+
+
+def _queue_missed(text: str, now: float | None = None) -> None:
+    items = _missed()
+    if any(i.get("text") == text for i in items):
+        return
+    items.append({"text": text, "at": time.time() if now is None else now})
+    store.kv_set(MISSED_KEY, json.dumps(items[-MISSED_MAX:]))
+
+
+async def resend_missed(now: float | None = None) -> bool:
+    """Send what failed to reach his phone, as one message. True when it landed.
+
+    Quiet rules still hold: what was missed during them waits like anything else."""
+    items = _missed()
+    if not items:
+        return False
+    if quiet_rule() is not None:
+        return False
+    now = time.time() if now is None else now
+    fresh = [i for i in items if now - float(i.get("at") or 0) <= MISSED_FRESH_SECONDS]
+    stale = len(items) - len(fresh)
+    lines = []
+    for i in fresh[-10:]:
+        first = next((ln.strip() for ln in (i.get("text") or "").splitlines() if ln.strip()), "")
+        when = time.strftime("%H:%M", time.localtime(float(i.get("at") or now)))
+        lines.append(f"• {when} {first[:160]}")
+    if len(fresh) > 10:
+        lines.append(f"• …and {len(fresh) - 10} more")
+    if stale:
+        lines.append(f"({stale} older one{'s' if stale != 1 else ''} in the app)")
+    body = ("📬 These didn't reach your phone when they happened — WhatsApp was down:\n"
+            + "\n".join(lines))
+    wa = await wa_send(body)
+    tg = False if wa else await telegram.send(body)
+    if not (wa or tg):
+        return False
+    store.kv_set(MISSED_KEY, "[]")
+    store.record_outcome("notify", "missed resent", detail=f"{len(items)} item(s)")
+    return True
 
 
 def _ledger_priority(urgency: str, priority: int | None) -> int:
@@ -499,7 +564,7 @@ async def flush_held(reason: str = "while you were at the laptop") -> dict:
         body += f"\n\n(+{len(texts) - 10} more in the app)"
     # Through the one door: quiet rules hold it, the budget counts it — this
     # flush used to send straight to WhatsApp, past both.
-    out = await deliver(head + body)
+    out = await deliver(head + body, retry=False)   # kept in HELD_KEY on failure instead
     if out.get("quiet"):
         return {"held": True, "whatsapp": False, "telegram": False}
     if not (out["whatsapp"] or out["telegram"]):
@@ -527,6 +592,7 @@ async def held_watch_loop() -> None:
                 await flush_held(reason="waited long enough")
             was_present = present
             await release_grace()
+            await resend_missed()
         except Exception:
             pass
 

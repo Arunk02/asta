@@ -1133,7 +1133,7 @@ async def review_is_current(origin: dict) -> bool:
     from . import review
     try:
         current, good = await review.revision(origin["ref"])
-        return good and current == origin["revision"]
+        return good and review.same_commit(current, origin["revision"])
     except (RuntimeError, ValueError, KeyError) as exc:
         store.record_outcome("review", "verification failed",
                              subject=str(origin.get("ref", ""))[:80], detail=str(exc)[:200])

@@ -41,6 +41,8 @@ import re
 import time
 from pathlib import Path
 
+from . import call_states
+
 
 def enabled() -> bool:
     return os.environ.get("ASTA_CALL_RTC", "1").strip().lower() not in ("0", "false", "no", "off")
@@ -891,6 +893,7 @@ async def wait_for_answer(page, seconds: float = 0) -> str:
     if got in ("voice", "connected"):
         call["answered_at"] = meetings._now()
         call["answered_by"] = got
+        call_states.mark(call, "answered", f"webrtc: {got}")
         return "connected"
     if got == "no answer":
         with contextlib.suppress(Exception):
@@ -941,6 +944,7 @@ async def say_line(text: str, voice_name: str = "") -> str:
         if not (reading.get("connected") and reading.get("inPackets")):
             raise RuntimeError("nobody has picked up yet — said nothing")
         call["answered_at"] = meetings._now()
+        call_states.mark(call, "answered", "webrtc: connected with incoming packets")
     words = voice.strip_voice_instruction(text)
     if not words:
         raise RuntimeError("nothing left to say once the instruction was removed")
@@ -969,6 +973,7 @@ async def say_line(text: str, voice_name: str = "") -> str:
         raise RuntimeError("played it into Asta's microphone, but the call sent no "
                            "sound — Teams may be muted. Treat it as NOT said.")
     store.kv_set("teams_last_spoken", words[:500])
+    call_states.mark(call, "speech_delivered", f"webrtc sent sound, {out['seconds']:.1f}s")
     return f"said it in the call in {chosen} voice ({out['seconds']:.1f}s): {words[:120]}"
 
 

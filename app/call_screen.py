@@ -83,6 +83,10 @@ async def call_state(page, captions=None) -> str:
         return "ended"                 # the page is gone; that counts as ended
     if _ENDED.search(text[:4000]):
         return "ended"
+    # Waiting to be let in is not being in the meeting. Nothing in the lobby is a
+    # conversation, so it is checked before any connection evidence.
+    if _LOBBY.search(text[:4000]):
+        return "lobby"
     # A caption cannot exist before somebody is talking, and nobody talks into a
     # phone that is still ringing. This is the one piece of connection evidence
     # that runs on code already proven against live Teams.
@@ -106,6 +110,10 @@ async def call_state(page, captions=None) -> str:
 
 
 _ENDED = re.compile(r"call ended|meeting ended|you (have )?left|rejoin", re.I)
+
+#: Teams' lobby, in the wordings it has used.
+_LOBBY = re.compile(r"should let you in soon|let you in shortly|waiting to be (let in|admitted)|"
+                    r"let people know you'?re waiting|you'?re in the lobby", re.I)
 
 
 async def call_ended(page) -> bool:

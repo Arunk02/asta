@@ -216,3 +216,27 @@ def test_server_only_secrets_never_reach_a_task_process(monkeypatch):
         assert not set(task_fence.SERVER_ONLY_SECRETS) & set(env), mode
         assert env['ANTHROPIC_API_KEY'] == 'model-key', 'the brain still needs its model key'
     assert task_fence.env(dict(base), mode='')['JIRA_API_TOKEN'] == 'secret', 'chat path unchanged'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('task_ws, asked, code', [
+    ('', 'booking', 200),        # a colleague's question: any registered workspace
+    ('', 'not-registered', 403),
+    ('billing', 'booking', 403), # a task with a workspace stays pinned to it
+    ('billing', 'billing', 200),
+])
+async def test_a_task_without_a_workspace_may_read_his_registered_ones(monkeypatch, task_ws, asked, code):
+    from app import workspace
+    monkeypatch.setattr(workspace, 'available_workspaces',
+                        lambda: {'booking': {}, 'billing': {}})
+    conv = store.create_conversation('claude', None)
+    task = store.create_task('Colleague question', 'analysis', 'what is sent to TMS', task_ws or None)
+    tasks.link_task(conv['id'], task['id'])
+    token, _ = worker_auth.issue(task['id'], conv['id'])
+    cap = capabilities.get('resolve_context')
+    monkeypatch.setitem(capabilities.registry(), 'resolve_context',
+                        dataclasses.replace(cap, fn=lambda workspace, task: f'ctx:{workspace}'))
+    r = await invoke(token, {'tool': 'resolve_context', 'args': {'workspace': asked, 'task': 'x'}})
+    assert r.status_code == code
+    if code == 200:
+        assert r.json()['result'] == f'ctx:{asked}'

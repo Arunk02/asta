@@ -378,6 +378,7 @@ def task_intent(text: str) -> str:
     is not an amendment; "update the PR" is an external operation, not code.
     """
     t = _TASK_LEAD.sub("", (text or "").strip())
+    t = re.sub(r"^task\s*[,;:—-]\s*", "", t, flags=re.I)
     if re.match(r"^(?:does|did|has|have|is|are|was|were|what|why|when|where|how)\b",
                 t, re.I):
         return "read"

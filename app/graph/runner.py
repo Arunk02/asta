@@ -141,6 +141,12 @@ def answer(task_id: int, value: dict) -> asyncio.Task:
     return _spawn(task_id, Command(resume=value))
 
 
+def restart_reproduction(task_id: int) -> asyncio.Task:
+    """Explicit reproduction direction starts at plan's preflight, not implementation."""
+    return _spawn(task_id, {"task_id": task_id,
+                            "answer": {"approved": False}, "reproduction_next": ""})
+
+
 def revisit(task_id: int, text: str) -> asyncio.Task:
     """Follow-up on finished work: the same thread runs again, straight to building,
     keeping what it knew — the plan's repos, the notes, the session."""

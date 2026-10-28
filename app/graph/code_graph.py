@@ -42,6 +42,7 @@ from . import notes, outcome
 
 class JobState(TypedDict, total=False):
     task_id: int
+    reproduction_next: str
     text: str             # the last leg's output
     outcome: dict         # the last leg's typed outcome
     plan_outcome: dict    # the approved plan's outcome — its repos, its summary
@@ -164,6 +165,8 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
         from app import context_pack
         prompt = (fresh_prompt + context_pack.build(tid, "plan" if stage == "plan" else "implement")
                   + outcome.rider(tid, fresh=True))
+    if stage == "reproduce" and not (session and store.kv_get(mark) == stage):
+        store.kv_set(carry, prompt)
     store.kv_set(mark, stage)
     since = time.time()
     async with tasks._ws_lock(t["workspace"]):
@@ -180,6 +183,9 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
 
 def entry(state: JobState) -> str:
     """A new run plans; follow-up on approved work (a refine) goes straight to building."""
+    from app import reproduction
+    if reproduction.pending(state["task_id"]):
+        return "plan"
     ans = state.get("answer") or {}
     return "implement" if ans.get("approved") and _tasks().plan_approved(state["task_id"]) \
         else "plan"
@@ -196,6 +202,9 @@ async def plan(state: JobState) -> dict:
         async with tasks._ws_lock(t["workspace"]):
             await tasks._prepare_branches(tid, t)
         store.kv_set(f"graph_prepared:{tid}", "1")
+    from app import reproduction
+    if reproduction.pending(tid):
+        return await reproduction.run(tid, t, _leg)
     said = ((state.get("answer") or {}).get("text") or "").strip()
     fresh = tasks.first_code_prompt(tid, t)
     if said:
@@ -204,10 +213,12 @@ async def plan(state: JobState) -> dict:
     ex = tasks._resolve_executor(tid)
     text, out = await _leg(tid, "plan", fresh, effort=tasks._effort_for("code", ex),
                            resume_prompt=said or None)
-    return {"text": text, "outcome": out, "plan_outcome": out, "answer": {}}
+    return {"text": text, "outcome": out, "plan_outcome": out, "answer": {}, "reproduction_next": ""}
 
 
 def after_plan(state: JobState) -> str:
+    if state.get("reproduction_next"):
+        return state["reproduction_next"]
     kind = (state.get("outcome") or {}).get("kind")
     if kind == "needs_input":
         return "ask"
@@ -528,7 +539,7 @@ def build() -> StateGraph:
         g.add_node(name, fn)
     g.add_conditional_edges(START, entry, {"plan": "plan", "implement": "implement"})
     g.add_conditional_edges("plan", after_plan,
-                            {"ask": "ask", "escalate": "escalate",
+                            {"plan": "plan", "end": END, "ask": "ask", "escalate": "escalate",
                              "announce_plan": "announce_plan"})
     g.add_edge("escalate", "plan")
     g.add_edge("ask", "wait_answer")

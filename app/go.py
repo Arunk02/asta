@@ -276,7 +276,12 @@ def no_ask(task_id: int, plan: str) -> str:
         return ""
     # Before "as you said": a go-ahead for the task is not a go-ahead to skip the
     # approval he asked someone else for, nor to skip the plan's own questions.
-    if waits_for_someone(task_id) or _PLAN_ASKS.search(plan or "") or reviewed_by_him(task_id):
+    if waits_for_someone(task_id) or _PLAN_ASKS.search(plan or ""):
+        return ""
+    from . import reproduction
+    if reproduction.fix_authorized(task_id):
+        return "you authorized a fix if reproduced, and the reproduction test failed"
+    if reviewed_by_him(task_id):
         return ""
     if granted(task_id):
         return "as you said"

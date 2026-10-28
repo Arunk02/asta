@@ -1332,6 +1332,17 @@ async def api_followup_stop(followup_id: int, request: Request):
     return {"ok": True, "detail": followup.stop(followup_id, (b or {}).get("why", ""))}
 
 
+@app.post("/api/tasks/{task_id}/reproduce", dependencies=[Depends(require_auth)])
+async def api_reproduce_task(task_id: int, request: Request):
+    b = await request.json()
+    if not isinstance(b.get('text'), str) or not b['text'].strip():
+        raise HTTPException(400, 'text is required')
+    try:
+        return {'ok': True, 'detail': await tasks.reproduce_first(task_id, b['text'])}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
 @app.post("/api/tasks/{task_id}/reply", dependencies=[Depends(require_auth)])
 async def api_reply_task(task_id: int, request: Request):
     b = await request.json()
@@ -4154,6 +4165,19 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             await sink.send({"type": "done", "tools": []})
         return None
 
+    # An explicit reproduction direction outranks plan replies and pending drafts.
+    from . import reproduction
+    reproduction_target = _explicit_task(user_text)
+    if reproduction_target is not None and reproduction.asked(_strip_task_ref(user_text)):
+        try:
+            note = await tasks.reproduce_first(reproduction_target, _strip_task_ref(user_text))
+        except ValueError as exc:
+            note = str(exc)
+        await sink.send({"type": "note", "text": note})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+
     # A task that asked him something takes the message that names it as the
     # answer. 7 Oct: "task 263 : no how it was earlier it has to be same …
     # check how it was in develop" was read as a status question (it says
@@ -4956,8 +4980,9 @@ def _task_awaiting_answer(cid: str, text: str) -> int | None:
     if store.kv_get(f"task_gate:{named}") not in ("context", "plan", "verify", "change"):
         return None
     said = _strip_task_ref(text or "").strip()
-    if not said or (said.endswith("?") and frontdesk.task_intent(said) == "read"
-                    and re.match(r"^(?:what|why|when|where|how|did|does|is|are|any)\b", said, re.I)):
+    question = re.sub(r"^task\s*[,;:—-]\s*", "", said, flags=re.I)
+    if not said or (frontdesk.task_intent(question) == "read"
+                    and re.match(r"^(?:what|why|when|where|how|did|does|has|have|is|are|any)\b", question, re.I)):
         return None                       # a real question about it: the card answers
     return named
 

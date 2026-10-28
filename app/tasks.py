@@ -1379,6 +1379,9 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
                 from . import capabilities, go, scorecard
                 said = scorecard.his_words(capabilities.said_this_turn())
                 go.on_spawn(t["id"], said)
+                from . import reproduction
+                if _graph().enabled() and reproduction.asked(said):
+                    reproduction.request(t["id"], said)
                 from . import task_inform
                 task_inform.record(t["id"], said)
         if _agent_for(t) and _graph().enabled():
@@ -1986,14 +1989,15 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
         await free_idle_checkouts(Path(code_cwd(ws)), task_id)
     refuse_shared_tree(task_id, cwd, ws)
     before = await other_trees(ws, cwd)
-    planning = not plan_approved(task_id)
+    from . import reproduction
+    planning = not (plan_approved(task_id) or reproduction.active(task_id))
     clean = await _clean_repos(cwd) if planning else []
-    token = task_fence.MODE.set("code")
+    token = task_fence.MODE.set("none" if reproduction.active(task_id) else "code")
     try:
         from . import worker_auth
         with worker_auth.session(task_id):
             out = await _code_leg(task_id, prompt + workspace_context_note(ws, cwd, prompt)
-                                  + task_fence.prompt_line("code") + _stay_inside(cwd),
+                                  + task_fence.prompt_line(task_fence.MODE.get()) + _stay_inside(cwd),
                                   cwd, resume=resume, effort=effort, workspace=workspace)
         if clean:
             out += await _set_aside_plan_writes(task_id, clean)
@@ -2133,7 +2137,8 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     # Before his approval, a code leg may read everything and change nothing.
     # The rule was a sentence in a prompt; the micro pipeline's own instructions
     # said "make the edit", and an instruction a model may ignore is not a gate.
-    plan_only = not plan_approved(task_id)
+    from . import reproduction
+    plan_only = not (plan_approved(task_id) or reproduction.active(task_id))
     # Which model at what effort: by the size of the work, not the stage alone.
     model = ""
     from . import routing
@@ -3729,6 +3734,33 @@ def approves_proposal(text: str) -> bool:
                                          (text or "")[lead.end():lead.end() + 60], re.I)
 
 
+async def reproduce_first(task_id: int, text: str) -> str:
+    """Trusted user direction: local test work, without approving a production plan."""
+    from . import reproduction
+    t = store.get_task(task_id)
+    if not t or t['kind'] != 'code' or not _graph().manages(task_id):
+        raise ValueError('Reproduction needs an existing graph code task')
+    if t['status'] not in ('running', 'queued', 'paused', 'awaiting_approval', 'failed', 'done'):
+        raise ValueError(f"Task #{task_id} cannot reproduce from {t['status']}")
+    job = _running.get(task_id)
+    if job and not job.done():
+        job.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await job
+    reproduction.request(task_id, text)
+    store.kv_del(f'graph_leg:{task_id}')
+    store.kv_del(f'graph_leg_prompt:{task_id}')
+    store.kv_del(f'graph_answer:{task_id}')
+    store.kv_del(f'task_gate:{task_id}')
+    # Keep quota scheduling intact. Its plan checkpoint observes pending()
+    # before doing any planning, so this instruction survives the retry.
+    if t['status'] == 'paused':
+        return f'Task #{task_id}: reproduction-first instruction saved; local tests run when quota resumes. No plan approval needed for those tests.'
+    store.update_task(task_id, status='running', error='', finished_at=None)
+    _graph().restart_reproduction(task_id)
+    return f'Task #{task_id}: reproducing with local tests first; no production fix until evidence.'
+
+
 def reply(task_id: int, text: str) -> str:
     """Resume a code task paused at its plan gate — 'PLAN APPROVED' or feedback.
     The pipeline continues in its own session with full context."""
@@ -4029,6 +4061,10 @@ async def resume_task(task_id: int, switch_to: str = "") -> str:
               "`git log --oneline -5` and `git status` first so you don't redo "
               "finished work, then carry on from the next unfinished step.")
     if _graph().manages(task_id):
+        from . import reproduction
+        if reproduction.pending(task_id):
+            _graph().restart_reproduction(task_id)
+            return f"Task #{task_id}: resuming the requested reproduction before planning."
         if await _graph().ended(task_id):
             # A failed task's thread has run to its end: there is no checkpoint
             # to carry on from, and carrying on ran nothing at all (8 Oct, #268).

@@ -157,6 +157,48 @@ _PROMISE_REPLY = re.compile(
     r"i'?ll do it( myself)?)\s*[.!]?\s*$", re.I)
 
 
+#: His answer to a setup workflow parked at a gate (app/graph/setup.py).
+_SETUP_REQUEST = re.compile(
+    r"^\s*(?:(?:yes|ok(?:ay)?)[\s,]+)?(?:go ahead and |please )?request (?:it|the access|access)"
+    r"\s*[.!]?\s*$", re.I)
+_SETUP_NO_REQUEST = re.compile(r"^\s*(?:no[\s,]+)?(?:don'?t|do not) request(?: it| access)?\s*[.!]?\s*$",
+                               re.I)
+_SETUP_SIGNED_IN = re.compile(r"^\s*(?:i'?ve |i )?(?:signed|logged) in(?: again)?(?:,? done)?\s*[.!]?\s*$"
+                              r"|^\s*done signing in\s*[.!]?\s*$", re.I)
+
+
+def _setups_at(gate: str) -> list[str]:
+    from . import setup_flow
+    out = []
+    for key in store.kv_like("setup_flow:%"):
+        wid = key[len("setup_flow:"):]
+        at = setup_flow.status(wid).get("waiting_at") or ""
+        if at == gate or (gate == "request" and at.startswith("request:")):
+            out.append(wid)
+    return out
+
+
+def _setup_answer(t: str) -> str:
+    """Record his gate answer for the one setup it can mean. '' when it is not one."""
+    from . import setup_flow
+    from .graph import engine
+    if _SETUP_SIGNED_IN.match(t):
+        gate, value = "login", {"text": "done"}
+    elif _SETUP_REQUEST.match(t):
+        gate, value = "request", {"yes": True}
+    elif _SETUP_NO_REQUEST.match(t):
+        gate, value = "request", {"yes": False}
+    else:
+        return ""
+    waiting = _setups_at(gate)
+    if len(waiting) != 1:
+        return "" if not waiting else ("Which setup — " + ", ".join(waiting) + "?")
+    # Recorded, not driven: the setup ticker applies it, and a restart loses nothing.
+    engine.record_answer(setup_flow.KIND, waiting[0], value)
+    return {"login": "Thanks — carrying on with the setup.",
+            "request": "Requesting it now." if value.get("yes") else "OK — not requesting it."}[gate]
+
+
 def _promises_at_a_gate() -> list[int]:
     """Follow-ups whose thread is parked at the deadline gate, from state."""
     from . import followup
@@ -190,6 +232,11 @@ def answer_from_state(text: str) -> str:
     # it asks "chase them or leave it?" and then has no way to hear the answer,
     # and the thread sits at its gate until a restart cleans it up. Rules only —
     # a brain is never asked which promise he meant.
+    from .graph import engine as _engine
+    if _engine.enabled():
+        said = _setup_answer(t)
+        if said:
+            return said
     m = _PROMISE_REPLY.match(t)
     if m:
         from .graph import engine

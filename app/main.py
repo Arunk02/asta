@@ -218,6 +218,9 @@ async def startup() -> None:
     # with nothing that knew which task it belonged to.
     daemon.start("pr_watch", tasks.pr_watch_loop)
     daemon.start("followup", followup.loop)
+    # Setup workflows waiting on an approval or on his answer (app/graph/setup.py).
+    from . import setup_flow
+    daemon.start("setup_flows", setup_flow.loop)
     # "Delivery not confirmed" settled from the chat history, never by resending.
     from . import reconcile
     daemon.start("reconcile_delivery", reconcile.loop)

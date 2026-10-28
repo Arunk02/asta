@@ -3350,7 +3350,8 @@ _AFFIRM = re.compile(
 #: "send to Sameer", "send Sameer's one", "send to Sameer as well", "ok send Vinish".
 _SEND_TO = re.compile(
     r"^\s*(?:(?:no|ok(?:ay)?|yes|pls|please)[,\s]+)*send(?:\s+it)?\s+(?:to\s+)?"
-    r"([a-z][\w.' -]*?)(?:'s)?(?:\s+(?:one|draft|reply|msg|message))?"
+    r"([a-z][\w.' -]*?)(?:'s)?(?:\s+(?:the\s+)?(?:one|draft|reply|msg|message|answer|update|"
+    r"notes|findings|analysis|comments?|review(?:\s+(?:comments?|notes|findings))?))?"
     r"(?:\s+(?:as\s+well|also|too|now|bro|pls|please))*\s*[.!]*$", re.I)
 #: "send the previous msg", "no send the earlier draft message", "send the original one".
 _SEND_PREVIOUS = re.compile(

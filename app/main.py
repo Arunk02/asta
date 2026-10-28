@@ -3337,10 +3337,15 @@ def _offer_prompt(o, where: str = "") -> str:
 #: still is not one.
 _AFFIRM = re.compile(
     r"^\s*(?:(?:yes|yep|yeah|y|ok(?:ay)?|sure|pls|please)[,\s]+)*"
-    r"(?:send(?:\s+it)?|yes|yep|yeah|y|ok(?:ay)?(?:\s+(?:send|do\s+it))?|go(?:\s+ahead)?|"
+    r"(?:send(?:\s+it)?|yes|yep|yeah|y|ok(?:ay)?(?:\s+(?:send|do\s+it))?|"
+    r"go(?:\s+ahead)?(?:\s+and\s+send(?:\s+it)?)?|"
     r"confirm|do\s+it|proceed|approved?|submit(?:\s+it)?|ship\s+it|"
     r"post(?:\s+(?:it|this|that|the\s+(?:review(?:\s+comments?)?|comments?)))?|👍|✅)"
-    r"(?:[,\s]+(?:now|please|pls|go\s+ahead|do\s+it|post\s+it|send\s+it))*\s*[.!]*\s*$",
+    # "yes send it as is" (27 Oct, a dictated note to a colleague) was read as an edit
+    # and the same draft came back for a third yes.
+    r"(?:[,\s]+(?:now|please|pls|go\s+ahead|do\s+it|post\s+it|send\s+it|"
+    r"as\s+(?:it\s+)?is|as\s+written|exactly(?:\s+as\s+(?:it\s+is|written))?|"
+    r"like\s+that|the\s+same))*\s*[.!]*\s*$",
     re.I)
 #: "send to Sameer", "send Sameer's one", "send to Sameer as well", "ok send Vinish".
 _SEND_TO = re.compile(
@@ -4323,7 +4328,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             if channel == "web":
                 await sink.send({"type": "done", "tools": []})
             return None
-        loop.clear_awaiting(cid)
+        loop.clear_awaiting(cid, answered_by=user_text)
         if not approved:
             _judge_staged(cid, staged, user_text)
         if approved:

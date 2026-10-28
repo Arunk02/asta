@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
 from . import store
@@ -166,6 +167,39 @@ async def check_one(row: dict, now: float | None = None) -> tuple[list[str], boo
     return notes, False
 
 
+#: They asked not to be chased. Their word ends the follow-up, whatever it was for.
+_STOP = re.compile(r"\b(?:stop|quit)\s+(?:pinging|reminding|messaging|chasing|nudging|following\s+up)\b"
+                   r"|\bdon'?t\s+(?:ping|remind|chase|nudge|message|follow\s+up\s+with)\s+me\b"
+                   r"|\bno\s+need\s+to\s+(?:remind|ping|chase|nudge|follow\s*up)\b"
+                   r"|\bplease\s+stop\b", re.I)
+
+
+def their_word(row: dict) -> tuple[str, float, str] | None:
+    """What the person being chased said since we last looked, from stored Teams
+    history: ("stop" | "reply", when, text), or None.
+
+    A chase that never reads their side kept nudging people who had answered —
+    "on it, will check today" and even "please stop pinging me" left the next
+    reminder exactly where it was."""
+    from . import chat_watch
+    who = (row.get("person") or "").strip()
+    if not who:
+        return None
+    since = float(row.get("heard_until") or row.get("created_at") or 0)
+    theirs = [m for m in store.teams_messages(who, since=since + 0.001)
+              if (m.get("sender") or "").strip() and not chat_watch.is_from_him(m.get("sender") or "")
+              and (m.get("sender") or "").strip().lower() != "me"]
+    if not theirs:
+        return None
+    latest = max(float(m.get("sent_at") or 0) for m in theirs)
+    row["heard_until"] = latest
+    stop = next((m for m in theirs if _STOP.search(m.get("text") or "")), None)
+    if stop:
+        return "stop", float(stop.get("sent_at") or latest), (stop.get("text") or "")[:200]
+    last = max(theirs, key=lambda m: float(m.get("sent_at") or 0))
+    return "reply", latest, (last.get("text") or "")[:200]
+
+
 def _draft_pending(who: str) -> bool:
     """A nudge to this person is already waiting on Arun's yes."""
     return any(t.get("kind") == "teams_draft"
@@ -274,6 +308,21 @@ async def check_all(now: float | None = None) -> list[str]:
     for row in rows:
         if row.get("status") != "open":
             continue
+        # Their side first, saved at once: both paths below reload from disk.
+        heard = their_word(row)
+        if heard:
+            kind, at, text = heard
+            if kind == "stop":
+                row["status"] = "stopped"
+                row["stopped_why"] = f"{row['person']} asked not to be chased"
+                out.append(f"🛑 Stopped chasing {row['person']} about {row['goal'][:80]} — "
+                           f"they asked: “{text[:160]}”. Nothing more goes to them about it.")
+                _save(rows)
+                continue
+            # An answer is movement: the next nudge waits a full stall window.
+            row["last_moved_at"] = max(float(row.get("last_moved_at") or 0), at)
+            row["their_reply"] = text
+            _save(rows)
         # On the graph, a promise is a checkpointed thread: the warning before
         # the deadline can PARK and wait for what he says back, across restarts,
         # without the chase carrying on underneath it. A daemon loop cannot wait.

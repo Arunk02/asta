@@ -1616,8 +1616,8 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
                                                 action=action, findings=findings, body=verdict)
             if done is not None:
                 return done
-        if current != origin["revision"]:
-            return "Not staged: the PR head or CI changed while the review was running."
+        if not review.same_commit(current, origin["revision"]):
+            return "Not staged: the PR head changed (a new commit) while the review was running."
     else:
         try:
             verified, good = await review.revision(pr)

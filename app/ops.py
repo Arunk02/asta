@@ -177,8 +177,10 @@ async def _pr_review_inline(pr: str = "", workspace: str = "", repo: str = "",
         if f"{target.lower()}#{number}" != review_origin["ref"]:
             raise RuntimeError("review target differs from the approved repository and PR")
         current, good = await review.revision(review_origin["ref"])
-        if current != review_origin["revision"] or (action == "approve" and not good):
-            raise RuntimeError("PR head or CI changed since approval; review again")
+        if not review.same_commit(current, review_origin["revision"]):
+            raise RuntimeError("the PR head changed since this review (a new commit); review it again")
+        if action == "approve" and not good:
+            raise RuntimeError("approval needs successful CI on this commit, and it is not green now")
     return "✅ " + await review.post_inline_review(pr, workspace, repo, action,
                                                   body, comments or [])
 

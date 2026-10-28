@@ -132,6 +132,16 @@ def pr_target(pr: str) -> tuple[str, str]:
     return str(pr or "").strip().lstrip("#"), ""
 
 
+def same_commit(a: str, b: str) -> bool:
+    """Two revisions name the same PR at the same head commit (CI state ignored).
+
+    The revision string carries a CI fingerprint too, so comparing it whole read
+    "CI finished" as "the PR changed": a review staged while CI ran could never
+    be posted once CI completed (28 Oct, same commit, refused a minute later)."""
+    head = lambda r: (r or "").split(":", 1)[0]
+    return bool(a and b) and head(a) == head(b)
+
+
 async def revision(pr: str) -> tuple[str, bool]:
     """Exact repository, head commit and CI state for a review cache lookup.
 

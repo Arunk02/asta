@@ -204,13 +204,8 @@ async def join(join_url: str, muted: bool = True, camera: bool = False,
                      who="", rtc=rtc,
                      log=call_rtc.recorder("meeting") if rtc else None)
         store.kv_set("teams_in_call", join_url)
-        # Clicking Join is not being in the meeting: Teams may hold Asta in the lobby.
-        with contextlib.suppress(Exception):
-            if await call_state(page) == "lobby":
-                _CALL["in_lobby"] = True
-                call_states.mark(_CALL, "lobby", "Teams lobby text after Join")
-            else:
-                call_states.mark(_CALL, "joined", "no lobby on screen after Join")
+        with contextlib.suppress(Exception):   # clicking Join may only reach the lobby
+            call_states.after_join(_CALL, await call_state(page))
         # Captions are what make a recap possible at all. Failing to turn them on
         # is not a reason to abandon a call that has already been joined, so it
         # is recorded and reported later rather than raised now.
@@ -881,15 +876,9 @@ async def leave() -> str:
     # Read while `_CALL` is still standing — a moment later there is nothing to
     # measure, and a call reported without its duration is a call he cannot judge.
     _LAST_CALL.clear()
-    if call:
-        call_states.mark(call, "ended", "left the call")
-    seen = call_states.summary(call)
-    # `spoke` was the PERMISSION to speak (`speaks`), reported as if words had
-    # been delivered. It is now what the record shows was delivered.
+    # `spoke` is what the record shows was delivered, never the permission (`speaks`).
     _LAST_CALL.update(who=call.get("who") or "", seconds=call_duration(),
-                      answered=bool(call.get("answered_at")),
-                      spoke=seen["lines_delivered"] > 0, admitted=seen["admitted"],
-                      states=seen["states"])
+                      answered=bool(call.get("answered_at")), **call_states.ended(call))
     _CALL.clear()
     if not call:
         return "not in a call"
@@ -1240,13 +1229,10 @@ async def watch(poll_seconds: float = 30) -> str:
         if await _never_answered():
             await leave()
             return f"no answer after {int(UNANSWERED_SECONDS)}s — hung up"
-        if _CALL.get("in_lobby") and page is not None:
-            if await call_state(page) != "lobby":
-                _CALL["in_lobby"] = False
-                call_states.mark(_CALL, "joined", "admitted from the lobby")
-            elif _now() - float(_CALL.get("joined_at") or _now()) > call_states.LOBBY_MINUTES * 60:
-                await leave()
-                return f"never admitted from the lobby after {call_states.LOBBY_MINUTES} min — left"
+        if _CALL.get("in_lobby") and page is not None and call_states.lobby_tick(
+                _CALL, await call_state(page), _now()) == "overdue":
+            await leave()
+            return f"never admitted from the lobby after {call_states.LOBBY_MINUTES} min — left"
         for _ in range(ticks):
             if not _CALL:
                 break

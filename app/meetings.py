@@ -36,7 +36,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 from . import quiet, store
-from . import call_audio, call_rtc, call_screen, call_speech
+from . import call_audio, call_rtc, call_screen, call_speech, call_states
 from .call_audio import (  # noqa: F401  (constants only — the FUNCTIONS are
     AUDIO_DEVICE, HIS_MIC, SWITCH_AUDIO,   # called through `call_audio.` so the
     current_mic, set_call_mic, _restore_mic)  # borrow and the restore share one
@@ -204,6 +204,13 @@ async def join(join_url: str, muted: bool = True, camera: bool = False,
                      who="", rtc=rtc,
                      log=call_rtc.recorder("meeting") if rtc else None)
         store.kv_set("teams_in_call", join_url)
+        # Clicking Join is not being in the meeting: Teams may hold Asta in the lobby.
+        with contextlib.suppress(Exception):
+            if await call_state(page) == "lobby":
+                _CALL["in_lobby"] = True
+                call_states.mark(_CALL, "lobby", "Teams lobby text after Join")
+            else:
+                call_states.mark(_CALL, "joined", "no lobby on screen after Join")
         # Captions are what make a recap possible at all. Failing to turn them on
         # is not a reason to abandon a call that has already been joined, so it
         # is recorded and reported later rather than raised now.
@@ -554,6 +561,7 @@ async def call_person(who: str, video: bool = False, group: bool = False) -> str
                      answered_at=0.0, speaks=True, who=title, mic_proven=peak,
                      rtc=rtc, log=call_rtc.recorder(title) if rtc else None)
         store.kv_set("teams_in_call", f"call:{title}")
+        call_states.mark(_CALL, "dialled", "call window opened")
         if rtc:   # not how Asta hears here — and switching them on took 32 s on 22 Sep
             _CALL["captions_on"] = False
         else:
@@ -776,6 +784,7 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
                 raise RuntimeError(f"nobody has picked up yet ({state}) — said "
                                    f"nothing. The call window showed: {seen}")
             _CALL["answered_at"] = _now()
+            call_states.mark(_CALL, "answered", "screen: connected")
 
     words = voice.strip_voice_instruction(text)
     if not words:
@@ -826,6 +835,7 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
                         f"Settings → Privacy & Security → Microphone). Treat it as "
                         f"NOT said.")
                 _CALL["mic_proven"] = float(heard.get("peak") or 0)
+                call_states.mark(_CALL, "audio_ready", f"browser mic peak {_CALL['mic_proven']:.3f}")
     finally:
         if listening is not None and not listening.done():
             listening.cancel()
@@ -836,6 +846,7 @@ async def say_in_call(text: str, voice_name: str = "") -> str:
             await call_audio._restore_mic(page)
 
     store.kv_set("teams_last_spoken", words[:500])
+    call_states.mark(_CALL, "speech_delivered", f"played {played:.1f}s into an unmuted call")
     return f"said it in the call in {chosen} voice ({played:.1f}s): {words[:120]}"
 
 
@@ -870,9 +881,15 @@ async def leave() -> str:
     # Read while `_CALL` is still standing — a moment later there is nothing to
     # measure, and a call reported without its duration is a call he cannot judge.
     _LAST_CALL.clear()
+    if call:
+        call_states.mark(call, "ended", "left the call")
+    seen = call_states.summary(call)
+    # `spoke` was the PERMISSION to speak (`speaks`), reported as if words had
+    # been delivered. It is now what the record shows was delivered.
     _LAST_CALL.update(who=call.get("who") or "", seconds=call_duration(),
                       answered=bool(call.get("answered_at")),
-                      spoke=bool(call.get("speaks")))
+                      spoke=seen["lines_delivered"] > 0, admitted=seen["admitted"],
+                      states=seen["states"])
     _CALL.clear()
     if not call:
         return "not in a call"
@@ -1223,6 +1240,13 @@ async def watch(poll_seconds: float = 30) -> str:
         if await _never_answered():
             await leave()
             return f"no answer after {int(UNANSWERED_SECONDS)}s — hung up"
+        if _CALL.get("in_lobby") and page is not None:
+            if await call_state(page) != "lobby":
+                _CALL["in_lobby"] = False
+                call_states.mark(_CALL, "joined", "admitted from the lobby")
+            elif _now() - float(_CALL.get("joined_at") or _now()) > call_states.LOBBY_MINUTES * 60:
+                await leave()
+                return f"never admitted from the lobby after {call_states.LOBBY_MINUTES} min — left"
         for _ in range(ticks):
             if not _CALL:
                 break
@@ -1279,7 +1303,9 @@ async def watch_and_report(title: str = "") -> None:
         await leave()
     ended = last_call()
     label = f" — {title or ended.get('who') or ''}".rstrip(" —")
-    if ended.get("seconds"):
+    if ended.get("admitted") is False:
+        why = f"{why} · never let in from the lobby — nothing was heard"
+    elif ended.get("seconds"):
         why = f"{why} · {spoken_duration(ended['seconds'])}"
     elif ended.get("who"):
         why = f"{why} · never answered"
@@ -1367,6 +1393,7 @@ async def call_watch(title: str = "") -> None:
 
     if state == "connected":
         _CALL["answered_at"] = _now()
+        call_states.mark(_CALL, "answered", "screen: connected")
     else:
         # Staying on a call it cannot read, and saying so. Silence is enforced
         # because speaking would be talking into a call that may still be ringing.

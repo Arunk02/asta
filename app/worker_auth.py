@@ -101,6 +101,22 @@ def authenticate(token: str, now: float | None = None) -> dict:
         raise Refused('Invalid worker scope') from None
 
 
+def _registered(name) -> bool:
+    """One of his own registered workspaces.
+
+    A task with a workspace is pinned to it. A task with none — a colleague's
+    question the responder investigates — may read any workspace he registered:
+    28 Oct, two such investigations asked for the booking context and were
+    refused, and answered without it. Never an unregistered name."""
+    if not isinstance(name, str) or not name.strip():
+        return False
+    try:
+        from . import workspace
+        return name in workspace.available_workspaces()
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 def authorize(scope: dict, body: dict) -> dict:
     """Bind identity from the server record; reject caller-supplied substitutions."""
     if str(body.get('task_id') or scope['task_id']) != str(scope['task_id']):
@@ -125,9 +141,10 @@ def authorize(scope: dict, body: dict) -> dict:
         # chat's own slot would let his next unrelated "yes" approve it unseen.
         raise Refused('A worker can stage only a 1:1 chat draft to a named person')
     if name in _WORKSPACE_TOOLS:
-        if args.get('workspace', scope['workspace']) != scope['workspace']:
+        asked = args.get('workspace', scope['workspace'])
+        if asked != scope['workspace'] and not (not scope['workspace'] and _registered(asked)):
             raise Refused('Workspace is outside this worker credential')
-        args['workspace'] = scope['workspace']
+        args['workspace'] = asked
     if name in _TASK_TOOLS:
         if str(args.get('task_id', scope['task_id'])) != str(scope['task_id']):
             raise Refused('Cannot access another task with this credential')

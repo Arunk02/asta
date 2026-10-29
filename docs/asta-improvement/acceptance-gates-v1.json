@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "gates": {
+    "G1": [
+      "tests/test_worker_capabilities.py::test_request_identity_is_bound_by_server_even_when_worker_asks_for_write_mode",
+      "tests/test_worker_capabilities.py::test_worker_token_cannot_use_other_owner_routes_or_query_auth"
+    ],
+    "G2": [
+      "tests/test_worker_capabilities.py::test_forged_identity_and_ungranted_tools_are_refused"
+    ],
+    "G3": [
+      "tests/test_worker_capabilities.py::test_credentials_are_durable_hashed_expiring_and_revocable",
+      "tests/test_worker_capabilities.py::test_task_end_or_scope_change_invalidates_existing_credential",
+      "tests/test_worker_capabilities.py::test_execution_wrapper_revokes_on_cancellation_and_does_not_leak_context",
+      "tests/test_worker_capabilities.py::test_prune_removes_only_records_that_can_no_longer_authenticate"
+    ],
+    "G4": [
+      "tests/test_worker_capabilities.py::test_workspace_reader_rejects_sibling_prefix_and_symlink_escape"
+    ],
+    "G5": [
+      "tests/test_worker_capabilities.py::test_server_only_secrets_never_reach_a_task_process"
+    ],
+    "G6": [
+      "tests/test_one_instruction_chain.py::test_said_once_reaches_merge_and_vinish_with_a_restart_at_every_stage"
+    ],
+    "G7": [
+      "tests/test_one_instruction_chain.py::test_revoking_the_merge_after_the_pr_stops_the_merge_only",
+      "tests/test_one_instruction_chain.py::test_revoking_the_tell_after_the_merge_request_stops_the_message_only",
+      "tests/test_one_instruction_chain.py::test_revoking_before_the_pr_keeps_the_pr_and_drops_merge_and_message"
+    ],
+    "G8": [
+      "tests/test_one_instruction_chain.py::test_an_uncertain_merge_is_not_requested_again_and_vinish_hears_once_it_lands"
+    ],
+    "G9": [
+      "tests/test_task_merge_authority.py::test_incomplete_evidence_never_merges"
+    ],
+    "G10": [
+      "tests/test_pr_authority.py::test_a_review_that_is_not_good_goes_to_him_and_nothing_is_posted",
+      "tests/test_pr_authority.py::test_red_ci_is_not_good_even_with_an_approve_verdict",
+      "tests/test_pr_authority.py::test_a_head_change_is_reviewed_again_under_the_same_instruction",
+      "tests/test_pr_authority.py::test_a_pr_that_keeps_moving_stops_and_comes_back"
+    ],
+    "G11": [
+      "tests/test_pr_authority.py::test_the_pr_body_or_tool_arguments_cannot_grant_it",
+      "tests/test_one_instruction_chain.py::test_a_colleagues_words_cannot_add_a_merge_or_a_message"
+    ],
+    "G12": [
+      "tests/test_pr_authority.py::test_his_own_pr_is_not_approved_and_the_merge_still_respects_github"
+    ],
+    "G13": [
+      "tests/test_task_inform.py::test_only_one_named_person_in_his_words_is_kept",
+      "tests/test_task_inform.py::test_a_refused_send_is_staged_for_his_yes_not_sent"
+    ],
+    "G14": [
+      "tests/test_task_inform.py::test_concurrent_milestones_send_once"
+    ],
+    "G15": [
+      "tests/test_reconcile.py::test_found_in_the_chat_settles_as_sent_and_says_nothing",
+      "tests/test_reconcile.py::test_absent_from_a_chat_read_after_the_send_is_said_once_and_not_resent",
+      "tests/test_reconcile.py::test_unread_history_stays_unknown_then_is_said_once_after_a_day",
+      "tests/test_reconcile.py::test_a_crash_mid_send_is_checked_and_a_send_in_progress_is_not"
+    ],
+    "G16": [
+      "tests/test_contact_reply_permission.py::test_daily_cap_is_reserved_before_concurrent_replies",
+      "tests/test_contact_reply_permission.py::test_explicit_limit_or_revocation_cannot_fall_back_to_legacy_allowlist",
+      "tests/test_contact_reply_permission.py::test_global_send_hold_and_policy_still_apply"
+    ],
+    "G17": [
+      "tests/test_cross_person_issues.py::test_live_reports_share_work_but_keep_both_recipients",
+      "tests/test_cross_person_issues.py::test_different_or_ambiguous_work_does_not_join",
+      "tests/test_cross_person_issues.py::test_different_explicit_build_is_a_different_investigation",
+      "tests/test_shared_evidence.py::test_the_second_report_is_queued_as_evidence_for_the_running_task"
+    ],
+    "G18": [
+      "tests/test_memory_correction.py::test_a_correction_supersedes_and_leaves_recall",
+      "tests/test_memory_correction.py::test_the_restore_drill_reports_then_restores_byte_for_byte",
+      "tests/test_memory_correction.py::test_a_corrupt_history_copy_is_reported_never_restored",
+      "tests/test_memory_correction.py::test_nothing_is_deleted_without_his_words",
+      "tests/test_memory_correction.py::test_purge_needs_his_explicit_word_and_removes_every_copy"
+    ],
+    "G19": [
+      "tests/test_memory_continuity.py::test_a_busy_project_cannot_crowd_the_asked_project_out_of_recall",
+      "tests/test_memory_continuity.py::test_a_recalled_memory_carries_its_content_not_its_date"
+    ],
+    "G20": [
+      "tests/test_plan_preview.py::test_a_plan_too_long_for_the_phone_arrives_in_full_as_a_file",
+      "tests/test_plan_preview.py::test_a_revised_plan_is_a_new_file_and_the_one_he_read_is_kept",
+      "tests/test_plan_preview.py::test_an_implementation_that_did_not_quote_the_receipt_is_flagged",
+      "tests/test_plan_preview.py::test_the_card_names_what_a_plan_left_out"
+    ],
+    "G21": [
+      "tests/test_context_refresh_verified.py::test_files_changed_but_verified_against_did_not_move_is_not_fresh",
+      "tests/test_context_refresh_verified.py::test_a_run_that_changed_nothing_is_not_fresh",
+      "tests/test_context_refresh_verified.py::test_provenance_records_each_repo_before_and_after"
+    ]
+  }
+}

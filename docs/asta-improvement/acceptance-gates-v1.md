@@ -39,3 +39,15 @@ The 70 representative tasks (coding, debugging, browser/setup, communication, ca
 - The 70 representative tasks, ten per area, with independently verifiable outcomes written before execution.
 - Which nondeterministic cases may run on live models, and on whose quota. Each needs at least three runs.
 - The cost ledger that counts background workers and retries per verified successful task. Chat traces alone are not enough (#176).
+
+## Executable gate report (29 October 2026)
+
+`acceptance-gates-v1.json` now pins the test selectors for all 21 gates. From the repository root, run:
+
+```sh
+python -m app.acceptance_gates --report acceptance-gates.json
+```
+
+The runner executes every parameterized instance and requires successful setup, test and teardown. Missing tests, unrun instances, skips, expected failures (including unexpected passes), collection failures and interrupted runs fail the report. It records the manifest hash and per-gate evidence. CI runs it after the full suite and retains its JSON artifact. The report is a deterministic regression result, separate from the still-pending 70-task representative benchmark and live pilot.
+
+Initial local run: all 21 gates passed, covering 88 executed test instances with no skips. The runner's own 16 tests also passed, including real pytest subprocesses that skip, fail, xfail/xpass or omit a mandatory test.

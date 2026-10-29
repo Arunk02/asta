@@ -333,36 +333,74 @@ def write_skill(data: dict, source: str = "extracted", *, validated: bool = Fals
     return path
 
 
-async def validate_candidate(name: str, evaluator) -> Path:
-    """Evaluate a candidate without activating it, then promote only on evidence.
+async def validate_candidate(name: str, evaluator, *, required_checks: tuple[str, ...] = ()) -> Path:
+    """Promote the exact bytes checked by a trusted, independently configured suite.
 
-    evaluator(path) is a trusted test harness, not an LLM response. Its report
-    must identify the run and contain a positive number of all-passing checks.
-    Failed, stale or modified candidates remain quarantined; previous active
-    content is archived when promotion succeeds.
+    The caller supplies the mandatory check IDs, never the candidate or its report.
+    Aggregate pass counts alone are not evidence that the expected suite ran.
+    No runtime extractor calls this API; missing promotion policy fails closed.
     """
     if name != _slug(name):
         raise ValueError("invalid candidate name")
     path = skills.SKILLS_DIR / ".candidates" / f"{name}.md"
     body = path.read_bytes()
     metadata = path.with_suffix(".json").read_bytes()
+    payload = json.loads(metadata)
+    data = payload.get("data", {})
+    if (_slug(data.get("title", "")) != name
+            or _render(data).encode() != body):
+        raise ValueError("candidate content does not match its metadata")
+    if (not isinstance(required_checks, tuple) or not required_checks
+            or any(not isinstance(c, str) or not c.strip() for c in required_checks)
+            or len(set(required_checks)) != len(required_checks)):
+        raise ValueError("an independent mandatory-check policy is required")
     result = await evaluator(path)
-    total, passed = result.get("total"), result.get("passed")
     digest = hashlib.sha256(body).hexdigest()
-    record = {"sha256": digest, "at": time.time(), "result": result}
+    record = {"sha256": digest, "at": time.time(), "required_checks": required_checks,
+              "result": result}
     store.kv_set(f"skill_validation:{name}:{digest}", json.dumps(record))
-    if not (result.get("run_id") and type(total) is int and total > 0
-            and type(passed) is int and passed == total):
+    if not isinstance(result, dict):
+        raise ValueError("candidate did not pass independent validation")
+    checks = result.get("checks")
+    total, passed = result.get("total"), result.get("passed")
+    if not (isinstance(result.get("run_id"), str) and result["run_id"].strip()
+            and result.get("sha256") == digest
+            and isinstance(checks, dict) and set(checks) == set(required_checks)
+            and all(status == "passed" for status in checks.values())
+            and type(total) is int and total == len(required_checks)
+            and type(passed) is int and passed == total
+            and all(type(result.get(k, 0)) is int and result.get(k, 0) == 0
+                    for k in ("failed", "errors", "skipped"))):
         raise ValueError("candidate did not pass independent validation")
     if path.read_bytes() != body or path.with_suffix(".json").read_bytes() != metadata:
         raise ValueError("candidate changed during validation")
-    payload = json.loads(metadata)
     active = _existing_match(name)
     current = hashlib.sha256(active.read_bytes()).hexdigest() if active else None
     if payload["base_sha256"] != current:
         raise ValueError("active skill changed; rebase and validate the candidate again")
-    promoted = write_skill(payload["data"], source=payload["data"]["source"], validated=True)
-    store.record_outcome("skill", "promoted", subject=name, detail=f"validated by {result['run_id']}: {digest}")
+    if active:
+        archive = skills.SKILLS_DIR / ".history" / name
+        archive.mkdir(parents=True, exist_ok=True)
+        (archive / f"{current}.md").write_bytes(active.read_bytes())
+    # Do not re-render or merge after evaluation: that would activate untested bytes.
+    promoted = active or skills.SKILLS_DIR / f"{name}.md"
+    import tempfile
+    with tempfile.NamedTemporaryFile(dir=skills.SKILLS_DIR, delete=False) as handle:
+        temporary = Path(handle.name)
+        handle.write(body)
+    try:
+        os.replace(temporary, promoted)
+    finally:
+        temporary.unlink(missing_ok=True)
+    usage = _usage()
+    entry = usage.setdefault(name, {"uses": 0, "created": time.time()})
+    entry.update(confidence=float(data.get("confidence", 0)), source=data["source"],
+                 updated=time.time(), candidate=False, validated_sha256=digest,
+                 validation_run_id=result["run_id"], predecessor_sha256=current)
+    entry.pop("pending_candidate", None)
+    _save_usage(usage)
+    store.record_outcome("skill", "promoted", subject=name,
+                         detail=f"validated by {result['run_id']}: {digest}")
     return promoted
 
 

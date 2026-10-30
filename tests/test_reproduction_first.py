@@ -274,3 +274,19 @@ def test_validated_new_report_is_evidence_not_a_production_edit(world, monkeypat
     monkeypatch.setattr(claude_cli, 'one_shot', brain)
     asyncio.run(runner._drive(t['id'], {'task_id': t['id']}))
     assert store.get_task(t['id'])['status'] == ('failed' if existing or change_source else 'done')
+
+
+def test_repo_relative_report_resolves_only_when_unambiguous(tmp_path):
+    since = time.time() - 1
+    for name in ('one', 'two'):
+        repo = tmp_path / name
+        repo.mkdir()
+        (repo / '.git').mkdir()
+    text = report(tmp_path / 'one')
+    proof = reproduction.evidence(text, str(tmp_path), since)
+    assert proof['report'] == str(tmp_path / 'one/target/report.xml')
+    report(tmp_path / 'two')
+    with pytest.raises(ValueError, match='Ambiguous'):
+        reproduction.evidence(text, str(tmp_path), since)
+    explicit = text.replace('target/report.xml', 'one/target/report.xml')
+    assert reproduction.evidence(explicit, str(tmp_path), since)['tests'] == 1

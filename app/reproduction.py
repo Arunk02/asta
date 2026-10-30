@@ -99,6 +99,20 @@ def evidence(text: str, cwd: str, since: float) -> dict:
         raise ValueError('Reproduction needs the test command, report, expected and actual behavior')
     root = Path(cwd).resolve()
     report = (root / row['report']).resolve()
+    if not report.exists() and not Path(row['report']).is_absolute():
+        # Workers run builds within one repo of a task's multi-repo checkout.
+        # Accept a repo-relative artifact only when exactly one repo matches.
+        matches = []
+        for repo in root.iterdir():
+            if not repo.is_dir() or not (repo / '.git').exists():
+                continue
+            candidate = (repo / row['report']).resolve()
+            if root in candidate.parents and repo.resolve() in candidate.parents and candidate.is_file():
+                matches.append(candidate)
+        if len(matches) > 1:
+            raise ValueError('Ambiguous test report; supply its task-relative or absolute path')
+        if matches:
+            report = matches[0]
     if root not in report.parents or not report.is_file():
         raise ValueError('Test report must be inside this task checkout')
     if report.stat().st_mtime < since or report.stat().st_size > 5_000_000:

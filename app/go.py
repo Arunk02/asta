@@ -276,10 +276,28 @@ def no_ask(task_id: int, plan: str) -> str:
         return ""
     # Before "as you said": a go-ahead for the task is not a go-ahead to skip the
     # approval he asked someone else for, nor to skip the plan's own questions.
-    if waits_for_someone(task_id) or _PLAN_ASKS.search(plan or ""):
+    if waits_for_someone(task_id):
         return ""
     from . import reproduction
-    if reproduction.fix_authorized(task_id):
+    authorized_fix = reproduction.fix_authorized(task_id)
+    questions = plan or ""
+    if authorized_fix:
+        # A model repeating the approval ceremony cannot revoke a recorded
+        # conditional fix grant. Actual questions and outside approval still gate.
+        questions = re.sub(r"\bawaiting\s+(?:your|arun'?s|his)\s+approval\b", "", questions, flags=re.I)
+        # Lettered reproduced findings are a summary, not alternatives. Keep
+        # the conservative option gate everywhere else, including explicit
+        # decision language in a reproduced-finding paragraph.
+        paragraphs = []
+        for paragraph in questions.split("\n"):
+            if (re.match(r"\s*Reproduced\b", paragraph, re.I)
+                    and not re.search(r"\b(?:choose|choice|option|decide|decision|recommend|whether|or)\b|\?", paragraph, re.I)):
+                paragraph = re.sub(r"\([a-z]\)", "", paragraph, flags=re.I)
+            paragraphs.append(paragraph)
+        questions = "\n".join(paragraphs)
+    if _PLAN_ASKS.search(questions):
+        return ""
+    if authorized_fix:
         return "you authorized a fix if reproduced, and the reproduction test failed"
     if reviewed_by_him(task_id):
         return ""

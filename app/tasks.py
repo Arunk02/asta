@@ -3575,6 +3575,13 @@ async def _prepare_branches(task_id: int, t: dict) -> list[dict]:
 def first_code_prompt(task_id: int, t: dict) -> str:
     """The opening prompt of a code task — one definition for both engines."""
     prompt = t["prompt"]
+    from . import reproduction
+    if reproduction.fix_authorized(task_id):
+        prompt += ("\n\nAsta has verified the reproduction and recorded the user's conditional fix authorization. "
+                   "Return the plan for Asta to dispatch; do not request another approval for this same fix. "
+                   "Resolve routine implementation and test-file choices yourself while preserving unrelated work. "
+                   "Ask only for missing information that materially changes scope or correctness. "
+                   "Do not implement during this plan invocation; Asta dispatches implementation separately.")
     if _agent_for(t):
         # micro's agent file is self-contained; the rider is solo-only.
         if _pipeline_for(task_id) == "full":

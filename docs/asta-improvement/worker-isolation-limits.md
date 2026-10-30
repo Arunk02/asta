@@ -33,3 +33,9 @@ This is the boundary as it stands after #177–#179. It records what is enforced
 3. A per-task macOS user, or a VM, for file and shell isolation. This needs Arun's decision and admin setup, so it stays a recommendation here.
 
 Until then, a worker is trusted not to go around the fence deliberately. What is guaranteed is that Asta's own API, the owner token and every outward act Asta itself performs are bound to the task's recorded authority.
+
+## Scoped Claude MCP configuration
+
+A scoped Claude worker now starts with `--strict-mcp-config` and only the explicit MCP configuration selected for its task. When task MCP is disabled, the worker receives an empty configuration instead of inheriting user/project MCP servers. Ordinary non-task calls retain their existing behavior; tool-free calls also use strict configuration.
+
+This avoids unrelated ambient servers, tools and their startup/context overhead. It does not isolate filesystem access, remove user instructions from Claude's context, or establish a measured token-saving percentage. The public coding pilot's usage receipt motivates measuring context overhead; it does not attribute all cached input to MCP tools.

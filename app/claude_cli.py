@@ -115,25 +115,22 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
            # Parity with the copilot path's --allow-all-tools: the pipeline
            # must run builds/tests unattended. Workspace repos only.
            "--permission-mode", "default" if tools_off else "bypassPermissions"]
+    from . import task_fence
+    fence = task_fence.MODE.get()
     if tools_off:
         cmd += ["--tools", ""]
-        if not mcp_config:
-            # No MCP servers either. The CLI otherwise starts every server in
-            # his user config (Grafana) for a call that can use none of them:
-            # +2.3s each time, measured, and one hung server stalls the reader.
-            cmd += ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
-    if mcp_config:
-        # No --strict-mcp-config: these servers ADD to whatever the workspace
-        # already configures, they don't replace it. `claude --mcp-config` takes
-        # a JSON string as readily as a file, so nothing touches disk.
-        cmd += ["--mcp-config", mcp_config]
+    if mcp_config or tools_off or fence:
+        cmd += ["--mcp-config", mcp_config or '{"mcpServers":{}}']
+        if tools_off or fence:
+            # A scoped worker receives only the servers selected for this leg.
+            # Ambient user/project servers add unrelated tools, context and
+            # credentials; disabling Asta MCP must not silently restore them.
+            cmd += ["--strict-mcp-config"]
     if session_id:
         cmd += (["--resume", session_id] if resume else ["--session-id", session_id])
     if agent_file:
         with contextlib.suppress(OSError):
             cmd += ["--append-system-prompt", Path(agent_file).read_text()]
-    from . import task_fence
-    fence = task_fence.MODE.get()
     deny = list(_PLAN_DENY) if plan_only else []
     # The plan gate, made structural: an unapproved leg cannot write, commit,
     # push or open a PR even if it decides to. And no task leg approves, merges

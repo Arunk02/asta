@@ -31,3 +31,9 @@ not confirmed bugs. Non-JUnit repro harnesses need a future evidence adapter.
 Tests include real checkpointed graph transitions, quota pause/resume, bounded
 worker credentials, rejection of stale/outside/empty/error reports, production
 edit detection, and a real pytest subprocess producing JUnit evidence.
+
+## Real worker pilot: stage completion scope
+
+A public-source Claude pilot reproduced two lesson-promotion defects, then edited production code in the same reproduction invocation. The production snapshot guard rejected that attempt. The worker also returned a generic JSON fence rather than the required reproduction evidence fence. This was not a successful end-to-end pilot.
+
+The reproduction leg now gets its own executor instructions (`agents/reproduce.md`), explicitly stops after reporting the test evidence, and does not inherit the generic implementation outcome contract or an earlier solution plan. Claude receives the stage instructions through its appended system prompt; both executors receive them at the end of the task prompt. The existing snapshot and JUnit checks remain the progression gate. These instructions improve stage adherence; they are not OS-level write isolation.

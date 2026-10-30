@@ -137,6 +137,9 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
     """One brain leg for `stage` — fresh, continued, or picked up after a stop."""
     tasks = _tasks()
     t = _task(tid)
+    reproducing = stage == "reproduce"
+    def ending(fresh):
+        return "" if reproducing else outcome.rider(tid, fresh=fresh)
     mark = f"graph_leg:{tid}"
     session = _has_session(tid)
     # Plan legs too (26 Oct): #419's re-plan after shipping resumed the 332k session.
@@ -156,15 +159,15 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
         carried = store.kv_get(carry) or ""
         prompt = RESUME_PROMPT + (
             "\n\nThe step that stopped was carrying this — act on it now if you had not "
-            f"already:\n{carried}" if carried else "") + outcome.rider(tid, fresh=False)
+            f"already:\n{carried}" if carried else "") + ending(False)
     elif session:
         body = resume_prompt if resume_prompt is not None else fresh_prompt
         store.kv_set(carry, body[:6000])
-        prompt = body + outcome.rider(tid, fresh=False)
+        prompt = body + ending(False)
     else:
         from app import context_pack
-        prompt = (fresh_prompt + context_pack.build(tid, "plan" if stage == "plan" else "implement")
-                  + outcome.rider(tid, fresh=True))
+        prompt = (fresh_prompt + context_pack.build(tid, stage if stage in ("plan", "reproduce") else "implement")
+                  + ending(True))
     if stage == "reproduce" and not (session and store.kv_get(mark) == stage):
         store.kv_set(carry, prompt)
     store.kv_set(mark, stage)
@@ -176,7 +179,7 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
     store.kv_del(mark)
     store.kv_del(carry)
     _task(tid)                       # rejected while the leg ran: stop here
-    return text, outcome.read(tid, text, since, "plan" if stage == "plan" else "implement")
+    return text, {} if reproducing else outcome.read(tid, text, since, "plan" if stage == "plan" else "implement")
 
 
 # --- entry ------------------------------------------------------------------

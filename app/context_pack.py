@@ -69,7 +69,7 @@ def build(task_id: int, stage: str) -> str:
     cap = CAPS.get(stage, 2500)
     parts: list[str] = []
 
-    if stage != "plan":
+    if stage not in ("plan", "reproduce"):
         plan = _approved_plan(task_id)
         if plan:
             parts.append("[The plan Arun approved — the definition of done]\n"
@@ -77,7 +77,7 @@ def build(task_id: int, stage: str) -> str:
 
     # Reserve project evidence before optional conversational notes. Previously
     # a full notes block could silently evict the very flow docs used to plan.
-    if stage == "plan":
+    if stage in ("plan", "reproduce"):
         flow = _how_it_works(t)
         if flow:
             parts.append(flow)

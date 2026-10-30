@@ -2138,7 +2138,12 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     # The rule was a sentence in a prompt; the micro pipeline's own instructions
     # said "make the edit", and an instruction a model may ignore is not a gate.
     from . import reproduction
-    plan_only = not (plan_approved(task_id) or reproduction.active(task_id))
+    reproducing = reproduction.active(task_id)
+    reproduction_agent = str(ROOT / "agents" / "reproduce.md")
+    if reproducing:
+        # The later fix authorization in the task brief is not this leg's scope.
+        prompt += "\n\n" + Path(reproduction_agent).read_text()
+    plan_only = not (plan_approved(task_id) or reproducing)
     # Which model at what effort: by the size of the work, not the stage alone.
     model = ""
     from . import routing
@@ -2150,7 +2155,7 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
         try:
             out = await claude_cli.one_shot(
                 prompt, cwd=cwd, timeout=code_timeout(workspace),
-                agent_file=None if reproduction.active(task_id) else _agent_file("code", _pipeline_for(task_id)),
+                agent_file=reproduction_agent if reproducing else _agent_file("code", _pipeline_for(task_id)),
                 effort=effort, session_id=sid, resume=resume, on_progress=watcher,
                 mcp_config=dev_cfg, plan_only=plan_only, model=model)
             agent_mod.mark_quota_ok("claude_cli")

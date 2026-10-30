@@ -78,7 +78,9 @@ def test_not_reproduced_runs_writable_test_leg_without_plan_or_code_approval(wor
     async def brain(prompt, **kw):
         calls.append(kw)
         assert reproduction.active(t['id'])
-        assert kw['agent_file'] is None
+        assert Path(kw['agent_file']).name == 'reproduce.md'
+        assert 'After the reproduction test runs, STOP' in prompt
+        assert '[How this run ends]' not in prompt
         assert task_fence.MODE.get() == 'none'
         (root / 'tests').mkdir()
         (root / 'tests' / 'test_amend.py').write_text('def test_amend(): assert True\n')
@@ -237,5 +239,20 @@ def test_copilot_reproduction_omits_the_planning_pipeline(world, monkeypatch):
         assert task_fence.MODE.get() == 'none'
         return report(root)
     monkeypatch.setattr(copilot_cli, 'one_shot', brain)
+    asyncio.run(runner._drive(t['id'], {'task_id': t['id']}))
+    assert store.get_task(t['id'])['status'] == 'done'
+
+
+def test_reproduction_does_not_inherit_old_plan_or_generic_done_contract(world, monkeypatch):
+    t, root, _ = world
+    store.kv_set(f"task_plan:{t['id']}", 'STALE PLAN: implement the entire solution now')
+    reproduction.request(t['id'], 'Reproduce first; if confirmed fix it and commit')
+    async def brain(prompt, **kw):
+        assert 'STALE PLAN' not in prompt
+        assert '[How this run ends]' not in prompt
+        assert 'Those are later stages controlled by Asta' in prompt
+        assert prompt.rstrip().endswith('Asta owns the transition from this evidence to planning and implementation.')
+        return report(root)
+    monkeypatch.setattr(claude_cli, 'one_shot', brain)
     asyncio.run(runner._drive(t['id'], {'task_id': t['id']}))
     assert store.get_task(t['id'])['status'] == 'done'

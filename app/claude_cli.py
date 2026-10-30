@@ -38,6 +38,10 @@ def turn_timeout() -> int:
     return copilot_cli.turn_timeout()
 
 
+class AuthenticationRequired(RuntimeError):
+    """The CLI cannot start a session until its owner signs in."""
+
+
 def available() -> bool:
     return bool(shutil.which("claude"))
 
@@ -184,6 +188,8 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
             await proc.wait()
         raise
     if proc.returncode != 0:
+        if out.strip() == "Not logged in · Please run /login":
+            raise AuthenticationRequired(out.strip())
         note_limit(out)
         raise RuntimeError(f"claude exited {proc.returncode}: {out[-300:]}")
     return out.strip()

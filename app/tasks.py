@@ -44,6 +44,15 @@ class _LimitPaused(Exception):
         self.raw = raw
 
 
+class _AuthenticationPaused(_LimitPaused):
+    """Manual login dependency; reuse durable pause/resume without quota retries."""
+
+    reason = "authentication"
+
+    def __init__(self, brain: str, raw: str):
+        super().__init__(brain, None, raw)
+
+
 # Wake a touch AFTER the stated reset, never exactly on it — a clock a minute
 # fast would otherwise resume into the same wall and re-pause.
 _RESUME_BUFFER = 120
@@ -2155,6 +2164,11 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
                 mcp_config=dev_cfg, plan_only=plan_only, model=model)
             agent_mod.mark_quota_ok("claude_cli")
             return out
+        except claude_cli.AuthenticationRequired as exc:
+            if not resume:
+                # No CLI session was created. A later resume must start fresh.
+                store.kv_del(sid_key)
+            raise _AuthenticationPaused("claude", str(exc)) from exc
         except RuntimeError as exc:
             # Claude's session (the pinned --resume thread) can't move to another
             # brain, so a limit here is always a pause — the wait is cheap because
@@ -2253,6 +2267,9 @@ async def _simple_leg(task_id: int, t: dict, prompt: str) -> str:
                 result = await copilot_cli.one_shot(_with_pipeline(pipeline, prompt),
                                                     cwd=cwd, timeout=tout, effort=effort,
                                                     mcp_config=dev_cfg)
+        except claude_cli.AuthenticationRequired as exc:
+            store.kv_set(f"task_executor:{task_id}", "claude")
+            raise _AuthenticationPaused("claude", str(exc)) from exc
         except RuntimeError as exc:
             if not agent_mod.transient_limit(str(exc)):
                 raise
@@ -3948,7 +3965,8 @@ async def _pause_task(task_id: int, t: dict, exc: _LimitPaused) -> None:
     from . import notify
     reset_at = exc.reset_at
     store.kv_set(f"task_paused:{task_id}", _json.dumps(
-        {"brain": exc.brain, "reset_at": reset_at, "raw": exc.raw[:300], "at": time.time()}))
+        {"brain": exc.brain, "reset_at": reset_at, "raw": exc.raw[:300], "at": time.time(),
+         "reason": getattr(exc, "reason", "quota")}))
     # Auto-resume ONLY when the limit said when it lifts. Claude's session window
     # does ("resets 3:40pm"); Copilot's monthly pool doesn't. Retrying blindly
     # against a pool that won't refill for weeks would just ping Arun every half
@@ -3961,7 +3979,13 @@ async def _pause_task(task_id: int, t: dict, exc: _LimitPaused) -> None:
     else:
         store.kv_del(f"task_resume_at:{task_id}")
     store.update_task(task_id, status="paused", error=exc.raw[:500])
-    await _tell_the_limit_once(exc.brain, reset_at)
+    if isinstance(exc, _AuthenticationPaused):
+        await notify.notify(
+            f"Task #{task_id} paused: Claude Code needs sign-in. Run /login in Claude Code "
+            f"on this machine, then say resume task {task_id}. Your task progress is preserved.",
+            kind="task")
+    else:
+        await _tell_the_limit_once(exc.brain, reset_at)
     return
 
 

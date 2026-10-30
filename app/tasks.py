@@ -2117,6 +2117,20 @@ async def _report_strays(task_id: int, before: dict[str, str], after: dict[str, 
           "was pushed by Asta; look before you build or commit in it.", "task")
 
 
+async def _observed_cli(task_id: int, executor: str, prompt: str, **kwargs) -> str:
+    """Record every real worker invocation, including quota fallback attempts."""
+    from . import agent as agent_mod, worker_usage
+    sid = kwargs.get("session_id") or str(uuid.uuid4())
+    kwargs["session_id"] = sid
+    task = store.get_task(task_id) or {}
+    stage = store.kv_get(f"graph_leg:{task_id}") or task.get("kind", "worker")
+    model = kwargs.get("model") or agent_mod.tier_of("claude_cli" if executor == "claude" else "copilot")
+    cli = claude_cli if executor == "claude" else copilot_cli
+    with worker_usage.attempt(task_id, executor, kwargs.get("cwd") or str(ROOT), sid,
+                              stage=stage, model=model):
+        return await cli.one_shot(prompt, **kwargs)
+
+
 async def _code_leg(task_id: int, prompt: str, cwd: str, *,
                     resume: bool, effort: str, workspace: str | None = None) -> str:
     """One executor leg of a code task, pinned to the task's session so gates
@@ -2162,7 +2176,7 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
         routing.record(task_id, "plan" if plan_only else "implement", ex, choice)
     if ex == "claude":
         try:
-            out = await claude_cli.one_shot(
+            out = await _observed_cli(task_id, "claude",
                 prompt, cwd=cwd, timeout=code_timeout(workspace),
                 agent_file=reproduction_agent if reproducing else _agent_file("code", _pipeline_for(task_id)),
                 effort=effort, session_id=sid, resume=resume, on_progress=watcher,
@@ -2186,7 +2200,7 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
         # Copilot's --agent resolves a name from the workspace's own agent
         # directory. Asta owns the pipeline now, so the body rides in the
         # prompt instead and nothing is installed into the user's repo.
-        out = await copilot_cli.one_shot(
+        out = await _observed_cli(task_id, "copilot",
             prompt if reproduction.active(task_id) else _with_pipeline(pipeline, prompt),
             cwd=cwd, timeout=code_timeout(workspace),
             effort=effort, session_id=sid, resume=resume, on_progress=watcher,
@@ -2265,11 +2279,11 @@ async def _simple_leg(task_id: int, t: dict, prompt: str) -> str:
         effort = eff if brain == ex else _effort_for(t["kind"], brain)
         try:
             if brain == "claude":
-                result = await claude_cli.one_shot(prompt, cwd=cwd, timeout=tout,
+                result = await _observed_cli(task_id, "claude", prompt, cwd=cwd, timeout=tout,
                                                    agent_file=agent_file, effort=effort,
                                                    mcp_config=dev_cfg)
             else:
-                result = await copilot_cli.one_shot(_with_pipeline(pipeline, prompt),
+                result = await _observed_cli(task_id, "copilot", _with_pipeline(pipeline, prompt),
                                                     cwd=cwd, timeout=tout, effort=effort,
                                                     mcp_config=dev_cfg)
         except claude_cli.AuthenticationRequired as exc:

@@ -141,7 +141,7 @@ async def run(task_id: int, task: dict, leg) -> dict:
         'End with a fenced reproduction JSON object: '
         '{"status":"confirmed|not_reproduced|blocked","report":"relative/path/to/junit.xml",'
         '"command":"exact scoped command","expected":"expected behavior","actual":"observed behavior",'
-        '"reason":"if blocked"}. This evidence block is required in addition to the normal outcome.\n\n'
+        '"reason":"if blocked"}. This evidence block is the completion of this stage; do not produce a generic coding outcome.\n\n'
         + task['prompt'] + '\n\nLatest user instruction:\n' + state(task_id)['words'])
     since = time.time()
     token = ACTIVE.set(task_id)

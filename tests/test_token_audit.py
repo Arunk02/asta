@@ -130,3 +130,38 @@ def test_capability_message_when_no_sessions(monkeypatch):
     monkeypatch.setattr(ta, "recent_sessions", lambda *a, **k: [])
     out = agent.token_audit(12)
     assert "No worker sessions" in out and "12h" in out
+
+
+def test_usage_snapshots_count_each_provider_message_once(tmp_path):
+    def entry(mid, output):
+        return {'type': 'assistant', 'message': {'id': mid,
+            'usage': {'input_tokens': 2, 'cache_creation_input_tokens': 10,
+                      'cache_read_input_tokens': 50, 'output_tokens': output}, 'content': []}}
+    path = tmp_path / 'session.jsonl'
+    path.write_text('\n'.join(json.dumps(x) for x in [entry('m1', 3), entry('m1', 9), entry('m2', 4)]))
+    result = ta._parse_claude(path)
+    assert result['calls'] == 2
+    assert result['out_tokens'] == 13
+    assert result['new_tokens'] == 24
+    assert result['cache_read'] == 100
+
+
+def test_task_audit_finds_isolated_worktree_log_before_legacy_log(tmp_path, monkeypatch):
+    from app import store, tasks
+    task = store.create_task('pilot', 'code', 'fix', 'pilot')
+    store.kv_set(f"task_session:{task['id']}:claude", 'session-1')
+    projects = tmp_path / 'projects'
+    tree, legacy = tmp_path / 'worktree', tmp_path / 'workspace'
+    monkeypatch.setattr(ta, 'CLAUDE_PROJECTS', projects)
+    monkeypatch.setattr(tasks, 'task_cwd', lambda *a: str(tree))
+    monkeypatch.setattr(tasks, '_cwd', lambda *a: str(legacy))
+    paths=[]
+    for root in (tree, legacy):
+        path = projects / ta._encode_project(root) / 'session-1.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_text('{}\n')
+        paths.append(path)
+    assert ta._session_file(task['id']) == paths[0]
+    paths[0].unlink()
+    assert ta._session_file(task['id']) == paths[1]
+    assert ta._session_file(987654321) is None

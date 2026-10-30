@@ -52,7 +52,8 @@ def _norm() -> dict:
 def _parse_claude(path: Path) -> dict:
     r = _norm(); r["executor"] = "claude"
     turn = 0
-    for line in _lines(path):
+    usage_by_message = {}
+    for line_number, line in enumerate(_lines(path)):
         try:
             e = json.loads(line)
         except ValueError:
@@ -61,11 +62,14 @@ def _parse_claude(path: Path) -> dict:
         u = m.get("usage") or {}
         typ = e.get("type")
         if typ == "assistant" and u:
-            r["calls"] += 1
-            turn += 1
-            r["out_tokens"] += u.get("output_tokens", 0)
-            r["new_tokens"] += u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
-            r["cache_read"] += u.get("cache_read_input_tokens", 0)
+            # Claude emits several content records with the same provider
+            # message ID and usage snapshot. Later snapshots replace earlier
+            # ones; they are not additional billed calls. Old logs without an
+            # ID retain their per-record behavior instead of being collapsed.
+            key = ("message", m["id"]) if m.get("id") else ("line", line_number)
+            if key not in usage_by_message:
+                turn += 1
+            usage_by_message[key] = u
         for b in (m.get("content") or []):
             if not isinstance(b, dict):
                 continue
@@ -85,6 +89,11 @@ def _parse_claude(path: Path) -> dict:
                 tid = b.get("tool_use_id")
                 r["results"][tid] = len(txt)
                 r["result_turn"][tid] = turn
+    r["calls"] = len(usage_by_message)
+    for usage in usage_by_message.values():
+        r["out_tokens"] += usage.get("output_tokens", 0)
+        r["new_tokens"] += usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
+        r["cache_read"] += usage.get("cache_read_input_tokens", 0)
     return r
 
 
@@ -333,19 +342,32 @@ def context_tokens(cwd: str | Path, session_id: str) -> int:
 
 
 def _session_file(task_id: int) -> Path | None:
-    """Resolve the session log a finished worker task actually wrote."""
+    """Resolve the current worker session in its isolated checkout, then legacy cwd."""
     from . import tasks
+    task = store.get_task(task_id)
+    if not task:
+        return None
     for ex in ("claude", "copilot"):
         sid = store.kv_get(f"task_session:{task_id}:{ex}")
         if not sid:
             continue
         if ex == "copilot":
-            f = COPILOT_SESSIONS / sid / "events.jsonl"
+            candidates = [COPILOT_SESSIONS / sid / "events.jsonl"]
         else:
-            cwd = tasks._cwd(store.get_task(task_id).get("workspace"))
-            f = CLAUDE_PROJECTS / _encode_project(cwd) / f"{sid}.jsonl"
-        if f.is_file():
-            return f
+            roots = []
+            for resolve in (lambda: tasks.task_cwd(task_id, task.get("workspace")),
+                            lambda: tasks._cwd(task.get("workspace"))):
+                try:
+                    root = resolve()
+                except (ValueError, OSError):
+                    continue
+                if root not in roots:
+                    roots.append(root)
+            candidates = [CLAUDE_PROJECTS / _encode_project(root) / f"{sid}.jsonl"
+                          for root in roots]
+        for file in candidates:
+            if file.is_file():
+                return file
     return None
 
 

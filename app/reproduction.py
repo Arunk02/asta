@@ -151,9 +151,15 @@ async def run(task_id: int, task: dict, leg) -> dict:
     finally:
         ACTIVE.reset(token)
     try:
-        if production_snapshot(cwd) != before:
-            raise ValueError('Production files changed during reproduction; inspect the retained diff before continuing')
         result = evidence(text, cwd, since)
+        after = production_snapshot(cwd)
+        # A fresh JUnit artifact is evidence, not a new production file. Only
+        # exempt the exact validated report, and never an existing file.
+        report_path = result['report']
+        if report_path not in before:
+            after.pop(report_path, None)
+        if after != before:
+            raise ValueError('Production files changed during reproduction; inspect the retained diff before continuing')
     except (ValueError, OSError, ET.ParseError) as exc:
         result = {'status': 'blocked', 'reason': str(exc)}
     record = {**state(task_id), 'state': result['status'], 'evidence': result, 'at': time.time()}

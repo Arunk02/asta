@@ -256,3 +256,21 @@ def test_reproduction_does_not_inherit_old_plan_or_generic_done_contract(world, 
     monkeypatch.setattr(claude_cli, 'one_shot', brain)
     asyncio.run(runner._drive(t['id'], {'task_id': t['id']}))
     assert store.get_task(t['id'])['status'] == 'done'
+
+
+@pytest.mark.parametrize('existing,change_source', [(False, False), (True, False), (False, True)])
+def test_validated_new_report_is_evidence_not_a_production_edit(world, monkeypatch, existing, change_source):
+    t, root, _ = world
+    path = root / 'reports' / 'junit.xml'
+    path.parent.mkdir()
+    if existing:
+        path.write_text('<original-production-xml/>')
+    async def brain(prompt, **kw):
+        text = report(root)
+        path.write_bytes((root / 'target/report.xml').read_bytes())
+        if change_source:
+            (root / 'app.py').write_text('value = 99\n')
+        return text.replace('target/report.xml', 'reports/junit.xml')
+    monkeypatch.setattr(claude_cli, 'one_shot', brain)
+    asyncio.run(runner._drive(t['id'], {'task_id': t['id']}))
+    assert store.get_task(t['id'])['status'] == ('failed' if existing or change_source else 'done')

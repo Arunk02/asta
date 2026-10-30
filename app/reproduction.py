@@ -99,6 +99,20 @@ def evidence(text: str, cwd: str, since: float) -> dict:
         raise ValueError('Reproduction needs the test command, report, expected and actual behavior')
     root = Path(cwd).resolve()
     report = (root / row['report']).resolve()
+    if not report.exists() and not Path(row['report']).is_absolute():
+        # Workers run builds within one repo of a task's multi-repo checkout.
+        # Accept a repo-relative artifact only when exactly one repo matches.
+        matches = []
+        for repo in root.iterdir():
+            if not repo.is_dir() or not (repo / '.git').exists():
+                continue
+            candidate = (repo / row['report']).resolve()
+            if root in candidate.parents and repo.resolve() in candidate.parents and candidate.is_file():
+                matches.append(candidate)
+        if len(matches) > 1:
+            raise ValueError('Ambiguous test report; supply its task-relative or absolute path')
+        if matches:
+            report = matches[0]
     if root not in report.parents or not report.is_file():
         raise ValueError('Test report must be inside this task checkout')
     if report.stat().st_mtime < since or report.stat().st_size > 5_000_000:
@@ -141,7 +155,7 @@ async def run(task_id: int, task: dict, leg) -> dict:
         'End with a fenced reproduction JSON object: '
         '{"status":"confirmed|not_reproduced|blocked","report":"relative/path/to/junit.xml",'
         '"command":"exact scoped command","expected":"expected behavior","actual":"observed behavior",'
-        '"reason":"if blocked"}. This evidence block is required in addition to the normal outcome.\n\n'
+        '"reason":"if blocked"}. This evidence block is the completion of this stage; do not produce a generic coding outcome.\n\n'
         + task['prompt'] + '\n\nLatest user instruction:\n' + state(task_id)['words'])
     since = time.time()
     token = ACTIVE.set(task_id)
@@ -151,9 +165,15 @@ async def run(task_id: int, task: dict, leg) -> dict:
     finally:
         ACTIVE.reset(token)
     try:
-        if production_snapshot(cwd) != before:
-            raise ValueError('Production files changed during reproduction; inspect the retained diff before continuing')
         result = evidence(text, cwd, since)
+        after = production_snapshot(cwd)
+        # A fresh JUnit artifact is evidence, not a new production file. Only
+        # exempt the exact validated report, and never an existing file.
+        report_path = result['report']
+        if report_path not in before:
+            after.pop(report_path, None)
+        if after != before:
+            raise ValueError('Production files changed during reproduction; inspect the retained diff before continuing')
     except (ValueError, OSError, ET.ParseError) as exc:
         result = {'status': 'blocked', 'reason': str(exc)}
     record = {**state(task_id), 'state': result['status'], 'evidence': result, 'at': time.time()}

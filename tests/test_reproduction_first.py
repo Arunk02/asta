@@ -78,7 +78,9 @@ def test_not_reproduced_runs_writable_test_leg_without_plan_or_code_approval(wor
     async def brain(prompt, **kw):
         calls.append(kw)
         assert reproduction.active(t['id'])
-        assert kw['agent_file'] is None
+        assert Path(kw['agent_file']).name == 'reproduce.md'
+        assert 'After the reproduction test runs, STOP' in prompt
+        assert '[How this run ends]' not in prompt
         assert task_fence.MODE.get() == 'none'
         (root / 'tests').mkdir()
         (root / 'tests' / 'test_amend.py').write_text('def test_amend(): assert True\n')
@@ -239,3 +241,52 @@ def test_copilot_reproduction_omits_the_planning_pipeline(world, monkeypatch):
     monkeypatch.setattr(copilot_cli, 'one_shot', brain)
     asyncio.run(runner._drive(t['id'], {'task_id': t['id']}))
     assert store.get_task(t['id'])['status'] == 'done'
+
+
+def test_reproduction_does_not_inherit_old_plan_or_generic_done_contract(world, monkeypatch):
+    t, root, _ = world
+    store.kv_set(f"task_plan:{t['id']}", 'STALE PLAN: implement the entire solution now')
+    reproduction.request(t['id'], 'Reproduce first; if confirmed fix it and commit')
+    async def brain(prompt, **kw):
+        assert 'STALE PLAN' not in prompt
+        assert '[How this run ends]' not in prompt
+        assert 'Those are later stages controlled by Asta' in prompt
+        assert prompt.rstrip().endswith('Asta owns the transition from this evidence to planning and implementation.')
+        return report(root)
+    monkeypatch.setattr(claude_cli, 'one_shot', brain)
+    asyncio.run(runner._drive(t['id'], {'task_id': t['id']}))
+    assert store.get_task(t['id'])['status'] == 'done'
+
+
+@pytest.mark.parametrize('existing,change_source', [(False, False), (True, False), (False, True)])
+def test_validated_new_report_is_evidence_not_a_production_edit(world, monkeypatch, existing, change_source):
+    t, root, _ = world
+    path = root / 'reports' / 'junit.xml'
+    path.parent.mkdir()
+    if existing:
+        path.write_text('<original-production-xml/>')
+    async def brain(prompt, **kw):
+        text = report(root)
+        path.write_bytes((root / 'target/report.xml').read_bytes())
+        if change_source:
+            (root / 'app.py').write_text('value = 99\n')
+        return text.replace('target/report.xml', 'reports/junit.xml')
+    monkeypatch.setattr(claude_cli, 'one_shot', brain)
+    asyncio.run(runner._drive(t['id'], {'task_id': t['id']}))
+    assert store.get_task(t['id'])['status'] == ('failed' if existing or change_source else 'done')
+
+
+def test_repo_relative_report_resolves_only_when_unambiguous(tmp_path):
+    since = time.time() - 1
+    for name in ('one', 'two'):
+        repo = tmp_path / name
+        repo.mkdir()
+        (repo / '.git').mkdir()
+    text = report(tmp_path / 'one')
+    proof = reproduction.evidence(text, str(tmp_path), since)
+    assert proof['report'] == str(tmp_path / 'one/target/report.xml')
+    report(tmp_path / 'two')
+    with pytest.raises(ValueError, match='Ambiguous'):
+        reproduction.evidence(text, str(tmp_path), since)
+    explicit = text.replace('target/report.xml', 'one/target/report.xml')
+    assert reproduction.evidence(explicit, str(tmp_path), since)['tests'] == 1

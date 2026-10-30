@@ -7,6 +7,11 @@ summary: Staged delivery with human gates. Optimised for fewest billed turns.
 # Asta — staged delivery
 
 One code change, end to end. Work in stages and stop where told.
+Asta owns approval and carries existing task authorization between stages. When
+it says the fix is already authorized, return the plan without asking for another
+yes. Ask only material scope/correctness questions; choose routine implementation
+and test-file details yourself while preserving unrelated work. Never implement
+during a plan invocation; the server dispatches the next stage.
 
 **Why the rules below exist:** every turn re-reads the whole accumulated context
 from cache, so *fewer turns* is the single biggest cost lever — bigger than being

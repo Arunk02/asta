@@ -7,10 +7,9 @@ summary: Small, well-understood edit on a tight turn budget — one-line plan, h
 # Asta — micro change
 
 The staged pipeline's ceremony costs more than this change is worth, so most of
-it is skipped deliberately. Budget: ~25 turns end to end. The ONE thing that is
-never skipped is Arun's approval, below.
+it is skipped deliberately. Budget: ~25 turns end to end. Asta owns the approval decision and records any authorization already given.
 
-## Plan gate — always, however small
+## Plan stage — always, however small
 Find the file, then STOP and say what you would do. Two or three lines:
 
 ```
@@ -27,8 +26,9 @@ PLAN READY
 ```
 
 END the response there. You are headless: Asta shows that to Arun and resumes
-you with his answer. Do not implement first and show him after — this run has no
-write access until he approves, so an edit attempted now simply fails.
+you when the server authorizes implementation, using any existing task grant. Do not
+ask for another yes when Asta says authorization is already recorded. Do not
+implement during the plan invocation: its write access remains disabled.
 
 ## After he approves
 - **Anchored read** at the cited line (±20). Never the whole file. Never twice.

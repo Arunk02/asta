@@ -68,8 +68,10 @@ def test_both_clis_know_how_to_deny_writing():
 def test_the_micro_pipeline_now_carries_the_gate():
     from pathlib import Path
     body = Path("agents/micro.md").read_text()
-    assert "Plan gate" in body and "PLAN READY" in body
-    assert "write access until he approves" in " ".join(body.split())
+    assert "Plan stage" in body and "PLAN READY" in body
+    assert "when the server authorizes implementation" in " ".join(body.split())
+    assert "Do not ask for another yes" in " ".join(body.split())
+    assert "write access remains disabled" in " ".join(body.split())
 
 
 # --- and a code task cannot finish before he approves -------------------------

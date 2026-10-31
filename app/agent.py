@@ -2859,6 +2859,10 @@ def task_result(task_id: int) -> str:
         out += f"ERROR: {t['error']}\n"
     if t["result"]:
         out += f"\n{t['result'][:4000]}"
+    from . import worker_usage
+    usage = worker_usage.summary(task_id)
+    if usage:
+        out += "\n\n" + usage
     return out
 
 

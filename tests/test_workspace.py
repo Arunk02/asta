@@ -517,3 +517,30 @@ def test_undiffable_history_is_treated_as_drift(indexed_ws):
     stale, detail = asyncio.run(ws.drift("proj"))
     assert stale is True
     assert "could not diff" in detail
+
+
+def test_broad_context_route_does_not_imply_exact_owner(indexed_ws):
+    (indexed_ws / '.asta-context' / 'resolve-task.js').write_text(
+        'console.log(JSON.stringify({route:"broad_token", impacted_repos:["svc-a"], entry_files:{}, matches:[]}));')
+    ws.add('proj', indexed_ws)
+    out = asyncio.run(ws.resolve_context('proj', 'UnknownAmendActivity fails'))
+    assert 'Repository hint only' in out
+    assert 'Confirm the owner in the selected repository' in out
+
+
+def test_failed_resolver_is_not_presented_as_valid_routing(indexed_ws):
+    (indexed_ws / '.asta-context' / 'resolve-task.js').write_text(
+        'console.log(JSON.stringify({error:"missing_file"}));process.exit(2);')
+    ws.add('proj', indexed_ws)
+    out = asyncio.run(ws.resolve_context('proj', 'amend failure'))
+    assert 'Context routing failed (exit 2)' in out
+    assert 'not verified ownership' in out
+
+
+def test_exact_symbol_route_does_not_get_fallback_warning(indexed_ws):
+    (indexed_ws / '.asta-context' / 'resolve-task.js').write_text(
+        'console.log(JSON.stringify({route:"symbol", impacted_repos:["svc-a"], entry_files:{}}));')
+    ws.add('proj', indexed_ws)
+    out = asyncio.run(ws.resolve_context('proj', 'KnownActivity'))
+    assert 'Repository hint only' not in out
+    assert '"route":"symbol"' in out

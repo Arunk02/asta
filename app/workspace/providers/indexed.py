@@ -187,6 +187,20 @@ class IndexedProvider(ContextProvider):
         rc, out = await _run(["node", str(script), str(self.root), task],
                              self.root, _RESOLVE_TIMEOUT, self.ctx.name)
         body = out[:_RESOLVE_CHARS] or "(resolver returned nothing)"
+        # Repository fallback is useful navigation, but cannot establish the
+        # owner of a specific class or prove a debugging hypothesis.
+        if rc not in (0, 3):
+            body = (f"Context routing failed (exit {rc}); this is not verified ownership. "
+                    "Resolve the context error before relying on this route.\n" + body)
+        else:
+            try:
+                routing = json.loads(out)
+            except (ValueError, TypeError):
+                routing = {}
+            if isinstance(routing, dict) and routing.get("route") == "broad_token":
+                body = ("Repository hint only: broad-token fallback did not identify an exact owner. "
+                        "Confirm the owner in the selected repository using the named symbols and "
+                        "source evidence before diagnosing or editing.\n" + body)
         # The passages themselves — his documents and the repo summaries — not
         # only pointers to files: "what is Telikos Inland Booking?" was answered
         # "I have nothing on that" with both on disk (2 Oct).

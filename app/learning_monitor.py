@@ -93,6 +93,8 @@ async def recheck(name: str, evaluator, *, required_checks: tuple[str, ...] = ()
                         if (active.read_bytes() != body or latest.get(name) != entry
                                 or archive.read_bytes() != prior_body):
                             raise ValueError('lesson changed during monitoring')
+                        # Retain the rejected bytes for audit and later diagnosis.
+                        (archive.parent / f'{digest}.md').write_bytes(body)
                         with tempfile.NamedTemporaryFile(dir=active.parent, delete=False) as handle:
                             temporary = Path(handle.name)
                             handle.write(prior_body)

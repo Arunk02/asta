@@ -36,6 +36,7 @@ async def test_verified_regression_restores_exact_retested_predecessor():
     assert result['status'] == 'rolled_back'
     assert active.read_bytes() == original
     assert len(calls) == 2
+    assert (skills.SKILLS_DIR / '.history' / 'monitor-test' / f"{result['sha256']}.md").read_bytes() == calls[0]
     assert learn.stats()['monitor-test']['validated_sha256'] == hashlib.sha256(original).hexdigest()
     assert store.kv_get('learning_monitor:monitor-test:' + result['sha256'])
 

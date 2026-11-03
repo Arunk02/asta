@@ -300,7 +300,33 @@ ENRICH_BRIEF = (
     "cannot be found.\n"
     "- Do not commit; Asta commits what you changed.\n"
     "- End with a short report: per repo, the files you patched and one line each on why, "
-    "and the files reviewed with nothing to change.\n\n")
+    "and the files reviewed with nothing to change.\n"
+    "- This run is HEADLESS: nobody can answer a question. Never stop to ask. If a step "
+    "cannot be done, do everything else and say in the report what was skipped and why.\n\n")
+
+#: The index tools the contract names, in Asta's checkout — the run works inside the
+#: workspace, where they do not exist (3 Nov: it stopped to ask where they were).
+INDEX_TOOLS = Path(__file__).resolve().parent.parent / "skills" / "workspace-context" / "resources"
+
+
+def index_tools(root: Path, ctx_dir: str) -> str:
+    """The exact commands the contract means by "regenerate the indexes"."""
+    env = f"ASTA_CONTEXT_DIR={ctx_dir}"
+    steps = [f"{env} node {INDEX_TOOLS / name} {root} --write"
+             for name in ("generate-indexes.js", "generate-symbols.js", "reconcile-router.js")]
+    steps.append(f"{env} node {INDEX_TOOLS / 'validate-indexes.js'} {root}")
+    return ("INDEX TOOLS — after editing, run these from the workspace root, in this order "
+            "(they are Asta's, outside this workspace; never copy them in):\n"
+            + "\n".join(f"  {s}" for s in steps)
+            + f"\nThen verify each added class routes: node {root / ctx_dir / 'resolve-task.js'} "
+              f"{root} \"<ClassName>\"\n\n")
+
+
+def _contract() -> str:
+    """The enrichment contract without its maintainer header (how to regenerate the
+    file itself), which a worker read as an instruction to run a missing script."""
+    text = ENRICH_CONTRACT.read_text()
+    return re.sub(r"\A\s*<!--.*?-->\s*", "", text, flags=re.S)
 
 
 def coverage_brief(coverage) -> str:
@@ -351,7 +377,7 @@ async def enrich(workspace: str, detail: str = "") -> str:
     cov_before = {c["repo"]: c for c in coverage_gap(workspace)}
     prompt = (ENRICH_BRIEF.format(workspace=workspace, context_dir=ctx_dir,
                                   detail=(detail or "(run the drift check)")[:3000])
-              + coverage_brief(cov_before.values()) + ENRICH_CONTRACT.read_text())
+              + coverage_brief(cov_before.values()) + index_tools(root, ctx_dir) + _contract())
     token = task_fence.MODE.set("none")      # nothing outward: no push, no PR, no posts
     try:
         report = await claude_cli.one_shot(prompt, cwd=str(root), timeout=ENRICH_TIMEOUT,

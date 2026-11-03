@@ -47,6 +47,9 @@ def test_the_symbols_command_runs_as_written(tmp_path):
     env_part, cmd = line.split(" ", 1)
     key, value = env_part.split("=", 1)
     argv = [a for a in shlex.split(cmd) if a != "--write"]          # dry run: writes nothing
-    out = subprocess.run(argv, capture_output=True, text=True, env={key: value, "PATH": "/usr/bin:/bin:/opt/homebrew/bin"})
+    assert argv[0] == "node"
+    argv[0] = shutil.which("node")                                   # wherever this machine keeps it
+    import os
+    out = subprocess.run(argv, capture_output=True, text=True, env={**os.environ, key: value})
     assert out.returncode == 0, out.stderr
     assert not (ctx / "_symbols.json").exists()

@@ -19,6 +19,12 @@ from app import attention, chat_watch, delivery, refresh, store, tasks
 
 # --- the context map the agent is told to trust ------------------------------------
 
+@pytest.fixture(autouse=True)
+def _no_real_workspace_coverage(monkeypatch):
+    """trust_note also reports entry-point coverage; these tests are about
+    staleness, and must never read the real workspace on this machine."""
+    monkeypatch.setattr(refresh, "coverage_gap", lambda w: [])
+
 def test_the_gap_is_counted_in_commits_not_days(monkeypatch, tmp_path):
     """Days measure how long nobody ran a script. Commits measure how much the
     agent does not know: booking-service was stamped against 6ee7d83b while

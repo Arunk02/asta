@@ -170,6 +170,86 @@ def context_gap(workspace: str) -> list[dict]:
     return sorted(out, key=lambda r: r["behind"], reverse=True)
 
 
+# --- coverage: entry points the map does not know -------------------------------------
+#
+# Staleness counts commits; it cannot see a class no mini-skill ever declared.
+# 31 Oct, booking: 21 of 29 Temporal activity classes were in no mini-skill's
+# `entities`, so the symbol index (generated from those) could not route an
+# exact-name query to them — the amend activity a real task needed fell back to
+# general booking context. Re-indexing cannot fix that; enrichment has to add them.
+
+#: Where a debugging or coding task usually starts, by path or by annotation.
+_ENTRY_PATHS = (("temporal activity", re.compile(r"/temporal/activit(?:y|ies)/[^/]+Impl\.(?:java|kt)$")),
+                ("temporal workflow", re.compile(r"/temporal/workflows?/[^/]+Impl\.(?:java|kt)$")))
+_ENTRY_ANNOTATIONS = (("kafka listener", "@KafkaListener"), ("rest controller", "@RestController"))
+#: A repo with at least this many unmapped entry points is called out.
+COVERAGE_MIN_MISSING = 3
+_coverage_cache: dict[tuple, dict] = {}
+
+
+def _declared(ctx: Path) -> set[str]:
+    names: set[str] = set()
+    try:
+        gi = json.loads((ctx / "_global_index.json").read_text())
+        for f in (gi if isinstance(gi, list) else gi.get("files") or []):
+            names.update(e for e in (f.get("entities") or []) if isinstance(e, str))
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        names.update((json.loads((ctx / "_symbols.json").read_text()).get("symbols") or {}).keys())
+    except (OSError, ValueError, AttributeError):
+        pass
+    return names
+
+
+def _entry_points(repo: Path) -> dict[str, str]:
+    """Main-source entry-point classes in a repo: name -> kind. Tracked files only."""
+    found: dict[str, str] = {}
+    for path in _git(repo, "ls-files", "*.java", "*.kt").splitlines():
+        if "/src/test/" in path:
+            continue
+        for kind, rx in _ENTRY_PATHS:
+            if rx.search("/" + path):
+                found[Path(path).stem] = kind
+    for kind, mark in _ENTRY_ANNOTATIONS:
+        for path in _git(repo, "grep", "-l", "-F", mark, "--", "*.java", "*.kt").splitlines():
+            if "/src/test/" not in path:
+                found.setdefault(Path(path).stem, kind)
+    return found
+
+
+def coverage_gap(workspace: str) -> list[dict]:
+    """Per repo: entry-point classes in the source that no mini-skill declares.
+
+    `[{repo, total, mapped, missing: [names], kinds: {name: kind}}]`, worst first.
+    Cached per repo HEAD and index file, so a code task's trust note costs nothing
+    when nothing changed."""
+    from . import worktrees as _wt
+    from .workspace.providers.indexed import context_dirname
+    ws = ws_mod.get(workspace)
+    if ws is None or not ws.exists():
+        return []
+    ctx = ws.path / context_dirname(ws.path)
+    try:
+        stamp = (ctx / "_global_index.json").stat().st_mtime
+    except OSError:
+        stamp = 0.0
+    declared = None
+    out = []
+    for repo in _wt.repos_in(ws.path):
+        key = (str(repo), _git(repo, "rev-parse", "HEAD").strip(), stamp)
+        if key not in _coverage_cache:
+            declared = _declared(ctx) if declared is None else declared
+            entries = _entry_points(repo)
+            missing = sorted(n for n in entries if n not in declared)
+            _coverage_cache[key] = {"repo": repo.name, "total": len(entries),
+                                    "mapped": len(entries) - len(missing), "missing": missing,
+                                    "kinds": {n: entries[n] for n in missing}}
+        if _coverage_cache[key]["total"]:
+            out.append(dict(_coverage_cache[key]))
+    return sorted(out, key=lambda r: len(r["missing"]), reverse=True)
+
+
 def trust_note(workspace: str, min_behind: int = 0) -> str:
     """What a code task must be told before it trusts the context map, or "".
 
@@ -181,12 +261,19 @@ def trust_note(workspace: str, min_behind: int = 0) -> str:
     min_behind = min_behind or STALE_BEHIND
     bad = [r for r in context_gap(workspace)
            if r["behind"] < 0 or r["behind"] >= min_behind]
-    if not bad:
+    try:
+        thin = [c for c in coverage_gap(workspace) if len(c["missing"]) >= COVERAGE_MIN_MISSING]
+    except Exception:                                          # noqa: BLE001
+        thin = []
+    if not bad and not thin:
         return ""
     lines = []
     for r in bad:
         how = "never verified" if r["behind"] < 0 else f"{r['behind']} commits behind"
         lines.append(f"  - {r['repo']}: context {how}")
+    for c in thin:
+        lines.append(f"  - {c['repo']}: {len(c['missing'])} of {c['total']} entry points are in "
+                     f"no mini-skill (e.g. {', '.join(c['missing'][:4])})")
     return ("\n\n[CONTEXT TRUST — read this before believing the resolver]\n"
             + "\n".join(lines) +
             "\nFor these repos the map describes older code. Use it to find WHERE to "
@@ -214,6 +301,23 @@ ENRICH_BRIEF = (
     "- Do not commit; Asta commits what you changed.\n"
     "- End with a short report: per repo, the files you patched and one line each on why, "
     "and the files reviewed with nothing to change.\n\n")
+
+
+def coverage_brief(coverage) -> str:
+    """The part of the refresh brief that asks for the unmapped classes, or ""."""
+    rows = [c for c in coverage if c["missing"]]
+    if not rows:
+        return ""
+    lines = []
+    for c in rows:
+        names = ", ".join(f"{n} ({c['kinds'].get(n, 'entry point')})" for n in c["missing"][:40])
+        more = f" and {len(c['missing']) - 40} more" if len(c["missing"]) > 40 else ""
+        lines.append(f"- {c['repo']} ({c['mapped']}/{c['total']} mapped): {names}{more}")
+    return ("COVERAGE — these classes exist in the source but no mini-skill declares them, so "
+            "an exact-name query cannot find them. Read each one, then add it to the "
+            "`entities` of the mini-skill that owns its flow (or a new mini-skill if none "
+            "does), with a source-backed line on what it does, and regenerate the indexes "
+            "as the contract below says:\n" + "\n".join(lines) + "\n\n")
 
 
 async def _porcelain(root: Path) -> set[str]:
@@ -244,9 +348,10 @@ async def enrich(workspace: str, detail: str = "") -> str:
             _stale, detail = await ws_mod.drift(workspace)
     before = await _porcelain(root)
     gap_before = {r["repo"]: r for r in context_gap(workspace)}
+    cov_before = {c["repo"]: c for c in coverage_gap(workspace)}
     prompt = (ENRICH_BRIEF.format(workspace=workspace, context_dir=ctx_dir,
                                   detail=(detail or "(run the drift check)")[:3000])
-              + ENRICH_CONTRACT.read_text())
+              + coverage_brief(cov_before.values()) + ENRICH_CONTRACT.read_text())
     token = task_fence.MODE.set("none")      # nothing outward: no push, no PR, no posts
     try:
         report = await claude_cli.one_shot(prompt, cwd=str(root), timeout=ENRICH_TIMEOUT,
@@ -272,6 +377,12 @@ async def enrich(workspace: str, detail: str = "") -> str:
         repos.append({"repo": name, "verified_before": b.get("verified", ""),
                       "verified_after": a.get("verified", ""),
                       "behind_before": b.get("behind", -1), "behind_after": a.get("behind", -1)})
+    _coverage_cache.clear()                          # the index files just changed
+    cov_after = {c["repo"]: c for c in coverage_gap(workspace)}
+    coverage = {name: {"before": f"{cov_before[name]['mapped']}/{cov_before[name]['total']}",
+                       "after": (f"{cov_after[name]['mapped']}/{cov_after[name]['total']}"
+                                 if name in cov_after else "?")}
+                for name in cov_before}
     stale_before = [r for r in repos if r["behind_before"] < 0 or r["behind_before"] >= STALE_BEHIND]
     moved = [r for r in repos if r["verified_after"] and r["verified_after"] != r["verified_before"]]
     still = [r for r in stale_before if r not in moved]
@@ -280,7 +391,7 @@ async def enrich(workspace: str, detail: str = "") -> str:
         note_enriched(workspace)
     store.kv_set(f"context_provenance:{workspace}", json.dumps({
         "at": time.time(), "fresh": fresh, "context_dir": ctx_dir, "files": ours,
-        "committed": committed, "repos": repos}))
+        "committed": committed, "repos": repos, "coverage": coverage}))
     lines = [f"🗂 {workspace} context refreshed — {len(ours)} file(s) updated"
              + (f", {committed}" if committed else "")]
     for r in moved:
@@ -295,6 +406,9 @@ async def enrich(workspace: str, detail: str = "") -> str:
     elif still:
         lines.append("Not re-verified this run: " + ", ".join(
             f"{r['repo']} ({_behind(r['behind_after'])})" for r in still))
+    for name, c in coverage.items():
+        if c["before"] != c["after"]:
+            lines.append(f"🧭 {name}: entry points mapped {c['before']} → {c['after']}")
     if elsewhere:
         lines.append(f"⚠️ Files outside {ctx_dir}/ changed during the run and were left "
                      f"as they are: {', '.join(elsewhere[:8])}")

@@ -202,9 +202,45 @@ def _declared(ctx: Path) -> set[str]:
     return names
 
 
+_TEMPORAL_MARKS = (("temporal activity", "@ActivityInterface"),
+                   ("temporal workflow", "@WorkflowInterface"))
+
+
+def _main_hits(repo: Path, *args: str) -> list[str]:
+    return [p for p in _git(repo, *args).splitlines() if p and "/src/test/" not in p]
+
+
+def _temporal_impls(repo: Path) -> dict[str, tuple[str, str]]:
+    """Classes implementing a Temporal-annotated interface: name -> (kind, interface).
+
+    By annotation, not folder: the activityplan service keeps its activities in
+    `…/activity/` with no `temporal/` segment, and a path rule found 1 of ~37."""
+    out: dict[str, tuple[str, str]] = {}
+    for kind, mark in _TEMPORAL_MARKS:
+        ifaces = {Path(p).stem for p in _main_hits(repo, "grep", "-l", "-F", mark, "--", "*.java", "*.kt")}
+        if not ifaces:
+            continue
+        # git's -E is POSIX and has no \b: let git find candidates, Python decide.
+        rx = re.compile(r"(?:implements|:)[^{]*\b(" + "|".join(sorted(map(re.escape, ifaces)))
+                        + r")\b")
+        for path in _main_hits(repo, "grep", "-l", "-E", "implements|class .*:", "--", "*.java", "*.kt"):
+            name = Path(path).stem
+            if name in ifaces:
+                continue
+            text = ""
+            with contextlib.suppress(OSError):
+                text = (repo / path).read_text(errors="replace")
+            hit = rx.search(text)
+            if hit:
+                out[name] = (kind, hit.group(1))
+    return out
+
+
 def _entry_points(repo: Path) -> dict[str, str]:
     """Main-source entry-point classes in a repo: name -> kind. Tracked files only."""
     found: dict[str, str] = {}
+    for name, (kind, _iface) in _temporal_impls(repo).items():
+        found[name] = kind
     for path in _git(repo, "ls-files", "*.java", "*.kt").splitlines():
         if "/src/test/" in path:
             continue
@@ -241,7 +277,9 @@ def coverage_gap(workspace: str) -> list[dict]:
         if key not in _coverage_cache:
             declared = _declared(ctx) if declared is None else declared
             entries = _entry_points(repo)
-            missing = sorted(n for n in entries if n not in declared)
+            ifaces = {n: i for n, (_k, i) in _temporal_impls(repo).items() if i}
+            missing = sorted(n for n in entries
+                             if n not in declared and ifaces.get(n, "\0") not in declared)
             _coverage_cache[key] = {"repo": repo.name, "total": len(entries),
                                     "mapped": len(entries) - len(missing), "missing": missing,
                                     "kinds": {n: entries[n] for n in missing}}

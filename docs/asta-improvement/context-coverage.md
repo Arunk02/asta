@@ -6,7 +6,7 @@ On 31 October in the booking workspace, 21 of 29 Temporal activity classes were 
 
 `refresh.coverage_gap(workspace)` lists, per repo, the main-source entry points no mini-skill declares:
 
-- Temporal activity and workflow implementations, found by path.
+- Temporal activity and workflow implementations: any main-source class implementing an `@ActivityInterface` / `@WorkflowInterface` interface, wherever it lives, plus the `temporal/activity` path rule. A class counts as mapped if a mini-skill declares it or the interface it implements.
 - `@KafkaListener` and `@RestController` classes, found by annotation.
 
 It uses tracked files only, ignores tests, and is cached per repo HEAD and index file.
@@ -16,6 +16,6 @@ It uses tracked files only, ignores tests, and is cached per repo HEAD and index
 
 Limits:
 
-- Detection is by path and annotation, so a repo with another layout reports fewer entry points.
+- Listeners and controllers are found by annotation, and Temporal classes by their interfaces. Other kinds of entry point aren't counted.
 - This finds and asks for coverage; it doesn't write mini-skills itself.
 - The booking refresh that would actually add them has not been run. It edits his workspace and uses model quota, so it waits for his go.

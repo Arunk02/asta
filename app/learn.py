@@ -529,6 +529,14 @@ async def daily_pass() -> str:
     except Exception:
         pass
     try:
+        # Candidates were quarantined with nothing ever checking them; this does.
+        from . import lesson_eval
+        checked = await lesson_eval.run_daily()
+        if checked:
+            parts.append(checked)
+    except Exception:
+        pass
+    try:
         dropped = prune()
         if dropped:
             parts.append(f"dropped {len(dropped)} that weren't earning it "

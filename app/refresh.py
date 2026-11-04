@@ -210,6 +210,9 @@ def _main_hits(repo: Path, *args: str) -> list[str]:
     return [p for p in _git(repo, *args).splitlines() if p and "/src/test/" not in p]
 
 
+_COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+
+
 def _temporal_impls(repo: Path) -> dict[str, tuple[str, str]]:
     """Classes implementing a Temporal-annotated interface: name -> (kind, interface).
 
@@ -230,7 +233,8 @@ def _temporal_impls(repo: Path) -> dict[str, tuple[str, str]]:
             text = ""
             with contextlib.suppress(OSError):
                 text = (repo / path).read_text(errors="replace")
-            hit = rx.search(text)
+            # A class commented out whole is dead code, not an entry point to map.
+            hit = rx.search(_COMMENTS.sub(" ", text))
             if hit:
                 out[name] = (kind, hit.group(1))
     return out

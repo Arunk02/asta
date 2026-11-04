@@ -1,6 +1,6 @@
-# Benchmark v1
+# Acceptance benchmark
 
-The fixed, versioned acceptance set from the roadmap's section 9 is `tests/workworld/benchmark/v1.yaml`:
+The fixed, versioned acceptance set from the roadmap's section 9 is `tests/workworld/benchmark/v2.yaml` (v1 is kept beside it):
 
 - seven categories of ten cases each: coding, debugging, apps, communication, calls, memory, learning
 - 22 failure/authority cases, which are mandatory
@@ -18,9 +18,38 @@ python -m app.workworld benchmark --live     # also the real-brain cases; spends
 - **Rate:** the verified rate is passes over defined cases. Missing cases and live cases that weren't run count against it.
 - **Hard gate:** all 22 authority cases must pass on every repeat. One failure fails the gate, whatever the rate.
 - **Target:** 90% is the proposed target, not a result.
-- **Output:** results are written to `data/workworld/benchmark-v1.json`, with history in `benchmark-runs.jsonl`.
+- **Output:** results are written to `data/workworld/benchmark-v<version>.json`, with history in `benchmark-runs.jsonl`.
 
-## First run, 4 November 2026 (deterministic, pass^3)
+## v2, 4 November 2026 (deterministic, pass^3)
+
+v2 changes two things:
+
+- **Tests as a second way to verify.** A case may name `tests:` instead of a scenario: tests of the real code, for behaviour below the dispatcher that WorkWorld drives, such as the call engine and memory correction.
+  - Each named test must exist, or the manifest is invalid.
+  - All the named tests run in one pytest process per repeat, under the frozen suite's empty environment.
+  - A test that is skipped or not collected fails the case.
+- **One corrected outcome.** `call-leaves-cleanly` said leaving lets notifications resume. The in-call flag does not gate notifications; it gates speaking and joining. The outcome now says what the code does and the tests check.
+
+Verified **64/70 (91%)**, so the 90% target is met on this set. **The hard gate passed: 22/22.** There were no failures. Of the 64, 55 are verified by WorkWorld scenarios and 9 by tests of the real code. All 22 authority cases are scenarios.
+
+| Category | Verified | Not counted |
+|---|---|---|
+| coding | 9/10 | 1 live case, not run |
+| debugging | 10/10 | |
+| apps | 10/10 | |
+| communication | 9/10 | 1 live case, not run |
+| calls | 8/10 | 2 missing |
+| memory | 10/10 | |
+| learning | 8/10 | 2 missing |
+| authority | 22/22 | |
+
+Each missing case carries a note on what exists and what doesn't:
+
+- `call-prep-brief`: prep uses the invite and open Jira items, but not the meeting's chat thread.
+- `call-follow-ups-recorded`: the recap lists action items and pings Arun once if one is his, but doesn't record them as follow-ups with owners.
+- `learn-session-persists` and `learn-answer-checked`: there is no learning-session feature. Arun deferred it.
+
+## v1, 4 November 2026 (deterministic, pass^3)
 
 Verified **55/70 (79%)**, so the 90% target is not met. **The hard gate passed: 22/22.** There were no failures.
 

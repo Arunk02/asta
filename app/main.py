@@ -1310,6 +1310,54 @@ async def api_responder_unmute(request: Request):
     return {"ok": True, "detail": agent_mod.resume_investigating(b.get("kind", ""))}
 
 
+@app.get("/api/study", dependencies=[Depends(require_auth)])
+def api_study_sessions():
+    from . import study
+    return {"sessions": study.sessions()}
+
+
+@app.post("/api/study", dependencies=[Depends(require_auth)])
+async def api_study_start(request: Request):
+    from . import study
+    b = await request.json()
+    try:
+        return {"ok": True, "session": study.start(b.get("topic", ""), b.get("objectives") or [])}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/study/{session_id}", dependencies=[Depends(require_auth)])
+def api_study_progress(session_id: int):
+    from . import study
+    try:
+        return study.progress(session_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/study/{session_id}/exercises", dependencies=[Depends(require_auth)])
+async def api_study_exercise(session_id: int, request: Request):
+    from . import study
+    b = await request.json()
+    try:
+        return {"ok": True, "exercise": study.add_exercise(
+            session_id, int(b.get("objective") or 0), b.get("question", ""),
+            b.get("answer_terms") or [], b.get("workspace", ""), b.get("source_path", ""))}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/study/{session_id}/exercises/{exercise_id}/answer",
+          dependencies=[Depends(require_auth)])
+async def api_study_answer(session_id: int, exercise_id: int, request: Request):
+    from . import study
+    b = await request.json()
+    try:
+        return {"ok": True, "attempt": study.answer(session_id, exercise_id, b.get("answer", ""))}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.get("/api/followups", dependencies=[Depends(require_auth)])
 def api_followups():
     return {"open": followup.list_open()}

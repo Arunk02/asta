@@ -2982,6 +2982,68 @@ def resume_investigating(kind: str) -> str:
     return responder.unmute((kind or "").strip().lower())
 
 
+def study_start(topic: str, objectives: list[str]) -> str:
+    """Start a learning session he asked for: a topic and what he wants to be able to do.
+    It persists across restarts. Write exercises next with study_exercise."""
+    from . import study
+    try:
+        s = study.start(topic, objectives)
+    except ValueError as exc:
+        return str(exc)
+    goals = "\n".join(f"  {n}. {o}" for n, o in enumerate(s["objectives"], 1))
+    return f"Learning session #{s['id']}: {s['topic']}\n{goals}"
+
+
+def study_exercise(session_id: int, objective: int, question: str, answer_terms: list[str],
+                   workspace: str, source_path: str) -> str:
+    """Add an exercise for one objective, written from a file in a workspace. answer_terms
+    are the words a right answer must contain; every one must appear in that file, or the
+    exercise is refused. Ask him the question; grade his reply with study_answer."""
+    from . import study
+    try:
+        ex = study.add_exercise(session_id, objective, question, answer_terms, workspace, source_path)
+    except ValueError as exc:
+        return f"Not added: {exc}"
+    return f"Exercise #{ex['id']} (objective {ex['objective']}, from {ex['source']}): {ex['question']}"
+
+
+def study_answer(session_id: int, exercise_id: int, answer: str) -> str:
+    """Grade his answer to a learning exercise against its source as it reads now, and record it.
+    Says passed, failed (with what was missing) or unverifiable (the source changed)."""
+    from . import study
+    try:
+        a = study.answer(session_id, exercise_id, answer)
+    except ValueError as exc:
+        return str(exc)
+    if a["result"] == "passed":
+        line = "Correct, and it matches the source."
+    elif a["result"] == "failed":
+        line = "Not yet. Missing: " + ", ".join(a["missing"])
+    else:
+        line = "Can't check it: " + a["why"]
+    p = study.progress(session_id)
+    met = sum(o["met"] for o in p["objectives"])
+    return f"{line} Objectives met {met}/{len(p['objectives'])}" + (
+        " — session complete." if p["status"] == "complete" else ".")
+
+
+def study_status(session_id: int = 0) -> str:
+    """His learning sessions, or one session's objectives and what he has passed."""
+    from . import study
+    if not session_id:
+        rows = study.sessions()
+        return "\n".join(f"#{r['id']} {r['topic']} ({r['status']})" for r in rows) or \
+            "No learning sessions yet."
+    try:
+        p = study.progress(session_id)
+    except ValueError as exc:
+        return str(exc)
+    lines = [f"#{p['id']} {p['topic']} ({p['status']}), {p['attempts']} answer(s) checked"]
+    lines += [f"  {'✓' if o['met'] else '·'} {o['objective']} — {o['passed']}/{o['exercises']} "
+              "exercises passed" for o in p["objectives"]]
+    return "\n".join(lines)
+
+
 def list_tracked() -> str:
     """What Asta is still following through on."""
     from . import followup

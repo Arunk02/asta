@@ -1232,6 +1232,18 @@ async def api_meeting_recap(body: dict):
         (body or {}).get("transcript", ""), (body or {}).get("title", ""))}
 
 
+@app.get("/api/meeting-actions", dependencies=[Depends(require_auth)])
+def api_meeting_actions(owner: str = ""):
+    from . import meeting_actions
+    return {"open": meeting_actions.list_open(owner)}
+
+
+@app.post("/api/meeting-actions/{item_id}/done", dependencies=[Depends(require_auth)])
+def api_meeting_action_done(item_id: int):
+    from . import agent as agent_mod
+    return {"ok": True, "detail": agent_mod.meeting_action_done(item_id)}
+
+
 @app.get("/api/teams-draft", dependencies=[Depends(require_auth)])
 async def api_teams_draft(chat: str, question: str = ""):
     from . import agent as agent_mod

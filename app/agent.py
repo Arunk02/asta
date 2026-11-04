@@ -1711,7 +1711,8 @@ def quality_report(days: int = 7) -> str:
 
 def trace_report(limit: int = 15) -> str:
     """Your own performance/token telemetry: per-model latency + token totals (7d) and the
-    last N turns (model, ms, tokens in/out/cached, prompt sizes, tools, errors). Use when
+    last N turns (model, ms, tokens in/out/cached, prompt sizes, tools, errors), plus the
+    background one-shot calls of the last 24h by purpose. Use when
     Arun asks why something was slow/expensive, or to find token waste."""
     from . import store
     lines = ["PER-MODEL (last 7 days):"]
@@ -1729,6 +1730,9 @@ def trace_report(limit: int = 15) -> str:
             f"  [{t['model']}/{t['channel']}] {t['total_ms']}ms,{ft} "
             f"tok {t['input_tokens']}/{t['output_tokens']}/{t['cached_tokens']}, "
             f"instr {t['instructions_chars']}ch prompt {t['prompt_chars']}ch{tools}{err}")
+    # Background calls (memory, the reader, reviews, refresh) never appear above.
+    from . import call_ledger
+    lines.append("\n" + call_ledger.summary(24))
     return "\n".join(lines)
 
 

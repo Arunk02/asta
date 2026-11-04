@@ -87,7 +87,8 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent_file: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
                    on_progress=None, mcp_config: str = "", plan_only: bool = False,
-                   model: str = "", tools_off: bool = False) -> str:
+                   model: str = "", tools_off: bool = False,
+                   purpose: str = "") -> str:
     """Headless claude run with the same contract as copilot_cli.one_shot.
 
     agent_file — a .github/agents/*.agent.md whose CONTENT becomes the appended
@@ -107,6 +108,22 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     if limited:
         raise RuntimeError("claude usage limit — not called; resets "
                            + time.strftime("%H:%M", time.localtime(limited)))
+    from . import agent as agent_mod, call_ledger
+    if call_ledger.inside_worker():  # worker_usage.attempt already measures this leg
+        return await _one_shot(prompt, cwd, timeout, agent_file, effort, session_id, resume,
+                               on_progress, mcp_config, plan_only, model, tools_off)
+    # A named session is the only way to find this run's own log afterwards.
+    session_id = session_id or str(uuid.uuid4())
+    with call_ledger.call("claude", cwd or str(ROOT), session_id,
+                          purpose=purpose or call_ledger.caller(),
+                          model=model or agent_mod.tier_of("claude_cli")):
+        return await _one_shot(prompt, cwd, timeout, agent_file, effort, session_id, resume,
+                               on_progress, mcp_config, plan_only, model, tools_off)
+
+
+async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str, effort: str,
+                    session_id: str, resume: bool, on_progress, mcp_config: str,
+                    plan_only: bool, model: str, tools_off: bool) -> str:
     # Same stamp the chat turn gets, from the same function — see
     # copilot_cli.now_line for the Monday this is here to stop repeating.
     from . import copilot_cli

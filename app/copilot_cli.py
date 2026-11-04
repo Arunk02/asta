@@ -271,11 +271,15 @@ def _tasks_named(text: str) -> str:
             + "\n".join(lines)) if lines else ""
 
 
-def _teams_with(who: str, n: int = 12) -> str:
-    """The last messages of his 1:1 with this person, both sides, oldest first."""
+def _teams_with(who: str, n: int = 12, *, days: float = 3, lead: str = "") -> str:
+    """The last messages of his 1:1 with this person, both sides, oldest first.
+
+    `who` is a chat's name, so a meeting's own chat (named after the meeting) is
+    read the same way. `lead` replaces the heading for a reader that is not
+    continuing the conversation, such as meeting prep."""
     import time as _t
     from . import chat_watch, store
-    rows = store.teams_messages(chat=who, since=_t.time() - 3 * 86400, limit=4000)
+    rows = store.teams_messages(chat=who, since=_t.time() - days * 86400, limit=4000)
     rows = [r for r in rows if (r.get("chat") or "").strip().lower() == who.strip().lower()]
     lines, seen = [], set()
     for r in rows:
@@ -289,8 +293,8 @@ def _teams_with(who: str, n: int = 12) -> str:
         lines.append(f"{when} {sender}: {text}")
     if not lines:
         return ""
-    return (f"His Teams chat with {who} — the last messages, as they were written "
-            f"(this is the conversation; continue from it):\n" + "\n".join(lines[-n:]))
+    return ((lead or f"His Teams chat with {who} — the last messages, as they were written "
+                     f"(this is the conversation; continue from it):") + "\n" + "\n".join(lines[-n:]))
 
 
 def _his_prs(hours: float = 96) -> str:

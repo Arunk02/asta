@@ -368,7 +368,11 @@ _TABLE: tuple[Capability, ...] = (
     Capability("meeting_recap", "outlook",
                http='POST /api/meeting-recap {"transcript":"…","title":"…"}',
                note="Summarizes a call/meeting transcript (from Teams' own recording/recap) "
-                    "into decisions + action items + open questions; pings Arun if an item is his."),
+                    "into decisions + action items + open questions; records each item with "
+                    "its owner and tells Arun his own once."),
+    Capability("meeting_actions", "meeting_actions", http="GET /api/meeting-actions?owner=…"),
+    Capability("meeting_action_done", "meeting_actions", http="POST /api/meeting-actions/{id}/done",
+               note="Only when he says the item is done. Nothing is sent to anyone."),
     # --- the work engine -----------------------------------------------------
     Capability("delegate_task", "tasks",
                http='POST /api/tasks {"title":"…","prompt":"full SELF-CONTAINED '
@@ -581,7 +585,7 @@ SIDE_READS = frozenset({
     "jira_search", "jira_my_issues", "jira_issue", "jira_sprint",
     "teams_activity", "teams_read_chat", "teams_search", "teams_history",
     "teams_unread", "teams_resolve", "voice_check", "meeting_notes",
-    "outlook_mail", "outlook_meetings", "meeting_prep", "meeting_recap",
+    "outlook_mail", "outlook_meetings", "meeting_prep", "meeting_recap", "meeting_actions",
     "debug_stack_health", "check_teams_selectors", "answer_quality",
     "list_background_tasks", "task_result", "list_tracked", "task_pr_status", "study_status",
     "task_ci_report",

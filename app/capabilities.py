@@ -370,8 +370,8 @@ _TABLE: tuple[Capability, ...] = (
                note="Summarizes a call/meeting transcript (from Teams' own recording/recap) "
                     "into decisions + action items + open questions; records each item with "
                     "its owner and tells Arun his own once."),
-    Capability("meeting_actions", "outlook", http="GET /api/meeting-actions?owner=…"),
-    Capability("meeting_action_done", "outlook", http="POST /api/meeting-actions/{id}/done",
+    Capability("meeting_actions", "meeting_actions", http="GET /api/meeting-actions?owner=…"),
+    Capability("meeting_action_done", "meeting_actions", http="POST /api/meeting-actions/{id}/done",
                note="Only when he says the item is done. Nothing is sent to anyone."),
     # --- the work engine -----------------------------------------------------
     Capability("delegate_task", "tasks",

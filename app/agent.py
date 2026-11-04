@@ -3247,7 +3247,7 @@ NO_PREP = ""
 
 async def meeting_prep(title: str = "") -> str:
     """Draft prep for a meeting or 1:1 from today's calendar, the meeting's recent Teams
-    thread (its own chat, else the organiser's) + your open work: talking
+    thread (its own chat, or failing that the organiser's) + your open work: talking
     points, questions to ask, and watch-outs. `title` matches a meeting by name; empty =
     the next meeting you have to speak in. Best-effort, local-model-first (cheap). This
     only DRAFTS — stage it with prepare_to_send if you want it sent to anyone."""

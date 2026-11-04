@@ -24,6 +24,10 @@ def ws(tmp_path, monkeypatch):
         f"{PKG}/flow/PlanWorkflow.java": "@WorkflowInterface\npublic interface PlanWorkflow {}",
         f"{PKG}/flow/PlanFlowRunner.java": "public class PlanFlowRunner implements PlanWorkflow {}",
         f"{PKG}/util/Helper.java": "public class Helper implements Runnable {}",
+        # Dead code: the whole class is commented out, so it is not an entry point.
+        f"{PKG}/activity/DeadActivityImpl.java":
+            "// public class DeadActivityImpl implements AmendActivity {}\n"
+            "/*\npublic class DeadActivityImpl implements AmendActivity {\n}\n*/",
         "workflow/src/test/java/com/acme/plan/FakeAmend.java": "class FakeAmend implements AmendActivity {}",
     }
     for rel, text in files.items():
@@ -65,3 +69,8 @@ def test_interfaces_tests_and_unrelated_classes_are_not_entry_points(ws):
     cov, = refresh.coverage_gap("x")
     for name in ("AmendActivity", "PlanWorkflow", "FakeAmend", "Helper"):
         assert name not in cov["missing"]
+
+
+def test_a_class_commented_out_whole_is_not_an_entry_point(ws):
+    assert "DeadActivityImpl" not in refresh._temporal_impls(ws / "plan-service")
+    assert "AmendActivityImpl" in refresh._temporal_impls(ws / "plan-service")

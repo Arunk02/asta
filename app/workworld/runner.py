@@ -139,7 +139,8 @@ def report(summary: dict) -> str:
 def main(argv: list[str]) -> int:
     import argparse
     ap = argparse.ArgumentParser(prog="python -m app.workworld")
-    ap.add_argument("command", choices=["run", "twin", "day", "baseline", "replays"])
+    ap.add_argument("command", choices=["run", "twin", "day", "baseline", "replays", "benchmark"])
+    ap.add_argument("--repeats", type=int, default=0, help="benchmark: runs per case (default: the manifest's)")
     ap.add_argument("--set", action="append", dest="sets")
     ap.add_argument("--k", type=int, default=1)
     ap.add_argument("--live", action="store_true")
@@ -156,6 +157,9 @@ def main(argv: list[str]) -> int:
         import os
         os.environ["ASTA_GRAPH"] = "1" if args.engine == "graph" else ""
 
+    if args.command == "benchmark":
+        from . import benchmark
+        return benchmark.main(live=args.live, repeats=args.repeats or None, save_it=not args.no_save)
     if args.command == "twin":
         from . import twin
         print(json.dumps(twin.build_profile(), indent=1))

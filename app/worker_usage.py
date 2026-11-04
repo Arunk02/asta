@@ -6,13 +6,19 @@ not a price calculator or proof that a finished task was independently verified.
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import glob
 import json
 import time
 import uuid
+from pathlib import Path
 
 from . import store, token_audit
 
 _FIELDS = ('calls', 'new_tokens', 'cache_read', 'out_tokens')
+
+#: True inside an attempt, so call_ledger does not record the same call twice.
+ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar('worker_attempt', default=False)
 
 
 def _snapshot(executor: str, cwd: str, session_id: str) -> dict | None:
@@ -21,12 +27,27 @@ def _snapshot(executor: str, cwd: str, session_id: str) -> dict | None:
         return None
     path = token_audit.CLAUDE_PROJECTS / token_audit._encode_project(cwd) / f'{session_id}.jsonl'
     if not path.is_file():
-        return dict.fromkeys(_FIELDS, 0)
+        # The CLI names the project after the cwd it resolved (a symlinked /tmp
+        # becomes /private/tmp); a session id is unique, so find it by name.
+        found = glob.glob(str(token_audit.CLAUDE_PROJECTS / '*' / f'{glob.escape(session_id)}.jsonl'))
+        if not found:
+            return dict.fromkeys(_FIELDS, 0)
+        path = Path(found[0])
     try:
         parsed = token_audit._parse_claude(path)
         return {field: parsed[field] for field in _FIELDS}
     except (OSError, ValueError, TypeError):
         return None
+
+
+def _delta(before: dict | None, after: dict | None) -> tuple[dict | None, str]:
+    """Cumulative session counters before/after one invocation, as (usage, state)."""
+    if before is None or after is None or after['calls'] <= before['calls']:
+        return None, 'unavailable'
+    delta = {field: after[field] - before[field] for field in _FIELDS}
+    if all(value >= 0 for value in delta.values()):
+        return delta, 'provider_reported'
+    return None, 'counter_reset'
 
 
 @contextlib.contextmanager
@@ -42,6 +63,7 @@ def attempt(task_id: int, executor: str, cwd: str, session_id: str, *,
            'started_at': time.time(), 'finished_at': None,
            'status': 'running', 'usage': None, 'usage_state': 'pending'}
     store.kv_set(key, json.dumps(row))
+    token = ACTIVE.set(True)
     try:
         yield run_id
     except BaseException as exc:
@@ -51,16 +73,10 @@ def attempt(task_id: int, executor: str, cwd: str, session_id: str, *,
     else:
         row['status'] = 'returned'
     finally:
+        ACTIVE.reset(token)
         after = _snapshot(executor, cwd, session_id)
         row['finished_at'] = time.time()
-        row['usage_state'] = 'unavailable'
-        if before is not None and after is not None and after['calls'] > before['calls']:
-            delta = {field: after[field] - before[field] for field in _FIELDS}
-            if all(value >= 0 for value in delta.values()):
-                row['usage'] = delta
-                row['usage_state'] = 'provider_reported'
-            else:
-                row['usage_state'] = 'counter_reset'
+        row['usage'], row['usage_state'] = _delta(before, after)
         store.kv_set(key, json.dumps(row))
 
 

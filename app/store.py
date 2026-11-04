@@ -344,6 +344,26 @@ CREATE TABLE IF NOT EXISTS conv_episodes (
     closed_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_conv_episodes ON conv_episodes(counterpart, closed_at);
+CREATE TABLE IF NOT EXISTS call_usage (
+    -- One headless model call outside a task worker (app/call_ledger.py). Usage
+    -- columns stay NULL unless the executor's own session log reported them.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL UNIQUE,
+    purpose TEXT NOT NULL,
+    executor TEXT NOT NULL,
+    model TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running',
+    error_type TEXT NOT NULL DEFAULT '',
+    usage_state TEXT NOT NULL DEFAULT 'pending',
+    calls INTEGER,
+    new_tokens INTEGER,
+    cache_read INTEGER,
+    out_tokens INTEGER,
+    started_at REAL NOT NULL,
+    finished_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_call_usage_started ON call_usage(started_at);
 CREATE TABLE IF NOT EXISTS result_cache (
     -- What was already found out, so the same question is not investigated
     -- twice (app/results_cache.py). The answer itself lives on the task row.
@@ -664,6 +684,41 @@ def add_trace(conv_id: str, model: str, channel: str, first_token_ms: int | None
         )
         conn.execute(  # keep the table bounded
             "DELETE FROM traces WHERE id NOT IN (SELECT id FROM traces ORDER BY id DESC LIMIT 500)")
+
+
+# --- call usage ---------------------------------------------------------------
+
+#: Rows kept; the newest win. A sweep of the reader is dozens of calls.
+CALL_USAGE_KEEP = 5000
+
+
+def add_call_usage(run_id: str, *, purpose: str, executor: str, model: str,
+                   session_id: str = "") -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO call_usage (run_id, purpose, executor, model, session_id, started_at) "
+            "VALUES (?,?,?,?,?,?)", (run_id, purpose, executor, model, session_id, time.time()))
+        conn.execute(
+            "DELETE FROM call_usage WHERE id NOT IN "
+            "(SELECT id FROM call_usage ORDER BY id DESC LIMIT ?)", (CALL_USAGE_KEEP,))
+
+
+def finish_call_usage(run_id: str, *, status: str, error_type: str, usage_state: str,
+                      usage: dict | None) -> None:
+    u = usage or {}
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE call_usage SET status=?, error_type=?, usage_state=?, calls=?, new_tokens=?, "
+            "cache_read=?, out_tokens=?, finished_at=? WHERE run_id=?",
+            (status, error_type, usage_state, u.get("calls"), u.get("new_tokens"),
+             u.get("cache_read"), u.get("out_tokens"), time.time(), run_id))
+
+
+def call_usage_since(cutoff: float) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM call_usage WHERE started_at > ? ORDER BY id",
+                            (cutoff,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 def list_traces(limit: int = 50) -> list[dict]:

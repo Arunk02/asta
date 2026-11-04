@@ -1025,7 +1025,8 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    agent: str = "", effort: str = "",
                    session_id: str = "", resume: bool = False,
                    on_progress=None, mcp_config: str = "", plan_only: bool = False,
-                   model: str = "") -> str:
+                   model: str = "",
+                   purpose: str = "") -> str:
     """Headless one-off prompt.
 
     agent      — a workspace .github/agents/*.agent.md pipeline (e.g.
@@ -1039,6 +1040,21 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     """
     if not available():
         raise RuntimeError("Copilot CLI is not installed/authenticated")
+    from . import call_ledger
+    if call_ledger.inside_worker():  # worker_usage.attempt already records this leg
+        return await _one_shot(prompt, cwd, timeout, agent, effort, session_id, resume,
+                               on_progress, mcp_config, plan_only, model)
+    # Counted as a call; Copilot's log does not establish complete usage, so the
+    # row says unavailable rather than zero.
+    with call_ledger.call("copilot", cwd or str(ROOT), session_id,
+                          purpose=purpose or call_ledger.caller(), model=model):
+        return await _one_shot(prompt, cwd, timeout, agent, effort, session_id, resume,
+                               on_progress, mcp_config, plan_only, model)
+
+
+async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent: str, effort: str,
+                    session_id: str, resume: bool, on_progress, mcp_config: str,
+                    plan_only: bool, model: str) -> str:
     # A background brain is the one nobody is watching, and it was the only one
     # not told the date. See now_line.
     prompt = f"{now_line()}\n{prompt}"

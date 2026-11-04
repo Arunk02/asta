@@ -1,4 +1,4 @@
-"""python -m app.workworld run|baseline|twin|day — see runner.main."""
+"""python -m app.workworld run|baseline|twin|day|replays|benchmark — see runner.main."""
 
 from __future__ import annotations
 

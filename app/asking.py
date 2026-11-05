@@ -150,13 +150,13 @@ def _repo_words() -> set[str]:
     """The distinctive words of every repo in his workspaces: `booking` for
     telikos-booking-service. Read each call: the set is small and changes."""
     from pathlib import Path
-    words: set[str] = {"ap"}
+    words: set[str] = set()
     try:
         from . import workspace_tools, worktrees
         for root in workspace_tools.WORKSPACES.values():
             for repo in worktrees.repos_in(Path(root)):
-                words.update(w for w in re.split(r"[-_.]", repo.name.lower())
-                             if len(w) > 1 and w not in ("telikos", "service", "services", "maersk"))
+                # The same names the checkout matcher uses — one definition.
+                words |= {w for w in worktrees._names(repo.name) if len(w) > 1}
     except Exception:                                   # noqa: BLE001
         pass
     return words

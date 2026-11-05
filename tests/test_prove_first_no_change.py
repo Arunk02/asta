@@ -65,3 +65,11 @@ def test_a_question_too_long_for_the_phone_starts_at_its_first_word():
     out = tasks._phone_text(para, 300)
     assert out.startswith("Live check of the order") and out.endswith("…")
     assert len(out) <= 300
+
+
+def test_a_brief_naming_ap_prepares_the_activity_plan_repo(tmp_path):
+    from app import worktrees
+    for name in ("telikos-booking-service", "telikos-activityplanworkflow-service"):
+        (tmp_path / name / ".git").mkdir(parents=True)
+    picked = {p.name for p in worktrees.repos_for(tmp_path, "Fix the date dropped from AP's payload")}
+    assert picked == {"telikos-activityplanworkflow-service"}

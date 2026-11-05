@@ -4986,7 +4986,10 @@ async def check_pr(task_id: int) -> str | None:
     news, and saying so every five minutes is how a useful watcher gets muted.
     """
     t = store.get_task(task_id)
-    if not t or t["status"] not in SHIPPED_STATUSES:
+    if not t:
+        return None
+    parked = parked_on_pr(t)
+    if t["status"] not in SHIPPED_STATUSES and not parked:
         return None
     links = _pr_links(t)
     if not links:
@@ -4998,6 +5001,7 @@ async def check_pr(task_id: int) -> str | None:
     states = {url: await _pr_state(url) for url in links}
     if all(pr and (pr.get('state') == 'MERGED' or pr.get('mergedAt')) for pr in states.values()):
         store.update_task(task_id, status="merged", pr_state="MERGED", finished_at=time.time())
+        _drop_proposal(task_id)
         store.record_outcome("ship", "merged", subject=str(task_id), detail=' '.join(links))
         from . import task_inform
         told = await task_inform.reached(task_id, "merged")
@@ -5012,12 +5016,30 @@ async def check_pr(task_id: int) -> str | None:
         if pr.get("state") == "CLOSED":
             store.update_task(task_id, status="pr_closed", pr_state="CLOSED",
                               finished_at=time.time())
+            _drop_proposal(task_id)
             store.record_outcome("ship", "closed_unmerged", subject=str(task_id), detail=url)
             return (f"🚫 PR closed without merging — #{task_id} {title}\n{url}\n"
                     f"Reply with what should change and I'll pick the task back up.")
 
         decision = (pr.get("reviewDecision") or "").upper()
         checks = _checks_verdict(pr)
+        if parked:
+            # Watched, not driven: no re-run, no new fix round, no merge, and his
+            # gate stays as it is — unless the PR made the waiting plan moot.
+            now_state = f"{checks}/{decision or 'NONE'}"
+            if now_state == was:
+                continue
+            store.update_task(task_id, pr_state=now_state)
+            store.kv_set(f"pr_told:{url}", now_state)
+            if checks == "green":
+                _drop_proposal(task_id)
+                store.update_task(task_id, status="shipped")
+                return (f"✅ CI green on {prname.from_url(url)} (#{task_id} {title})\n{url}\n"
+                        f"The fix plan that was waiting on you is not needed now — dropped it. "
+                        f"Still watching until it merges.")
+            return (f"🔔 {prname.from_url(url)} (#{task_id} {title}) is now {checks}"
+                    + (f", review {decision.lower().replace('_', ' ')}" if decision else "")
+                    + f"\n{url}\nThe fix plan is still waiting on you.")
         from . import go
         if checks == 'green' and go.merges(task_id):
             result = await _merge_as_asked(task_id, url, t)
@@ -5157,10 +5179,26 @@ async def _merge_as_asked(task_id: int, url: str, task: dict) -> str | None:
     return f"🔀 Task #{task_id}: {result} — under your saved merge instruction.\n{url}"
 
 
+def parked_on_pr(t: dict) -> bool:
+    """A shipped task waiting on his yes to a follow-up change, its PR still open.
+
+    5 Nov, #521: the CI-fix proposal moved the task to awaiting_approval, which is
+    not a shipped status, so its PR stopped being watched at 12:13 while it sat
+    red — and "does Asta monitor it?" had the answer no.
+    """
+    return (t.get("status") == "awaiting_approval" and bool(t.get("pr_urls"))
+            and store.kv_get(f"task_gate:{t['id']}") == "change")
+
+
+def _drop_proposal(task_id: int) -> None:
+    store.kv_del(f"task_proposal:{task_id}")
+    store.kv_del(f"task_gate:{task_id}")
+
+
 def open_prs() -> list[int]:
     """Task ids whose PR is open and still being watched."""
     return [t["id"] for t in store.list_tasks(limit=200)
-            if t["status"] in SHIPPED_STATUSES]
+            if t["status"] in SHIPPED_STATUSES or parked_on_pr(t)]
 
 
 async def pr_watch_loop() -> None:
@@ -5424,6 +5462,16 @@ async def reject(task_id: int, why: str = "") -> str:
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
+    if t["status"] == "awaiting_approval" and store.kv_get(f"task_gate:{task_id}") == "change":
+        # A no to the follow-up plan, not to the work: the task, its branch and
+        # its PR stay as they were, and the PR is still watched. Rejecting the
+        # whole task here ended the watch on a PR he was waiting on.
+        raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
+        store.update_task(task_id, status=raw.get("status") or "shipped")
+        _drop_proposal(task_id)
+        store.record_outcome("task", "proposal declined", subject=str(task_id), detail=why[:300])
+        return (f"Task #{task_id}: dropped the proposed change — nothing was changed, and its "
+                f"PR is still watched. Say *cancel {task_id}* to stop the task itself.")
     store.record_outcome("task", "rejected", subject=str(task_id), detail=why[:300])
     killed = await cancel(task_id, status="rejected", why=why)
     if not killed:

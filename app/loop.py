@@ -192,7 +192,14 @@ def _kv(op: str, cid: str, value: str = ""):
 DRAFT_FRESH_SECONDS = 2 * 3600
 
 
-async def stale_draft(staged: dict, now: float | None = None) -> str:
+def staged_at(cid: str) -> float:
+    try:
+        return float(_kv("get", f"at:{cid}") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def stale_draft(staged: dict, cid: str = "", now: float | None = None) -> str:
     """Why this Teams draft must not go on the yes just given, or "" when it may.
 
     5 Nov: a reply drafted for a colleague at 12:06 went out at 14:54 on a "go
@@ -201,7 +208,7 @@ async def stale_draft(staged: dict, now: float | None = None) -> str:
     import contextlib
     if (staged.get("channel") or "").strip().lower() != "teams" or not staged.get("to"):
         return ""
-    at = float(staged.get("_at") or 0)
+    at = float(staged.get("_at") or 0) or (staged_at(cid) if cid else 0.0)
     if not at:
         return ""
     now = time.time() if now is None else now
@@ -224,9 +231,9 @@ def stage(cid: str, intent: dict) -> None:
     the moment it is staged and a new process finds it waiting.
     """
     if cid:
-        # When it was drafted, so a yes hours later is checked against a chat
-        # that may have moved on (main._stale_draft). Kept when already set.
-        intent = {"_at": time.time(), **intent}
+        # When it was drafted, kept beside the draft rather than in it, so a yes
+        # hours later is checked against a chat that may have moved on.
+        _kv("set", f"at:{cid}", str(time.time()))
         _awaiting[cid] = intent
         _kv("set", cid, json.dumps(intent))
         _remember_version(cid, intent)

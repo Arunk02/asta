@@ -3582,7 +3582,7 @@ async def _run_op(op: dict, cid: str, sink, channel: str,
     brain then re-made it from memory — into Shabda's 1:1 instead of the group,
     and "already sent" when nothing had gone (1 Oct)."""
     if staged and op.get("name") == "teams_send":
-        why = await loop.stale_draft(staged)
+        why = await loop.stale_draft(staged, cid)
         if why:
             # His yes is to what is in front of him now. 5 Nov: a reply drafted
             # for Vinish at 12:06 went out at 14:54 on a "go ahead" meant for a

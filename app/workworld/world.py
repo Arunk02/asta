@@ -295,11 +295,13 @@ class World:
 
     def use_clock(self, start: float) -> Clock:
         """Run the sandbox on a simulated clock (see Clock)."""
-        from app import (attention, delivery, digest, instructions, notify, outlook, policy,
-                         quiet, reminders)
+        from app import (attention, delivery, digest, instructions, loop, notify, outlook,
+                         policy, quiet, reminders)
         self.clock = Clock(start)
+        # loop too: a staged draft's age runs from loop.stage to his yes
+        # (loop.stale_draft), and loop reads time.time() for both ends.
         for mod in (notify, delivery, attention, digest, quiet, outlook, reminders, policy,
-                    instructions):
+                    instructions, loop):
             if hasattr(mod, "time"):
                 self._patch.set(mod, "time", self.clock)
         return self.clock

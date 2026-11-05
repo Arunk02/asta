@@ -1,8 +1,8 @@
 # Acceptance benchmark
 
-The fixed, versioned acceptance set from the roadmap's section 9 is `tests/workworld/benchmark/v2.yaml` (v1 is kept beside it):
+The fixed, versioned acceptance set from the roadmap's section 9 is `tests/workworld/benchmark/v3.yaml` (v1 and v2 are kept beside it):
 
-- seven categories of ten cases each: coding, debugging, apps, communication, calls, memory, learning
+- eight categories of ten cases each: coding, debugging, apps, communication, calls, memory, learning, and (from v3) case
 - 22 failure/authority cases, which are mandatory
 
 Every case states its outcome before it runs. A case maps to a WorkWorld scenario, whose checks make that outcome executable. A case with no scenario yet is `scenario: null` and is reported as **missing**, never as passed. A change to what a case means is a new version of the file, so runs of different versions are never compared.
@@ -19,6 +19,37 @@ python -m app.workworld benchmark --live     # also the real-brain cases; spends
 - **Hard gate:** all 22 authority cases must pass on every repeat. One failure fails the gate, whatever the rate.
 - **Target:** 90% is the proposed target, not a result.
 - **Output:** results are written to `data/workworld/benchmark-v<version>.json`, with history in `benchmark-runs.jsonl`.
+
+## v3, 5 November 2026 (deterministic, pass^3)
+
+v3 keeps v2 and adds a `case` category. On 5 November one colleague's case got six answers that contradicted each other, while v2 scored debugging 10/10. Every v2 debugging case checks one turn. The `case` cases check one case across turns and lanes:
+
+- a side turn's answer reaches the main conversation and the main brain
+- a reply cut at the CLI ceiling is kept
+- an answer to a question whose turn died reaches the brain with the question
+- a repo, environment or PR he named is not asked back
+- an approved reply hands that person's case over for their follow-ups
+- a follow-up's brief carries earlier findings and what was already said
+- a zero-hit log search is not presented as absence
+- a prove-first code task that finds no defect ends done with its proof
+- a yes hours later doesn't send an old draft
+- a contradicting finding raises a correction draft (**missing**)
+
+Verified **77/80 (96%)**. **The hard gate passed: 22/22.** There were no failures.
+
+| Category | Verified | Not counted |
+|---|---|---|
+| coding | 9/10 | 1 live case, not run |
+| debugging | 10/10 | |
+| apps | 10/10 | |
+| communication | 9/10 | 1 live case, not run |
+| calls | 10/10 | |
+| memory | 10/10 | |
+| learning | 10/10 | |
+| case | 9/10 | 1 missing |
+| authority | 22/22 | |
+
+`case-correction-raised` is missing. The brief asks for "Corrects:" and a correction reply when evidence contradicts what was said. Nothing yet raises a correction draft by itself when a later task overturns a sent reply.
 
 ## v2, 4 November 2026 (deterministic, pass^3)
 

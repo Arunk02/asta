@@ -307,6 +307,28 @@ def test_continue_working_works_across_the_mcp_hop(client):
     asyncio.run(go())
 
 
+def test_ask_user_reads_his_words_across_the_mcp_hop(client, monkeypatch):
+    """ask_user refuses a choice he already made — which needs HIS conversation,
+    so it has to arrive with the turn's conv_id like the others (5 Nov)."""
+    from app import asking, store
+    conv = store.create_conversation("claude_cli", None)
+    store.add_ui_message(conv["id"], "user", "replicate the fix in prod", {})
+
+    async def never(*a, **k):
+        raise AssertionError("asked him to choose an environment he named")
+    monkeypatch.setattr(asking, "ask", never)
+
+    async def go():
+        async with client as c:
+            r = await c.post("/api/_invoke", json={
+                "tool": "ask_user",
+                "args": {"question": "Fix it in prod, or in uat?"},
+                "conv_id": conv["id"]})
+            assert r.status_code == 200
+            assert r.json()["result"].startswith("Not asked")
+    asyncio.run(go())
+
+
 def test_a_send_really_is_staged_for_that_conversation(client):
     """Not just "no error" — the draft has to land where he will be asked about it.
     A staged send nobody is shown is the same outcome as the failure."""

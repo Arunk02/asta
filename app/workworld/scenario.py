@@ -881,6 +881,25 @@ def _check_health(arg, world, state):
     return ""
 
 
+def _check_task_result(arg, world, state):
+    """What a task concluded, from its stored result — every `contains` pattern
+    present and no `lacks` pattern, case-insensitive regex. The push carries
+    only a cut of it; the result is what was concluded."""
+    from app import store
+    tid = _task_id(arg.get("task", "last"), state)
+    text = (store.get_task(tid) or {}).get("result") or ""
+    want = arg.get("contains") or []
+    for n in [want] if isinstance(want, str) else want:
+        if not re.search(n, text, re.I | re.S):
+            return f"task #{tid}'s result lacks {n!r} — {text[-200:]!r}"
+    nope = arg.get("lacks") or []
+    for n in [nope] if isinstance(nope, str) else nope:
+        m = re.search(n, text, re.I | re.S)
+        if m:
+            return f"task #{tid}'s result contains {n!r}: {text[max(0, m.start() - 80):m.end() + 80]!r}"
+    return ""
+
+
 def _check_reply_max(arg, world, state):
     longest = max((len(r.get("text", "")) for r in world.replies), default=0)
     if longest > int(arg):
@@ -898,6 +917,7 @@ CHECKS = {
     "brain_prompt_contains": _contains("brain", True),
     "brain_prompt_lacks": _contains("brain", False),
     "task_status": _check_task_status,
+    "task_result": _check_task_result,
     "tasks": _check_tasks,
     "push_count": _check_push_count,
     "no_send": _check_no_send,

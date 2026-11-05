@@ -175,8 +175,17 @@ def _switch_recap(conv: dict, via: str) -> str:
     why = ("your previous session was retired to keep its context small — this is "
            "the same conversation continuing" if rotated
            else "you're continuing it after a model switch")
-    return (f"Conversation so far ({why} — pick up where it left off, don't restart):\n"
-            + "\n".join(lines))
+    recap = (f"Conversation so far ({why} — pick up where it left off, don't restart):\n"
+             + "\n".join(lines))
+    # Six lines are not a case. 5 Nov: the session was retired at 133k tokens in
+    # the middle of one, and the fresh session asked him to choose what the old
+    # one had told him minutes before.
+    from . import responder
+    for chat in responder.handed_chats()[:2]:
+        held = responder.case_so_far(chat, chat)
+        if held:
+            recap += f"\n\nOpen case — {chat}:{held[:1500]}"
+    return recap
 
 
 def now_line(now: float | None = None) -> str:

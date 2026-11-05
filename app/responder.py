@@ -521,7 +521,44 @@ def note_handed(chat: str, now: float | None = None) -> None:
     ask to a task himself."""
     if (chat or "").strip():
         store.kv_set(f"case_handed:{chat.strip().lower()[:60]}",
-                     str(time.time() if now is None else now))
+                     json.dumps({"at": time.time() if now is None else now,
+                                 "chat": chat.strip()}))
+
+
+def _handed(raw: str) -> tuple[float, str]:
+    """(when, chat) from a hand-over row; early rows held only the time."""
+    try:
+        row = json.loads(raw or "0")
+    except ValueError:
+        return 0.0, ""
+    if isinstance(row, dict):
+        return float(row.get("at") or 0), str(row.get("chat") or "")
+    return float(row or 0), ""
+
+
+def handed_chats(now: float | None = None) -> list[str]:
+    """Chats whose case he has handed over and is still open, newest first."""
+    now = time.time() if now is None else now
+    live = [_handed(v) for v in store.kv_like("case_handed:%").values()]
+    return [chat for at, chat in sorted(live, reverse=True)
+            if chat and now - at <= CASE_HANDED_SECONDS]
+
+
+def case_for_text(text: str, now: float | None = None) -> tuple[str, str]:
+    """(chat, what the case holds) when `text` names someone whose case is open —
+    by their first name, as he writes it ("what about Vinish's one?")."""
+    for chat in named_handed(text, now):
+        held = case_so_far(chat, chat, now)
+        if held:
+            return chat, held
+    return "", ""
+
+
+def named_handed(text: str, now: float | None = None) -> list[str]:
+    """Open handed-over chats whose person `text` names by first name."""
+    words = set(re.findall(r"[a-z]+", (text or "").lower()))
+    return [chat for chat in handed_chats(now)
+            if len(chat.split()[0]) > 2 and chat.split()[0].lower() in words]
 
 
 def handed_rider(chat: str, now: float | None = None) -> str:
@@ -533,7 +570,7 @@ def handed_rider(chat: str, now: float | None = None) -> str:
     unless I hand one over") and stopped to ask him. A hand-over is of the case,
     not of one message.
     """
-    at = float(store.kv_get(f"case_handed:{(chat or '').strip().lower()[:60]}") or 0)
+    at, _ = _handed(store.kv_get(f"case_handed:{(chat or '').strip().lower()[:60]}") or "")
     now = time.time() if now is None else now
     if not at or now - at > CASE_HANDED_SECONDS:
         return ""

@@ -153,6 +153,22 @@ _DO_VERB = re.compile(
     r"remove|change|move|rerun|re-run|trigger|analy[sz]e|clarify|decide|assign)\b", re.I)
 
 
+#: The analysis's own words for a claim it has not proved.
+_UNPROVEN = re.compile(
+    r"\bhypothes[ie]s\b|\bunconfirmed\b|\bnot\s+(?:yet\s+)?(?:confirmed|verified|proven)\b|"
+    r"\bmost\s+likely\b|\bprobably\b|\bcould\s+not\s+(?:confirm|verify)\b", re.I)
+
+
+def unconfirmed(analysis: str) -> str:
+    """Why a reply resting on this analysis is not proven, or "".
+
+    5 Nov: "dropped in AP's payload builder" went to a colleague on an analysis
+    whose own reasoning said "most likely". The analysis says when it is
+    guessing; the draft must say so too, and never go out on its own."""
+    m = _UNPROVEN.search(analysis or "")
+    return f"the analysis calls part of this unconfirmed (“{m.group(0)}”)" if m else ""
+
+
 def render(who: str, need: str, analysis: str, reply: str, note: str = "",
            lead: str = "") -> str:
     """Exactly what he needs to decide, said the way a colleague would say it.
@@ -183,6 +199,9 @@ def render(who: str, need: str, analysis: str, reply: str, note: str = "",
     parts = [(lead or head) + (f" {note}" if note else "")]
     if analysis:
         parts.append(analysis)
+    basis = unconfirmed(analysis)
+    if basis:
+        parts.append(f"⚠️ Basis: {basis} — check it before this goes.")
     quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in reply.splitlines())
     parts.append(f"Here's what I'd send {first}:\n{quoted}")
     parts.append("Shall I send it? Or tell me what to change.")
@@ -301,7 +320,9 @@ async def _deliver_automatic_reply(intent: dict) -> bool:
         store.record_outcome("answer", "auto reply held", subject=target[:80],
                              detail="they corrected an earlier answer in this thread")
         return False
-    why = unfit_to_send(intent.get("what", ""))
+    why = unfit_to_send(intent.get("what", "")) or unconfirmed(intent.get("analysis", "")) \
+        or ("it corrects what was said earlier — that is his to send"
+            if "corrects:" in (intent.get("analysis") or "").lower() else "")
     if why:
         store.record_outcome("answer", "auto reply held", subject=target[:80],
                              detail=why)
@@ -839,6 +860,29 @@ async def present_task_draft(task_id: int, t: dict, *, answered: bool = False) -
         return True
     await _show(cid, intent)
     return True
+
+
+async def offer_correction(task_id: int, t: dict, result: str) -> bool:
+    """A finished task that overturns what someone was told: one correction draft.
+
+    5 Nov: a code task proved the colleague had been told the wrong service, and
+    the finding went to a task card. Nothing put a correction in front of him.
+    Only a task naming a person whose case is open, and only when its analysis
+    says `Corrects:` — the brief's own word for it. True when offered."""
+    from . import responder
+    analysis, reply = split(result or "")
+    if "corrects:" not in (analysis or result or "").lower():
+        return False
+    named = responder.named_handed(f"{t.get('title') or ''}\n{(t.get('prompt') or '')[:1500]}")
+    if not named:
+        return False
+    chat = named[0]
+    line = next((ln.strip() for ln in (analysis or result).splitlines()
+                 if ln.strip().lower().startswith("corrects:")), "")
+    return await present(who=chat, need="a correction to what they were told", chat=chat,
+                         group=False, analysis=analysis or line, reply=reply or line,
+                         task_id=task_id,
+                         lead=f"*{chat}* was told something task #{task_id} has since overturned.")
 
 
 async def present_task(task_id: int, t: dict, result: str) -> bool:

@@ -5378,6 +5378,9 @@ def _apply_proposal(task_id: int) -> tuple[str, str]:
             raw.get("status") or "done")
 
 
+_BARE_FIX = re.compile(r"^\s*(?:pls|please)?\s*fix(?:\s+(?:it|this|that|task))?\s*#?\s*\d*\s*[.!]*\s*$", re.I)
+
+
 async def refine(task_id: int, feedback: str, *, code_change: bool = False,
                  approved_plan: bool = False) -> str:
     """Continue a finished task with feedback, in the session it already has.
@@ -5396,6 +5399,12 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
         raise ValueError(f"no task #{task_id}")
     if t["kind"] != "code":
         raise ValueError(f"task #{task_id} is not a code task (kind={t['kind']})")
+    if t["status"] == "pr_ci_failed" and _BARE_FIX.match(feedback or ""):
+        # 5 Nov: "Fix 521", typed after "CI red … say fix #521", reached the
+        # worker with nothing about the CI, and it answered "already done".
+        # On a red PR a bare "fix" is "fix the CI": that route reads the
+        # failed checks first and plans before it changes anything.
+        feedback = f"Fix the red CI on this task's PR. ({feedback.strip()})"
     from . import frontdesk
     intent = "edit" if code_change else frontdesk.task_intent(feedback)
     if intent == "external" and t["status"] in LIVE_STATUSES:

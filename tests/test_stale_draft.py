@@ -54,3 +54,29 @@ def test_only_teams_drafts_to_a_person_are_checked(monkeypatch):
     assert asyncio.run(loop.stale_draft(_draft(channel="pr"))) == ""
     assert asyncio.run(loop.stale_draft({**_draft(), "_at": 0})) == ""
     assert not seen
+
+
+# --- "fix 521" on a red PR is "fix the CI" -------------------------------------
+
+import pytest  # noqa: E402
+
+from app import store, tasks  # noqa: E402
+
+
+@pytest.mark.parametrize("said", ["Fix 521", "fix #521", "please fix it", "fix"])
+def test_a_bare_fix_on_a_red_pr_goes_the_ci_route(monkeypatch, said):
+    t = store.create_task("Skip tracker call", "code", "p", "ws")
+    store.update_task(t["id"], status="pr_ci_failed")
+    seen = {}
+
+    async def plan(task_id, feedback):
+        seen["feedback"] = feedback
+        return "planning"
+    monkeypatch.setattr(tasks, "propose_change", plan)
+    assert asyncio.run(tasks.refine(t["id"], said)) == "planning"
+    assert seen["feedback"].startswith("Fix the red CI on this task's PR.")
+
+
+def test_a_fix_with_its_own_words_is_left_as_he_said_it(monkeypatch):
+    assert not tasks._BARE_FIX.match("fix the null check in the mapper")
+    assert not tasks._BARE_FIX.match("fixed it already")

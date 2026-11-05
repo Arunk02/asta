@@ -2249,13 +2249,24 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
         kwargs["on_usage"] = on_usage
 
     try:
-        reply = await cli.run_turn(conv, user_text, on_delta, **kwargs)
+        reply = await cli.run_turn(conv, _with_side_answers(conv["id"], user_text),
+                                   on_delta, **kwargs)
     except Exception as exc:
         # Whatever it managed to stream before dying is the only record of how far
         # it got — the CLI session itself is gone. Save it here, where `parts`
         # still exists, so a handoff can continue instead of starting over.
         if _is_quota_error(exc):
             resume.save(conv["id"], user_text, via, "".join(parts), channel)
+        # He read what it streamed before the stop, so the history must hold it
+        # too: 5 Nov, a question asked in a turn cut at the ceiling was in
+        # neither the history nor any later turn, and his answer to it read as
+        # out of nowhere.
+        from . import turn_budget
+        stopped = getattr(exc, "partial", "") if isinstance(exc, turn_budget.TurnStopped) else ""
+        if stopped.strip():
+            store.add_ui_message(conv["id"], "assistant", stopped,
+                                 {"tools": [tool_name], "via": via, "channel": channel,
+                                  "stopped": exc.stop.reason})
         raise
     # It answered, so whatever limit was recorded for it is over — say so, or
     # health goes on reporting a ceiling that lifted hours ago.
@@ -3060,6 +3071,58 @@ SIDE_TURNS_MAX = int(os.environ.get("ASTA_SIDE_TURNS_MAX", "2"))
 _side_turns: set[asyncio.Task] = set()
 
 
+#: How long a side answer is still news to the main brain.
+SIDE_NOTE_SECONDS = 2 * 3600
+
+
+def _note_side_answer(cid: str, asked: str, answer: str, now: float | None = None) -> None:
+    """Remember a side answer for the main brain's next turn."""
+    try:
+        kept = json.loads(store.kv_get(f"side_said:{cid}") or "[]")
+    except ValueError:
+        kept = []
+    kept.append({"q": asked[:600], "a": answer[:1500], "at": time.time() if now is None else now})
+    store.kv_set(f"side_said:{cid}", json.dumps(kept[-3:]))
+
+
+def _with_side_answers(cid: str, text: str, now: float | None = None) -> str:
+    """`text`, preceded once by what side turns told him since the last turn.
+
+    The main brain's CLI session never saw them. 5 Nov: a side turn named the
+    service a field was dropped in; the main brain, not knowing, asked him to
+    choose between that service and another, and he had to point out that it
+    had "just now" told him. Consumed on use: after this the session has it.
+    """
+    raw = store.kv_get(f"side_said:{cid}") or ""
+    if not raw:
+        return text
+    store.kv_del(f"side_said:{cid}")
+    now = time.time() if now is None else now
+    try:
+        notes = [n for n in json.loads(raw) if now - float(n.get("at", 0)) < SIDE_NOTE_SECONDS]
+    except (ValueError, TypeError, AttributeError):
+        return text
+    if not notes:
+        return text
+    said = "\n".join(f"Arun: {n['q']}\nYou answered: {n['a']}" for n in notes)
+    return (f"[While you were busy, a separate read-only turn answered him. You did not "
+            f"see it until now; he did. Build on it, or say plainly where it was wrong:\n"
+            f"{said}]\n\n{text}")
+
+
+def _keep_side_answer(cid: str, side_id: str, asked: str, channel: str) -> None:
+    """Copy a side turn's answer into the main conversation before it is deleted."""
+    with contextlib.suppress(Exception):
+        replies = [m["content"] for m in store.list_ui_messages(side_id)
+                   if m["role"] == "assistant" and (m["content"] or "").strip()]
+        if not replies:
+            return
+        answer = "\n\n".join(replies)
+        store.add_ui_message(cid, "user", asked, {"channel": channel, "side": True})
+        store.add_ui_message(cid, "assistant", answer, {"channel": channel, "side": True})
+        _note_side_answer(cid, asked, answer)
+
+
 def _start_side_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.Task | None:
     """Answer a read-only question WITHOUT waiting for the running turn.
 
@@ -3103,6 +3166,7 @@ def _start_side_turn(conv: dict, user_text: str, sink, channel: str) -> asyncio.
         try:
             await _conducted_turn(side, query, sink, channel)
         finally:
+            _keep_side_answer(conv["id"], side["id"], user_text, channel)
             store.delete_conversation(side["id"])
 
     token = capabilities.READ_ONLY_TURN.set(True)
@@ -4242,6 +4306,12 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None
+    if answer_cmd:
+        # The turn that asked is gone; his answer is still an answer. It goes on
+        # to the brain as his message, with the question it answers.
+        late = asking.orphan_reply(int(answer_cmd.group(1)), answer_cmd.group(2).strip())
+        if late:
+            user_text = late
 
     # An explicit reproduction direction outranks plan replies and pending drafts.
     from . import reproduction

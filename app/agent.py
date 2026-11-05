@@ -1916,7 +1916,17 @@ async def ask_user(question: str) -> str:
     or a plan number. The question goes to his phone and this call returns his reply.
     Do NOT use it for permission to act (that is what the approval gates are for), and
     do not use it when a sensible assumption you can state would do."""
-    from . import asking
+    from . import asking, store, tasks
+    cid = tasks.current_conversation()
+    his = [m for m in (store.list_ui_messages(cid)[-8:] if cid else [])
+           if m["role"] == "user" and time.time() - float(m.get("created_at") or 0) < 1800]
+    named = asking.already_named(question, his[-1]["content"] if his else "")
+    if named:
+        store.record_outcome("ask", "already_named", subject=named, detail=question[:200])
+        return (f"Not asked: he already decided this — his message names {named} "
+                f"(“{his[-1]['content'][:200]}”). Do it there. If your evidence says the "
+                f"cause is elsewhere, say so once in your answer with the proof "
+                f"(service, class:line, the log line) — do not ask him to choose again.")
     return await asking.ask(question, source="chat")
 
 
@@ -2670,7 +2680,8 @@ def report_outcome(task_id: int, kind: str, summary: str = "",
     kind: plan_ready (a plan is written and waiting for Arun) | needs_input (you need
     an answer before going further — put the questions in `questions`) | escalate
     (bigger than this pipeline allows — why, in `summary`) | done (implemented and
-    checked) | blocked (cannot continue — why) | failed. On a plan, list EVERY repo the
+    checked) | no_change (proved nothing needs changing — the proof in `summary`) |
+    blocked (cannot continue — why) | failed. On a plan, list EVERY repo the
     change touches in `repos`, so each gets a checkout before the first edit. `notes`
     are decisions or facts worth keeping if the run is restarted."""
     from .graph import outcome
@@ -2771,6 +2782,9 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
             return (f"Not a new task: this PR belongs to task #{owner['id']} "
                     f"(“{owner['title'][:60]}”), so it was sent there and continues in that "
                     f"task's own session and checkout. Arun will be told how it goes.")
+    if teams_chat:
+        from . import responder
+        responder.note_handed(teams_chat)       # his turn sent their ask to a task
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
     return (f"Task #{t['id']} ({kind}) spawned — running in the background. "
             f"Arun will be notified when it finishes.")

@@ -210,8 +210,14 @@ def render_lines(found: dict, width: int = 320) -> str:
     if found.get("error"):
         return f"Could not read {found['namespace']}: {found['error']}\nQuery: {found['query']}"
     if not found["rows"]:
+        # 5 Nov: zero hits for `estimatedArrival` / `vesselArrival` / `eta` was told
+        # to a colleague as "the payload has no ETA field at all". The payload
+        # carried it all along, as the upper-case enum VESSEL_ARRIVAL.
         return (f"No lines in {found['namespace']} between {stamp(found['start'])} and "
-                f"{stamp(found['end'])} for: {found['query']}\nLink: {found['link']}")
+                f"{stamp(found['end'])} for: {found['query']}\nLink: {found['link']}\n"
+                f"Not proof of absence: filters match exact, case-sensitive text. Before "
+                f"saying a field or event is missing, search the same line for a value that "
+                f"must be there (the id alone, the exact enum name) and see it match.")
     out = [f"{len(found['rows'])} line(s) in {found['namespace']}"
            + (" — the limit was reached; narrow the window or add a filter for the rest"
               if found.get("full") else "") + ":"]

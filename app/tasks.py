@@ -1736,7 +1736,15 @@ def _phone_text(result: str, limit: int = 1100, head_first: bool = False) -> str
     # sign-off, a stripped fence) leave their blanks behind, and a phone bubble
     # shows every one of them as empty screen.
     body = re.sub(r"\n{3,}", "\n\n", body)
-    return body or (result or "").strip()[-limit:]
+    if body:
+        return body
+    # One paragraph longer than the whole budget. Its tail starts mid-sentence
+    # (5 Nov, #535: the question opened "successfully' on the KafkaP…"), so
+    # read it from its first word and cut on a word instead.
+    last = next((ln.strip() for ln in reversed(rest) if ln.strip()), (result or "").strip())
+    if len(last) <= limit:
+        return last
+    return last[:limit - 2].rsplit(" ", 1)[0] + " …"
 
 
 def _audit_note(task_id: int) -> str:

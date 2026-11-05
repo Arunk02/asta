@@ -21,7 +21,21 @@ import time
 
 from app import store
 
-KINDS = ("plan_ready", "needs_input", "escalate", "done", "blocked", "failed")
+#: no_change — the run proved there is nothing to change. 5 Nov: a "prove it before
+#: you fix it" task found the field present in the live payload, had no kind that
+#: said so, reported `escalate`, and was rerun through the whole pipeline to
+#: arrive at the same finding as a question.
+KINDS = ("plan_ready", "needs_input", "escalate", "done", "no_change", "blocked", "failed")
+
+#: An escalation whose own summary says the code is fine is a no_change that had
+#: no word for it. Read only on that route, never as a general sentinel.
+_NOTHING_TO_CHANGE = re.compile(
+    r"\bno\s+(?:drop|defect|bug|fault|filter(?:ing)?)\b[^.]{0,40}\bfound\b|"
+    r"\bno\s+code\s+changes?\s+(?:were\s+)?(?:made|needed|required)\b", re.I)
+
+
+def says_nothing_to_change(summary: str) -> bool:
+    return bool(_NOTHING_TO_CHANGE.search(summary or ""))
 
 _FENCED = re.compile(r"```outcome\s*(\{.*?\})\s*```", re.S | re.I)
 
@@ -108,7 +122,9 @@ def rider(task_id: int, fresh: bool = True) -> str:
         f"task_id={task_id} and a kind: plan_ready (a plan is waiting for Arun), "
         "needs_input (you need an answer first — put the questions in `questions`), "
         "escalate (bigger than this pipeline allows — say why in `summary`), done "
-        "(implemented and checked), blocked (cannot continue — say why) or failed. "
+        "(implemented and checked), no_change (you proved there is nothing to change "
+        "— the proof in `summary`: service, class:line, the log line), blocked "
+        "(cannot continue — say why) or failed. "
         "On a plan, list every repo the change touches in `repos`. Decisions worth "
         "keeping across a restart go in `notes`. If you have no report_outcome tool, "
         "end your reply with a fenced block instead:\n"

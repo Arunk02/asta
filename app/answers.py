@@ -739,9 +739,13 @@ def sent(staged: dict, by_arun: bool = True) -> None:
 
     `by_arun` — he approved these words. Only that lifts a thread's
     after-correction hold; an automatic send never does."""
-    from . import threads
+    from . import responder, threads
     if by_arun and (staged or {}).get("thread"):
         store.kv_del(_CORRECTED + staged["thread"])
+    if by_arun and not (staged or {}).get("to_group"):
+        # Approving a reply on someone's case hands that case over: their
+        # follow-ups are investigated, not stopped on the incident rule.
+        responder.note_handed((staged or {}).get("to", ""))
     origin = (staged or {}).get("review_origin")
     if origin and staged.get("type") == "answer" and not staged.get("to_group"):
         store.kv_set(_approved_review_key(origin), json.dumps({

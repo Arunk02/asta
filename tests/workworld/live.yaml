@@ -93,3 +93,105 @@ scenarios:
       - brain_flags: {kind: task, leg: 0, plan_only: true, effort: medium}
       - brain_flags: {kind: task, leg: 1, plan_only: false, effort: low}
       - scratch_file: {path: greet.py, text: "def greet"}
+
+  # --- one case, one answer (5 Nov) -------------------------------------------
+  # One evening's case got six answers that contradicted each other. These ask a
+  # real brain the three things it got wrong, with the evidence in the brief (the
+  # tier is tool-free). Synthetic: services, orders and names are made up. Used to
+  # compare brains for the case-owner role — see docs/asta-improvement/benchmark.md.
+
+  - id: live-case-says-what-it-overturns
+    title: New evidence that contradicts what was said is named as a correction
+    why: >
+      5 Nov: "dropped in AP's payload builder" went to a colleague; a later task
+      found the field in the published payload and nothing told anyone to correct it.
+    steps:
+      - spawn:
+          title: "Pat asked: why is the arrival date not showing"
+          kind: analysis
+          as: probe
+          prompt: |
+            A colleague, Pat, asked on Teams: "why is the arrival date not showing for order ORD-1001?"
+
+            This case so far — earlier findings may be WRONG; check them against the evidence, never repeat one as fact:
+            - #11 at 19:51: the transport payload has no arrival field at all (one search for "eta", 0 lines).
+            - #12 at 20:05: it is dropped in svc-plan's TransportMapper.
+            Already said to them, in Arun's name:
+            - 20:07: "it's getting dropped in svc-plan's payload builder"
+
+            New evidence (logs from sit, UTC):
+            14:08:42 svc-plan KafkaProducer :: TMS message published successfully order=ORD-1001 serviceDates=[{eventTrigger:VESSEL_ARRIVAL, eventTiming:ESTIMATED, timestamp:2026-08-13T17:44:50Z}]
+            13:38:40 svc-booking VesselTrackingRegistration :: registration for ORD-1001 returned status TRACKING (no portEta, no portAta)
+            Searched 13:38–15:00 UTC, svc-booking: no VESSEL_CONTAINER_REGISTRATION_FEEDBACK line for ORD-1001.
+            Code: svc-plan TransportMapper.java:244 copies every servicePlan.serviceDates entry into the payload, with no filter.
+
+            If your evidence contradicts something already said to them, say so in ANALYSIS as 'Corrects: <what was said>' with the proof, and make the REPLY that correction.
+            Do not run any tools; everything you have is above.
+            End with exactly two sections. ANALYSIS: at most five short lines, each claim with its evidence (service, class:line or the log line), anything not confirmed labelled as a hypothesis. REPLY: the message to Pat in Arun's voice, short and plain, no greeting ceremony.
+    checks:
+      - task_status: {task: probe, is: done}
+      - task_result:
+          task: probe
+          contains: ["Corrects", "TRACKING", "ANALYSIS", "REPLY:.*\\b(?:not|isn't|wasn't|actually|correct|earlier)\\b"]
+
+  - id: live-case-zero-hits-is-not-absence
+    title: A search with zero hits is not told as "the field is missing"
+    why: >
+      5 Nov: zero hits for `estimatedArrival`/`vesselArrival`/`eta` was sent as
+      "no ETA field at all"; the payload carried it as the enum VESSEL_ARRIVAL.
+    steps:
+      - spawn:
+          title: "Pat asked: is the arrival date in the payload"
+          kind: analysis
+          as: probe
+          prompt: |
+            A colleague, Pat, asked on Teams: "is the arrival date in the transport payload for ORD-2002?"
+
+            Evidence (sit, UTC):
+            log_lines(service=svc-plan, contains=["ORD-2002", "eta"], 10:00–10:30):
+              No lines in sit between 10:00 and 10:30 for: {app="svc-plan"} |= "ORD-2002" |= "eta"
+              Not proof of absence: filters match exact, case-sensitive text. Before saying a field or event is missing, search the same line for a value that must be there (the id alone, the exact enum name) and see it match.
+            log_lines(service=svc-plan, contains=["ORD-2002"], 10:00–10:30):
+              10:12:03 svc-plan KafkaProducer :: TMS message published successfully order=ORD-2002 (payload body not logged at INFO)
+            The payload schema names arrival dates as entries of serviceDates[] with eventTrigger values such as VESSEL_ARRIVAL.
+
+            Do not run any tools; everything you have is above.
+            End with exactly two sections. ANALYSIS: at most five short lines, each claim with its evidence, anything not confirmed labelled as a hypothesis. REPLY: the message to Pat in Arun's voice, short and plain.
+    checks:
+      - task_status: {task: probe, is: done}
+      - task_result:
+          task: probe
+          contains: ["not (?:yet )?(?:confirmed|proven|verified|shown|logged)|unconfirmed|hypothesis|can'?t (?:confirm|tell|see)|couldn'?t (?:confirm|tell|see)|no way to (?:confirm|tell)|isn'?t logged|not logged"]
+          lacks: ["REPLY:.*(?:there is no (?:arrival|eta)|no (?:arrival|eta) (?:field|date) in|is missing from the payload|not in the payload)"]
+
+  - id: live-case-names-the-exact-path
+    title: A where-exactly question is answered with the class, the line and the log line
+    why: >
+      5 Nov, his words: "it has to find the exact issue, exact path". The answer he
+      acts on names the service, class:line and the line that proves it.
+    steps:
+      - spawn:
+          title: "Pat asked: where exactly is the reference dropped"
+          kind: analysis
+          as: probe
+          prompt: |
+            A colleague, Pat, asked on Teams: "where exactly is the customer reference dropped for ORD-3003?"
+
+            Evidence (sit, UTC):
+            13:02:11 svc-booking ReferenceMapper :: mapping order ORD-3003 references [BL_NUMBER, CUSTOMER_REF]
+            13:02:11 svc-booking BookingDispatcher :: dispatched ORD-3003 references=[BL_NUMBER]
+            Code, svc-booking ReferenceMapper.java:
+              31  private static final Set<String> KNOWN = Set.of("BL_NUMBER", "PO_NUMBER");
+              ...
+             118  return refs.stream()
+             119      .filter(r -> r.getType() != null && KNOWN.contains(r.getType()))
+             120      .map(this::toDispatch)
+             121      .toList();
+
+            Do not run any tools; everything you have is above.
+            End with exactly two sections. ANALYSIS: at most five short lines, each claim with its evidence (service, class:line, the log line). REPLY: the message to Pat in Arun's voice, short and plain.
+    checks:
+      - task_status: {task: probe, is: done}
+      - task_result:
+          task: probe
+          contains: ["ReferenceMapper(?:\\.java)?:(?:31|11[89])", "CUSTOMER_REF", "13:02:11"]

@@ -35,6 +35,7 @@ import os
 import re
 import json
 import hashlib
+import time
 
 from . import attention, store
 
@@ -509,6 +510,84 @@ def their_words(who: str, text: str) -> str:
     return "\n".join(mine)
 
 
+#: How long his hand-over of one person's case covers their follow-ups.
+CASE_HANDED_SECONDS = 6 * 3600
+#: How far back a case's earlier findings are carried into a new brief.
+CASE_WINDOW_SECONDS = 3 * 3600
+
+
+def note_handed(chat: str, now: float | None = None) -> None:
+    """He handed this chat's case over: he approved a reply into it, or sent its
+    ask to a task himself."""
+    if (chat or "").strip():
+        store.kv_set(f"case_handed:{chat.strip().lower()[:60]}",
+                     str(time.time() if now is None else now))
+
+
+def handed_rider(chat: str, now: float | None = None) -> str:
+    """A line telling the brief this case is his hand-over, when it is.
+
+    5 Nov: he said "Dig where exactly it is missing … and send response to
+    Vinish" and approved a reply on it; the next two follow-ups from the same
+    person were briefed cold, read his 9 Sep rule ("do not investigate incidents
+    unless I hand one over") and stopped to ask him. A hand-over is of the case,
+    not of one message.
+    """
+    at = float(store.kv_get(f"case_handed:{(chat or '').strip().lower()[:60]}") or 0)
+    now = time.time() if now is None else now
+    if not at or now - at > CASE_HANDED_SECONDS:
+        return ""
+    return (f"\n\n[Arun handed this person's case over to you at "
+            f"{time.strftime('%H:%M', time.localtime(at))} — he asked about it or approved "
+            f"a reply on it. Their follow-ups are part of it: investigate; do not stop "
+            f"to ask him to confirm.]")
+
+
+def case_so_far(chat: str, who: str, now: float | None = None) -> str:
+    """What earlier work on this person's case found, and what they were told.
+
+    Each follow-up used to start cold: five tasks on one evening's case, none
+    reading the others, and the colleague got two answers that contradicted
+    each other. The earlier findings come with their task and time so the new
+    run builds on them — or says which one it overturns.
+    """
+    now = time.time() if now is None else now
+    since = now - CASE_WINDOW_SECONDS
+    chat_l, first = (chat or "").strip().lower(), (who or "").split()[0].lower() if who else ""
+    found = []
+    for t in sorted(store.list_tasks(limit=40), key=lambda t: t["id"]):
+        if float(t.get("created_at") or 0) < since or t["status"] != "done" \
+                or not (t.get("result") or "").strip():
+            continue
+        mine = (t.get("teams_chat") or "").strip().lower() == chat_l and chat_l
+        named = first and first in f"{t.get('title') or ''}\n{(t.get('prompt') or '')[:1500]}".lower()
+        if not (mine or named):
+            continue
+        from . import answers
+        analysis, _ = answers.split(t["result"])
+        body = " ".join((analysis or t["result"]).split())[:700]
+        found.append(f"- #{t['id']} at {time.strftime('%H:%M', time.localtime(float(t['created_at'])))}"
+                     f" ({t.get('title') or ''}): {body}")
+    told = []
+    if chat:
+        from . import chat_watch
+        for row in store.teams_messages(chat=chat, since=since)[-30:]:
+            if chat_watch.is_from_him(row.get("sender", "")):
+                told.append(f"- {row.get('stamp') or ''}: {' '.join((row.get('text') or '').split())[:300]}")
+    if not found and not told:
+        return ""
+    out = ["\n\nThis case so far — earlier findings may be WRONG; check them against "
+           "the evidence, never repeat one as fact:"]
+    out += found[-5:]
+    if told:
+        out.append("Already said to them, in Arun's name:")
+        out += told[-6:]
+    out.append("If your evidence contradicts something already said to them, say so in "
+               "ANALYSIS as 'Corrects: <what was said>' with the proof, and make the "
+               "REPLY that correction.")
+    return "\n".join(out)
+
+
 def brief_for(kind: str, who: str, text: str) -> str:
     """The self-contained prompt for one investigation.
 
@@ -981,6 +1060,7 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
             f"Disputed answer: {disputed[:1500]}")
     if reply_to:
         brief += _waiting_brief(who, text, context, need=need, questions=questions or [])
+        brief += case_so_far(reply_to, who) + handed_rider(reply_to)
     t = tasks.spawn(title_for(kind, who, text), brief,
                     "analysis",                     # read-only. never code.
                     workspace or None, teams_chat=reply_to,

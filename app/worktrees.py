@@ -262,7 +262,17 @@ def _names(repo_name: str) -> set[str]:
     # The generic halves say nothing about WHICH repo — matching on them would
     # select every repo in a workspace whose repos share a prefix, which is the
     # normal shape.
-    return parts - {"service", "telikos", "svc", "app", "api"}
+    parts -= {"service", "telikos", "svc", "app", "api"}
+    for name, called in _CALLED.items():
+        if name in parts:
+            parts |= called
+    return parts
+
+
+#: What he and his team call a repo when its name is one long word. 5 Nov, #535:
+#: a brief about "AP's TMS payload" prepared only booking-service — the other
+#: repo it named — and the fix had nowhere to go.
+_CALLED = {"activityplanworkflow": {"ap", "activityplan"}}
 
 
 async def create(workspace_root: Path, task_id: int, branch: str,

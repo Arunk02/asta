@@ -12,7 +12,8 @@ def test_the_current_manifest_is_complete_and_every_case_resolves():
     cats = {}
     for case in m["cases"]:
         cats[case["category"]] = cats.get(case["category"], 0) + 1
-    assert len(cats) == 8 and all(n == 10 for c, n in cats.items() if c != "authority")
+    assert len(cats) == 9 and all(n == 10 for c, n in cats.items() if c != "authority")
+    assert "case" in cats, "v3: one case across turns and lanes"
     assert cats["authority"] >= 20
     assert all(c["outcome"].strip() for c in m["cases"]), "every outcome is stated before it runs"
     assert all(c.get("note") for c in m["cases"] if c["executor"] is None), \
@@ -21,6 +22,7 @@ def test_the_current_manifest_is_complete_and_every_case_resolves():
 
 def test_older_versions_still_load_so_their_results_stay_readable():
     assert benchmark.load(benchmark.MANIFEST.parent / "v1.yaml")["version"] == 1
+    assert benchmark.load(benchmark.MANIFEST.parent / "v2.yaml")["version"] == 2
 
 
 def _manifest(tmp_path, change):

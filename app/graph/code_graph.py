@@ -222,12 +222,25 @@ async def plan(state: JobState) -> dict:
 def after_plan(state: JobState) -> str:
     if state.get("reproduction_next"):
         return state["reproduction_next"]
-    kind = (state.get("outcome") or {}).get("kind")
+    out = state.get("outcome") or {}
+    kind = out.get("kind")
+    if kind == "no_change" or (kind == "escalate"
+                               and outcome.says_nothing_to_change(out.get("summary", ""))):
+        return "no_change"
     if kind == "needs_input":
         return "ask"
     if kind == "escalate" and _tasks()._pipeline_for(state["task_id"]) == "micro":
         return "escalate"
     return "announce_plan"
+
+
+async def no_change(state: JobState) -> dict:
+    """Proved there is nothing to fix: done, with the proof — no rerun, no question."""
+    tid = state["task_id"]
+    proof = (state.get("outcome") or {}).get("summary") or state.get("text", "")
+    notes.add(tid, "Planning proved no change is needed.")
+    await _tasks().complete(tid, _task(tid), f"No change needed — {proof}")
+    return {}
 
 
 async def escalate(state: JobState) -> dict:
@@ -534,7 +547,7 @@ async def complete(state: JobState) -> dict:
 
 def build() -> StateGraph:
     g = StateGraph(JobState)
-    for name, fn in (("plan", plan), ("escalate", escalate), ("ask", ask),
+    for name, fn in (("plan", plan), ("escalate", escalate), ("ask", ask), ("no_change", no_change),
                      ("wait_answer", wait_answer), ("announce_plan", announce_plan),
                      ("gate", gate), ("go_on", go_on), ("implement", implement), ("hop", hop),
                      ("verify", verify_node), ("fix", fix), ("stronger", stronger),
@@ -543,7 +556,8 @@ def build() -> StateGraph:
     g.add_conditional_edges(START, entry, {"plan": "plan", "implement": "implement"})
     g.add_conditional_edges("plan", after_plan,
                             {"plan": "plan", "end": END, "ask": "ask", "escalate": "escalate",
-                             "announce_plan": "announce_plan"})
+                             "no_change": "no_change", "announce_plan": "announce_plan"})
+    g.add_edge("no_change", END)
     g.add_edge("escalate", "plan")
     g.add_edge("ask", "wait_answer")
     g.add_conditional_edges("wait_answer", after_answer, {"plan": "plan", "end": END})

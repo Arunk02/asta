@@ -116,6 +116,15 @@ async def ask(question: str, source: str = "", timeout: float = DEFAULT_TIMEOUT)
         store.close_question(qid, "", status="timeout")
         store.record_outcome("ask", "timeout", subject=str(qid), detail=text[:200])
         return NO_ANSWER
+    except asyncio.CancelledError:
+        # The turn that asked was stopped — the CLI ceiling, a redirect. The
+        # question is still on his phone, so his answer will still come: it is
+        # marked orphaned for `orphan_reply`, never left open with nobody to take
+        # it (5 Nov: "answer 38 …" arrived four seconds after its turn died and
+        # was reported delivered to no one).
+        store.close_question(qid, "", status="orphaned")
+        store.record_outcome("ask", "orphaned", subject=str(qid), detail=text[:200])
+        raise
     finally:
         _waiters.pop(qid, None)
 
@@ -130,6 +139,70 @@ def answer(qid: int, text: str) -> bool:
     if fut and not fut.done():
         fut.set_result(text)
     return True
+
+
+_ENVS = ("prod", "production", "preprod", "pp", "sit", "uat", "qa", "dev", "cdt", "spt", "local")
+_CHOICE = re.compile(r"\bor\b|\bwhich\b|\beither\b", re.I)
+_PR_REF = re.compile(r"\bpr\s*#?(\d{2,6})\b", re.I)
+
+
+def _repo_words() -> set[str]:
+    """The distinctive words of every repo in his workspaces: `booking` for
+    telikos-booking-service. Read each call: the set is small and changes."""
+    from pathlib import Path
+    words: set[str] = set()
+    try:
+        from . import workspace_tools, worktrees
+        for root in workspace_tools.WORKSPACES.values():
+            for repo in worktrees.repos_in(Path(root)):
+                # The same names the checkout matcher uses — one definition.
+                words |= {w for w in worktrees._names(repo.name) if len(w) > 1}
+    except Exception:                                   # noqa: BLE001
+        pass
+    return words
+
+
+def already_named(question: str, his_text: str) -> str:
+    """The target he named in `his_text` that `question` asks him to choose again.
+
+    5 Nov: "Send this to Vinish and replicate fix it in booking" got back "Should
+    the fix target AP, or did you mean … the booking repo?" A repo, environment
+    or PR he named in the instruction is his decision; asking him to re-make it
+    reads as not having listened. Returns "" when the question is not a choice
+    or names nothing he said.
+    """
+    q, his = (question or "").lower(), (his_text or "").lower()
+    if not q or not his or not _CHOICE.search(q):
+        return ""
+    for n in _PR_REF.findall(his):
+        if n in q:
+            return f"PR {n}"
+    words = set(_ENVS) | _repo_words()
+    q_words, his_words = set(re.findall(r"[a-z0-9]+", q)), set(re.findall(r"[a-z0-9]+", his))
+    named = sorted(words & q_words & his_words)
+    return named[0] if named else ""
+
+
+#: How long his answer to an orphaned question is still read as that answer.
+ORPHAN_WINDOW = 2 * 3600
+
+
+def orphan_reply(qid: int, text: str, now: float | None = None) -> str | None:
+    """His answer to a question whose asking turn died, as a message for the brain.
+
+    Nobody is waiting on it any more, so it goes to the conversation like any
+    other message — with the question quoted, because "u just now told it is
+    booking" means nothing without what it answers. None when `qid` is not a
+    recent orphaned question. Consumed: a second "answer 38" is a new message.
+    """
+    q = store.get_question(qid)
+    now = time.time() if now is None else now
+    if not q or q["status"] != "orphaned" or now - float(q["created_at"]) > ORPHAN_WINDOW:
+        return None
+    store.close_question(qid, text, status="answered_late")
+    store.record_outcome("ask", "answered_late", subject=str(qid), detail=text[:200])
+    return (f"{text}\n\n[This answers your question #{qid}, asked in a turn that was "
+            f"stopped before he replied: “{q['text']}”]")
 
 
 #: An imperative that names something for Asta to DO, at the very start of the

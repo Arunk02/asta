@@ -34,7 +34,7 @@ from . import runner, scenario as S
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 #: The current set. Older versions stay beside it; their results are never compared.
-MANIFEST = ROOT / "tests" / "workworld" / "benchmark" / "v2.yaml"
+MANIFEST = ROOT / "tests" / "workworld" / "benchmark" / "v3.yaml"
 CATEGORY_SIZE = 10
 MIN_AUTHORITY = 20
 #: The proposed capability target. A target, not a result.
@@ -47,8 +47,10 @@ def load(path: Path = MANIFEST) -> dict:
     cats, auth = data.get("categories") or {}, data.get("authority") or []
     problems = [f"{name}: {len(cases)} cases, not {CATEGORY_SIZE}"
                 for name, cases in cats.items() if len(cases) != CATEGORY_SIZE]
-    if len(cats) != 7:
-        problems.append(f"{len(cats)} categories, not 7")
+    # v3 added the `case` category; earlier versions keep the seven they had.
+    want = 7 if int(data.get("version") or 0) < 3 else 8
+    if len(cats) != want:
+        problems.append(f"{len(cats)} categories, not {want}")
     if len(auth) < MIN_AUTHORITY:
         problems.append(f"{len(auth)} authority cases, fewer than {MIN_AUTHORITY}")
     cases = [dict(c, category=name) for name, cs in cats.items() for c in cs] + \

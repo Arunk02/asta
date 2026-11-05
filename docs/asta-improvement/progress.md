@@ -1,4 +1,4 @@
-# Asta delivery record — 30 October 2026
+# Asta delivery record — updated 5 November 2026
 
 Arun authorized implementation, PR creation and merging after checks, using his personal GitHub account. Work is isolated from the running checkout. A GitHub merge does not mean the live assistant has been restarted or its data migrated.
 
@@ -45,16 +45,37 @@ flowchart LR
     E --> G[Uncertain result: reconcile before retry]
 ```
 
+## Merged and deployed, 30 October – 5 November (to #220)
+
+The merge receipts were checked on 5 November. Since #215, each batch was deployed only when Asta was idle, and was checked afterwards:
+- one listener
+- health and status 200
+- 39/39 daemons
+- WhatsApp and Teams bridges up
+
+Each batch has a data backup in `data/backup-<date>-pre-<n>`. Every batch passed the frozen full suite and CI before merge.
+
+| PRs | Delivered behavior | Remaining boundary |
+|---|---|---|
+| [#197](https://github.com/Arunk02/asta/pull/197), [#199](https://github.com/Arunk02/asta/pull/199) | Reproduction workers stay scoped to evidence; conditional fix authority survives reproduction and planning | — |
+| [#200](https://github.com/Arunk02/asta/pull/200)–[#202](https://github.com/Arunk02/asta/pull/202), [#208](https://github.com/Arunk02/asta/pull/208) | Scoped Claude workers get only the selected MCP servers. Worker usage is kept across stages, failures and retries. Background one-shot calls are measured from their own session log (`call_usage`) | Copilot one-shots report no usage, and are recorded as unavailable, not zero |
+| [#203](https://github.com/Arunk02/asta/pull/203), [#209](https://github.com/Arunk02/asta/pull/209) | Evidence-gated lesson regression rollback. A trusted lesson evaluator (five free checks, then a capped Haiku rubric) runs in the daily pass | — |
+| [#204](https://github.com/Arunk02/asta/pull/204)–[#207](https://github.com/Arunk02/asta/pull/207), [#210](https://github.com/Arunk02/asta/pull/210) | Context refresh: fallback hints are not treated as ownership; unmapped entry points are found by Temporal annotation; commented-out classes are ignored | — |
+| [#211](https://github.com/Arunk02/asta/pull/211), [#212](https://github.com/Arunk02/asta/pull/212) | Versioned acceptance benchmark: 70 cases plus 22 authority gates, pass^3; v2 may verify a case by tests of the real code | — |
+| [#213](https://github.com/Arunk02/asta/pull/213), [#214](https://github.com/Arunk02/asta/pull/214) | Meeting prep from the meeting's own Teams thread; recap action items kept with owners. Learning sessions whose answers are graded against their source | — |
+| [#215](https://github.com/Arunk02/asta/pull/215)–[#217](https://github.com/Arunk02/asta/pull/217) | One ask, one task, one PR. A parked task's PR is still watched. A stale or overtaken Teams draft is held instead of sent on a yes | — |
+| [#218](https://github.com/Arunk02/asta/pull/218), [#219](https://github.com/Arunk02/asta/pull/219) | One case, one conversation. Side-turn answers and ceiling-cut replies are kept. A dead question's answer reaches the brain. A named target is not asked back. Hand-overs cover follow-ups. Findings and what was said are carried into every lane. A draft resting on an unconfirmed finding is flagged and never sent automatically. One correction draft when a finding overturns what was said. Prove-first tasks can end `no_change` | The correction draft depends on the analysis writing `Corrects:` |
+| [#220](https://github.com/Arunk02/asta/pull/220) | A red SonarQube gate is read from Sonar (`ASTA_SONAR_TOKEN`): failing conditions, issues on the change and uncovered lines. The CI fix round plans from them | Needs his token in `.env`; without one it says so and stops |
+
+**Benchmark** (see `benchmark.md`):
+- **v3, deterministic, pass^3:** 77/80 at #218, with the gate at 22/22. #219 covered the one missing case.
+- **Live case comparison:** Copilot (claude-sonnet-5), Claude Sonnet and Claude Opus each passed 9/9, with each model confirmed from its transcript.
+
 ## Remaining acceptance work
 
-The seven-stage roadmap is not complete. Highest-priority outstanding work:
+1. **OS isolation.** A worker OS/filesystem boundary needs a macOS user or VM. That is a system change Arun makes.
+2. **Live pilots.** The live Decision Hub setup and call pilots need concrete inputs and authorization.
+3. **Tool-using live tier.** A live tier where the brain gathers evidence with tools waits on serving the sim world to a brain safely.
+4. **Cost per verified success.** The usage ledgers exist; the per-task cost divided by verified successes has not been reported yet.
 
-1. Complete an actual worker OS/filesystem boundary; scoped API credentials and shell wrappers do not provide it.
-2. Connect trusted task-specific learning evaluators to promotion, isolated experiments, regression monitoring and guarded rollback.
-3. Deliver learning sessions with objectives, sources, exercises, checked answers and persisted progress.
-4. Complete per-task cost accounting across retries, background legs and failed attempts; distinguish measured and estimated usage and divide by verified successes.
-5. Run 70 representative tasks (ten per area), repeating nondeterministic cases three times; record interventions, failures and cost.
-6. Finish the real debugging/full-coding pilot first, then perform specifically authorized setup and call pilots with actual inputs.
-7. Prepare deployment separately and verify behavior after deployment. No live restart was performed by this implementation continuation.
-
-No 10/10 rating or token-saving percentage is claimed. These changes remove reproduced failure modes; an overall rating needs measured end-to-end results. No live deployment or restart is included in this record.
+No 10/10 rating or token-saving percentage is claimed.

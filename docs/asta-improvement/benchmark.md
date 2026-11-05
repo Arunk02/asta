@@ -51,6 +51,15 @@ Verified **77/80 (96%)**. **The hard gate passed: 22/22.** There were no failure
 
 `case-correction-raised` is missing. The brief asks for "Corrects:" and a correction reply when evidence contradicts what was said. Nothing yet raises a correction draft by itself when a later task overturns a sent reply.
 
+### Live cases rerun (5 November 2026, 23:20)
+
+The two live cases that failed on 4 November were rerun at pass^3 on the default brain. Both passed.
+
+- **`code-live-graph-build`: 3/3.** On 4 November the task was `paused` when the scenario approved it, because the account had hit its usage limit. It was the quota, not the behaviour.
+- **`comm-live-sounds-like-him`: 3/3.** The scenario looked for "draft for Teams", but the card has read "a message to send to <them> on Teams" since #65 (1 October). The draft was held for his yes every time, so the check was corrected, not Asta.
+
+With these, v3 has no live failures left. The two live cases are counted only when `--live` is run.
+
 ### Live: which brain should own a case (5 November 2026)
 
 There are three live, tool-free scenarios in `tests/workworld/live.yaml`, each with the evidence written into the brief:

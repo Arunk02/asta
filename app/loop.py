@@ -214,10 +214,14 @@ async def stale_draft(staged: dict, cid: str = "", now: float | None = None) -> 
     now = time.time() if now is None else now
     if now - at > DRAFT_FRESH_SECONDS:
         return f"it was drafted {int((now - at) // 60)} minutes ago"
-    from . import chat_watch
+    # What the chat watcher already stored, not a fresh browser look: the look
+    # can hang on a sign-in page and hold the send (and, in a test, the suite).
+    from . import chat_watch, store
     with contextlib.suppress(Exception):
-        if await chat_watch.he_replied_since(staged["to"], at):
-            return "you have written to them yourself since it was drafted"
+        to = staged["to"].strip().lower()
+        for row in store.teams_messages(chat=staged["to"], since=at, limit=400):
+            if (row.get("chat") or "").strip().lower() == to and chat_watch.written_by_him(row):
+                return "you have written to them yourself since it was drafted"
     return ""
 
 

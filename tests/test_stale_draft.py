@@ -15,45 +15,46 @@ def _draft(age=60, channel="teams", to="Priya Nair"):
             "_at": time.time() - age}
 
 
-def _replied(monkeypatch, answer):
-    seen = []
-
-    async def since(chat, at):
-        seen.append((chat, at))
-        return answer
-    monkeypatch.setattr(chat_watch, "he_replied_since", since)
-    return seen
+def _his_line(chat="Priya Nair", ago=30, sender="Arunkumar K"):
+    from app import store
+    store.save_teams_messages([{"key": f"k-{chat}-{ago}-{sender}", "chat": chat, "sender": sender,
+                                "text": "on it", "sent_at": time.time() - ago}])
 
 
 def test_a_fresh_draft_he_has_not_overtaken_goes(monkeypatch):
-    seen = _replied(monkeypatch, False)
-    assert asyncio.run(loop.stale_draft(_draft())) == ""
-    assert seen and seen[0][0] == "Priya Nair", "the chat was looked at, fresh"
+    monkeypatch.setattr(chat_watch, "is_from_him", lambda s: s == "Arunkumar K")
+    _his_line(ago=600)                                  # before the draft: not overtaking it
+    _his_line(sender="Priya Nair", ago=10)              # their line, not his
+    assert asyncio.run(loop.stale_draft(_draft(age=60))) == ""
 
 
 def test_a_draft_he_has_answered_himself_is_held(monkeypatch):
-    _replied(monkeypatch, True)
-    assert "written to them yourself" in asyncio.run(loop.stale_draft(_draft()))
+    monkeypatch.setattr(chat_watch, "is_from_him", lambda s: s == "Arunkumar K")
+    _his_line(ago=30)
+    assert "written to them yourself" in asyncio.run(loop.stale_draft(_draft(age=60)))
 
 
-def test_an_old_draft_is_held_without_asking_teams(monkeypatch):
-    seen = _replied(monkeypatch, False)
+def test_his_line_in_another_chat_does_not_hold_it(monkeypatch):
+    monkeypatch.setattr(chat_watch, "is_from_him", lambda s: s == "Arunkumar K")
+    _his_line(chat="Priya Nair, Dev Rao, +2", ago=30)
+    assert asyncio.run(loop.stale_draft(_draft(age=60))) == ""
+
+
+def test_an_old_draft_is_held(monkeypatch):
     why = asyncio.run(loop.stale_draft(_draft(age=loop.DRAFT_FRESH_SECONDS + 600)))
-    assert "drafted" in why and "minutes ago" in why and not seen
+    assert "drafted" in why and "minutes ago" in why
 
 
-def test_a_failed_look_does_not_hold_a_fresh_draft(monkeypatch):
-    async def broken(chat, at):
-        raise RuntimeError("browser gone")
-    monkeypatch.setattr(chat_watch, "he_replied_since", broken)
-    assert asyncio.run(loop.stale_draft(_draft())) == ""
+def test_the_check_never_opens_a_browser(monkeypatch):
+    async def browser(*a, **k):
+        raise AssertionError("a fresh Teams look was made")
+    monkeypatch.setattr(chat_watch, "he_replied_since", browser)
+    assert asyncio.run(loop.stale_draft(_draft(age=60))) == ""
 
 
 def test_only_teams_drafts_to_a_person_are_checked(monkeypatch):
-    seen = _replied(monkeypatch, True)
-    assert asyncio.run(loop.stale_draft(_draft(channel="pr"))) == ""
+    assert asyncio.run(loop.stale_draft(_draft(channel="pr", age=loop.DRAFT_FRESH_SECONDS * 2))) == ""
     assert asyncio.run(loop.stale_draft({**_draft(), "_at": 0})) == ""
-    assert not seen
 
 
 # --- "fix 521" on a red PR is "fix the CI" -------------------------------------

@@ -2249,8 +2249,9 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
         kwargs["on_usage"] = on_usage
 
     try:
-        reply = await cli.run_turn(conv, _with_side_answers(conv["id"], user_text),
-                                   on_delta, **kwargs)
+        reply = await cli.run_turn(
+            conv, _with_open_case(conv["id"], _with_side_answers(conv["id"], user_text)),
+            on_delta, **kwargs)
     except Exception as exc:
         # Whatever it managed to stream before dying is the only record of how far
         # it got — the CLI session itself is gone. Save it here, where `parts`
@@ -3108,6 +3109,31 @@ def _with_side_answers(cid: str, text: str, now: float | None = None) -> str:
     return (f"[While you were busy, a separate read-only turn answered him. You did not "
             f"see it until now; he did. Build on it, or say plainly where it was wrong:\n"
             f"{said}]\n\n{text}")
+
+
+#: How long a case told to the chat brain stays told within its session.
+CASE_TOLD_SECONDS = 30 * 60
+
+
+def _with_open_case(cid: str, text: str, now: float | None = None) -> str:
+    """`text`, preceded once by the open case of the person it names.
+
+    5 Nov: the chat brain read logs and answered in-conversation while tasks on
+    the same case reached other conclusions; nothing put them side by side, and
+    it told him two different services in six minutes. Once per case per half
+    hour: the CLI session holds it after that.
+    """
+    from . import responder
+    chat, held = responder.case_for_text(text, now)
+    if not held:
+        return text
+    now = time.time() if now is None else now
+    key = f"case_told:{cid}:{chat.lower()[:60]}"
+    if now - float(store.kv_get(key) or 0) < CASE_TOLD_SECONDS:
+        return text
+    store.kv_set(key, str(now))
+    return (f"[This message is about {chat}'s open case. What it holds — build on it, "
+            f"and name anything you overturn:{held}]\n\n{text}")
 
 
 def _keep_side_answer(cid: str, side_id: str, asked: str, channel: str) -> None:

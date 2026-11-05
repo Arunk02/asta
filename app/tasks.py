@@ -3815,6 +3815,8 @@ async def _worker(task_id: int) -> None:
             if t.get("teams_chat") and await answers.present_task(task_id, t, result):
                 await answers.present_task_draft(task_id, t, answered=True)
                 return
+            if not t.get("teams_chat") and await answers.offer_correction(task_id, t, result):
+                return
             snippet = result[:400] + ("…" if len(result) > 400 else "")
             waste = _audit_note(task_id)
             await notify.notify(

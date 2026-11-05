@@ -2782,9 +2782,14 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
             return (f"Not a new task: this PR belongs to task #{owner['id']} "
                     f"(“{owner['title'][:60]}”), so it was sent there and continues in that "
                     f"task's own session and checkout. Arun will be told how it goes.")
+    from . import responder
     if teams_chat:
-        from . import responder
         responder.note_handed(teams_chat)       # his turn sent their ask to a task
+    # A task about someone's open case starts from what the case holds — and is
+    # told to name what it overturns, which is what raises the correction draft.
+    _, held = responder.case_for_text(f"{title}\n{prompt[:1500]}")
+    if held:
+        prompt += held
     t = tasks.spawn(title, prompt, kind, workspace or None, teams_chat)
     return (f"Task #{t['id']} ({kind}) spawned — running in the background. "
             f"Arun will be notified when it finishes.")

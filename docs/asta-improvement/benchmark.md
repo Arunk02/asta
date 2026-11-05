@@ -51,6 +51,26 @@ Verified **77/80 (96%)**. **The hard gate passed: 22/22.** There were no failure
 
 `case-correction-raised` is missing. The brief asks for "Corrects:" and a correction reply when evidence contradicts what was said. Nothing yet raises a correction draft by itself when a later task overturns a sent reply.
 
+### Live: which brain should own a case (5 November 2026)
+
+There are three live, tool-free scenarios in `tests/workworld/live.yaml`, each with the evidence written into the brief:
+
+- `live-case-says-what-it-overturns`
+- `live-case-zero-hits-is-not-absence`
+- `live-case-names-the-exact-path`
+
+They check what the 5 November case got wrong. Each was run on each brain, one brain at a time, at pass^3. Every run's model was confirmed from the CLI's own transcript.
+
+| Brain | Model it actually ran | Result | Time per run |
+|---|---|---|---|
+| Copilot CLI, default | claude-sonnet-5 | 9/9 | 57–88 s |
+| Claude CLI, sonnet | claude-sonnet-5 | 9/9 | 32–42 s |
+| Claude CLI, opus | claude-opus-5 | 9/9 | 36–76 s |
+
+The first Opus attempt hit the Claude session limit after one run. Asta's quota fallback then handed the remaining eight to Copilot, which passed them. Those runs were discarded and Opus was rerun after the limit reset. **A live comparison must check the transcript's model; a pass alone does not say which brain earned it.**
+
+**Reading:** given the case's history and the absence warning in the brief, every brain answered correctly. The failures of 5 November came from what the brain was not given, and #218/#219 fix that. They did not come from the model, so the brain for case analysis stays as it is, and Copilot's default is already Sonnet 5. These scenarios do not test finding evidence with tools. That needs a tool-using live tier, which waits on serving the sim world to a brain safely.
+
 ## v2, 4 November 2026 (deterministic, pass^3)
 
 v2 changes two things:

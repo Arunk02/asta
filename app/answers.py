@@ -208,13 +208,18 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
         store.record_outcome("answer", "stale review", subject=str(task_id or ""),
                              detail=f"{origin['ref']} changed before staging")
         return False
-    if _already_put(chat, need, reply):
+    if already_shown(task_id, chat) or _already_put(chat, need, reply):
         # The same ask for the same person, already in front of him (or already
-        # answered) today. "These we already discussed — why again?" (30 Sep,
+        # answered) today. One task's answer is shown once per chat: 5 Nov, the
+        # same finding came back as "Vinish wants you to confirm the call" twice
+        # because the chat window around it had moved on by one message. "These we already discussed — why again?" (30 Sep,
         # Vinish's "can we connect", re-read from an old message.)
         store.record_outcome("answer", "duplicate", subject=str(task_id or ""),
                              detail=f"{who}: {need}"[:200])
         return False
+    if task_id:
+        # Every path below puts it in front of him in some form.
+        store.kv_set(_shown_key(task_id, chat), str(time.time()))
     later = _taken_over_by(task_id, who)
     if later:
         # 16 Oct: Vinish's ask was clarified ("update the schema in booking
@@ -392,7 +397,7 @@ async def offer_plan(*, who: str, chat: str, need: str, summary: str, thread: st
         _record_rejected_origin(item)
         return False
     from . import tasks
-    covered = tasks.covering_task(f"{need}\n{summary}\n{words}")
+    covered = tasks.covering_task(f"{need}\n{summary}\n{words}", who=who, ask=need)
     if covered:
         # Already being built: offering it again is the nag he complained of,
         # and a "yes" would start a second task on the same change.
@@ -444,7 +449,8 @@ async def _show_plan(item: dict) -> None:
                 + "\n\nIts plan gate brings the plan back to Arun; nothing big is "
                   "written before he approves it, and nothing ships before he says ship."),
         kind="plan_code", payload={"who": who, "chat": item.get("chat"),
-                                   "thread": item.get("thread")})
+                                   "thread": item.get("thread"),
+                                   "words": (item.get("words") or "")[:1500]})
     await notify.notify(f"🛠 *{who}* asks for a code change: {need}\n\n"
                         f"Reply *yes* and I'll plan it — the plan comes to you before any code.",
                         "answer", urgency="direct", considered=True)
@@ -1005,6 +1011,18 @@ REPEAT_SECONDS = 12 * 3600
 
 def _gist(text: str) -> str:
     return " ".join(re.sub(r"[^\w\s]", " ", (text or "").lower()).split())[:200]
+
+
+def _shown_key(task_id: int | None, chat: str) -> str:
+    return f"answer_shown:{task_id}:{(chat or '').strip().lower()[:60]}"
+
+
+def already_shown(task_id: int | None, chat: str, now: float | None = None) -> bool:
+    """This task's answer was already put in front of him for this chat, recently."""
+    if not task_id:
+        return False
+    at = float(store.kv_get(_shown_key(task_id, chat)) or 0)
+    return bool(at) and (time.time() if now is None else now) - at < REPEAT_SECONDS
 
 
 def _already_put(chat: str, need: str, reply: str, now: float | None = None) -> bool:

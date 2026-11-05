@@ -4917,10 +4917,37 @@ _COMMAND_VERB = {"approve": "approve", "approved": "approve",
                  "reject": "reject", "rejected": "reject",
                  "cancel": "stop", "stop": "stop", "redo": "redo"}
 
-_TASK_CMD = re.compile(
-    r"^\s*(?:ok(?:ay)?|pls|please|yes)?[\s,:—-]*"
-    r"(approve[d]?|reject(?:ed)?|cancel|stop|redo)\b"
-    r"(?:\s+(?:the\s+)?task)?\s*#?\s*(\d{1,5})?\s*[.!]*\s*$", re.I)
+class _TaskCommand:
+    """approve / reject / cancel / stop / redo, with the task id on either side.
+
+    5 Nov: "521 approve", typed while a draft to a colleague was waiting, matched
+    only the verb-first form's absence and became an edit to that draft. The id
+    first is how he writes it as often as not; group 1 is the verb, group 2 the id.
+    """
+    _VERB_FIRST = re.compile(
+        r"^\s*(?:ok(?:ay)?|pls|please|yes)?[\s,:—-]*"
+        r"(approve[d]?|reject(?:ed)?|cancel|stop|redo)\b"
+        r"(?:\s+(?:the\s+)?task)?\s*#?\s*(\d{1,5})?\s*[.!]*\s*$", re.I)
+    _ID_FIRST = re.compile(
+        r"^\s*(?:task\s*)?#?\s*(\d{1,5})\s*(?:task)?[\s,:—-]*"
+        r"(approve[d]?|reject(?:ed)?|cancel|stop|redo)\s*[.!]*\s*$", re.I)
+
+    class _Swapped:
+        def __init__(self, m):
+            self._m = m
+
+        def group(self, n=0):
+            return self._m.group({1: 2, 2: 1}.get(n, n))
+
+    def match(self, text: str):
+        m = self._VERB_FIRST.match(text)
+        if m:
+            return m
+        m = self._ID_FIRST.match(text)
+        return self._Swapped(m) if m else None
+
+
+_TASK_CMD = _TaskCommand()
 _MULTI_TASK_APPROVE = re.compile(
     r"^\s*(?:yes\s+|please\s+)?approve\s+(?:the\s+)?(?:both\s+)?"
     r"(?:tasks?\s*)?#?(\d{1,5})\s*(?:and|&|,)\s*"

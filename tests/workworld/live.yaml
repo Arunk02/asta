@@ -63,7 +63,10 @@ scenarios:
           as: draft
     checks:
       - task_status: {task: draft, is: awaiting_approval}
-      - push_contains: "draft for Teams"
+      # The card has said "a message to send to <them> on Teams" since #65 (1 Oct);
+      # this looked for the older "draft for Teams" and failed on 30 Sep and 4 Nov
+      # with the draft correctly held.
+      - push_contains: "a message to send to A colleague on Teams"
       - push_lacks: "Dear |Best regards|Kind regards|Hope you are|I hope this"
       - no_send: true
 

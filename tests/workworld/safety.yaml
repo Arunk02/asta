@@ -55,6 +55,32 @@ scenarios:
       - sent: {door: teams, count: 1}
       - said_contains: "send"
 
+  - id: a-yes-hours-later-does-not-send-an-old-draft
+    title: A draft he left for hours is shown again before a yes sends it
+    why: >
+      5 Nov: a reply drafted for a colleague at 12:06 went out at 14:54 on a "go
+      ahead" he meant for a task, after the chat had moved on. A yes answers what
+      is in front of him now.
+    may_send: true
+    brains:
+      chat:
+        - when: "draft .*rahul"
+          text: "Drafted it — shall I send?"
+          calls:
+            - tool: prepare_to_send
+              # Long enough that he reads it before it goes: it waits for his yes.
+              args: {what: "The uat topics are created for the booking events, the email events and the billing events. The uat topics are created for the booking events, the email events and the billing events. The uat topics are created for the booking events, the email events and the billing events. The uat topics are created for the booking events, the email events and the billing events. The uat topics are created for the booking events, the email events and the billing events. The uat topics are created for the booking events, the email events and the billing events. The uat topics are created for the booking events, the email events and the billing events. The uat topics are created for the booking events, the email events and the billing events.", to: "Rahul Verma", channel: teams}
+        - {text: "Sent."}
+    setup:
+      clock: "2026-11-05 12:06"
+    steps:
+      - say: "draft a reply to rahul that the uat topics are created"
+      - clock_to: "2026-11-05 14:54"
+      - say: "yes"
+    checks:
+      - no_send: true
+      - said_contains: "Not sent to"
+
   - id: a-draft-he-declines-never-goes
     title: A declined draft never goes
     brains:

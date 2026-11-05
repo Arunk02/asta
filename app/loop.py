@@ -187,6 +187,44 @@ def _kv(op: str, cid: str, value: str = ""):
         raise
 
 
+#: A colleague's draft is his yes for this long. Past it, a bare yes is more
+#: likely about something newer, so the draft is shown again before it goes.
+DRAFT_FRESH_SECONDS = 2 * 3600
+
+
+def staged_at(cid: str) -> float:
+    try:
+        return float(_kv("get", f"at:{cid}") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def stale_draft(staged: dict, cid: str = "", now: float | None = None) -> str:
+    """Why this Teams draft must not go on the yes just given, or "" when it may.
+
+    5 Nov: a reply drafted for a colleague at 12:06 went out at 14:54 on a "go
+    ahead" he meant for a task, after he had written to them himself five times.
+    """
+    import contextlib
+    if (staged.get("channel") or "").strip().lower() != "teams" or not staged.get("to"):
+        return ""
+    at = float(staged.get("_at") or 0) or (staged_at(cid) if cid else 0.0)
+    if not at:
+        return ""
+    now = time.time() if now is None else now
+    if now - at > DRAFT_FRESH_SECONDS:
+        return f"it was drafted {int((now - at) // 60)} minutes ago"
+    # What the chat watcher already stored, not a fresh browser look: the look
+    # can hang on a sign-in page and hold the send (and, in a test, the suite).
+    from . import chat_watch, store
+    with contextlib.suppress(Exception):
+        to = staged["to"].strip().lower()
+        for row in store.teams_messages(chat=staged["to"], since=at, limit=400):
+            if (row.get("chat") or "").strip().lower() == to and chat_watch.written_by_him(row):
+                return "you have written to them yourself since it was drafted"
+    return ""
+
+
 def stage(cid: str, intent: dict) -> None:
     """Hold a drafted send until Arun answers — in memory AND on disk.
 
@@ -197,6 +235,9 @@ def stage(cid: str, intent: dict) -> None:
     the moment it is staged and a new process finds it waiting.
     """
     if cid:
+        # When it was drafted, kept beside the draft rather than in it, so a yes
+        # hours later is checked against a chat that may have moved on.
+        _kv("set", f"at:{cid}", str(time.time()))
         _awaiting[cid] = intent
         _kv("set", cid, json.dumps(intent))
         _remember_version(cid, intent)

@@ -2187,6 +2187,10 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                     source_text=c["raw"][-1].get("text") or "",
                     note=f"Already looked into this recently (task #{task['id']}) — not run again."):
                 continue
+            if answers.already_shown(task["id"], c["chat"]):
+                # Already in front of him: a new line in the chat that asks nothing
+                # new is not a reason to tell him about it again.
+                continue
         if task and not task.get("reused"):
             threads.update(tid, status="working")
             # They hear back within the minute — "checking", in his words — and

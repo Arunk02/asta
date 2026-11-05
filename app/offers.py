@@ -39,6 +39,7 @@ yesterday must not quietly kick off work he has forgotten proposing.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -347,7 +348,26 @@ def accept() -> Offer | None:
     if o:
         clear()
         _promote()
+        with contextlib.suppress(Exception):
+            words = (o.payload or {}).get("words") or ""
+            store.kv_set(ACCEPTED_KEY, json.dumps(
+                {"at": time.time(), "said": f"{o.context}\n{words}".strip()}))
     return o
+
+
+#: What he last said yes to, for the task that yes starts: a colleague's ask is
+#: where the PR to work on can be named when his own word was only "yes".
+ACCEPTED_KEY = "offer_accepted_last"
+ACCEPTED_FOR = 900
+
+
+def recently_accepted(now: float | None = None) -> str:
+    try:
+        raw = json.loads(store.kv_get(ACCEPTED_KEY) or "{}")
+    except ValueError:
+        return ""
+    now = time.time() if now is None else now
+    return raw.get("said", "") if now - float(raw.get("at") or 0) < ACCEPTED_FOR else ""
 
 
 def decline() -> Offer | None:

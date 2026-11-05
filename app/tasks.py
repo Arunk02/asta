@@ -1250,15 +1250,40 @@ def _identifiers(text: str) -> set[str]:
     return {m.group(0).replace("_", "").lower() for m in _IDENTIFIER.finditer(text or "")}
 
 
-def covering_task(text: str, days: float = 3) -> dict | None:
+#: Words of an ask that say what to do rather than what it is about.
+_ASK_VERBS = frozenset("""disable enable skip add fix change update remove make stop
+please can could you need want code task raise pr should would kindly also just""".split())
+#: A plain-language ask covers a task when this many of its subject words, and
+#: this share of them, are in the task — and the task names the same person.
+WORD_OVERLAP_MIN = 4
+WORD_COVERAGE_MIN = 0.7
+
+
+def _subject_words(text: str) -> set[str]:
+    from . import knowledge
+    out = set()
+    for w in knowledge.terms(text):
+        if len(w) < 3 or w in _ASK_VERBS or w in knowledge._CHATTER or w.isdigit():
+            continue
+        out.add(w[:-1] if len(w) > 3 and w.endswith("s") else w)
+    return out
+
+
+def covering_task(text: str, days: float = 3, *, who: str = "", ask: str = "") -> dict | None:
     """A code task already on this work, or None.
 
     9 Oct: Vinish's customs-status ask was offered to Arun as a new code change
     five times while task 272 was building exactly that. Matched on at least two
     shared code identifiers against the task's title, prompt and approved plan —
-    a topic word ("customs") alone is two different jobs as often as one."""
+    a topic word ("customs") alone is two different jobs as often as one.
+
+    5 Nov: "disable VTS calls and vessel ETA validation for one-way empty or grey
+    pool orders" has no identifier at all, so it was offered again while #521
+    built it. A plain-language `ask` from `who` also covers a task that names
+    that person and shares most of the ask's subject words."""
     want = _identifiers(text)
-    if len(want) < 2:
+    words = _subject_words(ask or text) if who and len(want) < 2 else set()
+    if len(want) < 2 and len(words) < WORD_OVERLAP_MIN:
         return None
     for row in store.list_tasks(limit=60):
         if row.get("kind") != "code" or row.get("status") in FINAL + ("failed",):
@@ -1267,8 +1292,15 @@ def covering_task(text: str, days: float = 3) -> dict | None:
                 and time.time() - float(row.get("created_at") or 0) > days * 86400:
             continue
         plan = store.kv_get(f"task_plan:{row['id']}") or ""
-        have = _identifiers(f"{row.get('title', '')}\n{row.get('prompt', '')}\n{plan}")
-        if len(want & have) >= 2:
+        body = f"{row.get('title', '')}\n{row.get('prompt', '')}\n{plan}"
+        if len(want) >= 2:
+            if len(want & _identifiers(body)) >= 2:
+                return row
+            continue
+        if who.strip().lower() not in body.lower():
+            continue
+        shared = words & _subject_words(body)
+        if len(shared) >= WORD_OVERLAP_MIN and len(shared) / len(words) >= WORD_COVERAGE_MIN:
             return row
     return None
 
@@ -1387,6 +1419,11 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
             with contextlib.suppress(Exception):
                 from . import capabilities, go, scorecard
                 said = scorecard.his_words(capabilities.said_this_turn())
+                from . import offers
+                # The words a PR may be named in: his, and a colleague's he said
+                # yes to. Not the brief, where a PR can be mere background.
+                store.kv_set(f"task_asked:{t['id']}", _json.dumps(
+                    {"his": said, "offer": offers.recently_accepted()}))
                 go.on_spawn(t["id"], said)
                 from . import reproduction
                 if _graph().enabled() and reproduction.asked(said):
@@ -2853,6 +2890,24 @@ _CI_SIGNAL = re.compile(
     r"Tests run:.*(?:Failures|Errors): [1-9]|BUILD FAILURE|Failed scenarios|"
     r"\bFAILED\b|Caused by:|Exception:", re.I)
 _LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z\s?")
+#: A quality gate (SonarQube) is a verdict on the change, kept on the Sonar server:
+#: the log says only that it failed. 5 Nov, #521: the build and tests passed, the
+#: gate failed, and the automatic fix round proposed a change whose cause it
+#: "can't confirm" — a plan for him to approve with nothing in it.
+_QUALITY_GATE = re.compile(r"quality\s+gate\s+(?:has\s+)?failed|quality\s+gate\s+status:?\s*(?:error|failed)", re.I)
+_REAL_FAILURE = re.compile(
+    r"BUILD FAILURE|Tests run:.*(?:Failures|Errors): [1-9]|AssertionError|AssertionFailedError|"
+    r"ComparisonFailure|expected:\s*<|Failed scenarios|COMPILATION ERROR", re.I)
+
+
+def quality_gate_only(ci_read: str) -> bool:
+    """The only failure in what Asta read is a quality gate: no build or test failed."""
+    return bool(_QUALITY_GATE.search(ci_read or "")) and not _REAL_FAILURE.search(ci_read or "")
+
+
+class QualityGateOnly(ValueError):
+    """The red CI is a quality gate, not a fault a code change can be planned from."""
+
 
 
 async def _github_token(repo: str) -> str:
@@ -3444,6 +3499,16 @@ async def pr_head_branch(t: dict, ws_root: Path) -> dict[str, str]:
     link: the work belongs on that PR's branch."""
     from . import prname, review, worktrees
     text = f"{t.get('title') or ''}\n{(t.get('prompt') or '')[:3000]}"
+    try:
+        asked = _json.loads(store.kv_get(f"task_asked:{t.get('id')}") or "null")
+    except ValueError:
+        asked = None
+    if isinstance(asked, dict):
+        # 5 Nov, #521: the brief a brain wrote called the change "the one added in
+        # Arun's existing PR 1409", he never named a PR, and the task was built on
+        # 1409's branch and shipped into it. Only a PR a person named is the one
+        # to work on.
+        text = f"{asked.get('his') or ''}\n{asked.get('offer') or ''}"
     repo, number = prname.parse(text)
     if not number:
         number, target = review.pr_target(text)
@@ -5009,6 +5074,12 @@ async def check_pr(task_id: int) -> str | None:
                 store.kv_set(f"task_ci_autofix:{task_id}", str(tries + 1))
                 try:
                     await propose_change(task_id, CI_FIX_BRIEF)
+                except QualityGateOnly:
+                    return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}\n"
+                            "It is the SonarQube quality gate, not the build: the build and "
+                            "tests passed. Which condition failed is on Sonar for this PR — "
+                            "usually coverage on the new code. Nothing changed. Say "
+                            f"*fix #{task_id}* to add tests for it, or *rerun ci {task_id}*.")
                 except Exception as exc:                       # noqa: BLE001
                     store.record_outcome("task", "ci_analysis_failed", subject=str(task_id),
                                          detail=str(exc)[:200])
@@ -5207,6 +5278,15 @@ async def propose_change(task_id: int, feedback: str) -> str:
         raise ValueError(f"task #{task_id} is still running — I'll plan this when it stops")
     await ensure_checkout(task_id)
     ci_read = await _ci_failure_for(t, feedback)
+    if quality_gate_only(ci_read):
+        if feedback == CI_FIX_BRIEF:
+            # The automatic round: nothing to plan from, so it says what it saw.
+            store.record_outcome("task", "quality gate", subject=str(task_id), detail=ci_read[:200])
+            raise QualityGateOnly(f"task #{task_id}: the red check is a quality gate")
+        ci_read += ("\n\nThe red check is a QUALITY GATE (SonarQube): the build and tests "
+                    "passed. Its failing condition is on the Sonar server, not in this log — "
+                    "most often coverage or new issues on the changed code. Plan the change "
+                    "that meets it (tests for the new code); do not change unrelated code.")
     store.kv_set(f"task_approved:{task_id}", "")          # this leg cannot write
     store.kv_set(f"task_proposal:{task_id}", _json.dumps(
         {"feedback": feedback, "status": t["status"], "at": time.time()}))

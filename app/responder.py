@@ -482,6 +482,33 @@ _BRIEFS = {
 }
 
 
+_LINK = re.compile(r"https?://\S+")
+_IMAGE = re.compile(r"\[image:[^\]]*\]")
+
+
+def their_words(who: str, text: str) -> str:
+    """The asker's own lines in a chat window, links dropped.
+
+    The window around an ask moves on with every message. Keyed on all of it, a
+    new line that asks nothing (5 Nov: Vinish posting a recording link) made the
+    same exchange look new, and it was investigated and told to him again. What
+    THEY said is the ask; a link is evidence, already counted as an entity.
+    """
+    name = (who or "").strip().lower()
+    if not name:
+        return ""
+    mine = []
+    for line in (text or "").splitlines():
+        head, sep, body = line.partition(":")
+        if sep and head.strip().lower() == name:
+            # What they typed before a pasted link; the preview text Teams adds
+            # after it (title, site, image) is the link's, not theirs.
+            said = _IMAGE.sub(" ", _LINK.split(body, 1)[0]).strip()
+            if said:
+                mine.append(" ".join(said.split()))
+    return "\n".join(mine)
+
+
 def brief_for(kind: str, who: str, text: str) -> str:
     """The self-contained prompt for one investigation.
 
@@ -906,8 +933,8 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         ck = (f"review_request:{review_revision}:"
               f"{hashlib.sha256(scope.encode()).hexdigest()[:12]}" if review_revision else "")
     else:
-        ck = "" if kind == "pr_review" else results_cache.key_for(kind or "ask", grounds,
-                                                                  question=text)
+        ck = "" if kind == "pr_review" else results_cache.key_for(
+            kind or "ask", grounds, question=their_words(who, text) or text)
     hit = results_cache.lookup(ck) if ck else None
     from . import issue_links
     report_scope = issue_links.scope(text, kind or "ask") if not original else None

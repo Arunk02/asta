@@ -2896,7 +2896,7 @@ _JOB_ID = re.compile(r"/actions/runs/\d+/job/(\d+)")
 _CI_SIGNAL = re.compile(
     r"ComparisonFailure|AssertionError|AssertionFailedError|expected:\s*<|Expected:|"
     r"Tests run:.*(?:Failures|Errors): [1-9]|BUILD FAILURE|Failed scenarios|"
-    r"\bFAILED\b|Caused by:|Exception:", re.I)
+    r"\bFAILED\b|Caused by:|Exception:|/dashboard\?id=", re.I)
 _LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z\s?")
 #: A quality gate (SonarQube) is a verdict on the change, kept on the Sonar server:
 #: the log says only that it failed. 5 Nov, #521: the build and tests passed, the
@@ -5107,11 +5107,14 @@ async def check_pr(task_id: int) -> str | None:
                 try:
                     await propose_change(task_id, CI_FIX_BRIEF)
                 except QualityGateOnly:
+                    from . import sonar
                     return (f"🔴 CI red on {prname.from_url(url)} (#{task_id} {title})\n{url}\n"
                             "It is the SonarQube quality gate, not the build: the build and "
-                            "tests passed. Which condition failed is on Sonar for this PR — "
-                            "usually coverage on the new code. Nothing changed. Say "
-                            f"*fix #{task_id}* to add tests for it, or *rerun ci {task_id}*.")
+                            "tests passed. Which condition failed is on Sonar for this PR, "
+                            "and I could not read it. "
+                            + ("" if sonar.configured() else sonar.NEEDS_TOKEN + " ")
+                            + f"Nothing changed. Say *fix #{task_id}* once you know the "
+                            f"condition, or *rerun ci {task_id}*.")
                 except Exception as exc:                       # noqa: BLE001
                     store.record_outcome("task", "ci_analysis_failed", subject=str(task_id),
                                          detail=str(exc)[:200])
@@ -5327,6 +5330,18 @@ async def propose_change(task_id: int, feedback: str) -> str:
     await ensure_checkout(task_id)
     ci_read = await _ci_failure_for(t, feedback)
     if quality_gate_only(ci_read):
+        # Sonar knows which condition failed; the log does not. With a token the
+        # round plans from the gate's own conditions and issues, like any red CI.
+        from . import sonar
+        gate = ""
+        if sonar.configured():
+            with contextlib.suppress(Exception):
+                gate = sonar.render(await sonar.report(sonar.target(ci_read)))
+        if gate:
+            store.record_outcome("task", "quality gate read", subject=str(task_id), detail=gate[:200])
+            ci_read += ("\n\n" + gate + "\n\nPlan the change that meets these conditions on "
+                        "the changed code — the issues and lines above, nothing unrelated.")
+    if quality_gate_only(ci_read) and "SonarQube quality gate:" not in ci_read:
         if feedback == CI_FIX_BRIEF:
             # The automatic round: nothing to plan from, so it says what it saw.
             store.record_outcome("task", "quality gate", subject=str(task_id), detail=ci_read[:200])

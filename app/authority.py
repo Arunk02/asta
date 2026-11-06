@@ -145,10 +145,14 @@ def _contact_named(words: str) -> list[str]:
     """His 1:1 contacts that `words` names by any one of their names."""
     from . import answers, chat_watch
     said = set(answers.name_tokens(words))
+    # A person's chat is one where that person wrote: the 1:1 shows their name as
+    # both the chat and the sender. Meeting chats never do — and their titles
+    # ("… changes for billing") matched everyday words in his message (6 Nov,
+    # found on live data after deploy: 14 candidates, so nothing was granted).
     with store._connect() as conn:
-        chats = [r[0] for r in conn.execute("SELECT DISTINCT chat FROM teams_messages "
-                                            "WHERE chat <> ''").fetchall()]
-    people = [c for c in chats if not any(ch in c for ch in (",", "+")) and not chat_watch.is_from_him(c)]
+        people = [r[0] for r in conn.execute(
+            "SELECT DISTINCT chat FROM teams_messages WHERE chat <> '' AND sender = chat").fetchall()]
+    people = [c for c in people if not any(ch in c for ch in (",", "+")) and not chat_watch.is_from_him(c)]
     return [c for c in people
             if any(len(t) >= 3 and t in said for t in answers.name_tokens(c))]
 

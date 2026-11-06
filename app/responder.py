@@ -514,6 +514,8 @@ def their_words(who: str, text: str) -> str:
 CASE_HANDED_SECONDS = 6 * 3600
 #: How far back a case's earlier findings are carried into a new brief.
 CASE_WINDOW_SECONDS = 3 * 3600
+#: How far back their links are read for where their work is.
+LOCATION_WINDOW_SECONDS = 24 * 3600
 
 
 def note_handed(chat: str, now: float | None = None) -> None:
@@ -673,7 +675,10 @@ def case_so_far(chat: str, who: str, now: float | None = None) -> str:
     if chat:
         from . import chat_watch
         rows = store.teams_messages(chat=chat, since=since)[-40:]
-        theirs = [r.get("text") or "" for r in rows]
+        # Where their work is comes from the day's links, not only the case's
+        # three hours: a branch named at 10:57 is still the branch at 14:00.
+        theirs = [r.get("text") or "" for r in
+                  store.teams_messages(chat=chat, since=now - LOCATION_WINDOW_SECONDS)[-80:]]
         for row in rows[-30:]:
             if chat_watch.is_from_him(row.get("sender", "")):
                 told.append(f"- {row.get('stamp') or ''}: {' '.join((row.get('text') or '').split())[:300]}")

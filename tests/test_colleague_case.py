@@ -167,3 +167,24 @@ def test_an_earlier_real_send_is_not_called_false_by_her_other_name():
     _said(CHAT, "Arunkumar K", "the amend event answer", 120)
     claim = main.unproven_send("The amend-event answer is already sent to Pat.", time.time())
     assert claim == ""
+
+
+def test_meeting_chats_with_everyday_words_are_not_contacts():
+    """Found on live data after the first deploy: meeting chats such as "New
+    changes for billing" matched "for" in his message, so fourteen candidates
+    granted nothing. A person's chat is one where they wrote."""
+    _known_chats()
+    for title in ("Approach for QA with billing", "Scenario discussion for few items",
+                  "Talk directly with the team today"):
+        _said(title, "Someone Else", "agenda", 700)
+    g = authority.standing_from_words(
+        "Whatever Pat asks respond don't required me approval, talk with her directly just for today ..")
+    assert g is not None and g.target == CHAT
+
+
+def test_where_her_work_is_survives_past_the_case_window():
+    _said(CHAT, CHAT, "please check branch feature/abc-123", responder.CASE_WINDOW_SECONDS + 1800)
+    _said(CHAT, CHAT, "where do I add this?", 600)
+    _said(CHAT, "Arunkumar K", "check the old status", 500)
+    block = responder.case_so_far(CHAT, CHAT)
+    assert "feature/abc-123" in block

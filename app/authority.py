@@ -39,35 +39,52 @@ class Grant:
     target: str
     per_day: int
     words: str = ""
+    expires_at: float | None = None
 
     def render(self) -> str:
         verb = {"send": "message", "call": "call", "comment": "comment on"}.get(self.act, self.act)
-        return f"May {verb} {self.target} without asking — up to {self.per_day} a day"
+        until = (f", until {time.strftime('%H:%M', time.localtime(self.expires_at))} today"
+                 if self.expires_at else "")
+        return f"May {verb} {self.target} without asking — up to {self.per_day} a day{until}"
 
 
 def _row(r) -> Grant:
+    keys = r.keys() if hasattr(r, "keys") else []
     return Grant(id=r["id"], act=r["act"], target=r["target"],
-                 per_day=int(r["per_day"] or 1), words=r["words"] or "")
+                 per_day=int(r["per_day"] or 1), words=r["words"] or "",
+                 expires_at=r["expires_at"] if "expires_at" in keys else None)
+
+
+def _live(r, now: float | None = None) -> bool:
+    """Active, and not past an end he gave it ("just for today")."""
+    end = r["expires_at"] if "expires_at" in r.keys() else None
+    return bool(r["active"]) and (end is None or (time.time() if now is None else now) < float(end))
 
 
 def grants() -> list[Grant]:
     with store._connect() as conn:
         rows = conn.execute("SELECT * FROM authority WHERE active=1 ORDER BY id").fetchall()
-    return [_row(r) for r in rows]
+    return [_row(r) for r in rows if _live(r)]
 
 
-def grant(act: str, target: str, per_day: int = 1, words: str = "") -> Grant:
+def grant(act: str, target: str, per_day: int = 1, words: str = "",
+          expires_at: float | None = None) -> Grant:
     """Record a permission HE approved. Never called on Asta's own initiative."""
     act, target = (act or "").strip().lower(), (target or "").strip()
     if not act or not target:
         raise ValueError("a permission needs an act and who it is for")
     for g in grants():
         if g.act == act and g.target.lower() == target.lower():
+            if expires_at and g.expires_at and expires_at > g.expires_at:
+                with store._connect() as conn:          # "for today" again, later: extend it
+                    conn.execute("UPDATE authority SET expires_at=? WHERE id=?", (expires_at, g.id))
+                return next(x for x in grants() if x.id == g.id)
             return g
     with store._connect() as conn:
-        cur = conn.execute("INSERT INTO authority (act, target, per_day, words, created_at) "
-                           "VALUES (?,?,?,?,?)",
-                           (act, target, max(1, int(per_day)), words[:300], time.time()))
+        cur = conn.execute("INSERT INTO authority (act, target, per_day, words, created_at, "
+                           "expires_at) VALUES (?,?,?,?,?,?)",
+                           (act, target, max(1, int(per_day)), words[:300], time.time(),
+                            expires_at))
         gid = cur.lastrowid
     store.record_outcome("authority", "granted", subject=str(gid), detail=f"{act} {target}"[:200])
     return next(g for g in grants() if g.id == gid)
@@ -110,6 +127,55 @@ def record_explicit_contact(target: str, per_day: int = 20) -> Grant:
     if int(per_day) < 1:
         raise ValueError("A zero daily limit does not grant permission; revoke the existing permission instead")
     return grant("send", target, per_day=max(1, min(int(per_day), 100)), words=said)
+
+
+#: "for today", "just for today", "today only", "till evening", "until tonight".
+_TODAY = re.compile(r"\b(?:(?:just\s+|only\s+)?for\s+today|today\s+only|for\s+the\s+day|"
+                    r"(?:till|until)\s+(?:evening|tonight|eod|end\s+of\s+(?:the\s+)?day))\b", re.I)
+#: He waives his approval: "without my approval", "don't need my approval",
+#: "no need of my approval", "talk with her directly", "respond directly".
+_WAIVER = re.compile(
+    r"\b(?:without\s+(?:my\s+)?(?:approval|asking(?:\s+me)?|my\s+yes)|"
+    r"(?:don'?t|do\s+not|dont|no)\s+(?:need|require[ds]?|required)?\s*(?:of\s+)?(?:me\s+|my\s+)?approval|"
+    r"no\s+need\s+(?:of|for)\s+(?:my\s+)?approval|"
+    r"(?:talk|respond|reply|answer|speak)\s+(?:with\s+(?:her|him|them)\s+)?directly)\b", re.I)
+
+
+def _contact_named(words: str) -> list[str]:
+    """His 1:1 contacts that `words` names by any one of their names."""
+    from . import answers, chat_watch
+    said = set(answers.name_tokens(words))
+    with store._connect() as conn:
+        chats = [r[0] for r in conn.execute("SELECT DISTINCT chat FROM teams_messages "
+                                            "WHERE chat <> ''").fetchall()]
+    people = [c for c in chats if not any(ch in c for ch in (",", "+")) and not chat_watch.is_from_him(c)]
+    return [c for c in people
+            if any(len(t) >= 3 and t in said for t in answers.name_tokens(c))]
+
+
+def standing_from_words(words: str, now: float | None = None) -> Grant | None:
+    """A permission he gave in so many words, for today, to one 1:1 contact.
+
+    6 Nov: "Whatever Harika asks respond don't required me approval, talk with
+    her directly just for today" got "noted" — and the next two replies were
+    staged for his yes. The standing rule above wanted "going forward" and her
+    full Teams name ("Nakka Harika"); and there was no way to say "for today".
+    Read from HIS words at the turn boundary, never from a tool's arguments.
+    One person (named by any of their names, unique among his chats), messaging
+    only, ending at midnight. None when it is anything less clear than that.
+    """
+    said = " ".join((words or "").split())
+    if not _TODAY.search(said) or not _WAIVER.search(said):
+        return None
+    # "don't reply to her without my approval" says the opposite of a waiver.
+    if re.search(r"\b(?:don'?t|do\s+not|never)\s+(?:reply|respond|send|message|talk)\b", said, re.I):
+        return None
+    named = _contact_named(said)
+    if len(named) != 1:
+        return None
+    day = time.localtime(time.time() if now is None else now)
+    end = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, 23, 59, 0, 0, 0, -1))
+    return grant("send", named[0], per_day=50, words=said, expires_at=end)
 
 
 def revoke(grant_id: int) -> bool:
@@ -158,6 +224,8 @@ def _contact_permission(target: str) -> tuple[bool, Grant | None]:
     for row in rows:
         if row['target'].strip().casefold() == target.strip().casefold():
             g = _row(row)
+            if row['active'] and not _live(row):
+                continue            # "just for today" has ended: as if never given
             usable = bool(row['active']) and used_today(g.id) < g.per_day
             return True, g if usable else None
     return False, None

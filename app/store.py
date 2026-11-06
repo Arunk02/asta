@@ -379,6 +379,8 @@ CREATE TABLE IF NOT EXISTS result_cache (
 # existing table alone, so a plain schema edit reaches new installs only — the
 # one machine that actually has the history would keep the old shape.
 _ADDED_COLUMNS = {
+    # A permission he gave "just for today" ends tonight (authority.standing_from_words).
+    "authority": (("expires_at", "REAL"),),
     "traces": (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
                ("cost_usd", "REAL NOT NULL DEFAULT 0"),
                ("measured", "INTEGER NOT NULL DEFAULT 0"),

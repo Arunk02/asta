@@ -2078,8 +2078,11 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         review = not corrected and not reference and responder.what_it_asks(
             f"{fields['need']}\n" + "\n".join(c["new"])) in ("review_request", "pr_review")
         port = responder.counterpart("\n".join(c["new"]) + "\n" + (fields.get("need") or ""))
+        # A question about the work THEY are writing is answered, not planned:
+        # "where do I add this activity?" is asking his view (6 Nov).
+        advice = responder.asks_advice("\n".join(c["new"]))
         if d.get("work") == "code" and state != "urgent" and not review and not port \
-                and not corrected and not reference:
+                and not corrected and not reference and not advice:
             from . import answers
             await answers.offer_plan(who=who, chat=c["chat"], need=said,
                                      summary=fields["summary"], thread=tid,

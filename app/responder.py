@@ -556,9 +556,11 @@ def case_for_text(text: str, now: float | None = None) -> tuple[str, str]:
 
 def named_handed(text: str, now: float | None = None) -> list[str]:
     """Open handed-over chats whose person `text` names by first name."""
+    from . import answers
     words = set(re.findall(r"[a-z]+", (text or "").lower()))
+    # Any of their names: "Nakka Harika" is "Harika" to him (6 Nov).
     return [chat for chat in handed_chats(now)
-            if len(chat.split()[0]) > 2 and chat.split()[0].lower() in words]
+            if any(len(t) > 2 and t in words for t in answers.name_tokens(chat))]
 
 
 def handed_rider(chat: str, now: float | None = None) -> str:
@@ -578,6 +580,68 @@ def handed_rider(chat: str, now: float | None = None) -> str:
             f"{time.strftime('%H:%M', time.localtime(at))} — he asked about it or approved "
             f"a reply on it. Their follow-ups are part of it: investigate; do not stop "
             f"to ask him to confirm.]")
+
+
+#: A colleague asking for HIS view on work THEY are writing: "where do I add this
+#: activity?", "how should I test it?", "is this condition valid?".
+_ADVICE = re.compile(
+    r"\b(?:where|how|what|which|when)\b[^.?!\n]{0,40}\b(?:i|we)\s+(?:need\s+to|have\s+to|should|"
+    r"can|must|do|add|put|check|test|call|use|write)\b|"
+    r"\b(?:should|shall|can|do)\s+(?:i|we)\b|"
+    r"\bis\s+(?:this|that|it|my)\b[^.?!\n]{0,40}\b(?:valid|correct|right|fine|ok(?:ay)?|good|enough)\b",
+    re.I)
+#: …and what makes it a request for Arun to change code instead.
+_FOR_HIM = re.compile(r"\b(?:can|could|would)\s+you\b[^.?!\n]{0,60}\b(?:add|fix|change|implement|"
+                      r"raise|create|update|write|push|remove)\b|\b(?:please|pls)\s+(?:add|fix|change|"
+                      r"implement|raise|create|update|remove)\b|\braise\s+(?:a\s+)?pr\b", re.I)
+
+
+def asks_advice(text: str) -> bool:
+    """Advice on their own work, not a code change for Arun to make.
+
+    6 Nov: "now, where i need to add this activity?" reached him as "🛠 asks for
+    a code change" — he had to say "It is not code, she's asking your opinion for
+    the work she's coding". It is answered like any question."""
+    said = " ".join((text or "").split())
+    return bool(_ADVICE.search(said)) and not _FOR_HIM.search(said)
+
+
+def _groups_naming(chat: str) -> list[str]:
+    """Group chats whose title names this person (Teams: "Ayontika, Mayur, Nakka, +2")."""
+    from . import answers
+    names = [t for t in answers.name_tokens(chat) if len(t) >= 3]
+    if not names:
+        return []
+    with store._connect() as conn:
+        rooms = [r[0] for r in conn.execute("SELECT DISTINCT chat FROM teams_messages "
+                                            "WHERE chat LIKE '%,%' OR chat LIKE '%+%'").fetchall()]
+    return [r for r in rooms if any(n in re.findall(r"[a-z]+", r.lower()) for n in names)]
+
+
+_REPO_URL = re.compile(r"github\.com/[\w.-]+/([\w.-]+)/(?:pull/(\d+)|compare/[\w.-]+?\.{2,3}([\w./-]+))")
+_REPO_TITLE = re.compile(r"·\s*[\w.-]+/([\w.-]+)")
+_BRANCH = re.compile(r"\b((?:feature|fix|bugfix|hotfix|release)/[\w.-]+)", re.I)
+
+
+def _work_location(text: str) -> str:
+    """"telikos-booking-service, branch feature/x" from links and words in their chat."""
+    repo = branch = pr = ""
+    for m in _REPO_URL.finditer(text or ""):
+        repo, pr, branch = m.group(1), m.group(2) or pr, m.group(3) or branch
+    if not repo:
+        m = _REPO_TITLE.search(text or "")
+        repo = m.group(1) if m else ""
+    if not branch:
+        found = _BRANCH.findall(text or "")
+        branch = found[-1] if found else ""
+    if not repo and not branch:
+        return ""
+    parts = [repo or "their repo"]
+    if branch:
+        parts.append(f"branch {branch.rstrip('.')}")
+    if pr:
+        parts.append(f"PR {pr}")
+    return ", ".join(parts)
 
 
 def case_so_far(chat: str, who: str, now: float | None = None) -> str:
@@ -605,20 +669,39 @@ def case_so_far(chat: str, who: str, now: float | None = None) -> str:
         body = " ".join((analysis or t["result"]).split())[:700]
         found.append(f"- #{t['id']} at {time.strftime('%H:%M', time.localtime(float(t['created_at'])))}"
                      f" ({t.get('title') or ''}): {body}")
-    told = []
+    told, theirs, group_lines = [], [], []
     if chat:
         from . import chat_watch
-        for row in store.teams_messages(chat=chat, since=since)[-30:]:
+        rows = store.teams_messages(chat=chat, since=since)[-40:]
+        theirs = [r.get("text") or "" for r in rows]
+        for row in rows[-30:]:
             if chat_watch.is_from_him(row.get("sender", "")):
                 told.append(f"- {row.get('stamp') or ''}: {' '.join((row.get('text') or '').split())[:300]}")
-    if not found and not told:
+        # What he said to them in a GROUP is part of their case too: 6 Nov, his
+        # review of her branch was in the team chat and her 1:1 questions were
+        # about it, but the case read only the 1:1.
+        for room in _groups_naming(chat):
+            for row in store.teams_messages(chat=room, since=since)[-30:]:
+                theirs.append(row.get("text") or "")
+                if chat_watch.is_from_him(row.get("sender", "")):
+                    group_lines.append(f"- in “{room}”, {row.get('stamp') or ''}: "
+                                       f"{' '.join((row.get('text') or '').split())[:400]}")
+    where = _work_location("\n".join(theirs))
+    if not found and not told and not group_lines:
         return ""
     out = ["\n\nThis case so far — earlier findings may be WRONG; check them against "
            "the evidence, never repeat one as fact:"]
+    if where:
+        out.append(f"Their work is in {where}. Answer from that repo and branch; bring in "
+                   f"another repo only when they ask about it.")
     out += found[-5:]
     if told:
         out.append("Already said to them, in Arun's name:")
         out += told[-6:]
+    if group_lines:
+        out.append("What Arun said in a group chat they are in (his review or direction — "
+                   "their questions may be about it):")
+        out += group_lines[-6:]
     out.append("If your evidence contradicts something already said to them, say so in "
                "ANALYSIS as 'Corrects: <what was said>' with the proof, and make the "
                "REPLY that correction.")

@@ -2422,15 +2422,20 @@ def unproven_send(reply: str, since: float) -> str:
         return ""
     # "Already sent Vinish: …" about a send that really happened earlier.
     low, window = claim.lower(), since - 7200
+    # By ANY of their names: the chat is "Nakka Harika", he and Asta say "Harika"
+    # (6 Nov: a real send at 12:48 was "corrected" as false at 12:49).
+    from . import answers
+    words = set(re.findall(r"[a-z]+", low))
+
+    def named(title: str) -> bool:
+        return any(len(t) >= 3 and t in words for t in answers.name_tokens(title))
     for t, title in teams_bridge.SENT:
-        first = (title or "").split()[0].lower() if (title or "").split() else ""
-        if t >= window and len(first) >= 3 and first in low:
+        if t >= window and named(title or ""):
             return ""
     with contextlib.suppress(Exception):
         from . import chat_watch
         for r in store.teams_messages(since=window, limit=2000):
-            first = (r.get("chat") or "").split()[0].lower() if (r.get("chat") or "").split() else ""
-            if chat_watch.is_from_him(r.get("sender", "")) and len(first) >= 3 and first in low:
+            if chat_watch.is_from_him(r.get("sender", "")) and named(r.get("chat") or ""):
                 return ""
     if re.search(r"\b(?:review|comment|pr)\b", low) and any(
             t >= window and name.startswith(("pr_", "jira_")) for t, name in ops.DONE):
@@ -3115,6 +3120,37 @@ def _with_side_answers(cid: str, text: str, now: float | None = None) -> str:
 CASE_TOLD_SECONDS = 30 * 60
 
 
+_PRONOUN = re.compile(r"\b(?:she|her|hers|he|him|his|they|them)\b", re.I)
+#: How recent a chat must be to be "the one" a bare "she" means.
+PRONOUN_CASE_SECONDS = 30 * 60
+
+
+def _case_he_means(cid: str, text: str, now: float | None = None) -> str:
+    """The open case a name-less message is about, or "" when that is a guess.
+
+    6 Nov 13:03: "It is not code, she asking ur option for the work she coding"
+    named nobody, so the chat brain answered without her case and sent her to a
+    class in another repo. Two sources, in order: the draft waiting for his yes
+    (he is talking about its recipient), else the ONE open case whose chat moved
+    in the last half hour. Two candidates guess nothing.
+    """
+    from . import answers, responder
+    open_cases = responder.handed_chats(now)
+    if not open_cases:
+        return ""
+    staged = loop.awaiting(cid)
+    if staged:
+        hit = [c for c in open_cases if answers.is_for(staged, c)]
+        if len(hit) == 1:
+            return hit[0]
+    if not _PRONOUN.search(text or ""):
+        return ""
+    now = time.time() if now is None else now
+    recent = [c for c in open_cases
+              if store.teams_messages(chat=c, since=now - PRONOUN_CASE_SECONDS, limit=1)]
+    return recent[0] if len(recent) == 1 else ""
+
+
 def _with_open_case(cid: str, text: str, now: float | None = None) -> str:
     """`text`, preceded once by the open case of the person it names.
 
@@ -3125,6 +3161,9 @@ def _with_open_case(cid: str, text: str, now: float | None = None) -> str:
     """
     from . import responder
     chat, held = responder.case_for_text(text, now)
+    if not held:
+        chat = _case_he_means(cid, text, now)
+        held = responder.case_so_far(chat, chat, now) if chat else ""
     if not held:
         return text
     now = time.time() if now is None else now
@@ -3342,11 +3381,14 @@ async def _conduct(conv0: dict, first_text: str, sink, channel: str) -> None:
 
 def _known_threads() -> list[str]:
     """Distinct chat names Asta has actually read messages in."""
+    # Every chat ever read, not the first 800 rows: those are the OLDEST, so
+    # everyone he started talking to recently was "no messages on record" (6 Nov).
     try:
-        rows = store.teams_messages(limit=800)
+        with store._connect() as conn:
+            rows = conn.execute("SELECT DISTINCT chat FROM teams_messages WHERE chat <> ''").fetchall()
     except Exception:                                          # noqa: BLE001
         return []
-    return sorted({(r.get("chat") or "").strip() for r in rows if (r.get("chat") or "").strip()})
+    return sorted({(r[0] or "").strip() for r in rows if (r[0] or "").strip()})
 
 
 def _recipient_warning(intent: dict) -> str:
@@ -4174,6 +4216,24 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None
+
+    # "Whatever Harika asks, respond — no approval needed, just for today": his
+    # permission, recorded here and now. Left to a brain on 6 Nov it was answered
+    # "noted" and nothing was recorded, so the next two replies waited for his yes.
+    from . import authority
+    granted = authority.standing_from_words(user_text or "")
+    if granted:
+        await sink.send({"type": "note", "text": (
+            f"✅ Until {time.strftime('%H:%M', time.localtime(granted.expires_at))} today I'll "
+            f"answer *{granted.target}* directly — no approval needed, and I'll tell you what "
+            f"went. Permission {granted.id}: say “revoke {granted.id}” to stop sooner.")})
+        staged = loop.awaiting(cid)
+        if not (staged and answers.is_for(staged, granted.target)):
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+        # A draft to her is waiting: his words are also feedback on it, and the
+        # brain now sends the revised reply under the permission.
 
     # "new chat" on a phone channel — the clean slate the web UI gets from its
     # button. Answered here so it never reaches a brain and costs a turn.

@@ -176,7 +176,7 @@ async def reached(task_id: int, stage: str) -> str | None:
 async def _refusal(person: str) -> str:
     """Why this must wait for his yes after all, or ''."""
     from . import policy, senior, steward, teams_bridge
-    if steward.sends_held():
+    if steward.held_for(person):
         return "sends are on hold"
     rule = policy.check("send", person, asked=True)
     if not rule.ok:

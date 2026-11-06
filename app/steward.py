@@ -139,8 +139,48 @@ def sends_held() -> bool:
 
 def hold_sends(on: bool) -> None:
     from . import store
+    import time
     store.kv_set(HOLD_KEY, "1" if on else "")
+    store.kv_set(HOLD_KEY + ":at", str(time.time()) if on else "")
     store.record_outcome("steward", "sends held" if on else "sends resumed")
+
+
+def held_since() -> float:
+    """When the hold began. A hold set before its time was kept is dated from
+    the ledger row that recorded it."""
+    from . import store
+    at = store.kv_get(HOLD_KEY + ":at") or ""
+    if at:
+        return float(at)
+    with store._connect() as conn:
+        row = conn.execute("SELECT MAX(created_at) FROM outcomes WHERE kind='steward' "
+                           "AND outcome='sends held'").fetchone()
+    return float(row[0] or 0) if row else 0.0
+
+
+def held_for(person: str) -> bool:
+    """Whether the hold covers this person: the ONE question every send path asks.
+
+    His "hold all sends" covers everyone, except someone he has since given a
+    live permission to in so many words. 6 Nov: the hold had been on for three
+    weeks when he said "whatever <colleague> asks, respond without my approval,
+    just for today"; the permission was recorded and every reply to her still
+    waited, because the hold outranked it. A newer, narrower instruction wins
+    for that one person, until it ends. A permission from before the hold does
+    not: the hold was said after it."""
+    if not sends_held():
+        return False
+    from . import store
+    import time
+    since, now = held_since(), time.time()
+    if not since:
+        return True          # a hold with no known start covers everyone
+    with store._connect() as conn:
+        rows = conn.execute("SELECT created_at, expires_at FROM authority WHERE act='send' "
+                            "AND active=1 AND lower(trim(target))=lower(trim(?))",
+                            (person or "",)).fetchall()
+    return not any(float(r["created_at"]) > since
+                   and (r["expires_at"] is None or now < float(r["expires_at"])) for r in rows)
 
 
 def ask_back_enabled() -> bool:

@@ -1851,7 +1851,7 @@ _automatic_send: contextvars.ContextVar[str] = contextvars.ContextVar(
 async def send_automatic(chat: str, text: str) -> str:
     """Send an unapproved acknowledgement and attribute only its verified message."""
     from . import steward, writing
-    if steward.sends_held():
+    if steward.held_for(chat):
         store.record_outcome("thread", "held back", subject=chat[:80],
                              detail=f"he said hold all sends — not said: {text}"[:200])
         raise PermissionError("Arun has held all of Asta's own sends")

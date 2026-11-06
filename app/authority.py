@@ -240,7 +240,7 @@ def auto_reply_to(target: str, group: bool = False) -> bool:
     if group or not target:
         return False
     from . import steward
-    if steward.sends_held():
+    if steward.held_for(target):
         return False
     from . import guardrails, policy, senior
     if not policy.check("send", target).ok:
@@ -350,7 +350,7 @@ def claim_use(g: Grant, now: float | None = None) -> bool:
     uncertain. A fresh authorization check also honors revocation after staging.
     """
     from . import policy, steward
-    if steward.sends_held() or not policy.check(g.act, g.target).ok:
+    if steward.held_for(g.target) or not policy.check(g.act, g.target).ok:
         return False
     key = _used_key(g.id, now)
     with store._connect() as conn:

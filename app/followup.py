@@ -217,7 +217,7 @@ def task_authorized(row: dict) -> bool:
 def authorized(row: dict) -> bool:
     from . import authority, policy, steward
     who = row.get("person") or ""
-    if row.get("status") != "open" or steward.sends_held() or not policy.check("send", who, asked=True).ok:
+    if row.get("status") != "open" or steward.held_for(who) or not policy.check("send", who, asked=True).ok:
         return False
     if authority.may("send", who):
         return True

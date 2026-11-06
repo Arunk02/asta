@@ -228,6 +228,41 @@ def task_health(since: float, until: float) -> dict:
     }
 
 
+def verified_work(since: float, until: float) -> dict:
+    """What one VERIFIED piece of code work costs: time to merge, stops for him,
+    and tokens — measured only, with the unmeasured counted, never as zero.
+
+    Section 9 of the roadmap asks for cost per verified success, not per chat
+    turn: a cheap turn on a task that never merges is not a saving. "Verified"
+    is a code task whose PR merged inside the window. A stop is a gate he had to
+    answer or approve (`task_events` kind `gate`)."""
+    from . import worker_usage
+    rows = _rows("SELECT e.task_id, e.created_at merged_at, t.created_at born FROM task_events e "
+                 "JOIN tasks t ON t.id = e.task_id WHERE e.kind='status' "
+                 "AND e.detail LIKE '%→ merged' AND e.created_at >= ? AND e.created_at < ?",
+                 (since, until))
+    seen: dict[int, dict] = {}
+    for r in rows:
+        seen.setdefault(r["task_id"], r)
+    latency, stops, tokens, unmeasured = [], [], [], 0
+    for tid, r in seen.items():
+        latency.append(float(r["merged_at"]) - float(r["born"]))
+        stops.append(int(_one("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='gate'",
+                              (tid,)) or 0))
+        rep = worker_usage.report(tid)
+        if rep["recorded_usage_complete"] and rep["known_subtotal"]:
+            c = rep["known_subtotal"]
+            tokens.append(c["new_tokens"] + c["cache_read"] + c["out_tokens"])
+        else:
+            unmeasured += 1
+    n = len(seen)
+    return {"verified": n,
+            "latency_p50_s": _pct(latency, 0.5), "latency_p90_s": _pct(latency, 0.9),
+            "stops_avg": (sum(stops) / n) if n else None,
+            "tokens_per_verified": (sum(tokens) / len(tokens)) if tokens else None,
+            "measured": len(tokens), "unmeasured": unmeasured}
+
+
 def tool_failures(since: float, until: float) -> dict:
     rows = _rows("SELECT subject, COUNT(*) n FROM outcomes WHERE kind='capability' "
                  "AND outcome='failed' AND created_at >= ? AND created_at < ? "
@@ -408,6 +443,15 @@ def _fmt_s(v):
     return "—" if v is None else f"{v:.0f} s"
 
 
+def _fmt_dur(v):
+    """A long span read at a glance: minutes, hours or days."""
+    if v is None:
+        return "—"
+    if v < 3600:
+        return f"{v / 60:.0f} min"
+    return f"{v / 3600:.1f} h" if v < 2 * 86400 else f"{v / 86400:.1f} d"
+
+
 def _fmt_k(v):
     return "—" if v is None else f"{v / 1000:.0f}k"
 
@@ -436,8 +480,17 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
     it = interruptions(since, until)
     da = done_alone(since, until)
     cv = conversations(since, until)
+    vw = verified_work(since, until)
 
     rows = [
+        Row("verified_work", "Per merged code task: stops for you, ask to merge (incl. review wait)", vw["stops_avg"],
+            "—" if not vw["verified"] else
+            f"{vw['stops_avg']:.1f} stops · {_fmt_dur(vw['latency_p50_s'])} to merge",
+            "≤ 2 stops (plan + one answer)",
+            "na" if not vw["verified"] else _judge(vw["stops_avg"], 2, 4),
+            f"{vw['verified']} merged · slow end {_fmt_dur(vw['latency_p90_s'])} · tokens per merged "
+            f"task {_fmt_k(vw['tokens_per_verified'])} over {vw['measured']} measured, "
+            f"{vw['unmeasured']} unmeasured (Copilot reports no usage) — never counted as zero"),
         Row("reply_p50", "WhatsApp reply time, typical", r["p50_s"], _fmt_s(r["p50_s"]),
             "≤ 25 s (status answers come from state)", _judge(r["p50_s"], 25, 45),
             f"slow end {_fmt_s(r['p90_s'])} · first word {_fmt_s(r['first_word_p50_s'])}"),

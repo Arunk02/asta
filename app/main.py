@@ -236,6 +236,8 @@ async def startup() -> None:
     daemon.start("self_audit", selfaudit.daily_loop)
     # Quiet: snapshots yesterday's card after midnight, pushes nothing.
     daemon.start("scorecard", scorecard.loop)
+    from . import journal
+    daemon.start("journal", journal.loop)
     # The live test bench, at night, on quota that would otherwise expire. Off
     # until ASTA_BENCH_NIGHTLY=1; the loop itself decides whether tonight
     # qualifies (window, budget, and whether he was working).
@@ -1796,6 +1798,13 @@ async def api_review(request: Request):
         raise HTTPException(400, "pr and workspace are required")
     return {"result": await agent_mod.review_pr(str(b["pr"]), b["workspace"],
                                                 b.get("repo", ""))}
+
+
+@app.get("/api/journal/review", dependencies=[Depends(require_auth)])
+def api_journal_review(days: int = 14):
+    """Where Asta went wrong over the last `days`, from the local journal."""
+    from . import journal
+    return {"days": days, "review": journal.review(max(1, min(days, journal.keep_days())))}
 
 
 @app.get("/api/scorecard", dependencies=[Depends(require_auth)])

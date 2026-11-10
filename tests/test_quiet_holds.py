@@ -164,8 +164,9 @@ def test_his_unless_i_ask_rules_read_as_satisfied_for_his_own_task():
     t = store.create_task("Debug the workflow", "analysis", "p", None)
     store.kv_set(f"task_asked:{t['id']}", json.dumps({"his": "debug that workflow", "offer": ""}))
     block = tasks.rules_for(t["id"], "- 9 Sep: do not investigate incidents unless I hand one over.\n"
+                                     "- Investigate incident mails on your own — only when a colleague hands one over.\n"
                                      "- Never push unless you ask")
-    assert "satisfied for this task" in block and "debug that workflow" in block
+    assert block.count("satisfied for this task") == 3 and "debug that workflow" in block
     other = store.create_task("A colleague's ask", "analysis", "p", None)
     plain = tasks.rules_for(other["id"], "- 9 Sep: do not investigate incidents unless I hand one over.")
     assert "satisfied" not in plain, "a colleague's ask still follows his rule"

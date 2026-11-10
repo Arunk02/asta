@@ -2282,7 +2282,8 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
 _GUARDRAIL_AUDIENCE = {"analysis": "analysis", "teams_draft": "draft", "code": "code"}
 
 #: His rules that yield when he asks: "unless I hand one over", "unless you ask".
-_UNLESS_ASKED = re.compile(r"\bunless\s+(?:i|you|he|arun)\s+(?:ask|asks|hand|hands|say|says|tell)\b", re.I)
+_UNLESS_ASKED = re.compile(r"\bunless\s+(?:i|you|he|arun)\s+(?:ask|asks|hand|hands|say|says|tell)\b"
+                           r"|\bonly\s+when\s+(?:a\s+colleague|i|he|arun)\s+hands?\b", re.I)
 
 
 def rules_for(task_id: int, block: str) -> str:

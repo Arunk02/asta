@@ -88,8 +88,9 @@ def build(task_id: int, stage: str) -> str:
 
     ruled = [r.render() for r in policy.rules() if r.kind in ("never", "mute", "prefer")]
     if ruled:
+        from . import tasks as _tasks
         parts.append("[Arun's standing rules — enforced; do not plan around them]\n"
-                     + "\n".join(f"- {x}" for x in ruled[:8]))
+                     + _tasks.rules_for(task_id, "\n".join(f"- {x}" for x in ruled[:8])))
 
     known = people.about(f"{t.get('title', '')} {t.get('prompt', '')}")
     if known:

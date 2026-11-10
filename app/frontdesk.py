@@ -446,6 +446,31 @@ _BACK = re.compile(
     r"|\b(?:notifications?|pings?)\s+(?:back\s+)?on\b|\bresume\s+notifications?\b", re.I)
 
 
+#: Quiet again after "I'm back": "go on hold", "be silent again", "notifications off".
+_REARM = re.compile(
+    r"\b(?:go|be|stay|put (?:me|it|everything))\s+(?:back\s+)?(?:on\s+)?hold\b"
+    r"|\b(?:go|be|stay)\s+(?:back\s+)?(?:on\s+|in\s+)?(?:quiet|silent|mute)\b"
+    r"|\b(?:quiet|silent|mute)\s+again\b|\bnotifications?\s+off\b", re.I)
+#: "Are you on silent?" — a question about the quiet itself.
+_QUIET_STATE = re.compile(
+    r"\b(?:are|r)\s+(?:you|u)\s+(?:still\s+)?(?:on\s+|in\s+)?(?:silent|quiet|hold|mute|muted)\b"
+    r"|\bis\s+(?:the\s+)?quiet\s+on\b|\bquiet\s+status\b", re.I)
+
+
+def rearms_quiet(text: str) -> bool:
+    return bool(_REARM.search((text or "").replace("’", "'")))
+
+
+def rearm_only(text: str) -> bool:
+    """The message is just "go on hold (bye)", nothing else to act on."""
+    rest = _REARM.sub(" ", (text or "").replace("’", "'"))
+    return len(re.findall(r"[a-z]{2,}", rest.lower())) <= 2
+
+
+def asks_quiet_state(text: str) -> bool:
+    return bool(_QUIET_STATE.search((text or "").replace("’", "'")))
+
+
 def ends_quiet(text: str) -> bool:
     """"I'm back" — only meaningful while his quiet time holds (the caller checks)."""
     return bool(_BACK.search((text or "").replace("’", "'")))

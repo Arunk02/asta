@@ -1403,6 +1403,15 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
             executor = asked
     if executor:
         store.kv_set(f"task_executor:{t['id']}", executor)
+    if kind != "code" and _TURN_CONV.get():
+        # Every task started from his own turn records his words — not only code.
+        # 9 Nov: five analyses he asked for were refused, each worker reading his
+        # "unless I ask" rules with nothing trusted saying he had asked.
+        with contextlib.suppress(Exception):
+            from . import capabilities, scorecard
+            said = scorecard.his_words(capabilities.said_this_turn())
+            if said.strip():
+                store.kv_set(f"task_asked:{t['id']}", _json.dumps({"his": said, "offer": ""}))
     if kind == "code":
         if not pipeline:
             # Jira tickets are stories — full pipeline with gates. Ad-hoc asks
@@ -2272,6 +2281,33 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
 #: Which guardrails sections a non-pipeline run receives — see guardrails.AUDIENCES.
 _GUARDRAIL_AUDIENCE = {"analysis": "analysis", "teams_draft": "draft", "code": "code"}
 
+#: His rules that yield when he asks: "unless I hand one over", "unless you ask".
+_UNLESS_ASKED = re.compile(r"\bunless\s+(?:i|you|he|arun)\s+(?:ask|asks|hand|hands|say|says|tell)\b", re.I)
+
+
+def rules_for(task_id: int, block: str) -> str:
+    """His rules as this task's worker should read them.
+
+    For a task he asked for himself, each "unless I ask / unless I hand one
+    over" rule is marked satisfied, with his own words and the time — stated
+    where the rule is, by the code that knows he asked, rather than as a claim
+    elsewhere in the prompt that a careful worker rightly distrusts (9 Nov: five
+    refusals of an analysis he asked for five times). A colleague's ask, or a
+    task with no record of his words, gets the rules unchanged.
+    """
+    try:
+        asked = _json.loads(store.kv_get(f"task_asked:{task_id}") or "{}")
+    except ValueError:
+        asked = {}
+    his = " ".join(str((asked or {}).get("his") or "").split())
+    if not his or not block:
+        return block
+    t = store.get_task(task_id) or {}
+    at = time.strftime("%d %b %H:%M", time.localtime(float(t.get("created_at") or time.time())))
+    note = f" — satisfied for this task: Arun asked for it himself at {at}: «{his[:240]}»"
+    return "\n".join(line + note if _UNLESS_ASKED.search(line) else line
+                     for line in block.split("\n"))
+
 
 async def _run_simple(task_id: int, t: dict, prompt: str) -> str:
     """`_simple_leg` inside the task fence. An analysis or a draft changes nothing
@@ -2297,7 +2333,7 @@ async def _simple_leg(task_id: int, t: dict, prompt: str) -> str:
     cwd = task_cwd(task_id, t["workspace"]) if t["kind"] == "code" else _cwd(t["workspace"])
     # One fresh session per simple run, so his guardrails ride exactly once —
     # the Investigation rules to an analysis, the Communication rules to a draft.
-    prompt += guardrails.block(_GUARDRAIL_AUDIENCE.get(t["kind"], "chat"))
+    prompt += rules_for(task_id, guardrails.block(_GUARDRAIL_AUDIENCE.get(t["kind"], "chat")))
     tout = timeout_for(task_id, t)
     agent = _agent_for(t)
     eff = _effort_for(t["kind"], ex)

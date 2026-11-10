@@ -4875,6 +4875,23 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             if channel == "web":
                 await sink.send({"type": "done", "tools": []})
             return None
+    if frontdesk.enabled() and frontdesk.asks_quiet_state(user_text):
+        # "Are you on silent?" — from the stored rule, never a brain's recollection
+        # (10 Nov: "Already on hold — told you", after it had pushed four times).
+        frontdesk.record("state", "quiet")
+        await sink.send({"type": "note", "text": policy.quiet_state_line()})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
+    if frontdesk.enabled() and frontdesk.rearms_quiet(user_text):
+        rearmed = policy.rearm_quiet()
+        if rearmed is not None:
+            frontdesk.record("rule", "quiet re-armed")
+            await sink.send({"type": "note", "text": f"🔕 Quiet again — {rearmed.render()}."})
+            if frontdesk.rearm_only(user_text):
+                if channel == "web":
+                    await sink.send({"type": "done", "tools": []})
+                return None
     if frontdesk.enabled() and frontdesk.ends_quiet(user_text) and notify.quiet_rule() is not None:
         # "I'm back" while his quiet time holds: lift it, and hand him what it kept.
         frontdesk.record("rule", "quiet lifted")
@@ -4895,6 +4912,14 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                 if channel == "web":
                     await sink.send({"type": "done", "tools": []})
                 return None
+        elif instructions.asks_quiet_without_end(user_text):
+            frontdesk.record("rule", "quiet: until when?")
+            await sink.send({"type": "note", "text": (
+                "🔕 Until when? Say e.g. “quiet until Wed 09:00”, “silent till 11 Nov” "
+                "or “quiet for 2 days” — I'll hold everything till then.")})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
 
     # A live background CODE task owns the conversation's attention: augment it
     # (delivered at its next gate — no session restart) or redirect it (cancel).

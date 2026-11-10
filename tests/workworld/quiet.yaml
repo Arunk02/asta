@@ -154,3 +154,41 @@ scenarios:
       - push_contains: "While you were off"
       - push_contains: "the fix is merged"
       - rules: {kind: quiet, count: 1}
+
+  # --- 9-10 Nov: "be silent two days" held for an hour -------------------------------
+
+  - id: quiet-until-a-date-is-stored-and-said-as-stored
+    title: '"Quiet until 11 nov" is stored with that end, and the reply says exactly that'
+    why: >
+      9 Nov: the parser had no "until <date>" form, the brain answered "Got it —
+      quiet until 11 Nov", and nothing was stored.
+    twin: false
+    setup:
+      clock: "2026-11-09 11:26"
+    steps:
+      - say: "Quiet until 11 nov"
+    checks:
+      - said_contains: "Quiet until Wed 11 Nov 09:00"
+      - rules: {kind: quiet, count: 1}
+      - brain_calls: {kind: chat, count: 0}
+
+  - id: go-on-hold-brings-the-quiet-back-after-im-back
+    title: '"I''m back" lifts the quiet; "go on hold" brings it back; nothing reaches his phone after'
+    why: >
+      9 Nov: he said "I'm back" only to get an analysis done, which lifted the
+      quiet to the end of the week; "Go on hold byee" stopped the tasks and left
+      every notification on, so the next morning's brief and mentions reached him.
+    twin: false
+    real_notify: true
+    setup:
+      clock: "2026-11-09 12:10"
+      rules:
+        - {kind: quiet, act: push, value: "from=1794200000;until=1794371400", words: "quiet until wed"}
+    steps:
+      - say: "I'm back"
+      - say: "Go on hold byee"
+      - inbound: {who: "A colleague", source: teams-chat, text: "can you check why the build is red?", priority: 1}
+      - announce: {text: "🔴 CI failure: booking-service · build (main)", level: ci, urgency: ambient}
+    checks:
+      - said_contains: "Quiet again"
+      - push_count: {matching: "build is red|CI failure", count: 0}

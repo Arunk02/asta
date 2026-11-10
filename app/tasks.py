@@ -4184,6 +4184,23 @@ async def _tell_the_limit_once(brain: str, reset_at: float | None) -> None:
     await notify.notify("\n".join(lines), "task", urgency="direct", considered=True)
 
 
+def _resume_executor(task_id: int) -> tuple[str, bool]:
+    """Keep a healthy executor; recover a paused task using existing availability policy."""
+    current = _resolve_executor(task_id)
+    if _can_take_over(current):
+        return current, False
+    replacement = next((ex for ex in _SIMPLE_BRAINS
+                        if ex != current and _can_take_over(ex)), "")
+    if not replacement:
+        return "", False
+    # Sessions are already keyed by executor. Never copy a provider's session
+    # into another provider; the existing fresh-session context pack is used.
+    store.kv_set(f"task_executor:{task_id}", replacement)
+    store.record_outcome("task", "executor_recovered", subject=str(task_id),
+                         detail=f"{current} -> {replacement}")
+    return replacement, True
+
+
 async def resume_task(task_id: int, switch_to: str = "") -> str:
     """Resume a paused (or transiently-failed) code task from where it stopped.
 
@@ -4202,6 +4219,12 @@ async def resume_task(task_id: int, switch_to: str = "") -> str:
     if is_running(task_id):
         return f"Task #{task_id} is already running."
     note = ""
+    if not switch_to:
+        executor, changed = _resume_executor(task_id)
+        if not executor:
+            return f"Task #{task_id}: no executor is available; kept paused for recovery."
+        if changed:
+            note = f" on {executor} (previous executor unavailable)"
     if switch_to:
         ex = _resolve_switch(switch_to)
         if not ex:

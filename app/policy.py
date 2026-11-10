@@ -250,11 +250,12 @@ def _quiet_holds(q: dict, now: float, since: float = 0.0) -> bool:
 LIFTED_KEY = "quiet_lifted_until"
 
 
-def quiet_holding(now: float | None = None):
-    """The quiet rule in force right now, or None."""
+def quiet_holding(now: float | None = None, *, ignore_lift: bool = False):
+    """The quiet rule in force right now, or None. `ignore_lift`: the rule whose
+    window runs now even if he said "I'm back" — what "go on hold" brings back."""
     now = time.time() if now is None else now
     try:
-        if float(store.kv_get(LIFTED_KEY) or 0) > now:
+        if not ignore_lift and float(store.kv_get(LIFTED_KEY) or 0) > now:
             return None                     # "I'm back" — for the rest of this stretch
     except ValueError:
         pass
@@ -285,6 +286,40 @@ def lift_quiet(now: float | None = None):
         return None
     store.kv_set(LIFTED_KEY, str(quiet_ends(rule, now)))
     return rule
+
+
+def rearm_quiet(now: float | None = None):
+    """He has gone quiet again after "I'm back": the lift ends, and the rule whose
+    window still runs holds again. None when there is no such rule — "go on hold"
+    alone never invents a quiet window.
+
+    9 Nov: "I'm back" (said only to get work done) lifted the quiet to the end of
+    the week; "Go on hold byee" five minutes later stopped the tasks and left
+    every notification on."""
+    now = time.time() if now is None else now
+    try:
+        lifted = float(store.kv_get(LIFTED_KEY) or 0) > now
+    except ValueError:
+        lifted = False
+    rule = quiet_holding(now, ignore_lift=True)
+    if not lifted or rule is None:
+        return None
+    store.kv_set(LIFTED_KEY, "")
+    store.record_outcome("rule", "quiet re-armed", detail=rule.render()[:200])
+    return rule
+
+
+def quiet_state_line(now: float | None = None) -> str:
+    """"Are you on silent?" — from what is stored, never from a brain's memory."""
+    now = time.time() if now is None else now
+    holding = quiet_holding(now)
+    if holding is not None:
+        return f"🔕 Yes. {holding.render()}."
+    paused = quiet_holding(now, ignore_lift=True)
+    if paused is not None:
+        return (f"🔔 Not right now — you said you were back, so “{paused.render()}” is lifted. "
+                "Say “go on hold” to make it quiet again.")
+    return "🔔 No quiet rule is on. Say e.g. “quiet until Wed 09:00”."
 
 
 def expire_quiet(now: float | None = None) -> int:

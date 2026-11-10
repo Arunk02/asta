@@ -212,8 +212,12 @@ def now_line(now: float | None = None) -> str:
     with contextlib.suppress(Exception):
         if policy.rules("quiet"):
             holding = policy.quiet_holding(at.timestamp())
-            line += (f" · his quiet rule IS in force now ({holding.render()}) — "
-                     "hold anything that is not urgent" if holding else
+            # Quiet is about his phone. 9 Nov: "hold anything that is not urgent"
+            # reached the workers doing an analysis he had just asked for, and
+            # five of them stood down.
+            line += (f" · his quiet rule IS in force now ({holding.render()}) — it holds "
+                     "messages and notifications to Arun; it never stops work he asked for"
+                     if holding else
                      " · his quiet-hours rules are NOT in force right now, so work normally")
     return f"[now: {line}]"
 

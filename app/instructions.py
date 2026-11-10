@@ -28,6 +28,7 @@ an instruction outlive the conversation it was given in.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import re
 import time
@@ -91,7 +92,9 @@ def states_a_default(text: str) -> bool:
 #: about Sam, not quiet time, so a verb needs "me" after it; "be on silent",
 #: "go quiet", "do not disturb" and "no notifications" need nothing more.
 _SILENCE = re.compile(
-    r"\b(?:be|go|stay|keep(?: it)?|put (?:me|it|everything) on)\s+(?:on\s+)?(?:silent|quiet|mute)\b"
+    r"\b(?:be|go|stay|keep(?: it)?|put (?:me|it|everything) on)\s+(?:on\s+|in\s+)?(?:silent|quiet|mute)\b"
+    # "Quiet until 11 nov" (9 Nov): the word and its end, with no verb in front.
+    r"|\b(?:quiet|silent|silence|dnd)\s+(?:until|till|til|upto|up to|for)\b"
     r"|\bsilent mode\b|\bon (?:silent|mute)\b|\bdo not disturb\b|\bdnd\b"
     r"|\bmute (?:everything|all|notifications?|pings?|alerts?)\b"
     r"|\b(?:don'?t|dont|do not|no need to|never)\s+(?:\w+\s+){0,3}?"
@@ -136,11 +139,23 @@ _EVERY = re.compile(r"\b(?:every|each|always|going forward|from now on|weekly)\b
 _THIS = re.compile(rf"\b(?:this|next|coming)\s+(weekend|{_WEEKDAY})\b", re.I)
 _FOR = re.compile(r"\bfor (?:the )?(?:(a|an|one|1|two|2|three|3|\d+) )?(week|day|hour|hr|minute|min)s?\b",
                   re.I)
+#: "tmr" is how he writes tomorrow (9 Nov: "today and tmr is govt holiday").
+_TMR = r"tomorrow|tmrw|tmr|tomo|tommorow|tomorow"
 _UNTIL = re.compile(
-    rf"\b(?:until|till|til|upto|up to)\s+(?:(tomorrow|today|tonight|{_WEEKDAY})\s*)?"
+    rf"\b(?:until|till|til|upto|up to)\s+(?:({_TMR}|today|tonight|{_WEEKDAY})\s*)?"
     r"(?:(morning|mrng|noon|evening|night)|(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?", re.I)
 _TODAY = re.compile(r"\b(?:today|tonight|rest of the day|for the day)\b", re.I)
-_TOMORROW = re.compile(r"\btomorrow\b", re.I)
+_TOMORROW = re.compile(rf"\b(?:{_TMR})\b", re.I)
+_MONTHS = {m: i + 1 for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul",
+                                          "aug", "sep", "oct", "nov", "dec"))}
+_MONTH = r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+#: "until 11 nov", "till nov 11th": back that morning.
+_UNTIL_DATE = re.compile(
+    rf"\b(?:until|till|til|upto|up to)\s+(?:the\s+)?(?:(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({_MONTH})"
+    rf"|({_MONTH})\s+(\d{{1,2}})(?:st|nd|rd|th)?)\b", re.I)
+#: "be on silent like weekend": how to be quiet, not until when — it never named
+#: a weekend day (9 Nov: stored as "until Monday 16" when he meant two days).
+_LIKE_WEEKEND = re.compile(r"\b(?:like|as(?:\s+(?:on|in|if it'?s))?|same as)\s+(?:a\s+|the\s+)?weekends?\b", re.I)
 _NUM = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3}
 _UNIT = {"week": 7 * 86400, "day": 86400, "hour": 3600, "hr": 3600, "minute": 60, "min": 60}
 
@@ -170,6 +185,16 @@ def quiet_spec(text: str, now: float | None = None) -> str:
     # The day he wants the summary on is not a quiet day: "…summarise all on
     # Monday mrng" named Monday, and read naively made it silent too.
     quiet_part = t[:release.start()] + t[release.end():] if release else t
+    quiet_part = _LIKE_WEEKEND.sub(" ", quiet_part)
+    date_m = _UNTIL_DATE.search(quiet_part)
+    if date_m:
+        dd, mon, mon2, dd2 = date_m.groups()
+        day, month = int(dd or dd2), _MONTHS[(mon or mon2).lower()[:3]]
+        with contextlib.suppress(ValueError):
+            until = dt.datetime(at.year, month, day, 9, 0)
+            if until <= at:
+                until = until.replace(year=at.year + 1)
+            return _window(at, until)
     until_m = _UNTIL.search(quiet_part)
     if until_m and not any(until_m.groups()):
         until_m = None                    # "until" with nothing after it
@@ -212,7 +237,7 @@ def quiet_spec(text: str, now: float | None = None) -> str:
     if until_m:
         day, part, hh, mm, ampm = until_m.groups()
         day = (day or "").lower()
-        if day == "tomorrow":
+        if _TOMORROW.fullmatch(day or "-"):
             offset = 1
         elif day in ("", "today", "tonight"):
             offset = 0
@@ -232,7 +257,9 @@ def quiet_spec(text: str, now: float | None = None) -> str:
             until += dt.timedelta(days=1)   # "until 9" said at ten means tomorrow
         return _window(at, until)
     if _TOMORROW.search(quiet_part):
-        return _window(max(at, _day_at(midnight, 1, 0)), _day_at(midnight, 2))
+        # "On leave today and tmr is a holiday": from now, not from tomorrow.
+        start = at if _TODAY.search(quiet_part) else max(at, _day_at(midnight, 1, 0))
+        return _window(start, _day_at(midnight, 2))
     if _TODAY.search(quiet_part):
         return _window(at, _day_at(midnight, 1))
     return ""
@@ -286,6 +313,10 @@ def propose(text: str, cand: Candidate) -> str:
     return f"📌 {q}\nReply yes to keep it everywhere, or no."
 
 
+#: How soon after one quiet message the next is read as correcting it.
+QUIET_CORRECTION_SECONDS = 15 * 60
+
+
 def go_quiet(cand: Candidate) -> str:
     """A quiet window he asked for, in so many words: it starts now, no offer.
 
@@ -294,10 +325,33 @@ def go_quiet(cand: Candidate) -> str:
     spared. It ends by itself; a weekly rule still goes through `propose`.
     """
     from . import policy
+    # A second quiet message moments after the first is his correction of it,
+    # never a second window beside it (9 Nov: "Not Monday till Tuesday" was
+    # stacked on "…like weekend", and the longer, wrong one kept holding).
+    # Weekly rules are his standing habit and are left alone.
+    with store._connect() as conn:
+        recent = conn.execute(
+            "SELECT id FROM rules WHERE kind='quiet' AND active=1 AND value LIKE '%until=%' "
+            "AND created_at >= ?", (time.time() - QUIET_CORRECTION_SECONDS,)).fetchall()
+    for row in recent:
+        policy.drop(row["id"])
     rule = policy.add("quiet", "push", value=cand.value, words=cand.words)
     store.record_outcome("rule", "quiet window", detail=rule.render()[:200])
     return (f"🔕 {rule.render()}. Reminders you set still ring. "
             "Say “I'm back” to end it early.")
+
+
+#: Quiet is asked for, in its own words (not "don't notify me about X").
+_QUIET_WORD = re.compile(r"\b(?:silent|silence|quiet|dnd|do not disturb|mute)\b", re.I)
+
+
+def asks_quiet_without_end(text: str) -> bool:
+    """He asked for quiet but said nothing that sets when it ends. 9 Nov: the
+    brain answered such a message "Got it — quiet until 11 Nov" and stored
+    nothing. Asked back instead, in one line."""
+    t = " ".join((text or "").replace("’", "'").split())
+    return bool(t) and not t.endswith("?") and bool(_SILENCE.search(t)) \
+        and bool(_QUIET_WORD.search(t)) and not quiet_spec(t)
 
 
 def is_one_off_quiet(cand: Candidate | None) -> bool:

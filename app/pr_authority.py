@@ -209,18 +209,19 @@ async def on_review(task_id, *, current: str, good: bool, action: str,
         return None
     if _head(current) != _head(rec["revision"]):
         return await rereview(task_id, rec)
-    if rec.get("post") and not rec.get("approve") and action in ("comment", "request_changes"):
-        # "review and send": the review goes out as concluded. An approval in his
-        # name still needs his word "approve" — that verdict is staged for him.
-        return await _post(task_id, rec, current, action, findings, body)
-    if action == "approve" and not (rec.get("approve") or rec.get("merge")):
-        _finish(task_id, rec, "not_good")
-        return None       # an approval goes out in his name only on his word "approve"
+    clean = action == "approve" and good and not any(f.get("blocking") for f in findings)
+    if rec.get("post") and not rec.get("approve") and not clean:
+        # "review and send": the review goes out as concluded — findings as
+        # comments or a request for changes.
+        post_as = action if action in ("comment", "request_changes") else "comment"
+        return await _post(task_id, rec, current, post_as, findings, body)
     if action != "approve" or any(f.get("blocking") for f in findings) or not good:
         _finish(task_id, rec, "not_good")
         return None       # his condition was "if good": the findings go to him
     lines = []
-    if rec["approve"]:
+    if rec["approve"] or rec.get("post"):
+        # 11 Nov: "if changes are all good it has to approve as well" — a clean
+        # review under "review and send" is an approval (green CI, nothing blocking).
         lines.append(await _approve(task_id, rec, current, findings, body))
     if rec["merge"]:
         rec = {**get(task_id), "state": "merge_pending"} if get(task_id) else None
@@ -244,7 +245,7 @@ async def _approve(task_id, rec: dict, current: str, findings: list[dict], body:
     name = f"{task_id}:approve:{current}"
     if not _claim(name, {"ref": rec["ref"], "revision": current}):
         return f"Approval of {rec['ref']} at this revision was already sent."
-    if not _allowed(task_id, "approve", rec["ref"]):
+    if not (_allowed(task_id, "approve", rec["ref"]) or _allowed(task_id, "post", rec["ref"])):
         store.kv_del(RECEIPT + name)
         return f"Not approved: your instruction for {rec['ref']} was revoked."
     try:
@@ -327,9 +328,114 @@ async def rereview(task_id, rec: dict) -> str:
             f"new head under the same instruction; nothing was approved or merged.")
 
 
+# --- after a review with findings: the author's fix gets reviewed again ---------------
+#
+# 11 Nov: "once the person resolved our review comments, u have to review once
+# properly and approve if all good, still issue comment it". A review posted
+# with findings leaves a watch on the PR; a new head commit is the author's
+# answer, and it is reviewed again under the same rule — approve when clean,
+# comment again when not. Bounded: merged/closed/approved ends it, and so do
+# MAX_ROUNDS re-reviews or WATCH_DAYS of silence.
+
+WATCH = "review_watch:"
+WATCH_DAYS = 7
+MAX_ROUNDS = 3
+
+
+def _ref_of(pr: str) -> tuple[str, str]:
+    """("owner/repo#N", "https://github.com/owner/repo/pull/N") or ("", "")."""
+    from . import review
+    number, target = review.pr_target(pr)
+    if not target or not str(number).isdigit():
+        return "", ""
+    return f"{target.lower()}#{number}", f"https://github.com/{target}/pull/{number}"
+
+
+def watch_after_post(pr: str, action: str, revision: str, *, workspace: str = "",
+                     repo: str = "", body: str = "", now: float | None = None) -> None:
+    """A review just went out on `pr`. With findings, wait for the author's fix;
+    an approval ends the watch."""
+    ref, url = _ref_of(pr)
+    if not ref:
+        return
+    if action == "approve":
+        store.kv_del(WATCH + ref)
+        return
+    try:
+        prev = json.loads(store.kv_get(WATCH + ref) or "{}")
+    except ValueError:
+        prev = {}
+    now = time.time() if now is None else now
+    store.kv_set(WATCH + ref, json.dumps({
+        "ref": ref, "url": url, "revision": revision or prev.get("revision", ""),
+        "workspace": workspace or prev.get("workspace", ""),
+        "repo": repo or prev.get("repo", ""), "rounds": int(prev.get("rounds") or 0),
+        "since": float(prev.get("since") or now), "last": (body or "")[:1500]}))
+
+
+async def watch_sweep(now: float | None = None) -> list[str]:
+    """Re-review every watched PR whose author pushed since our review."""
+    from . import review, tasks
+    now = time.time() if now is None else now
+    notes: list[str] = []
+    for key, raw in store.kv_like(WATCH + "%").items():
+        try:
+            w = json.loads(raw)
+        except ValueError:
+            store.kv_del(key)
+            continue
+        if now - float(w.get("since") or now) > WATCH_DAYS * 86400:
+            store.kv_del(key)
+            continue
+        try:
+            current, _ = await review.revision(w["url"])
+        except (RuntimeError, ValueError):
+            continue                      # transient, or closed: the next pass reads it
+        if not w.get("revision") or review.same_commit(current, w["revision"]):
+            continue                      # nothing new from the author yet
+        if int(w.get("rounds") or 0) >= MAX_ROUNDS:
+            store.kv_del(key)
+            notes.append(f"🔁 {w['ref']}: the author pushed again after {MAX_ROUNDS} re-reviews "
+                         f"— I've stopped re-reviewing it; say review to look again.")
+            continue
+        try:
+            text, meta = await review.brief(w["url"], w.get("workspace", ""), w.get("repo", ""))
+        except (RuntimeError, ValueError) as exc:
+            notes.append(f"🔁 {w['ref']} changed after our review, and I could not read it — {exc}")
+            continue
+        if (meta.get("state") or "OPEN").upper() != "OPEN":
+            store.kv_del(key)
+            continue
+        text += ("\n\nTHIS IS A RE-REVIEW. Our earlier review asked for changes:\n"
+                 + (w.get("last") or "(not kept)") + "\n\nCheck each earlier point against the "
+                 "new head first — resolved, partly, or not — then review what changed since.")
+        t = tasks.spawn(f"Re-review {w['ref']} after the author's update", text, "analysis",
+                        w.get("workspace") or None)
+        store.kv_set(f"review_origin:{t['id']}", json.dumps({"ref": w["ref"], "revision": current}))
+        _save(t["id"], {"version": 1, "ref": w["ref"], "revision": current, "url": w["url"],
+                        "approve": False, "merge": False, "post": True,
+                        "words": "re-review after the author's update (his standing rule)",
+                        "author": (meta.get("author") or {}).get("login", ""),
+                        "workspace": w.get("workspace", ""), "repo": w.get("repo", ""),
+                        "rereviews": 0, "state": "reviewing", "at": now})
+        store.kv_set(key, json.dumps({**w, "revision": current,
+                                      "rounds": int(w.get("rounds") or 0) + 1}))
+        store.add_task_event(t["id"], "authority", f"re-review {w['ref']}: approve if clean")
+        notes.append(f"🔁 {w['ref']}: the author pushed after our review — task #{t['id']} is "
+                     f"reviewing it again; it approves if clean, comments if not.")
+    return notes
+
+
 async def sweep() -> list[str]:
     """Pending merges whose requirements may now be met. Called by the PR watcher."""
-    notes = []
+    notes = await watch_sweep()
+    try:
+        from . import responder
+        for t in await responder.github_review_requests():
+            notes.append(f"🔎 Review requested on GitHub — task #{t['id']} is reviewing it; "
+                         f"you'll get the findings, and nothing posts without your send.")
+    except Exception:                                          # noqa: BLE001
+        pass
     for tid, rec in active():
         if rec.get("state") == "merge_pending":
             note = await merge_now(tid)

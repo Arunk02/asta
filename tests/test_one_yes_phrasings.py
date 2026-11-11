@@ -100,11 +100,22 @@ def test_review_and_send_posts_the_review_as_concluded_once(posted):
     assert len(posted) == 1, "posted once, never twice"
 
 
-def test_an_approval_still_needs_his_word_approve(posted):
+def test_a_clean_review_under_review_and_send_is_an_approval(posted, monkeypatch):
+    """11 Nov: "if changes are all good it has to approve as well"."""
+    async def logins():
+        return {"someone-else"}
+    monkeypatch.setattr(review, "my_logins", logins)
     t, _ = _granted()
     out = asyncio.run(pr_authority.on_review(t["id"], current=REV, good=True, action="approve",
                                              findings=[], body="VERDICT: Approve"))
-    assert out is None and not posted, "staged for his yes, not approved in his name"
+    assert [c["args"]["action"] for c in posted] == ["approve"] and "under your instruction" in out
+
+
+def test_an_approve_verdict_on_red_ci_is_not_approved(posted):
+    t, _ = _granted()
+    out = asyncio.run(pr_authority.on_review(t["id"], current=REV, good=False, action="approve",
+                                             findings=[], body="VERDICT: Approve"))
+    assert not [c for c in posted if c["args"]["action"] == "approve"]
 
 
 def test_review_alone_grants_nothing(posted):

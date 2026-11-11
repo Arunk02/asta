@@ -5479,6 +5479,80 @@ def _apply_proposal(task_id: int) -> tuple[str, str]:
 _BARE_FIX = re.compile(r"^\s*(?:pls|please)?\s*fix(?:\s+(?:it|this|that|task))?\s*#?\s*\d*\s*[.!]*\s*$", re.I)
 
 
+#: Follow-ups on a merged task so far: each gets its own branch and PR.
+_FOLLOWUPS = "task_followups:"
+
+
+async def _reopen_merged(task_id: int, t: dict) -> None:
+    """A merged task takes a small change on top: same task, a fresh branch.
+
+    Its PR is merged, so its old branch is spent — with squash merges a PR from it
+    would carry the whole change again. The follow-up branch is cut from the
+    latest base, which already holds the merged work; `ship` raises a new PR."""
+    from . import worktrees
+    try:
+        ws_root = Path(code_cwd(t.get("workspace")))
+    except RuntimeError as exc:
+        raise ValueError(f"task #{task_id} cannot be continued: {exc}") from exc
+    old = (store.kv_get(f"task_branch:{task_id}") or task_branch(t, task_id)).strip()
+    raw = store.kv_get(_CLEANED + str(task_id))
+    repos = list((_json.loads(raw).get("repos") if raw else None) or [])
+    if worktrees.exists(ws_root, task_id):
+        root = worktrees.root_for(ws_root, task_id)
+        if root.is_dir():
+            repos = sorted(p.name for p in root.iterdir() if p.is_dir() and (p / ".git").exists()) \
+                or repos
+        await remove_checkout(task_id, t)
+        if worktrees.exists(ws_root, task_id):
+            raise ValueError(f"task #{task_id}: its old checkout still holds uncommitted "
+                             f"work — I did not touch it")
+    n = int(store.kv_get(_FOLLOWUPS + str(task_id)) or 0) + 1
+    branch = f"{re.sub(r'-followup-[0-9]+$', '', old)}-followup-{n}"
+    made = await worktrees.create(ws_root, task_id, branch, *repos)
+    if not any(r.get("ok") for r in made):
+        why = "; ".join(f"{r.get('repo')}: {r.get('note')}" for r in made if r.get("note"))
+        raise ValueError(f"task #{task_id}: could not prepare a follow-up branch ({why or 'no repo'})")
+    store.kv_del(_CLEANED + str(task_id))
+    store.kv_set(f"task_branch:{task_id}", branch)
+    store.kv_set(_FOLLOWUPS + str(task_id), str(n))
+    merged = "\n".join(x for x in (store.kv_get(f"task_merged_prs:{task_id}") or "",
+                                   t.get("pr_urls") or "") if x)
+    store.kv_set(f"task_merged_prs:{task_id}", merged)
+    store.update_task(task_id, status="done", pr_urls="", pr_state="", pr_checked_at=0.0)
+    store.record_outcome("task", "reopened after merge", subject=str(task_id), detail=branch)
+
+
+async def continue_finished(task_id: int, followup: str) -> str:
+    """A finished analysis or draft, carried on with his follow-up — same task.
+
+    11 Nov: "task 559 - … then what if in future same issue … fix it again?" on
+    a done analysis got "cannot be continued (status: done)". There is no branch
+    to refine, but there is its answer: the worker runs again from the original
+    ask, its previous answer and his follow-up."""
+    t = store.get_task(task_id)
+    if not t:
+        raise ValueError(f"no task #{task_id}")
+    if t["kind"] == "code" or t["status"] in LIVE_STATUSES:
+        raise ValueError(f"task #{task_id} is not a finished analysis")
+    if is_running(task_id):
+        return f"Task #{task_id} is already running."
+    first = store.kv_get(f"task_prompt0:{task_id}")
+    if first is None:
+        first = t["prompt"]
+        store.kv_set(f"task_prompt0:{task_id}", first)
+    said = (followup or "").strip().lstrip("-—:,. ").strip()
+    prompt = (f"{first}\n\nYOUR PREVIOUS ANSWER ON THIS TASK:\n{(t.get('result') or '')[:6000]}"
+              f"\n\nARUN'S FOLLOW-UP — answer this, building on the previous answer "
+              f"rather than redoing it:\n{said}")
+    store.update_task(task_id, prompt=prompt, status="running", error="")
+    store.kv_set(f"task_asked:{task_id}", _json.dumps({"his": said, "offer": ""}))
+    store.record_outcome("task", "continued", subject=str(task_id))
+    job = asyncio.create_task(_worker(task_id))
+    _running[task_id] = job
+    job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
+    return f"Task #{task_id}: continuing with your question — same task, building on its answer."
+
+
 async def refine(task_id: int, feedback: str, *, code_change: bool = False,
                  approved_plan: bool = False) -> str:
     """Continue a finished task with feedback, in the session it already has.
@@ -5520,6 +5594,10 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
         # Still running: kept for its next step — or, when he says the approved
         # design is wrong, the build stops and it plans again.
         return await note_for_live_task(task_id, feedback, code_change=code_change)
+    after_merge = t["status"] == "merged"
+    if after_merge:
+        await _reopen_merged(task_id, t)
+        t = store.get_task(task_id)
     if not approved_plan and t["status"] in REFINABLE and _PLAN_FIRST.search(feedback or ""):
         return await propose_change(task_id, feedback)
     if t["status"] not in REFINABLE:
@@ -5534,7 +5612,11 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
     store.update_task(task_id, status="running")
     prompt = (
         f"FOLLOW-UP ON YOUR OWN TASK — this is not a new task.\n"
-        + ("The previous run claimed completion without leaving a code change; "
+        + ("Your earlier change is MERGED into the base branch. This checkout is a "
+           "fresh branch cut from that base, so the merged work is already in it: "
+           "make only the follow-up change below, on top of it.\n"
+           if after_merge else
+           "The previous run claimed completion without leaving a code change; "
            "implement the original request before reporting done.\n"
            if t.get("error", "").startswith("The code task reported completion")
            else "You already implemented this; the diff is in the working tree"
@@ -5552,7 +5634,8 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
         job = asyncio.create_task(_resume_worker(task_id, prompt, approved=True))
         _running[task_id] = job
         job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
-    where = ("the open PR" if was_shipped else
+    where = ("its merged change on a fresh branch — say ship for a new PR" if after_merge else
+             "the open PR" if was_shipped else
              "the original implementation" if t.get("error", "").startswith(
                  "The code task reported completion") else "the existing diff")
     return f"Task #{task_id}: continuing {where} with your feedback (same session, full context)."

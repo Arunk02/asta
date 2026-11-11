@@ -3683,6 +3683,51 @@ def _affirmation(text: str) -> tuple[bool, str]:
     return False, ""
 
 
+def _recorded_review_for(staged: dict):
+    """A "pr" draft for a PR whose review is already recorded: post THAT review.
+
+    11 Nov, booking PR 1535: the brain re-drafted a recorded review as a "pr"
+    message; "send" had no call to run for it and handed it back to a brain that
+    cannot post, which staged it again — twice. His own task PRs keep the
+    description-note path."""
+    if (staged.get("channel") or "").strip().lower() != "pr":
+        return None
+    target = f"{staged.get('to') or ''}"
+    if tasks.resolve_task_pr(target or staged.get("what") or ""):
+        return None
+    pr = _pr_numbers(target)
+    if len(pr) != 1 or offers.review_for_pr(pr[0]) is None:
+        return None
+    return offers.take_review(pr[0])
+
+
+#: "PR 1535", "#1535", ".../pull/1535" — the PR numbers a line names.
+_PR_NUMBER = re.compile(r"(?:\bPR\s*#?\s*|/pull/|#)(\d{2,6})\b", re.I)
+
+
+def _pr_numbers(text: str) -> list[str]:
+    return list(dict.fromkeys(_PR_NUMBER.findall(text or "")))
+
+
+#: "task 564 send it", "post the review on PR 1535", "yes post 1535".
+_POST_YES = re.compile(r"\b(?:send|post|submit|publish|go\s+ahead|yes|ok(?:ay)?|do\s+it)\b", re.I)
+_POST_NO = re.compile(r"\b(?:don'?t|do\s+not|not\s+yet|hold|wait|cancel|drop|no)\b", re.I)
+
+
+def _named_review(text: str) -> str | None:
+    """The PR whose recorded review he just said to post, by naming it or its task."""
+    t = text or ""
+    if len(t) > 160 or not _POST_YES.search(t) or _POST_NO.search(t):
+        return None
+    named = _explicit_task(t)
+    prs = _pr_numbers(_EXPLICIT_TASK_REF.sub(" ", t))     # "task #564" is a task, not a PR
+    if named is not None and not prs:
+        task = store.get_task(named) or {}
+        prs = _pr_numbers(f"{task.get('title') or ''}\n{task.get('prompt') or ''}")
+    prs = [p for p in prs if offers.review_for_pr(p) is not None]
+    return prs[0] if len(prs) == 1 else None
+
+
 def _mechanical_send(staged: dict) -> dict | None:
     """The recorded call for an approved draft, or None if it needs a brain.
 
@@ -4609,6 +4654,10 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             # resolve a different person of that name, treat the tool call as
             # optional, or simply answer ABOUT sending — and every one of those
             # ends with Arun believing a message went out that never did.
+            review = _recorded_review_for(staged)
+            if review is not None:
+                await _run_staged_op(review, cid, sink, channel)
+                return None
             op = _mechanical_send(staged)
             if op:
                 sent = await _run_op(op, cid, sink, channel, staged=staged)
@@ -4657,6 +4706,17 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     # is what starts the work: nothing was investigated unasked, and nothing is
     # dropped either. Answerable from any channel, because the question went to
     # his phone and the answer usually comes back the same way.
+    # "task 564 send it" / "post PR 1535": the recorded review for THAT PR, even
+    # while another offer is the one being asked. Naming it is the yes to it.
+    named_pr = None if skip_new_gates else _named_review(user_text)
+    if named_pr is not None:
+        review = offers.take_review(named_pr)
+        if review is not None:
+            store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
+            frontdesk.record("command", f"post review PR {named_pr}")
+            await _run_staged_op(review, cid, sink, channel)
+            return None
+
     open_offer = None if skip_new_gates else offers.pending()
     if open_offer and (user_text or "").strip():
         last_send = store.latest_send_prompt(cid) if _affirmation(user_text)[0] else None

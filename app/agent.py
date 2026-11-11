@@ -2087,6 +2087,17 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
+    if channel.strip().lower() == "pr" and not tasks.resolve_task_pr(to or what):
+        # A review already recorded for this PR is the one to post: a "pr" text copy
+        # of it went back to a brain with no tool on "send" and was staged again
+        # (11 Nov, PR 1535). Any other "pr" draft stages as before.
+        from . import offers
+        from .main import _pr_numbers
+        prs = _pr_numbers(f"{to}\n{what}")
+        if len(prs) == 1 and offers.review_for_pr(prs[0]) is not None:
+            return (f"Not staged — the review for PR #{prs[0]} is already recorded and "
+                    f"waiting. Tell Arun in one line: say “post PR {prs[0]}” and it posts "
+                    f"exactly that review. Do not stage it again.")
     # It goes out as HIM. A sentence about Arun, the assistant or a staged
     # review cannot be his words (Komal, 1 Oct: "Will post once I confirm
     # with Arun", sent in his name). Dropped here, for every brain.

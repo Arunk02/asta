@@ -208,7 +208,9 @@ def offer(kind: str, subject: str, context: str, prompt: str,
     #
     # Replace rather than skip: the newer one carries fresher context ("21 days"
     # rather than "14"), and it is the same question either way.
-    queued = [row for row in queued if not _same_question(row, o)]
+    # A revision of a queued review replaces it too: 11 Nov, two Request-changes
+    # reviews for one PR (1 and 5 inline comments) waited side by side.
+    queued = [row for row in queued if not _same_question(row, o) and not _same_target(row, o)]
     queued.append(asdict(o))
     # Newest wins when full. An offer he has not reached in five proposals is
     # stale anyway, and dropping the newest would hide what is happening NOW.
@@ -417,6 +419,59 @@ def _same_target(row: dict, o: Offer) -> bool:
     if not (ra.get("pr") and na.get("pr")):
         return False
     return _pr_of(ra.get("pr")) == _pr_of(na.get("pr")) and ra.get("action") == na.get("action")
+
+
+#: Recorded calls that post a review on a pull request.
+_REVIEW_OPS = ("pr_review", "pr_review_inline")
+
+
+def _all_waiting() -> list[Offer]:
+    rows = []
+    with contextlib.suppress(ValueError, TypeError):
+        raw = store.kv_get(KEY)
+        if raw:
+            rows.append(json.loads(raw))
+    rows += _queue()
+    return [o for o in (_load(json.dumps(r)) for r in rows) if o is not None and not o.expired()]
+
+
+def review_for_pr(pr) -> Offer | None:
+    """The recorded review waiting for this PR — asked or still queued, newest.
+
+    11 Nov: the review for booking PR 1535 was recorded and waited behind an
+    older offer; "task 564 send it" and "send" only ever read the asked one, so
+    the brain re-drafted the review as text nothing could post."""
+    n = _pr_of(pr)
+    if not n or not str(n).isdigit():
+        return None
+    hits = [o for o in _all_waiting() if (o.op or {}).get("name") in _REVIEW_OPS
+            and _pr_of(((o.op or {}).get("args") or {}).get("pr")) == n]
+    return max(hits, key=lambda o: o.created) if hits else None
+
+
+def take_review(pr) -> Offer | None:
+    """Consume the recorded review for this PR, wherever it waits — exactly once.
+
+    The asked offer in front of it is left as it was; older copies of the same
+    PR's review are dropped with it."""
+    o = review_for_pr(pr)
+    if o is None:
+        return None
+    n = _pr_of(pr)
+
+    def same_pr(row: dict) -> bool:
+        op = row.get("op") or {}
+        return op.get("name") in _REVIEW_OPS and _pr_of((op.get("args") or {}).get("pr")) == n
+    head = pending()
+    if head is not None and same_pr(asdict(head)):
+        clear()
+        store.kv_set(QUEUE_KEY, json.dumps([r for r in _queue() if not same_pr(r)]))
+        _promote()
+    else:
+        store.kv_set(QUEUE_KEY, json.dumps([r for r in _queue() if not same_pr(r)]))
+    with contextlib.suppress(Exception):
+        store.kv_set(ACCEPTED_KEY, json.dumps({"at": time.time(), "said": o.context}))
+    return o
 
 
 def staged_write(op_name: str, args: dict, subject: str, context: str,

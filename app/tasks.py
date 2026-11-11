@@ -4184,17 +4184,32 @@ async def _tell_the_limit_once(brain: str, reset_at: float | None) -> None:
     await notify.notify("\n".join(lines), "task", urgency="direct", considered=True)
 
 
+def _out_for_the_month(brain: str) -> bool:
+    """Its last word was "monthly quota exceeded", and no call has worked since.
+
+    `quota_down` lets such a brain be tried again after a cool-down, which is
+    right for a probe and wrong for his paused task: the task becomes the probe,
+    fails the same way, and pauses again (task 535, Nov)."""
+    name = "claude_cli" if brain == "claude" else brain
+    return (store.kv_get(f"{name}_quota_exhausted") or "") == "1"
+
+
 def _resume_executor(task_id: int) -> tuple[str, bool]:
-    """Keep a healthy executor; recover a paused task using existing availability policy."""
+    """The brain a paused task resumes on: its own while that brain can work,
+    another that can when its own cannot. Nothing better on offer → its own, as
+    before — a resume is never refused here; the brain's limit handling pauses it
+    again if it must."""
     current = _resolve_executor(task_id)
-    if _can_take_over(current):
+
+    def usable(ex: str) -> bool:
+        return _can_take_over(ex) and not _out_for_the_month(ex)
+    if usable(current):
         return current, False
-    replacement = next((ex for ex in _SIMPLE_BRAINS
-                        if ex != current and _can_take_over(ex)), "")
+    replacement = next((ex for ex in _SIMPLE_BRAINS if ex != current and usable(ex)), "")
     if not replacement:
-        return "", False
-    # Sessions are already keyed by executor. Never copy a provider's session
-    # into another provider; the existing fresh-session context pack is used.
+        return current, False
+    # Sessions are keyed by executor: the new brain opens its own, and the old
+    # brain's session stays where it is, never copied across providers.
     store.kv_set(f"task_executor:{task_id}", replacement)
     store.record_outcome("task", "executor_recovered", subject=str(task_id),
                          detail=f"{current} -> {replacement}")
@@ -4221,10 +4236,8 @@ async def resume_task(task_id: int, switch_to: str = "") -> str:
     note = ""
     if not switch_to:
         executor, changed = _resume_executor(task_id)
-        if not executor:
-            return f"Task #{task_id}: no executor is available; kept paused for recovery."
         if changed:
-            note = f" on {executor} (previous executor unavailable)"
+            note = f" on {executor} (its own brain is unavailable)"
     if switch_to:
         ex = _resolve_switch(switch_to)
         if not ex:

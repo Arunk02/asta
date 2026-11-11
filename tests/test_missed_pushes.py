@@ -73,3 +73,37 @@ def test_old_misses_are_counted_not_replayed(phone):
     body, = phone["sent"]
     assert "this morning's thing" in body and "yesterday's thing" not in body
     assert "1 older one in the app" in body
+
+
+# --- 11 Nov: "7 things." and nothing behind it ---------------------------------------
+
+SUMMARY = ("🗓 While you were off (since Tue 10 Nov 09:40): 3 things.\n\n*Everything else*\n"
+           "• Incident INC0000001 has been assigned to your team\n"
+           "• Incident INC0000002 has been assigned to your team\n"
+           "• There's new activity in Teams: 1 mention")
+
+
+def test_a_held_summary_that_missed_his_phone_arrives_whole(phone):
+    asyncio.run(notify.deliver(SUMMARY))
+    asyncio.run(notify.deliver("❌ Task #7 failed — build broke"))
+    phone["up"] = True
+    assert asyncio.run(notify.resend_missed()) is True
+    grouped, whole = phone["sent"]
+    assert "Task #7 failed" in grouped and "While you were off" not in grouped
+    assert "Missed at" in whole and SUMMARY in whole, "every item of the summary, not its first line"
+    assert missed() == []
+
+
+def test_what_still_did_not_land_stays_queued_alone(phone, monkeypatch):
+    asyncio.run(notify.deliver(SUMMARY))
+    asyncio.run(notify.deliver("❌ Task #7 failed — build broke"))
+    sent = []
+
+    async def wa(text, done=False):
+        if "Missed at" in text:
+            return False
+        sent.append(text)
+        return True
+    monkeypatch.setattr(notify, "wa_send", wa)
+    assert asyncio.run(notify.resend_missed()) is False
+    assert [m["text"] for m in missed()] == [SUMMARY], "the one-liner landed and is not sent twice"

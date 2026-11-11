@@ -330,9 +330,12 @@ def _queue_missed(text: str, now: float | None = None) -> None:
 
 
 async def resend_missed(now: float | None = None) -> bool:
-    """Send what failed to reach his phone, as one message. True when it landed.
+    """Send what failed to reach his phone. True when all of it landed.
 
-    Quiet rules still hold: what was missed during them waits like anything else."""
+    One-line pushes go together as one message. A push of several lines — the
+    summary his quiet held, a digest, a brief — goes out whole as its own message:
+    its first line alone ("7 things.") says nothing. Quiet rules still hold: what
+    was missed during them waits like anything else."""
     items = _missed()
     if not items:
         return False
@@ -341,22 +344,35 @@ async def resend_missed(now: float | None = None) -> bool:
     now = time.time() if now is None else now
     fresh = [i for i in items if now - float(i.get("at") or 0) <= MISSED_FRESH_SECONDS]
     stale = len(items) - len(fresh)
-    lines = []
-    for i in fresh[-10:]:
-        first = next((ln.strip() for ln in (i.get("text") or "").splitlines() if ln.strip()), "")
-        when = time.strftime("%H:%M", time.localtime(float(i.get("at") or now)))
-        lines.append(f"• {when} {first[:160]}")
-    if len(fresh) > 10:
-        lines.append(f"• …and {len(fresh) - 10} more")
-    if stale:
-        lines.append(f"({stale} older one{'s' if stale != 1 else ''} in the app)")
-    body = ("📬 These didn't reach your phone when they happened — WhatsApp was down:\n"
-            + "\n".join(lines))
-    wa = await wa_send(body)
-    tg = False if wa else await telegram.send(body)
-    if not (wa or tg):
+
+    def _lines(i):
+        return [ln for ln in (i.get("text") or "").splitlines() if ln.strip()]
+
+    def _when(i):
+        return time.strftime("%H:%M", time.localtime(float(i.get("at") or now)))
+
+    short = [i for i in fresh if len(_lines(i)) <= 1]
+    whole = [i for i in fresh if len(_lines(i)) > 1]
+    messages = []                       # (body, the queued items it carries)
+    if short or stale:
+        lines = [f"• {_when(i)} {(_lines(i) or [''])[0].strip()[:160]}" for i in short[-10:]]
+        if len(short) > 10:
+            lines.append(f"• …and {len(short) - 10} more")
+        if stale:
+            lines.append(f"({stale} older one{'s' if stale != 1 else ''} in the app)")
+        messages.append(("📬 These didn't reach your phone when they happened — WhatsApp was down:\n"
+                         + "\n".join(lines), short))
+    for i in whole:
+        messages.append((f"📬 Missed at {_when(i)} — WhatsApp was down:\n\n{i['text']}", [i]))
+    unsent = []
+    for body, carried in messages:
+        wa = await wa_send(body)
+        tg = False if wa else await telegram.send(body)
+        if not (wa or tg):
+            unsent += carried
+    store.kv_set(MISSED_KEY, json.dumps(unsent))
+    if unsent:
         return False
-    store.kv_set(MISSED_KEY, "[]")
     store.record_outcome("notify", "missed resent", detail=f"{len(items)} item(s)")
     return True
 

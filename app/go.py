@@ -33,6 +33,8 @@ from . import store
 _PR = re.compile(
     r"\b(?:raise|create|open|make|put\s+up|send)\s+(?:a\s+|an\s+|the\s+|both\s+)?"
     r"(?:pr|prs|pull\s+requests?)\b|\bpush(?:ed)?\b(?!\s*back)|\bship\b|\bpr\s+raise\b|"
+    # "send him the PR", "send <name> the PR" (11 Nov: read as no PR at all)
+    r"\bsend\s+(?:him|her|them|me|us|[a-z]{3,15})\s+(?:the\s+|a\s+)?(?:pr|prs|pull\s+requests?)\b|"
     r"\bupdate\s+(?:it\s+)?(?:in\s+|to\s+)?(?:the\s+)?(?:same\s+)?(?:pr|pull\s+request)\b", re.I)
 
 #: "…and inform Vinish" — the part of a go-ahead that is a message, not a command.
@@ -87,6 +89,29 @@ def wants_pr(text: str) -> bool:
     return False
 
 
+#: "567 approve raise PR", "task 567: approve and raise PR" — the task named first.
+_LEAD = re.compile(r"^\s*(?:task\s*)?#?(\d{1,5})\b[\s,:—-]*", re.I)
+#: A short go-ahead said as a sentence: "once u done plan go ahead and implement
+#: and raise PR" (11 Nov: not a go-ahead, so the task stopped at "ready").
+_GO_WORD = re.compile(r"\b(?:go\s+ahead|approve[ds]?|approval|proceed|implement|do\s+it|"
+                      r"go\s+for\s+it)\b", re.I)
+_GO_START = re.compile(r"^\s*(?:once|after|when|ok(?:ay)?|yes|then|pls|please|go|approve[ds]?|"
+                       r"implement|proceed|so|and|just|fine|done|task|#?\d{1,5})\b", re.I)
+_HOLD = re.compile(r"\b(?:don'?t|do\s+not|not\s+yet|hold|wait|stop|without|never)\b", re.I)
+_TASK_REF = re.compile(r"\btask\s*#?(\d{1,5})\b|^\s*#?(\d{1,5})\b", re.I)
+
+
+def _go_sentence(text: str) -> tuple[bool, int | None]:
+    """A short sentence that is only his go-ahead to approve, build and raise the PR."""
+    t = (text or "").strip()
+    if not t or len(t) > 160 or "?" in t or _HOLD.search(t):
+        return False, None
+    if not (_GO_START.match(t) and _GO_WORD.search(t) and wants_pr(t)):
+        return False, None
+    ref = _TASK_REF.search(t)
+    return True, (int(ref.group(1) or ref.group(2)) if ref else None)
+
+
 def command(text: str) -> tuple[bool, int | None]:
     """(is this whole message a go-ahead?, the task number he named)."""
     stop = _STOP_MERGE.match(text or '')
@@ -96,9 +121,17 @@ def command(text: str) -> tuple[bool, int | None]:
     quiet, number = task_inform.stop_command(text)
     if quiet:
         return True, number
+    lead = _LEAD.match(text or "")
+    if lead and not wants_merge(text):
+        # The number first, then the go-ahead: the same command, said the other way.
+        rest = (text or "")[lead.end():]
+        m = _COMMAND.match(rest)
+        if m and (wants_pr(rest) or "approv" in rest.lower()) and \
+                (not m.group(1) or m.group(1) == lead.group(1)):
+            return True, int(lead.group(1))
     m = _COMMAND.match(text or "")
     if not m:
-        return False, None
+        return _go_sentence(text)
     if wants_merge(text) and m.group(1) and not re.search(r'\btask\s*#?\s*' + m.group(1) + r'\b', text, re.I):
         return False, None  # a bare merge number may identify a PR, not a task
     low = (text or "").lower()

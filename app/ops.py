@@ -162,7 +162,18 @@ async def _jira_transition(key: str = "", to_status: str = "") -> str:
                            f"PR #{str(a.get('pr', '?')).lstrip('#')}")
 async def _pr_review(pr: str = "", workspace: str = "", repo: str = "",
                      action: str = "comment", body: str = "") -> str:
-    return "✅ " + await review.post_review(pr, workspace, repo, action, body)
+    out = "✅ " + await review.post_review(pr, workspace, repo, action, body)
+    _posted(pr)
+    return out
+
+
+def _posted(pr: str) -> None:
+    """Posted: every other recorded review of this PR is answered by it."""
+    try:
+        from . import offers
+        offers.drop_reviews_for(pr)
+    except Exception:                                          # noqa: BLE001
+        pass
 
 
 @op("pr_review_inline", lambda a: f"{a.get('action', 'comment').replace('_', ' ').title()} "
@@ -181,8 +192,10 @@ async def _pr_review_inline(pr: str = "", workspace: str = "", repo: str = "",
             raise RuntimeError("the PR head changed since this review (a new commit); review it again")
         if action == "approve" and not good:
             raise RuntimeError("approval needs successful CI on this commit, and it is not green now")
-    return "✅ " + await review.post_inline_review(pr, workspace, repo, action,
-                                                  body, comments or [])
+    out = "✅ " + await review.post_inline_review(pr, workspace, repo, action,
+                                                 body, comments or [])
+    _posted(pr)
+    return out
 
 
 @op("pr_note", lambda a: f"Add to {a.get('where', 'description')} of the PR for task "

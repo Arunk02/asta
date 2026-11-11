@@ -449,6 +449,32 @@ def review_for_pr(pr) -> Offer | None:
     return max(hits, key=lambda o: o.created) if hits else None
 
 
+def drop_reviews_for(pr) -> int:
+    """A review for this PR has been posted: no other copy of it may ask again.
+
+    11 Nov: the 1-comment review was posted on his "yes go ahead"; the 5-comment
+    copy still queued for the same PR came back as a question afterwards."""
+    n = _pr_of(pr)
+    if not n or not str(n).isdigit():
+        return 0
+
+    def same_pr(row: dict) -> bool:
+        op = row.get("op") or {}
+        return op.get("name") in _REVIEW_OPS and _pr_of((op.get("args") or {}).get("pr")) == n
+    dropped = 0
+    head = pending()
+    if head is not None and same_pr(asdict(head)):
+        clear()
+        dropped += 1
+    queued = _queue()
+    keep = [r for r in queued if not same_pr(r)]
+    dropped += len(queued) - len(keep)
+    store.kv_set(QUEUE_KEY, json.dumps(keep))
+    if head is not None and same_pr(asdict(head)):
+        _promote()
+    return dropped
+
+
 def take_review(pr) -> Offer | None:
     """Consume the recorded review for this PR, wherever it waits — exactly once.
 

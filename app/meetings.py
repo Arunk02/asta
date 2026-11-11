@@ -598,19 +598,7 @@ async def join_by_phrase(phrase: str, now_minutes: int | None = None,
         listing = ", ".join(f"{e['start']} {e['title']}" for e in events[:6])
         raise RuntimeError(
             f"'{phrase}' doesn't pick out one meeting — today has: {listing}")
-    if not ev.get("join_url"):
-        # The row carried no link: read it from the event itself (11 Nov).
-        try:
-            ev["join_url"] = await outlook.join_url_for(ev)
-        except Exception as exc:                               # noqa: BLE001
-            raise RuntimeError(
-                f"found '{ev['title']}' at {ev['start']}; its calendar row has no join link "
-                f"and opening the event in Outlook failed ({str(exc)[:120]})") from exc
-    if not ev.get("join_url"):
-        raise RuntimeError(
-            f"found '{ev['title']}' at {ev['start']}, but there is no join link in its "
-            f"calendar row or in the event itself (opened it in Outlook: its links, its body "
-            f"and its Join button) — it may be in person or a channel meeting")
+    ev["join_url"] = await outlook.join_url_or_say_why(ev)
     return f"{await join(ev['join_url'], speak=speak)} — {ev['title']} ({ev['start']})"
 
 

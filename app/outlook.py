@@ -757,6 +757,23 @@ async def join_url_for(ev: dict) -> str:
     return url
 
 
+async def join_url_or_say_why(ev: dict) -> str:
+    """The link to join `ev` — from its row, else from the event — or a refusal
+    that says what was tried (never "send me the link": he asked Asta to look)."""
+    try:
+        url = await join_url_for(ev)
+    except Exception as exc:                                   # noqa: BLE001
+        raise RuntimeError(
+            f"found '{ev['title']}' at {ev['start']}; its calendar row has no join link "
+            f"and opening the event in Outlook failed ({str(exc)[:120]})") from exc
+    if not url:
+        raise RuntimeError(
+            f"found '{ev['title']}' at {ev['start']}, but there is no join link in its "
+            f"calendar row or in the event itself (opened it in Outlook: its links, its body "
+            f"and its Join button) — it may be in person or a channel meeting")
+    return url
+
+
 async def _join_button_target(page) -> str:
     """Where the event's Join button leads — its href, or the page it opens (closed at once)."""
     btn = page.get_by_role("button", name=re.compile(r"^\s*Join\b", re.I)).first

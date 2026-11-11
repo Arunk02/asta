@@ -96,8 +96,11 @@ def _dispatch(text: str, monkeypatch):
 
 
 def test_the_reply_is_what_was_stored(monkeypatch):
-    sink, started = _dispatch("Quiet until 11 nov", monkeypatch)
-    assert "Quiet until Wed 11 Nov 09:00" in sink.said()
+    # A date two days out, so the test means the same thing on every day it runs
+    # (a fixed "11 nov" rolled to next year once 11 Nov 09:00 had passed).
+    day = dt.datetime.now() + dt.timedelta(days=2)
+    sink, started = _dispatch(f"Quiet until {day.day} {day.strftime('%b').lower()}", monkeypatch)
+    assert f"Quiet until {day.strftime('%a %d %b')} 09:00" in sink.said()
     assert not started, "no brain to say 'got it' over what was stored"
 
 

@@ -23,12 +23,18 @@ AWAY_AFTER_SECONDS = int(os.environ.get("PRESENCE_AWAY_AFTER", "300"))
 
 _IDLE_RE = re.compile(r'"HIDIdleTime"\s*=\s*(\d+)')
 
+#: By full path. Asta's launchd job runs with PATH=/opt/homebrew/bin:/usr/local/bin:
+#: /usr/bin:/bin — no /usr/sbin — so a bare "ioreg" was never found, the idle time
+#: was "unknown", and unknown reads as "at the laptop". 11 Nov: away mode switched
+#: itself off twice ("back at the laptop") with the Mac idle for 20 minutes.
+IOREG = "/usr/sbin/ioreg"
+
 
 async def idle_seconds() -> float | None:
     """Seconds since the last human input, or None if it can't be determined."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ioreg", "-c", "IOHIDSystem",  # no -d: HIDIdleTime lives below depth 1
+            IOREG, "-c", "IOHIDSystem",  # no -d: HIDIdleTime lives below depth 1
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         raw, _ = await asyncio.wait_for(proc.communicate(), timeout=8)
     except Exception:

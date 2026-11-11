@@ -1858,6 +1858,9 @@ def _how_to_post(task_id: int, t: dict) -> str:
         return ""
     head = offers.pending()
     if head is not None and head.id == o.id:
+        # This note IS him being shown it: one yes, not one to see it and one to
+        # post it (11 Nov, PR 1536: the first yes only re-showed the review).
+        offers.mark_shown(o.id)
         return f"👉 Say “yes” or “post PR {m.group(1)}” to post it.\n\n"
     ahead = f" — a bare “yes” answers “{head.subject[:60]}” first" if head else ""
     return f"👉 To post it, say “post PR {m.group(1)}”{ahead}.\n\n"

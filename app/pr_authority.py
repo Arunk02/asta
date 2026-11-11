@@ -426,9 +426,40 @@ async def watch_sweep(now: float | None = None) -> list[str]:
     return notes
 
 
+async def stale_reviews_sweep() -> list[str]:
+    """A review waiting for his yes on a PR that has since moved is dropped.
+
+    11 Nov: a PR 1536 review from the afternoon sat in front of the queue; his
+    "yes" (meant for another) ran it, and it failed — "the PR head changed since
+    this review". Posting it was never going to work; holding it only took the
+    yes that was meant for something else."""
+    from . import offers, review
+    notes = []
+    for o in offers.waiting_reviews():
+        args = (o.op or {}).get("args") or {}
+        origin = args.get("review_origin") or {}
+        if not origin.get("revision"):
+            continue
+        try:
+            current, _ = await review.revision(origin.get("ref") or args.get("pr") or "")
+        except (RuntimeError, ValueError):
+            continue
+        if review.same_commit(current, origin["revision"]):
+            continue
+        if offers.drop_offer(o.id):
+            ref = origin.get("ref") or args.get("pr")
+            notes.append(f"🗑 Dropped the waiting review of {ref}: the PR has a new commit since. "
+                         f"Say “review {ref}” for a fresh one.")
+    return notes
+
+
 async def sweep() -> list[str]:
     """Pending merges whose requirements may now be met. Called by the PR watcher."""
     notes = await watch_sweep()
+    try:
+        notes += await stale_reviews_sweep()
+    except Exception:                                          # noqa: BLE001
+        pass
     try:
         from . import responder
         for t in await responder.github_review_requests():

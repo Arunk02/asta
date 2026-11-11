@@ -914,13 +914,15 @@ def best_model_name() -> str:
 def default_chat_model() -> str:
     """Day-to-day default: the cheapest CLI subscription that can actually answer.
 
-    Order is by what it costs Arun, not by preference: Copilot is office-paid, so
-    it goes first — but only while it has quota. `model_registry()` folds that in,
+    His primary brain first (repo_ops.default_executor — Claude since 11 Nov),
+    then the rest, each only while it has quota. `model_registry()` folds that in,
     so a brain that is installed and exhausted no longer counts as available and
     the next one takes over on its own.
     """
     reg = model_registry()
-    for name in EXECUTORS:
+    from . import repo_ops
+    primary = from_exec_name(repo_ops.default_executor())
+    for name in (primary, *(n for n in EXECUTORS if n != primary)):
         if reg.get(name, {}).get("available"):
             return name
     return best_model_name()

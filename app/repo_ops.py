@@ -169,8 +169,11 @@ async def start_branch(repo: Path, branch: str) -> dict:
 
 
 def default_executor() -> str:
-    """The CLI that runs headless work unless a task pins one."""
-    return os.environ.get("ASTA_EXECUTOR", "copilot")
+    """The CLI that runs headless work unless a task pins one.
+
+    Claude by default (11 Nov: "use claude as primary not copilot going forward"
+    — his Copilot seat is gone). ASTA_EXECUTOR still overrides."""
+    return os.environ.get("ASTA_EXECUTOR", "claude")
 
 
 async def git(cwd: Path, *args: str, timeout: float = 120,

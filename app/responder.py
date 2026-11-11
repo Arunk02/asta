@@ -32,6 +32,7 @@ everything already true of that (timeouts, quota failover, reporting) stays true
 from __future__ import annotations
 
 import os
+import contextlib
 import re
 import json
 import hashlib
@@ -70,6 +71,8 @@ MAX_PRIORITY = attention.P_TODAY
 #: acted on. A message from this morning that he has already dealt with is not,
 #: however recently Asta happened to read it.
 MAX_AGE_MINUTES = float(os.environ.get("ASTA_RESPOND_MAX_AGE_MIN", "90"))
+#: A review request is answered for a day, not 90 minutes: the PR is still open.
+REVIEW_MAX_AGE_MIN = 24 * 60.0
 
 _RATE_KEY = "responder_recent"
 _DONE_KEY = "responder_done"
@@ -339,6 +342,85 @@ def pr_number(text: str) -> str:
     from . import review
     number, target = review.pr_target(text or "")
     return number if target and number.isdigit() else ""
+
+
+def _workspace_repos() -> set[str]:
+    try:
+        from pathlib import Path
+        from . import project_knowledge, tasks, worktrees
+        root = Path(tasks.code_cwd(project_knowledge.default_workspace()))
+        return {p.name.lower() for p in worktrees.repos_in(root)}
+    except Exception:                                          # noqa: BLE001
+        return set()
+
+
+def outside_repo(text: str) -> str:
+    """"owner/repo#N" when the PR they link is not in his workspace, else "".
+
+    A bare number cannot say, and is taken as his workspace's — the review tool
+    resolves it there."""
+    from . import review
+    number, target = review.pr_target(text or "")
+    if not target:
+        return ""
+    repos = _workspace_repos()
+    name = target.split("/", 1)[-1].lower()
+    return "" if not repos or name in repos else f"{target}#{number}"
+
+
+#: A PR asking for his review, at one head, is picked up once.
+_REQ_SEEN = "review_requested_seen:"
+REQUESTS_PER_PASS = 2
+REQUEST_STALE_DAYS = 3
+
+
+async def github_review_requests() -> list[dict]:
+    """Open PRs that request HIS review on GitHub, in his workspace's repos —
+    picked up like a colleague's "please review" (11 Nov: auto-pickup without
+    being told). Once per PR head; a new commit is a new request."""
+    import asyncio as _aio
+    from . import review
+    repos = _workspace_repos()
+    if not repos:
+        return []
+    proc = await _aio.create_subprocess_exec(
+        "gh", "search", "prs", "--review-requested=@me", "--state=open", "--limit", "30",
+        "--json", "url,repository,author,title,number,updatedAt",
+        stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.DEVNULL)
+    out, _ = await _aio.wait_for(proc.communicate(), timeout=60)
+    try:
+        rows = json.loads(out or b"[]")
+    except ValueError:
+        return []
+    started = []
+    import datetime as _dt
+    for pr in rows:
+        if len(started) >= REQUESTS_PER_PASS:
+            break                         # the rest on the next pass — never a burst
+        repo = ((pr.get("repository") or {}).get("name") or "").lower()
+        if repo not in repos:
+            continue
+        try:
+            updated = _dt.datetime.fromisoformat((pr.get("updatedAt") or "").replace("Z", "+00:00"))
+            if time.time() - updated.timestamp() > REQUEST_STALE_DAYS * 86400:
+                continue                  # nobody has touched it in days: not a live ask
+        except ValueError:
+            pass
+        try:
+            current, _ = await review.revision(pr["url"])
+        except (RuntimeError, ValueError):
+            continue
+        seen = _REQ_SEEN + current.split(":", 1)[0]
+        if store.kv_get(seen):
+            continue
+        store.kv_set(seen, str(time.time()))
+        who = (pr.get("author") or {}).get("login", "") or "Someone"
+        t = respond("github", who, f"please review {pr['url']}", key=seen,
+                    review_revision=current, kind_override="review_request",
+                    source_text=f"GitHub: {who} requested your review — {pr.get('title', '')}")
+        if t:
+            started.append(t)
+    return started
 
 
 def review_scope(text: str) -> str:
@@ -811,7 +893,8 @@ def _note_handled(key: str) -> None:
     store.kv_set(_DONE_KEY, json.dumps(done[-200:]))
 
 
-def too_old(sent_at: float | None, now: float | None = None) -> bool:
+def too_old(sent_at: float | None, now: float | None = None,
+            minutes: float | None = None) -> bool:
     """Was this said long enough ago that acting on it now is noise?
 
     Unknown timestamps are treated as fresh. Refusing everything Teams did not
@@ -821,7 +904,7 @@ def too_old(sent_at: float | None, now: float | None = None) -> bool:
     import time
     if not sent_at:
         return False
-    return ((now or time.time()) - sent_at) > MAX_AGE_MINUTES * 60
+    return ((now or time.time()) - sent_at) > (MAX_AGE_MINUTES if minutes is None else minutes) * 60
 
 
 #: Kinds he has told Asta to leave alone. A standing instruction, kept in the
@@ -873,9 +956,12 @@ def should_respond(kind: str, priority: int | None, key: str,
     ruled = policy.check("investigate", kind)
     if not ruled.ok:
         return ruled.why
-    if broadcast:
+    # A review request stays a request while its PR is open, and "@Everyone pls
+    # review" includes him (11 Nov: "whoever tag me … go ahead and analyse").
+    review_ask = kind == "review_request"
+    if broadcast and not review_ask:
         return "addressed to a room, not to him"
-    if too_old(sent_at, now):
+    if too_old(sent_at, now) and not (review_ask and not too_old(sent_at, now, minutes=REVIEW_MAX_AGE_MIN)):
         return f"said more than {MAX_AGE_MINUTES:.0f} min ago — not a live ask"
     if priority is not None and priority > MAX_PRIORITY:
         return f"ranked p{priority} — below the bar for spending a turn"
@@ -1089,7 +1175,24 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     # STF not done?", so the one line handed over here had a question and
     # nothing to check it against.
     grounds = f"{context}\n{text}".strip() if context else text
+    if kind == "review_request":
+        outside = outside_repo(text)
+        if outside:
+            # Not a repo of his workspace: one line to him, no review run.
+            from . import notify
+            import asyncio
+            line = (f"🔎 {who or 'Someone'} asked you to review {outside} — not one of the "
+                    f"booking workspace repos, so I didn't. Say “review <link>” to do it.")
+            store.record_outcome("responder", "review outside workspace", subject=(who or "")[:80],
+                                 detail=outside)
+            with contextlib.suppress(RuntimeError):
+                asyncio.get_running_loop().create_task(
+                    notify.notify(line, "answer", urgency="fyi", considered=True))
+            return None
     known, why = familiar(grounds)
+    if kind == "review_request":
+        # Reading a PR changes nothing: a review request is picked up without asking.
+        known, why = True, "a review request (read-only, his standing rule)"
     if not known and reply_to and not is_broadcast(who, grounds) and LOOK_FOR_WAITING_COLLEAGUE:
         # A colleague is waiting on it, and looking is read-only. "Want me to
         # look into it?" was one more approval for work that changes nothing —

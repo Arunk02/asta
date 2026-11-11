@@ -163,15 +163,27 @@ async def _jira_transition(key: str = "", to_status: str = "") -> str:
 async def _pr_review(pr: str = "", workspace: str = "", repo: str = "",
                      action: str = "comment", body: str = "") -> str:
     out = "✅ " + await review.post_review(pr, workspace, repo, action, body)
-    _posted(pr)
+    await _posted(pr, action, workspace=workspace, repo=repo, body=body)
     return out
 
 
-def _posted(pr: str) -> None:
-    """Posted: every other recorded review of this PR is answered by it."""
+async def _posted(pr: str, action: str, *, revision: str = "", workspace: str = "",
+                  repo: str = "", body: str = "", comments: list | None = None) -> None:
+    """Posted: every other recorded review of this PR is answered by it, and a
+    review with findings waits for the author's fix (pr_authority.watch_after_post)."""
     try:
         from . import offers
         offers.drop_reviews_for(pr)
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
+        from . import pr_authority
+        if not revision and action != "approve":
+            revision, _ = await review.revision(pr)
+        points = "\n".join(f"- {c.get('path')}:{c.get('line')} — {c.get('body', '')[:200]}"
+                           for c in (comments or []))
+        pr_authority.watch_after_post(pr, action, revision, workspace=workspace, repo=repo,
+                                      body=f"{body}\n{points}".strip())
     except Exception:                                          # noqa: BLE001
         pass
 
@@ -194,7 +206,8 @@ async def _pr_review_inline(pr: str = "", workspace: str = "", repo: str = "",
             raise RuntimeError("approval needs successful CI on this commit, and it is not green now")
     out = "✅ " + await review.post_inline_review(pr, workspace, repo, action,
                                                  body, comments or [])
-    _posted(pr)
+    await _posted(pr, action, revision=(review_origin or {}).get("revision", ""),
+                  workspace=workspace, repo=repo, body=body, comments=comments)
     return out
 
 

@@ -65,6 +65,24 @@ CI:
 {others}DIFF:
 {diff}
 
+Check EVERY change for (Arun's review standard — 11 Nov):
+- Reuse: an existing utility/helper for this already in the repo? Search before accepting
+  a new method. A duplicate of existing logic under another name is BLOCKING.
+- Simple logic: guard clauses, no needless layers/flags; the smallest change that works.
+- Existing flows: trace every caller of what changed — a broken or silently changed
+  path is BLOCKING.
+- Tests: unit tests for the new behaviour AND the old one it must keep; a component
+  test (CT) for any new feature or flow. Missing ones are BLOCKING.
+- Logs to debug: ids in the message, the right level, no swallowed exception.
+- Memory: no unbounded collections, nothing large kept in static/instance state or
+  rebuilt inside a loop.
+- Data structures & loops: a map/set for lookups instead of scanning lists, no nested
+  O(n²) loops over request data, no remote call or query inside a loop.
+- Correctness: nulls and edge cases, error handling, idempotency on Kafka/Temporal
+  retries, Temporal determinism (no new non-deterministic workflow code without
+  versioning).
+APPROVE only when nothing is BLOCKING.
+
 Output EXACTLY this shape:
 
 VERDICT: APPROVE | COMMENT | REQUEST CHANGES — one clause why.

@@ -789,6 +789,42 @@ def verdict_of(notes: str) -> str:
             "REQUEST_CHANGES": "request_changes"}[said]
 
 
+def new_side_lines(patch: str) -> set[int]:
+    """Line numbers on the new side of a unified diff — where GitHub lets a
+    review comment attach (added and context lines inside a hunk)."""
+    out: set[int] = set()
+    line = 0
+    for row in (patch or "").splitlines():
+        head = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", row)
+        if head:
+            line = int(head.group(1))
+            continue
+        if not line or row.startswith("-"):
+            continue
+        if row.startswith("\\"):
+            continue                      # "\ No newline at end of file"
+        out.add(line)
+        line += 1
+    return out
+
+
+def attachable(comments: list[dict], files: dict[str, str]) -> tuple[list[dict], list[dict]]:
+    """(comments that attach — path made exact, comments that do not).
+
+    A path is exact, or the one PR file ending with it ("Foo.java" →
+    "service/src/…/Foo.java"); the line must be on the new side of its hunks."""
+    inline, rest = [], []
+    for c in comments:
+        cited = str(c.get("path") or "").lstrip("./")
+        ending = [f for f in files if f.endswith("/" + cited)]
+        path = cited if cited in files else (ending[0] if len(ending) == 1 else "")
+        if path and int(c.get("line") or 0) in new_side_lines(files[path]):
+            inline.append({**c, "path": path})
+        else:
+            rest.append(c)
+    return inline, rest
+
+
 async def post_inline_review(pr: str, workspace: str = "", repo: str = "",
                              action: str = "comment", body: str = "",
                              comments: list | None = None) -> str:
@@ -815,6 +851,23 @@ async def post_inline_review(pr: str, workspace: str = "", repo: str = "",
     if not target:
         raise RuntimeError("could not tell which repository that PR is in")
     rows = [c for c in (comments or []) if c.get("path") and c.get("line")]
+    if not rows:
+        return await post_review(pr, workspace, repo, action, body)
+    # Attach each comment to the PR's real file and a changed line; what cannot
+    # attach goes in the body. 11 Nov, PR 1536: short paths ("Foo.java:42")
+    # made GitHub refuse the whole review ("Path could not be resolved").
+    rc, raw = await _gh(cwd, "api", "--paginate", f"repos/{target}/pulls/{number}/files",
+                        "--jq", ".[] | {filename, patch}")
+    files = {}
+    if rc == 0:
+        for line in raw.splitlines():
+            with contextlib.suppress(ValueError):
+                f = json.loads(line)
+                files[f.get("filename") or ""] = f.get("patch") or ""
+    rows, leftover = attachable(rows, files) if files else (rows, [])
+    if leftover:
+        body = ((body or "").strip() + "\n\nAlso (not on a changed line):\n" + "\n".join(
+            f"- `{c['path']}:{c['line']}` — {c['body']}" for c in leftover)).strip()
     if not rows:
         return await post_review(pr, workspace, repo, action, body)
     payload = {"event": {"approve": "APPROVE", "comment": "COMMENT",

@@ -33,7 +33,7 @@ from . import store
 _PR = re.compile(
     r"\b(?:raise|create|open|make|put\s+up|send)\s+(?:a\s+|an\s+|the\s+|both\s+)?"
     r"(?:pr|prs|pull\s+requests?)\b|\bpush(?:ed)?\b(?!\s*back)|\bship\b|\bpr\s+raise\b|"
-    # "send him the PR", "send Vinish the PR" (11 Nov: read as no PR at all)
+    # "send him the PR", "send <name> the PR" (11 Nov: read as no PR at all)
     r"\bsend\s+(?:him|her|them|me|us|[a-z]{3,15})\s+(?:the\s+|a\s+)?(?:pr|prs|pull\s+requests?)\b|"
     r"\bupdate\s+(?:it\s+)?(?:in\s+|to\s+)?(?:the\s+)?(?:same\s+)?(?:pr|pull\s+request)\b", re.I)
 

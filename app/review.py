@@ -103,7 +103,10 @@ QUESTIONS (only what the diff truly cannot answer):
 Hard rules:
 - ONE point per bullet. Each bullet ≤ 25 words, starts with `path:line`. If it needs a
   paragraph, it is two points.
-- Cite a real path:line for every point — no line, no bullet.
+- Cite a real path:line for every point — no line, no bullet. Write the path exactly as
+  in FILES CHANGED (never shorten it with "..."), and the line as a NEW-side line the PR
+  changed: GitHub attaches a comment only to changed lines. A point about unchanged code
+  still names its path:line; it is posted in the review body instead.
 - Judge against how THIS codebase already does things (the PROJECT CONTEXT above), not a
   generic style guide.
 - Do NOT restate what the diff does — Arun can read it. Nothing a linter would catch.
@@ -816,7 +819,11 @@ def attachable(comments: list[dict], files: dict[str, str]) -> tuple[list[dict],
     inline, rest = [], []
     for c in comments:
         cited = str(c.get("path") or "").lstrip("./")
-        ending = [f for f in files if f.endswith("/" + cited)]
+        if "..." in cited or "…" in cited:
+            # "service/src/main/java/.../Foo.java": the part after the elision
+            # is what the reviewer actually named.
+            cited = re.split(r"\.\.\.|…", cited)[-1].lstrip("/")
+        ending = [f for f in files if f == cited or f.endswith("/" + cited)]
         path = cited if cited in files else (ending[0] if len(ending) == 1 else "")
         if path and int(c.get("line") or 0) in new_side_lines(files[path]):
             inline.append({**c, "path": path})

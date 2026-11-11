@@ -1819,14 +1819,14 @@ def _effort_for(kind: str, executor: str = "") -> str:
     if not stage:
         return ""
     from . import agent as agent_mod
-    ex = executor or os.environ.get("ASTA_EXECUTOR", "copilot")
+    ex = executor or repo_ops.default_executor()
     return agent_mod.effort_for(agent_mod.from_exec_name(ex), stage)
 
 
 def _impl_effort(executor: str = "") -> str:
     """Implementation leg — the one stage worth paying for, on any executor."""
     from . import agent as agent_mod
-    ex = executor or os.environ.get("ASTA_EXECUTOR", "copilot")
+    ex = executor or repo_ops.default_executor()
     return agent_mod.effort_for(agent_mod.from_exec_name(ex), "CODE")
 
 
@@ -1838,13 +1838,38 @@ def _copilot_quota_down() -> bool:
     return agent_mod.quota_down("copilot")
 
 
+def _how_to_post(task_id: int, t: dict) -> str:
+    """For a finished review: the words that post IT.
+
+    11 Nov: "Review staged on PR 1532 — waiting on your yes"; his "yes" went to
+    an older review queued in front (PR 1536), which then failed. A bare yes
+    answers the question in front, so a review that is not in front says so."""
+    import json as _j
+    from . import offers
+    try:
+        ref = _j.loads(store.kv_get(f"review_origin:{task_id}") or "{}").get("ref", "")
+    except ValueError:
+        ref = ""
+    m = re.search(r"#(\d{1,7})$", ref) or re.search(r"\bPR\s*#?(\d{2,7})\b", t.get("title") or "", re.I)
+    if not m:
+        return ""
+    o = offers.review_for_pr(m.group(1))
+    if o is None:
+        return ""
+    head = offers.pending()
+    if head is not None and head.id == o.id:
+        return f"👉 Say “yes” or “post PR {m.group(1)}” to post it.\n\n"
+    ahead = f" — a bare “yes” answers “{head.subject[:60]}” first" if head else ""
+    return f"👉 To post it, say “post PR {m.group(1)}”{ahead}.\n\n"
+
+
 def _resolve_executor(task_id: int) -> str:
     """Sticky per task: decided once at the first leg, so a pipeline never
     switches brains mid-session (the session context wouldn't follow)."""
     ex = store.kv_get(f"task_executor:{task_id}") or ""
     if ex in _executor_names():
         return ex
-    ex = brain_override() or os.environ.get("ASTA_EXECUTOR", "copilot")
+    ex = brain_override() or repo_ops.default_executor()
     if ex == "copilot" and _copilot_quota_down() and claude_cli.available():
         ex = "claude"
     store.kv_set(f"task_executor:{task_id}", ex)
@@ -2871,7 +2896,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         from . import worktrees as _wt
         with contextlib.suppress(Exception):
             await _wt.create(root, task_id, branch, *unfinished)
-        ex = store.kv_get(f"task_executor:{task_id}") or "copilot"
+        ex = store.kv_get(f"task_executor:{task_id}") or repo_ops.default_executor()
         store.kv_del(f"task_session:{task_id}:{ex}")
         await notify.notify(
             f"🔁 Task #{task_id}: same change reaches {', '.join(unfinished)} — "
@@ -2894,7 +2919,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     if any(m in tail for m in _HANDOFF_MARKS) and hops < _MAX_REPO_HOPS:
         # Multi-repo change: the agent finished one repo and asked for a fresh
         # window for the next (one repo = one window keeps the context small).
-        ex = store.kv_get(f"task_executor:{task_id}") or "copilot"
+        ex = store.kv_get(f"task_executor:{task_id}") or repo_ops.default_executor()
         store.kv_del(f"task_session:{task_id}:{ex}")
         await notify.notify(
             f"🔁 Task #{task_id}: repo done, continuing with the next repo "
@@ -3859,6 +3884,7 @@ async def _worker(task_id: int) -> None:
             waste = _audit_note(task_id)
             await notify.notify(
                 f"✅ Task #{task_id} done — {t['title']}\n\n{snippet}\n\n"
+                f"{_how_to_post(task_id, t)}"
                 f"(full result: ask 'task {task_id} result' or see the Missions tab)"
                 f"{waste}", "task")
             await answers.present_task_draft(task_id, t)

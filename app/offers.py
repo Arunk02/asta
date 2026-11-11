@@ -475,6 +475,24 @@ def drop_reviews_for(pr) -> int:
     return dropped
 
 
+def drop_offer(oid: str) -> bool:
+    """Remove one offer, asked or queued. True when it was there."""
+    head = pending()
+    if head is not None and head.id == oid:
+        clear()
+        _promote()
+        return True
+    queued = _queue()
+    keep = [r for r in queued if r.get("id") != oid]
+    store.kv_set(QUEUE_KEY, json.dumps(keep))
+    return len(keep) != len(queued)
+
+
+def waiting_reviews() -> list[Offer]:
+    """Every recorded review waiting for his yes, asked or queued."""
+    return [o for o in _all_waiting() if (o.op or {}).get("name") in _REVIEW_OPS]
+
+
 def take_review(pr) -> Offer | None:
     """Consume the recorded review for this PR, wherever it waits — exactly once.
 

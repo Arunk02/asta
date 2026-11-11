@@ -333,8 +333,11 @@ def test_an_exhausted_brain_stops_being_the_default(monkeypatch):
     to be made by hand, per conversation, to a brain that could not answer any of
     them."""
     from app import agent as agent_mod
+    # Claude is his primary since 11 Nov; the property is the same either way
+    # round, so it is pinned to the Copilot-first setting it was written for.
+    monkeypatch.setenv("ASTA_EXECUTOR", "copilot")
     monkeypatch.setattr(agent_mod, "available", lambda n: n in ("copilot", "claude_cli"))
-    assert agent_mod.default_chat_model() == "copilot"      # office-paid goes first
+    assert agent_mod.default_chat_model() == "copilot"      # his primary goes first
     agent_mod.mark_quota_down("copilot")
     assert agent_mod.default_chat_model() == "claude_cli"   # …while it can answer
 

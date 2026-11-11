@@ -84,9 +84,9 @@ def test_a_second_follow_up_builds_on_the_original_ask_not_a_nested_prompt():
     assert "Second answer." in prompt and "second question" in prompt and "first question" not in prompt
 
 
-def test_a_merged_code_task_is_still_not_continued(monkeypatch):
+def test_a_cancelled_code_task_is_still_not_continued(monkeypatch):
     t = store.create_task("Skip the tracker call", "code", "p", "ws")
-    store.update_task(t["id"], status="merged")
+    store.update_task(t["id"], status="cancelled")
     sink, started, ran, _ = _dispatch(SAID.format(id=t["id"]), monkeypatch)
     assert "cannot be continued" in sink.said() and not ran
 

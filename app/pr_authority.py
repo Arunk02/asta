@@ -44,6 +44,22 @@ def wants_approve(words: str) -> bool:
     return False
 
 
+#: "review and send", "review it and post the comments": his one yes to post.
+_POST = re.compile(r"\b(?:send|post|comment|share|submit|publish)\b", re.I)
+
+
+def wants_post(words: str) -> bool:
+    """He asked for the review AND for it to go out — one yes (11 Nov). "review"
+    alone stays tell-first: the findings come to him, posted on his word."""
+    from . import go
+    if not re.search(r"\breview", words or "", re.I):
+        return False
+    for m in _POST.finditer(words or ""):
+        if not go._NOT.search((words or "")[:m.start()]):
+            return True
+    return False
+
+
 def _names(words: str, ref: str) -> bool:
     """His words name this PR: a link to exactly it, or (with no link) its number."""
     from . import review
@@ -70,18 +86,20 @@ def record(task_id: int, ref: str, revision: str, words: str, *, url: str = "",
            author: str = "", workspace: str = "", repo: str = "",
            rereviews: int = 0, now: float | None = None) -> dict | None:
     """Save the instruction when his words grant approve and/or merge for `ref`."""
-    approve, merge = wants_approve(words), _wants_merge(words)
-    if not (approve or merge) or not _names(words, ref):
+    approve, merge, post = wants_approve(words), _wants_merge(words), wants_post(words)
+    if not (approve or merge or post) or not _names(words, ref):
         return None
     rec = {"version": 1, "ref": ref, "revision": revision, "url": url or ref,
-           "approve": approve, "merge": merge, "words": (words or "")[:300],
+           "approve": approve, "merge": merge, "post": post, "words": (words or "")[:300],
            "author": author, "workspace": workspace, "repo": repo,
            "rereviews": rereviews, "state": "reviewing",
            "at": time.time() if now is None else now}
     _save(task_id, rec)
+    acts = [a for a, on in (("post", post and not approve), ("approve", approve),
+                            ("merge", merge)) if on]
     store.add_task_event(task_id, "authority",
-                         f"{'approve' if approve else ''}{' + ' if approve and merge else ''}"
-                         f"{'merge' if merge else ''} {ref} if the review is good")
+                         f"{' + '.join(acts)} {ref}" + ("" if acts == ["post"] else
+                                                         " if the review is good"))
     return rec
 
 
@@ -151,6 +169,34 @@ def _allowed(task_id, act: str, ref: str) -> bool:
                 and policy.check(act if act == "merge" else "review", ref, asked=True).ok)
 
 
+async def _post(task_id, rec: dict, current: str, action: str, findings: list[dict],
+                body: str) -> str:
+    """Post the review as concluded — his "review and send". Once per revision."""
+    from . import ops
+    name = f"{task_id}:post:{current}"
+    if not _claim(name, {"ref": rec["ref"], "revision": current}):
+        return f"The review of {rec['ref']} at this revision was already posted."
+    if not _allowed(task_id, "post", rec["ref"]):
+        store.kv_del(RECEIPT + name)
+        return f"Not posted: your instruction for {rec['ref']} was revoked."
+    try:
+        out = await ops.run({"name": "pr_review_inline", "args": {
+            "pr": rec["ref"], "workspace": rec.get("workspace", ""), "repo": rec.get("repo", ""),
+            "action": action, "body": body, "comments": findings,
+            "review_origin": {"ref": rec["ref"], "revision": current}}})
+    except (RuntimeError, asyncio.CancelledError) as exc:
+        _receipt(name, "uncertain", ref=rec["ref"], why=str(exc)[:200])
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        return f"Review of {rec['ref']} not confirmed posted — {exc}. Not retrying blind."
+    _finish(task_id, rec, "blocked" if out.startswith("⛔") else "done")
+    if out.startswith("⛔"):
+        store.kv_del(RECEIPT + name)
+        return out
+    _receipt(name, "sent", ref=rec["ref"], result=out[:200])
+    return f"{out} — as you asked (review and send)."
+
+
 async def on_review(task_id, *, current: str, good: bool, action: str,
                     findings: list[dict], body: str) -> str | None:
     """The review task's verdict, against his saved instruction.
@@ -163,6 +209,13 @@ async def on_review(task_id, *, current: str, good: bool, action: str,
         return None
     if _head(current) != _head(rec["revision"]):
         return await rereview(task_id, rec)
+    if rec.get("post") and not rec.get("approve") and action in ("comment", "request_changes"):
+        # "review and send": the review goes out as concluded. An approval in his
+        # name still needs his word "approve" — that verdict is staged for him.
+        return await _post(task_id, rec, current, action, findings, body)
+    if action == "approve" and not (rec.get("approve") or rec.get("merge")):
+        _finish(task_id, rec, "not_good")
+        return None       # an approval goes out in his name only on his word "approve"
     if action != "approve" or any(f.get("blocking") for f in findings) or not good:
         _finish(task_id, rec, "not_good")
         return None       # his condition was "if good": the findings go to him

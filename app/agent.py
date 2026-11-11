@@ -1675,7 +1675,7 @@ async def review_pr(pr: str, workspace: str = "", repo: str = "") -> str:
     # carried by the review task. Read from his turn, never from the arguments.
     said = capabilities.said_this_turn()
     current = ""
-    if pr_authority.wants_approve(said) or go.wants_merge(said):
+    if pr_authority.wants_approve(said) or go.wants_merge(said) or pr_authority.wants_post(said):
         try:
             current, _ = await review.revision(meta.get("url") or pr)
         except (RuntimeError, ValueError):
@@ -1692,6 +1692,10 @@ async def review_pr(pr: str, workspace: str = "", repo: str = "") -> str:
         store.kv_set(f"review_origin:{t['id']}", json.dumps(
             {"ref": granted["ref"], "revision": current}))
     acts = " and ".join(a for a in ("approve", "merge") if granted and granted[a])
+    if granted and granted.get("post") and not acts:
+        return (f"Task #{t['id']} — reviewing PR #{meta['number']} "
+                f"({meta.get('changedFiles', 0)} files, +{meta.get('additions', 0)}/"
+                f"-{meta.get('deletions', 0)}). I'll post the review when it's done, as you asked.")
     return (f"Task #{t['id']} — reviewing PR #{meta['number']} "
             f"({meta.get('changedFiles', 0)} files, +{meta.get('additions', 0)}/"
             f"-{meta.get('deletions', 0)}). "

@@ -251,6 +251,8 @@ def rule(text: str, context: str = "", heard: bool = False) -> str:
            "   outbound only (sent or not): booking→IOM; →event history; AP→email and "
            "documents (SEND_DOCUMENTS).\n"
            + (_BILLING if _ABOUT_BILLING.search(whole) else _NOT_BILLING) +
+           "Root cause = the FIRST step of the flow that did not complete, with its exact "
+           "message (a FAILED status at INFO counts). 'Fine' only if the flow reached its end.\n"
            "3. A completed upstream milestone never rules out an earlier failed attempt or "
            "a later downstream failure. State separately what failed, what later succeeded, "
            "and what remains unverified. Where the logs and the document disagree, the logs "
@@ -454,11 +456,115 @@ def event_log(records: list[dict], billing: bool = False) -> str:
     return "\n".join(out)
 
 
+#: A step that ran and did not succeed — at ANY log level. 11 Nov: Ready For
+#: Planning failed on a business exception ("Facility city code cannot be empty",
+#: TELIKOS-222) logged at INFO, and the answer was "no errors".
+_FAILURE_SIGNAL = re.compile(
+    r"\\?\"(?:status|activityStatus|workProcessStatus)\\?\"\s*:\s*\\?\"(?:FAILED|Failed|FAILURE|ERROR)\b"
+    r"|\bstatus\s*[:=]\s*(?:FAILED|Failed)\b|activityStatus=Failed"
+    r"|exceptionName\\?\"\s*:\s*\\?\"[^\"\\]+"
+    r"|\bfound\s+[1-9]\d*\s+failure"
+    r"|\bstatus=[45]\d\d\b|\b[45]\d\d\s+(?:BAD_REQUEST|NOT_FOUND|INTERNAL_SERVER_ERROR|CONFLICT|"
+    r"UNPROCESSABLE_ENTITY|SERVICE_UNAVAILABLE)"
+    r"|\b(?:Exception|ERROR)\b")
+_EXC = re.compile(r"exceptionCode\\?\"\s*:\s*\\?\"([^\"\\]+).{0,80}?exceptionName\\?\"\s*:\s*\\?\"([^\"\\]+)")
+
+
+def failure_signals(records: list[dict], limit: int = 12) -> str:
+    """Every line that says a step did not succeed, whatever level it was logged at.
+
+    Not a list of known failures: a status, a business exception, a validation
+    count or an HTTP error, read the same way in every service and flow."""
+    import time as _t
+    seen, out = set(), []
+    for r in sorted(records, key=lambda r: r.get("timestamp") or 0):
+        line = r.get("line") or ""
+        if not _FAILURE_SIGNAL.search(line):
+            continue
+        exc = _EXC.search(line)
+        if exc:
+            what = f"business exception {exc.group(1)}: {exc.group(2).replace(chr(92), '')}"
+        else:
+            m = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.){0,220})', line)
+            what = (m.group(1) if m else _FAILURE_SIGNAL.search(line).group(0)).replace("\\", "")
+        key = (r.get("service", ""), what[:120])
+        if key in seen:
+            continue
+        seen.add(key)
+        when = _t.strftime("%d %b %H:%M:%S", _t.localtime(r.get("timestamp") or 0))
+        out.append(f"- {when} {_short(r.get('service', ''))}: {what[:240]}")
+        if len(out) >= limit:
+            break
+    if not out:
+        return "Failure signals (any log level): none in this window."
+    return ("Failure signals (any log level — a step that ran and did not succeed):\n"
+            + "\n".join(out))
+
+
+#: How much of the flow documents goes into one brief.
+FLOW_BUDGET = 6000
+
+
+def flow_knowledge(workspace: str = "") -> str:
+    """The flows this workspace documents, from its own context — never a list in code.
+
+    The cross-repo chain in full (the backbone a booking travels), and one line
+    for every runtime flow and failure model, with its path to open."""
+    from pathlib import Path
+    from . import project_knowledge as pk
+    files = pk._repo_files(workspace or pk.default_workspace())
+    chain, index, root = "", [], ""
+    for path, repo in files:
+        if path.parent.name not in ("runtime", "operations"):
+            continue
+        try:
+            raw = path.read_text(errors="replace")
+        except OSError:
+            continue
+        meta, body = pk.front_matter(raw)
+        if path.parent.name == "operations" and "fail" not in path.stem:
+            continue
+        head = raw[:max(0, raw.find("\n---", 3))]
+
+        def field(name: str) -> str:
+            m = re.search(rf"^{name}:\s*(.+)$", head, re.M)
+            return m.group(1) if m else ""
+        caps, prim = field("capabilities"), field("primary_for")
+        if not chain and ("cross-repo-tracing" in caps or "chain" in prim):
+            chain = f"[{repo}/runtime/{path.name}]\n{body.strip()}"
+            continue
+        root = root or str(Path(path).parents[2])
+        index.append(f"- {repo}/{path.parent.name}/{path.name} — "
+                     f"{(meta.get('summary') or meta.get('title') or '')[:150]}")
+    if not chain and not index:
+        return ""
+    room = max(0, FLOW_BUDGET - len(chain) - 200)
+    listed, used = [], 0
+    for line in index:
+        if used + len(line) > room:
+            break
+        listed.append(line)
+        used += len(line) + 1
+    return ("\n\n[The flows, from the workspace's own documents.] WALK THE FLOW: take its "
+            "steps from these documents, in order, from where this booking entered to where "
+            "the flow ends (open a flow's file for its steps and log lines). For each step say "
+            "reached / completed / FAILED / not reached yet, with the log line that shows it. "
+            "A step is completed only with a line saying so; a FAILED status or business "
+            "exception logged at INFO is a failure all the same (see 'Failure signals'). The "
+            "root cause is the FIRST step that did not complete — quote its exact message "
+            "(exception code, validation message, HTTP status). Never answer 'fine', 'no "
+            "issues' or 'all good' unless the flow reached its last step; otherwise say where "
+            "it stands now (e.g. 'consumed, Ready For Planning not reached yet').\n"
+            + (chain[:FLOW_BUDGET // 2] + "\n" if chain else "")
+            + (f"Flow and failure documents (under {root}):\n" + "\n".join(listed)
+               if listed else ""))
+
+
 _CASE = re.compile(r"This is about a specific case — ([A-Z0-9, ]+?), in (?:the (\w+) environment|"
                    r"the lower environments|an environment nobody named)")
 
 
-async def evidence(prompt: str, minutes: int = 4320) -> str:
+async def evidence(prompt: str, minutes: int = 4320, workspace: str = "") -> str:
     """What the logs say about the booking a brief is about — per flow, and its
     trail — fetched before the investigation starts. '' when the brief is not
     about one booking, or the logs cannot be read (the brief already says how to
@@ -501,16 +607,22 @@ async def evidence(prompt: str, minutes: int = 4320) -> str:
                          f"in these logs — it may be logged differently, so check before "
                          f"saying it was not sent):\n{flows(recs, billing)}\n"
                          f"{milestones(recs)}\n{event_log(recs, billing)}\n"
+                         f"{failure_signals(recs)}\n"
                          + grafana.render_trail(grafana.trail(recs, [booking]),
                                                 30 if len(hit) == 1 else 12))
         if failures:
             parts.append(f"Other environment queries failed: {'; '.join(failures)}")
     if not parts:
         return ""
+    try:
+        flows_known = flow_knowledge(workspace)
+    except Exception:                                          # noqa: BLE001
+        flows_known = ""
     return ("\n\n[Evidence Asta already read from namespace-wide logs before you started. "
             "Do not repeat this identifier/env/window query; use these records first. "
             "Query again only for a missing downstream signal, a different time window, "
-            "or a new attempt, and say what was absent here.]\n" + "\n\n".join(parts))
+            "or a new attempt, and say what was absent here.]\n" + "\n\n".join(parts)
+            + flows_known)
 
 
 # --- evidence before a chat turn ----------------------------------------------

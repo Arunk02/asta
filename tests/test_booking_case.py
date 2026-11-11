@@ -452,7 +452,9 @@ def test_the_check_looks_both_ways_at_every_hand_off_and_summarises():
               "outbound only", "booking→IOM", "SEND_DOCUMENTS"):
         assert x in r, x
     assert "with the id ALONE first" in r, "never 'not sent' from one keyword filter"
-    assert len(r) < 2400, "a brief, not a manual"
+    # +200 for the one rule a missed failure taught (11 Nov): the root cause is the
+    # first step that did not complete. The full walk rides with the flow documents.
+    assert len(r) < 2600, "a brief, not a manual"
 
 
 def test_whatever_they_ask_is_answered_simply_not_a_form_filled():
@@ -580,7 +582,7 @@ def test_the_investigation_brief_gets_the_evidence(monkeypatch):
 def test_the_worker_adds_the_evidence_to_an_analysis():
     import inspect
     from app import tasks
-    assert "booking_case.evidence(prompt)" in inspect.getsource(tasks._worker)
+    assert "booking_case.evidence(prompt" in inspect.getsource(tasks._worker)
 
 
 # --- milestones and the event log, as the UI shows them ------------------------------

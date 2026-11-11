@@ -227,7 +227,11 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
         store.record_outcome("answer", "stale review", subject=str(task_id or ""),
                              detail=f"{origin['ref']} changed before staging")
         return False
-    if already_shown(task_id, chat) or _already_put(chat, need, reply):
+    rechecked = store.kv_get(_RECHECK + str(task_id)) if task_id else None
+    if rechecked:
+        store.kv_del(_RECHECK + str(task_id))
+        note = ((note + "\n") if note else "") + f"🔁 Re-checked now — the first look was at {rechecked}."
+    if not rechecked and (already_shown(task_id, chat) or _already_put(chat, need, reply)):
         # The same ask for the same person, already in front of him (or already
         # answered) today. One task's answer is shown once per chat: 5 Nov, the
         # same finding came back as "Vinish wants you to confirm the call" twice
@@ -726,9 +730,50 @@ async def next_after(cid: str = "") -> bool:
             continue
         if await _answered_while_queued(item):
             continue
+        if await _rechecking(item):
+            continue
         await _show(cid, item)
         return True
     return False
+
+
+#: A queued answer about a booking older than this is looked at again, not re-shown.
+RECHECK_AFTER_SECONDS = 30 * 60
+_RECHECK = "answer_recheck:"
+
+
+async def _rechecking(item: dict, now: float | None = None) -> bool:
+    """A case answer that waited too long is checked again before he sees it.
+
+    11 Nov: "consumed and acked clean, no errors" was checked at 10:28, before
+    the booking reached Ready For Planning; at 11:35 the same words came back
+    ("Asking again") and three minutes later the booking failed. The same
+    investigation continues on its own task with its previous answer; the fresh
+    answer comes to him instead of the stale one."""
+    from . import booking_case, tasks
+    task_id = item.get("task_id")
+    if item.get("type") != "answer" or not task_id:
+        return False
+    if not booking_case.ids(f"{item.get('analysis') or ''}\n{item.get('need') or ''}"):
+        return False
+    t = store.get_task(int(task_id)) or {}
+    now = time.time() if now is None else now
+    if t.get("kind") == "code" or now - float(t.get("finished_at") or now) < RECHECK_AFTER_SECONDS:
+        return False
+    checked = time.strftime("%H:%M", time.localtime(float(t.get("finished_at") or now)))
+    try:
+        await tasks.continue_finished(int(task_id), (
+            f"RE-CHECK NOW. Your answer above was checked at {checked}; the booking may have "
+            "moved since. Read the logs again from that time and walk the flow to where it "
+            "stands NOW; update the ANALYSIS and the REPLY. Keep what still holds."),
+            record_asked=False)
+    except ValueError:
+        return False
+    store.kv_set(_RECHECK + str(task_id), checked)
+    store.kv_del(_shown_key(task_id, item.get("to") or ""))
+    store.record_outcome("answer", "rechecked before showing again", subject=str(task_id),
+                         detail=f"{item.get('who')}: checked at {checked}"[:200])
+    return True
 
 
 async def _answered_while_queued(item: dict) -> bool:

@@ -243,8 +243,10 @@ async def test_feedback_on_a_live_task_buffers_instead_of_restarting(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_a_merged_task_cannot_be_reopened_by_feedback():
-    tid = _task(status="merged")
+async def test_a_cancelled_task_cannot_be_reopened_by_feedback():
+    # A merged task now takes a follow-up on a fresh branch (test_task_followup);
+    # a task he stopped stays stopped.
+    tid = _task(status="cancelled")
     with pytest.raises(ValueError, match="cannot be continued"):
         await tasks.refine(tid, "one more thing")
 
@@ -355,8 +357,8 @@ def test_refine_needs_text(client):
     assert r.status_code == 400
 
 
-def test_refining_a_merged_task_is_refused_over_http(client):
-    tid = _task(status="merged")
+def test_refining_a_cancelled_task_is_refused_over_http(client):
+    tid = _task(status="cancelled")
     r = client.post(f"/api/tasks/{tid}/refine", json={"text": "more"},
                     headers={"Authorization": "Bearer qa-token"})
     assert r.status_code == 400

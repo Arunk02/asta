@@ -4960,12 +4960,29 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     if explicit is None and named_recent is not None \
             and frontdesk.task_intent(user_text) == "edit":
         explicit = named_recent
+    # A finished analysis he names is continued — same task, on top of its
+    # answer — whatever the follow-up is, a question or more digging. 11 Nov:
+    # "task 559 - … then what if in future same issue … fix it again?" got
+    # "cannot be continued (status: done)". Only "task N result" is left to the
+    # normal answer, which reads the result as it is.
+    finished = store.get_task(explicit) if explicit is not None else None
+    if finished and finished["kind"] != "code" and finished["status"] in ("done", "failed") \
+            and not _JUST_THE_RESULT.match(_strip_task_ref(user_text)):
+        note = await tasks.continue_finished(explicit, _strip_task_ref(user_text))
+        store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
+        store.add_ui_message(cid, "assistant", note, {"via": "task-continue", "channel": channel})
+        frontdesk.record("job", f"continue #{explicit}")
+        await sink.send({"type": "note", "text": note})
+        return None
     if explicit is not None and frontdesk.task_intent(user_text) == "edit":
         existing = store.get_task(explicit)
         if existing and existing["kind"] == "code" and \
-                existing["status"] in tasks.REFINABLE + tasks.LIVE_STATUSES:
+                existing["status"] in tasks.REFINABLE + tasks.LIVE_STATUSES + ("merged",):
             feedback = _strip_task_ref(user_text)
-            note = await tasks.refine(explicit, feedback)
+            try:
+                note = await tasks.refine(explicit, feedback)
+            except ValueError as exc:
+                note = f"⚠️ {exc}"
             note += _remember_if_asked(feedback, existing)
             frontdesk.record("job", f"refine #{explicit}")
             await sink.send({"type": "note", "text": note})
@@ -5224,6 +5241,13 @@ def _task_for_command(verb: str, wanted: int | None, cid: str) -> tuple[int | No
 #: Only an explicit "task N" or "#N" names a task in a sentence. A bare number
 #: is accepted at the start by _named_task for live task amendments, not inside
 #: a PR number, build number, or unrelated instruction.
+#: "task 559 result", "559 status?", "task 12 output pls" — show it, don't re-run it.
+_JUST_THE_RESULT = re.compile(
+    r"^[\s:,.—-]*(?:(?:the|its|whats|what's|what is|show|send|give|share)\s+){0,2}"
+    r"(?:result|results|output|answer|summary|status|update|findings)\b"
+    r"(?:\s+(?:pls|please|plz|now|again|here))?[\s?.!]*$", re.I)
+
+
 _EXPLICIT_TASK_REF = re.compile(r"(?:\btask\s*#?\s*|(?:^|[\s(\[])#)(\d{1,5})\b", re.I)
 
 

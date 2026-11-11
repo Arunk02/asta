@@ -861,9 +861,10 @@ async def post_inline_review(pr: str, workspace: str = "", repo: str = "",
     files = {}
     if rc == 0:
         for line in raw.splitlines():
-            with contextlib.suppress(ValueError):
+            with contextlib.suppress(ValueError, AttributeError):
                 f = json.loads(line)
-                files[f.get("filename") or ""] = f.get("patch") or ""
+                if f.get("filename"):
+                    files[f["filename"]] = f.get("patch") or ""
     rows, leftover = attachable(rows, files) if files else (rows, [])
     if leftover:
         body = ((body or "").strip() + "\n\nAlso (not on a changed line):\n" + "\n".join(

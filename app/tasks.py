@@ -3781,7 +3781,8 @@ async def _worker(task_id: int) -> None:
         # code per flow — not from whatever a keyword search happens to find.
         with contextlib.suppress(Exception):
             from . import booking_case
-            prompt += await asyncio.wait_for(booking_case.evidence(prompt), 60)
+            prompt += await asyncio.wait_for(
+                booking_case.evidence(prompt, workspace=t.get("workspace") or ""), 60)
     elif t["kind"] == "code":
         prompt = first_code_prompt(task_id, t)
     try:
@@ -5522,7 +5523,7 @@ async def _reopen_merged(task_id: int, t: dict) -> None:
     store.record_outcome("task", "reopened after merge", subject=str(task_id), detail=branch)
 
 
-async def continue_finished(task_id: int, followup: str) -> str:
+async def continue_finished(task_id: int, followup: str, *, record_asked: bool = True) -> str:
     """A finished analysis or draft, carried on with his follow-up — same task.
 
     11 Nov: "task 559 - … then what if in future same issue … fix it again?" on
@@ -5545,7 +5546,8 @@ async def continue_finished(task_id: int, followup: str) -> str:
               f"\n\nARUN'S FOLLOW-UP — answer this, building on the previous answer "
               f"rather than redoing it:\n{said}")
     store.update_task(task_id, prompt=prompt, status="running", error="")
-    store.kv_set(f"task_asked:{task_id}", _json.dumps({"his": said, "offer": ""}))
+    if record_asked:            # his words; a re-check Asta starts is not his ask
+        store.kv_set(f"task_asked:{task_id}", _json.dumps({"his": said, "offer": ""}))
     store.record_outcome("task", "continued", subject=str(task_id))
     job = asyncio.create_task(_worker(task_id))
     _running[task_id] = job

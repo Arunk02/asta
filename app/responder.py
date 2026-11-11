@@ -1300,7 +1300,13 @@ def _waiting_brief(who: str, text: str, context: str, need: str = "",
     if passages:
         parts.append("\n\nFrom Arun's project knowledge (his documents and the repo "
                      "summaries) — use them and name the source when you do:\n" + passages)
-    parts.append(playbook(text))
+    # "Check X, Y" … "merged" … "Fine na??": the ask names no booking, their
+    # earlier line in the same exchange does (11 Nov) — it is the same case.
+    from . import booking_case as _bc
+    earlier = [] if _bc.ids(text) else _bc.ids(their_words(who, context))
+    parts.append(playbook(f"{text}\n(the {'bookings' if len(earlier) > 1 else 'booking'} "
+                          f"they gave earlier in this exchange: {', '.join(earlier[:3])})"
+                          if earlier else text))
     from . import chat_watch
     shots = chat_watch.image_paths(f"{context}\n{text}")
     if shots:

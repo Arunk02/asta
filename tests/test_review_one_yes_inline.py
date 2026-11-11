@@ -72,3 +72,14 @@ def test_the_note_that_shows_a_review_counts_as_showing_it(monkeypatch):
     t = store.create_task("Review booking PR 4321", "analysis", "p", None)
     assert "Say “yes”" in tasks._how_to_post(t["id"], store.get_task(t["id"]))
     assert offers.pending().shown is True, "his next yes posts it — not a second showing"
+
+
+def test_an_elided_path_is_resolved_by_what_follows_the_dots():
+    files = {FULL: PATCH}
+    inline, _ = review.attachable(
+        [{"path": "service/src/main/java/.../OneClickValidator.java", "line": 41, "body": "x"}], files)
+    assert [c["path"] for c in inline] == [FULL]
+
+
+def test_the_brief_asks_for_full_paths_and_changed_lines():
+    assert 'never shorten it with "..."' in review.REVIEW_BRIEF and "NEW-side line" in review.REVIEW_BRIEF

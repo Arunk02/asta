@@ -609,7 +609,9 @@ def _events_from(labels: list[str]) -> list[dict]:
     events: list[tuple[str, str]] = []
     for raw in labels:
         lab = raw.strip()
-        if not (20 < len(lab) < 300):
+        # A row that carries its join link is long — keep it (11 Nov: the 300
+        # limit would have dropped exactly the rows with a link).
+        if not (20 < len(lab) < 300) and not (20 < len(lab) < 3000 and _JOIN_URL.search(lab)):
             continue
         m = re.match(r"^(.+?),\s*(\d{1,2}:\d{2}\s?[AP]M)\s+to\s+(\d{1,2}:\d{2}\s?[AP]M),\s*(.*)$", lab)
         if not m:
@@ -646,6 +648,9 @@ def _events_from(labels: list[str]) -> list[dict]:
                 # expected at a thing, which is most of "do I need to be there".
                 "status": status.group(1) if status else "",
                 "join_url": join_url_in(raw),
+                # The row as Outlook labels it — what opens the event when the
+                # row itself carries no link (join_url_for).
+                "label": raw,
             })
 
     return sorted(events, key=lambda e: e["minutes"])
@@ -676,7 +681,103 @@ def join_url_in(text: str) -> str:
     a missing link is a normal day, not a failure.
     """
     m = _JOIN_URL.search(text or "")
-    return m.group(0).rstrip(".,);") if m else ""
+    if m:
+        return m.group(0).rstrip(".,);")
+    if "meetup-join" not in (text or ""):
+        return ""
+    # Wrapped by Safe Links or the Teams launcher: the link is a url-encoded
+    # parameter of another one (…?url=https%3A%2F%2Fteams.microsoft.com%2Fl%2F…,
+    # or the launcher's …?url=%2F_%23%2Fl%2Fmeetup-join%2F…).
+    from urllib.parse import parse_qs, urlsplit
+    for outer in re.findall(r"https?://[^\s\"'<>]+", text):
+        for values in parse_qs(urlsplit(outer).query).values():
+            for v in values:
+                inner = _JOIN_URL.search(v)
+                if inner:
+                    return inner.group(0).rstrip(".,);")
+                rel = re.search(r"/l/meetup-join/[^\s\"'<>&]+", v)
+                if rel:
+                    return "https://teams.microsoft.com" + rel.group(0).rstrip(".,);")
+    return ""
+
+
+#: Today's links read from the events themselves: one look per meeting per day.
+_LINKS = "meeting_join_link:"
+
+#: Everything on the open event that can hold its link: hrefs, data attributes,
+#: titles, and the text of the card and its body.
+_LINK_TEXT_JS = """() => {
+  const bits = [];
+  for (const e of document.querySelectorAll('a[href], [data-href], [title]')) {
+    bits.push(e.href || '', e.getAttribute('data-href') || '', e.getAttribute('title') || '');
+  }
+  for (const e of document.querySelectorAll('[role="dialog"], [role="main"], [role="complementary"]')) {
+    bits.push(e.innerText || '');
+  }
+  return bits.join('\\n');
+}"""
+
+
+async def join_url_for(ev: dict) -> str:
+    """The Teams link of a meeting whose calendar row carried none, or "".
+
+    11 Nov: "join the code refactor meeting" stopped at "the calendar row carries
+    no join link — open it in Outlook and send me the link". The comment above
+    join_url_in promised a fallback to the calendar itself; there was none. This
+    opens the event, reads its links and body, and failing that reads where its
+    Join button points — the page it opens is closed at once, nobody is joined.
+    Read-only on his calendar; cached for the day."""
+    if ev.get("join_url"):
+        return ev["join_url"]
+    label = (ev.get("label") or "").strip()
+    if not label:
+        return ""
+    key = f"{_LINKS}{time.strftime('%Y-%m-%d')}:{ev.get('start', '')}:{ev.get('title', '')}"
+    cached = store.kv_get(key)
+    if cached:
+        return cached
+    url = ""
+    async with teams_bridge.site_page(CALENDAR_URL) as page:
+        await _ready(page, '[role="main"], [aria-label*="calendar view"]')
+        await asyncio.sleep(3)
+        row = page.locator(f"[aria-label={_json.dumps(label)}]").first
+        await row.click(timeout=10000)
+        await asyncio.sleep(2)
+        url = join_url_in(await page.evaluate(_LINK_TEXT_JS))
+        if not url:
+            url = await _join_button_target(page)
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:                                      # noqa: BLE001
+            pass
+    if url:
+        store.kv_set(key, url)
+    store.record_outcome("meeting", "join link read from the event" if url else "no join link in the event",
+                         subject=ev.get("title", "")[:80])
+    return url
+
+
+async def _join_button_target(page) -> str:
+    """Where the event's Join button leads — its href, or the page it opens (closed at once)."""
+    btn = page.get_by_role("button", name=re.compile(r"^\s*Join\b", re.I)).first
+    link = page.get_by_role("link", name=re.compile(r"^\s*Join\b", re.I)).first
+    for el in (link, btn):
+        try:
+            if not await el.count():
+                continue
+            href = await el.get_attribute("href") or ""
+            if join_url_in(href):
+                return join_url_in(href)
+            async with page.context.expect_page(timeout=8000) as opened:
+                await el.click(timeout=5000)
+            new = await opened.value
+            try:
+                return join_url_in(new.url)
+            finally:
+                await new.close()
+        except Exception:                                      # noqa: BLE001
+            continue
+    return ""
 
 
 def _clock_minutes(s: str) -> int:

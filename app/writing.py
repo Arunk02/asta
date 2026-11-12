@@ -352,6 +352,35 @@ _NOT_HIS_VOICE = re.compile(
 _SENTENCE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)")
 
 
+#: Asta's own bookkeeping, never in anything posted outside. 12 Nov: a PR
+#: comment went up as "Review (task #572) — …", and GitHub linked #572 to an
+#: unrelated PR in that repo.
+_TASK_REF = re.compile(r"\s*\(\s*(?:asta\s+)?task\s*#?\s*\d+\s*\)|\b(?:asta\s+)?task\s*#\s*\d+\b[:,]?", re.I)
+_INTERNAL = re.compile(
+    r"\b(?:waiting\s+(?:on|for)\s+(?:your|arun'?s)\s+(?:yes|approval)|reply\s+[“\"]?(?:yes|send|post)"
+    r"|missions\s+tab|full\s+result:\s*ask|staged\s+(?:the\s+|a\s+)?(?:review|reply|draft)|"
+    r"(?:say|reply)\s+[“\"]?post\s+pr)\b", re.I)
+
+
+def outward(text: str) -> str:
+    """Anything posted outside Asta — a PR review, a comment, a message — without
+    Asta's task numbers or its own workflow words. Line by line; a line that is
+    only bookkeeping goes, the rest stays as written."""
+    if not (text or "").strip():
+        return text
+    lines = []
+    for line in text.splitlines():
+        if _INTERNAL.search(line):
+            continue
+        cleaned = _TASK_REF.sub("", line)
+        cleaned = re.sub(r"\(\s*\)", "", cleaned)
+        cleaned = cleaned.rstrip()
+        cleaned = re.sub(r"\s{2,}", " ", cleaned) if cleaned.strip() else cleaned
+        lines.append(cleaned)
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    return out or text
+
+
 def as_him(text: str) -> str:
     """Drop the sentences that could only have come from his assistant.
 
@@ -361,6 +390,7 @@ def as_him(text: str) -> str:
     he sees every draft, and an empty send is the worse failure."""
     if not (text or "").strip():
         return text
+    text = outward(text)
     masked, held = _mask_urls(text)
     out_lines = []
     for line in masked.splitlines():

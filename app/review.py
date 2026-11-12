@@ -530,6 +530,8 @@ async def post_review(pr: str, workspace: str, repo: str = "",
     gives is not obvious, so that is checked here where the message can say what
     to do about it. An approval with no body is fine and common.
     """
+    from . import writing
+    body = writing.outward(body)
     flag = ACTIONS.get(action)
     if flag is None:
         raise RuntimeError(f"unknown review action '{action}' — one of: "
@@ -849,6 +851,9 @@ async def post_inline_review(pr: str, workspace: str = "", repo: str = "",
     if flag is None:
         raise RuntimeError(f"unknown review action '{action}' — one of: "
                            + ", ".join(sorted(ACTIONS)))
+    from . import writing
+    body = writing.outward(body)
+    comments = [{**c, "body": writing.outward(str(c.get("body") or ""))} for c in (comments or [])]
     number, where, cwd = _where(pr, workspace, repo)
     target = where[1] if where else ""
     if not target:

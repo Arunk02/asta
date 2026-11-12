@@ -818,13 +818,14 @@ def new_conversation(channel: str = "whatsapp", workspace: str | None = None,
 
 def task_row(title: str, kind: str = "code", status: str = "running",
              result: str = "", age_hours: float = 0.0, workspace: str | None = None,
-             prompt: str = "do it", teams_chat: str = "", pr_urls: str = "") -> int:
+             prompt: str = "do it", teams_chat: str = "", pr_urls: str = "",
+             pr_state: str = "OPEN") -> int:
     """A task as the world found it — including how long it has been sitting."""
     from app import store
     t = store.create_task(title, kind, prompt, workspace, teams_chat)
     fields = {"status": status, "result": result}
     if pr_urls:
-        fields.update(pr_urls=pr_urls, pr_state="OPEN")
+        fields.update(pr_urls=pr_urls, pr_state=pr_state)
     store.update_task(t["id"], **fields)
     if age_hours:
         then = time.time() - age_hours * 3600

@@ -773,3 +773,65 @@ def test_explicit_correction_spawns_fresh_work_without_reusing_old_answer(monkey
     assert task and task["id"] != old["id"] and len(spawned) == 1
     assert "Old result" in spawned[0] and "Recent exchange" in spawned[0]
     assert answers._meta(task["id"])["ask_kind"] == "ask"
+
+
+# --- 12 Nov: "that X thing" against the work they share --------------------------
+
+def _shared_pr_task(title, number, age_h=30):
+    t = store.create_task(title, "code", "Priya asked for this change", None, "")
+    store.update_task(t["id"], status="merged", pr_state="MERGED",
+                      pr_urls=f"booking: https://github.com/acme/booking/pull/{number}")
+    with store._connect() as conn:
+        conn.execute("UPDATE tasks SET created_at=? WHERE id=?", (time.time() - age_h * 3600, t["id"]))
+    return t["id"]
+
+
+def test_that_x_thing_fitting_two_shared_prs_is_asked_then_worked_on_the_answer(rail):
+    _shared_pr_task("Skip tracking call for one-way empty orders", 2101)
+    _shared_pr_task("Arrival-time check for one-way empty orders", 2109, age_h=20)
+    chat, now = "Priya Nair", time.time()
+    rail.rows[chat] = [_msg(chat, "that one way empty thing got merged?", now)]
+    rail.script[f"teams:{chat}"] = {"state": "ask", "need": "is it merged",
+                                    "closing_confidence": 0.0, "summary": "", "entities": []}
+    rail.sweep()
+    assert not rail.asked, "a pointer that fits two shared PRs is asked about, not investigated"
+    assert len(rail.sent) == 1
+    assert "booking PR 2101" in rail.sent[0][1] and "booking PR 2109" in rail.sent[0][1]
+    rail.rows[chat] = [_msg(chat, "the arrival time one", now + 30)]
+    rail.script[f"teams:{chat}"] = {"state": "status", "need": "", "closing_confidence": 0.5,
+                                    "summary": "", "entities": []}
+    rail.sweep()
+    assert len(rail.asked) == 1
+    assert "/pull/2109" in rail.asked[0]["text"]
+    assert "one way empty thing" in rail.asked[0]["text"]
+
+
+def test_more_from_them_while_their_draft_waits_replaces_the_draft(rail, monkeypatch):
+    from app import answers, loop, notify
+    told = []
+
+    async def _told(text, *a, **k):
+        told.append(text)
+        return {}
+
+    monkeypatch.setattr(notify, "notify", _told)
+    chat, thread = "Priya Nair", "teams:Priya Nair"
+    conv = store.create_conversation(model="claude_cli", workspace=None)
+    store.kv_set("wa_conversation", conv["id"])
+    t = store.create_task("Priya asked: that one way thing merged?", "analysis",
+                          "Priya Nair is asking Arun: that one way thing merged?", None, chat)
+    store.update_task(t["id"], status="done", result="ANALYSIS:\nx\nREPLY:\nYeah merged",
+                      finished_at=time.time() - 60)
+    answers.remember_meta(t["id"], who=chat, need="is it merged", chat=chat, group=False,
+                          thread=thread, source_text="that one way thing merged?", kind="ask")
+    loop.stage(conv["id"], {"type": "answer", "kind": "send", "what": "Yeah merged", "to": chat,
+                            "channel": "teams", "task_id": t["id"], "_shown": time.time()})
+    rail.rows[chat] = [_msg(chat, "no tracking call for OWE", time.time())]
+    rail.script[thread] = {"state": "status", "need": "", "closing_confidence": 0.3,
+                           "summary": "", "entities": []}
+    rail.sweep()
+    assert loop.awaiting(conv["id"]) is None, "the stale draft is withdrawn"
+    assert len(rail.asked) == 1
+    assert "that one way thing merged?" in rail.asked[0]["text"]
+    assert "no tracking call for OWE" in rail.asked[0]["text"]
+    assert any("dropped that draft" in m for m in told)

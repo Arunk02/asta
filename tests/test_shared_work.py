@@ -220,3 +220,25 @@ def test_a_review_done_note_reads_the_staged_review_not_the_worker():
     assert note.startswith("Staged: COMMENT review — 1 inline comment(s), 0 blocking.")
     assert "1 asked as questions" in note
     assert tasks.staged_review_note(tid, {"title": "Something else PR 3481"}) == ""
+
+
+def test_todays_link_in_a_busy_chat_is_found_and_ranks_above_tasks(monkeypatch):
+    monkeypatch.setattr(shared_work, "pr_meta", lambda o, r, n: {"title": "Price date fix", "state": "MERGED"})
+    store.save_teams_messages([{"key": f"old-{i}", "chat": "Priya Nair", "sender": "Priya Nair",
+                                "text": f"chatter {i}", "sent_at": time.time() - 10 * 86400 + i}
+                               for i in range(700)])
+    for i in range(12):
+        _task(f"Investigation {i}", prompt="Priya asked about a booking", status="done", age_h=30 + i)
+    _link("Priya Nair", "https://github.com/acme/booking/pull/2201 pls check", minutes_ago=5)
+    _link("Priya Nair, Sam Lee", "https://github.com/acme/booking/pull/2299 group link", minutes_ago=5)
+    rows = shared_work.rows("Priya Nair", "Priya Nair")
+    assert rows[0]["label"] == "booking PR 2201" and rows[0]["title"] == "Price date fix"
+    assert all(r["label"] != "booking PR 2299" for r in rows), "a group chat is not their 1:1"
+    assert len(rows) == shared_work.MAX_ROWS
+
+
+def test_the_brief_never_calls_gh(monkeypatch):
+    monkeypatch.setattr(shared_work, "pr_meta", lambda *a: (_ for _ in ()).throw(AssertionError("gh")))
+    _link("Priya Nair", "https://github.com/acme/booking/pull/2201 pls check")
+    out, _ = shared_work.for_brief("Priya Nair", "Priya Nair", "that thing merged?")
+    assert "booking PR 2201" in out

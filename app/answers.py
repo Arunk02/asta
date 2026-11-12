@@ -897,6 +897,10 @@ async def present_task_draft(task_id: int, t: dict, *, answered: bool = False) -
     if not cid:
         return False
     to = intent["to"]
+    from . import shared_work
+    asked = shared_work.check_draft(task_id, "", intent.get("what") or "")
+    if asked:
+        intent = {**intent, "what": asked}
     intent = {**intent, "task_id": task_id, "who": to, "need": "", "analysis": "",
               "lead": f"From task #{task_id} ({t.get('title', '')}) — a draft for *{to}*.",
               "_at": time.time()}
@@ -964,6 +968,10 @@ async def present_task(task_id: int, t: dict, result: str) -> bool:
     analysis, reply = split(result)
     if not reply:
         return False
+    # "Yeah merged bro" about a PR found by searching titles for their words is
+    # a guess told as a fact (12 Nov). The reply becomes the question instead.
+    from . import shared_work
+    reply = shared_work.check_draft(task_id, analysis, reply) or reply
     chat = meta.get("chat") or t.get("teams_chat", "")
     first = (meta.get("who") or "them").split()[0]
     from . import notify
@@ -1063,6 +1071,29 @@ def invalidate_answer(task_id: int) -> bool:
         store.kv_set(_QUEUE, json.dumps(keep))
         store.record_outcome("answer", "correction withdrew queued", subject=str(task_id))
     return bool(staged and staged.get("task_id") == task_id) or len(keep) != len(queue)
+
+
+def draft_waiting(thread: str, text: str) -> dict | None:
+    """The finished task on this thread whose answer still waits for his "send",
+    when `text` is more of the same ask (not a new subject, not the message that
+    started it). None otherwise."""
+    from . import loop
+    flat = " ".join((text or "").split())
+    if not thread or not flat:
+        return None
+    cid = phone_conversation()
+    staged = loop.awaiting(cid) if cid else None
+    queued = {item.get("task_id") for item in _load_queue()}
+    for t in store.list_tasks(limit=40):
+        meta = _meta(t["id"])
+        if meta.get("thread") != thread or t["status"] != "done":
+            continue
+        if not ((staged and staged.get("task_id") == t["id"]) or t["id"] in queued):
+            continue
+        if _new_subject(flat, t, meta) or flat[:80] in " ".join((t.get("prompt") or "").split()):
+            return None
+        return t
+    return None
 
 
 def _new_subject(text: str, task: dict, meta: dict) -> bool:

@@ -204,6 +204,14 @@ def _apply_setup(sc: Scenario, world: W.World, state: dict) -> None:
         if s.get("link_tasks", True):
             tasks_mod = __import__("app.tasks", fromlist=["tasks"])
             tasks_mod.link_task(state["conv"]["id"], tid)
+    teams_rows = []
+    for i, m in enumerate(s.get("teams", []) or []):
+        # Messages already in a chat, as the watcher stored them.
+        at = time.time() - float(m.get("minutes_ago", 60)) * 60
+        teams_rows.append({"key": f"seed-teams-{i}", "chat": m.get("chat", "A colleague"),
+                           "sender": m.get("sender", m.get("chat", "A colleague")),
+                           "text": m.get("text", ""), "sent_at": at})
+    store.save_teams_messages(teams_rows)
     for pr in s.get("prs", []) or []:
         world.prs[pr["url"]] = {"state": pr.get("state", "OPEN"),
                                 "url": pr["url"],
@@ -376,9 +384,16 @@ async def _do(step: dict, sc: Scenario, world: W.World, state: dict, seed: int) 
         else:
             if opening["opened_with"]:
                 said = f"{opening['opened_with']}\n{said}"
+            if arg.get("reply_to"):
+                # A 1:1 chat: the colleague is waiting, which is live behaviour
+                # (the suite pins the older offer-first setting).
+                world._patch.set(responder, "LOOK_FOR_WAITING_COLLEAGUE", True)
             task = responder.respond(arg.get("source", "teams-chat"), who, said,
                                      priority=arg.get("priority"),
-                                     context=arg.get("context", ""))
+                                     context=arg.get("context", ""),
+                                     reply_to=arg.get("reply_to", ""),
+                                     source_text=said if arg.get("reply_to") else "",
+                                     kind_override=arg.get("kind", ""))
             if task:
                 state["aliases"]["investigation"] = task["id"]
     elif kind == "spawn":

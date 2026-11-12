@@ -3725,6 +3725,43 @@ _POST_YES = re.compile(r"\b(?:send|post|submit|publish|go\s+ahead|yes|ok(?:ay)?|
 _POST_NO = re.compile(r"\b(?:don'?t|do\s+not|not\s+yet|hold|wait|cancel|drop|no)\b", re.I)
 
 
+#: "review PR 1535", "pls review booking PR 1535", "re-review https://…/pull/1535".
+_REVIEW_ASK = re.compile(r"^\W*(?:(?:hey\s+)?asta\W+)?(?:please\s+|pls\s+|kindly\s+|can\s+you\s+|"
+                         r"could\s+you\s+|now\s+|again\s+)*(?:re-?)?review\b", re.I)
+_REVIEW_NOT = re.compile(r"\b(?:post|send|submit|publish|result|status|findings|"
+                         r"what\s+(?:did|does)|did\s+you|reply|answer)\b", re.I)
+_PR_URL_ANY = re.compile(r"https?://github\.com/[\w.-]+/[\w.-]+/pull/\d+", re.I)
+_ALIAS_PR = re.compile(r"\b([A-Za-z][\w-]{1,30})\s+PR\s*#?\s*(\d{2,7})\b", re.I)
+
+
+def _review_ask(text: str) -> tuple[str, str] | None:
+    """(pr, repo) when his message is an order to review ONE pull request.
+
+    12 Nov: "review PR <n>" went to a brain, which answered from memory that
+    the review was "already staged" — it had been dropped; and naming the task
+    it came from continued that task instead of reviewing. A review is one
+    deterministic call, so it is made here, every time."""
+    t = (text or "").strip()
+    # "task 12 review PR 34 fresh": the task is where the PR came from, not
+    # what to do — the review still runs (it continued the task, 12 Nov).
+    t = re.sub(r"^\W*task\s*#?\s*\d{1,5}\b\W*", "", t, flags=re.I)
+    if len(t) > 300 or not _REVIEW_ASK.search(t) or _REVIEW_NOT.search(t) or t.endswith("?"):
+        return None
+    urls = list(dict.fromkeys(u.rstrip("/") for u in _PR_URL_ANY.findall(t)))
+    if len(urls) == 1:
+        return urls[0], ""
+    if urls:
+        return None
+    bare = _EXPLICIT_TASK_REF.sub(" ", t)
+    numbers = _pr_numbers(bare)
+    if len(numbers) != 1 or set(re.findall(r"\b\d{3,7}\b", bare)) - set(numbers):
+        return None                        # "review PR 1535 and 1481": two of them
+    from . import prname
+    m = _ALIAS_PR.search(t)
+    repo = prname.repo_for(m.group(1)) if m and m.group(2) == numbers[0] else ""
+    return numbers[0], repo
+
+
 def _review_no_longer_waiting(text: str) -> str | None:
     """"post PR N" / "PR N post it" when nothing is recorded for N: the PR number.
 
@@ -4579,6 +4616,25 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                 if channel == "web":
                     await sink.send({"type": "done", "tools": []})
                 return None
+
+    # "review PR 1535": one deterministic call, never a brain's memory of it, and
+    # never the continuation of the task it is named alongside.
+    review_ask = None if skip_new_gates else _review_ask(own)
+    if review_ask is not None:
+        from . import capabilities as _caps
+        token = _caps.TURN_TEXT.set(user_text or "")
+        try:
+            note = await agent_mod.review_pr(review_ask[0], conv.get("workspace") or
+                                             policy.prefer("workspace") or "", review_ask[1])
+        finally:
+            _caps.TURN_TEXT.reset(token)
+        store.add_ui_message(cid, "user", (user_text or "").strip(), {"channel": channel})
+        store.add_ui_message(cid, "assistant", note, {"via": "review-route", "channel": channel})
+        frontdesk.record("job", f"review {review_ask[0]}")
+        await sink.send({"type": "note", "text": note})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
 
     # A drafted outward send is waiting on "can I send this?" — his next message is
     # the answer. A bare yes sends it (via the model's real send tool, so the send

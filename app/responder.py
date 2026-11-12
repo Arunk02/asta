@@ -1287,9 +1287,16 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
             "a choice between your own guesses.\n"
             f"Original request: {(prior.get('source_text') or '')[:500]}\n"
             f"Disputed answer: {disputed[:1500]}")
+    shared_res = None
     if reply_to:
         brief += _waiting_brief(who, text, context, need=need, questions=questions or [])
         brief += case_so_far(reply_to, who) + handed_rider(reply_to)
+        if not group and kind not in ("review_request", "pr_review", "port"):
+            # What the two of them worked on: "that X thing" is resolved against
+            # it before any title search (12 Nov, see app/shared_work.py).
+            from . import shared_work
+            shared_text, shared_res = shared_work.for_brief(reply_to, who, message_of(text))
+            brief += shared_text
     t = tasks.spawn(title_for(kind, who, text), brief,
                     "analysis",                     # read-only. never code.
                     workspace or None, teams_chat=reply_to,
@@ -1304,6 +1311,9 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
         answers.remember_meta(t["id"], who=who, need=need or message_of(text)[:160],
                               chat=reply_to, group=group, thread=thread,
                               source_text=source_text or text, kind=kind)
+    if shared_res is not None:
+        from . import shared_work
+        shared_work.remember(t["id"], message_of(text), shared_res)
     if review_revision:
         store.kv_set(f"review_origin:{t['id']}", json.dumps(
             {"ref": review_revision.rsplit("@", 1)[0], "revision": review_revision}))

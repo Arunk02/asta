@@ -555,3 +555,71 @@ scenarios:
     checks:
       - sent: {door: git, text: "repos/acme/booking/pulls/1409/reviews"}
       - sent: {door: git, text: "src/Consumer.java"}
+
+  - id: that-x-thing-means-the-work-you-share
+    title: '"that X thing" from a colleague resolves to the PR the two of you share, not a title search'
+    why: >
+      12 Nov. A colleague asked whether "that vessel ETA thing for one-way empty"
+      was merged. He meant a merged PR Arun had sent him the day before; the brief
+      held only the day's chat, so the worker searched titles, found two other PRs,
+      and drafted "Yeah merged bro".
+    twin: false
+    setup:
+      env: {ASTA_RESPOND: "1"}
+      tasks:
+        - {title: "Skip tracking call and vessel ETA check for one-way empty orders", kind: code,
+           as: shipped, status: merged, age_hours: 30, prompt: "Priya asked for this: skip the tracking call for one-way empty orders",
+           pr_urls: "booking: https://github.com/acme/booking/pull/2101", pr_state: MERGED}
+      teams:
+        - {chat: "Priya Nair", text: "https://github.com/acme/booking/pull/2107 - review and approve it", minutes_ago: 90}
+      kv:
+        "pr_meta:acme/booking#2107": '{"title": "Avro enum fields to plain strings", "state": "MERGED", "at": 0}'
+    brains:
+      task:
+        - text: |
+            ANALYSIS:
+            booking PR 2101 (skip tracking call + vessel ETA check for one-way empty) is merged.
+            REPLY:
+            Yes, booking PR 2101 (skip the tracking call and vessel ETA check for one-way empty) is merged.
+    steps:
+      - colleague: {who: "Priya Nair", reply_to: "Priya Nair", kind: ask,
+                    text: "that vessel ETA thing for one way empty got merged?"}
+    checks:
+      - tasks: {count: 1}
+      - brain_prompt_contains: "SHARED WORK"
+      - brain_prompt_contains: "most likely mean booking PR 2101"
+      - brain_prompt_contains: "booking PR 2107"
+
+  - id: a-guess-is-never-told-as-merged
+    title: When "that X thing" fits two shared PRs, the reply that says "merged" becomes a question naming both
+    why: >
+      12 Nov. The draft asserted "merged" about a PR found only by keyword search.
+      A state told to a colleague on a guess is worse than asking which one.
+      A clarifying question goes to them directly (his standing rule); the
+      "merged" never does.
+    twin: false
+    may_send: true
+    setup:
+      env: {ASTA_RESPOND: "1"}
+      tasks:
+        - {as: one, title: "Skip tracking call for one-way empty orders", kind: code, status: merged, age_hours: 30,
+           prompt: "Priya asked: skip the tracking call", pr_urls: "booking: https://github.com/acme/booking/pull/2101",
+           pr_state: MERGED}
+        - {as: two, title: "Arrival-time check for one-way empty orders", kind: code, status: merged, age_hours: 20,
+           prompt: "Priya asked: arrival check", pr_urls: "booking: https://github.com/acme/booking/pull/2109",
+           pr_state: MERGED}
+    brains:
+      task:
+        - text: |
+            ANALYSIS:
+            Found booking PR 2203 by searching titles; it is merged.
+            REPLY:
+            Yeah merged bro
+    steps:
+      - colleague: {who: "Priya Nair", reply_to: "Priya Nair", kind: ask,
+                    text: "that one way empty thing got merged?"}
+    checks:
+      - brain_prompt_contains: "fit more than one item above"
+      - outcome: {kind: answer, outcome: "guess replaced"}
+      - sent: {door: teams, count: 1, text: "booking PR 2101"}
+      - sent: {door: teams, text: "booking PR 2109"}

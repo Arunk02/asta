@@ -321,13 +321,19 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     from . import copilot_cli, memory
     import datetime as _dt
 
-    sid, is_new = _session_id(conv["id"])
     # A handoff arrives AS the turn's text, and its wrapper ("was working on
     # it when it ran out of quota") ranks as conversation — so a resumed turn
     # was handed tools chosen for the handoff instead of for his request. Rank
     # on his sentence; the wrapper is provenance, not the subject.
     from . import resume as resume_mod
     ranking_text = resume_mod.ranking_text(user_text)
+    light = _light_choice(conv, ranking_text)
+    if light:
+        # A read of what Asta holds: a one-off session, not the saved one — the
+        # saved session is neither re-read (its ~80k tokens) nor grown by it.
+        sid, is_new = str(uuid.uuid4()), True
+    else:
+        sid, is_new = _session_id(conv["id"])
     umsg = f"{copilot_cli.now_line()}\n{user_text}"
     # Same block the Copilot path adds, from the same function: who he means, and
     # what his documents say about what he asked.
@@ -353,6 +359,8 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     # caching) so a resumed session never drifts back to plain Claude Code.
     system = copilot_cli._first_turn_context(
         conv, via="Claude Code CLI", user_text=ranking_text)
+    if light:
+        system += _recent_lines(conv)
     cmd = [
         "claude",
         "--resume" if not is_new else "--session-id", sid,
@@ -424,13 +432,51 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
             message_id=conv.get("_turn_message_id"))),
                 "--strict-mcp-config"]
     from . import agent as agent_mod
-    model = agent_mod.tier_of("claude_cli")
+    model = (light.model if light else "") or agent_mod.tier_of("claude_cli")
     if model:
         cmd += ["--model", model]
-    effort = os.environ.get("ASTA_CLAUDE_EFFORT", "")
+    effort = (light.effort if light else "") or os.environ.get("ASTA_CLAUDE_EFFORT", "")
     if effort and effort != "default":
         cmd += ["--effort", effort]
     return cmd
+
+
+def _light_choice(conv: dict, text: str):
+    """The T1 choice for a light read, or None. Never when he picked a model
+    himself ("use opus" is his), and recorded so the cost can be compared."""
+    from . import agent as agent_mod, routing
+    if agent_mod._tiers().get("claude_cli") or _continues_work(text) or conv.get("_no_light"):
+        conv.pop("_light", None)
+        return None
+    choice = routing.chat_choice("claude", text)
+    if choice:
+        conv["_light"] = True
+        store.record_outcome("route", "chat T1", subject=str(conv.get("id", ""))[:80],
+                             detail=f"{choice.model or 'default'} @ {choice.effort} — {text[:80]}")
+    else:
+        conv.pop("_light", None)
+    return choice
+
+
+def _continues_work(text: str) -> bool:
+    """A resumed or handed-off turn continues work — never a light read."""
+    return text.lstrip().startswith(("[resume", "(resume", "Context:"))
+
+
+def _recent_lines(conv: dict, n: int = 6) -> str:
+    """The last few lines of this conversation, for a one-off light session."""
+    msgs = store.list_ui_messages(conv["id"]) if conv.get("id") else []
+    if msgs and msgs[-1].get("role") == "user":
+        msgs = msgs[:-1]
+    lines = []
+    for m in msgs[-n:]:
+        text = " ".join((m.get("content") or "").split())[:300]
+        if text:
+            lines.append(f"{'Arun' if m.get('role') == 'user' else 'You'}: {text}")
+    if not lines:
+        return ""
+    return ("\n\nRECENT CONVERSATION (this answer runs in a short side session; these "
+            "are the last lines of the main thread, for reference):\n" + "\n".join(lines))
 
 
 async def run_turn(conv: dict, user_text: str,
@@ -613,6 +659,10 @@ async def run_turn(conv: dict, user_text: str,
     if rc != 0 or (err_msg and not out):
         stderr = (await proc.stderr.read()).decode(errors="replace")[-500:] if proc.stderr else ""
         # A dead --resume session (cleaned store / expired) gets one fresh retry.
+        if not out and conv.get("_light"):
+            # The light side session failed: the turn runs again the full way.
+            conv["_no_light"] = True
+            return await run_turn(conv, user_text, on_delta, on_tool, on_usage)
         if not out and store.kv_get(f"claude_session:{conv['id']}"):
             store.kv_del(f"claude_session:{conv['id']}")
             # The dead attempt already reported what it spent; the retry reports

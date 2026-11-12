@@ -286,3 +286,21 @@ def test_the_staging_reply_says_what_the_proof_check_did(monkeypatch):
                                 {"n": 2, "verdict": "wrong", "proof": "one date per leg"}])
     assert "Proof check: 1 proven, 1 dropped." in said and "not lost" in said
     assert review_proof.tally([]) == ""
+
+
+def test_a_light_pr_is_checked_on_the_t2_model_not_opus(monkeypatch):
+    from app import claude_cli
+    seen = {}
+
+    async def one_shot(prompt, **kw):
+        seen.update(kw)
+        return json.dumps([{"n": 1, "verdict": "proven", "proof": "test asserts nothing"}])
+
+    async def code(meta, findings, around=60):
+        return "### XTest.java\n12: assertTrue(true)"
+
+    monkeypatch.setattr(claude_cli, "one_shot", one_shot)
+    monkeypatch.setattr(review_proof, "_code_at_head", code)
+    asyncio.run(review_proof.check([FINDINGS[0]], "request_changes", LIGHT, "ws", None))
+    assert seen["model"] == "sonnet" and seen["effort"] == "medium" and seen["plan_only"] is True
+    assert review_proof.verify_model("logic") == ("opus", "high")

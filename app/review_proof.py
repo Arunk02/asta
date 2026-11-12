@@ -28,6 +28,18 @@ from . import untrusted
 #: share the reviewer's blind spots.
 VERIFY_MODEL = "opus"
 
+
+def verify_model(size: str) -> tuple[str, str]:
+    """(model, effort) for the proof check. A logic change gets opus; a light one —
+    tests, config, docs, build — is checked on the routing table's T2 cell: the
+    points there are about shape, not about a flow opus has to trace (12 Nov,
+    plan 2 E)."""
+    if size == "logic":
+        return VERIFY_MODEL, "high"
+    from . import routing
+    model, _ = routing._cell("claude", routing.T2)
+    return model or "sonnet", "medium"
+
 #: Beyond every proven blocking comment, at most this many others reach the PR.
 #: 7 comments on PR 1481 were more than an author reads.
 MAX_OTHER_COMMENTS = 3
@@ -362,7 +374,9 @@ async def check(findings: list[dict], action: str, meta: dict, workspace: str,
     if not findings:
         return findings, action, []
     code = await _code_at_head(meta, findings)
-    logic = size_of(meta) == "logic"
+    size = size_of(meta)
+    logic = size == "logic"
+    model, effort = verify_model(size)
     docs = domain_docs(meta, workspace, changed_methods(meta.get("diff") or "")) if logic else ""
     data = await real_input(meta) if logic else ""
     header = (f"PR #{meta.get('number')}: {meta.get('title')}\n"
@@ -378,7 +392,7 @@ async def check(findings: list[dict], action: str, meta: dict, workspace: str,
     try:
         said = await claude_cli.one_shot(
             prompt, cwd=str(repo_dir) if repo_dir and repo_dir.exists() else None, timeout=480,
-            effort="high", plan_only=True, model=VERIFY_MODEL, purpose="review-proof")
+            effort=effort, plan_only=True, model=model, purpose="review-proof")
     except Exception:                                             # noqa: BLE001
         said = ""
     verdicts = _verdicts(said, len(findings))

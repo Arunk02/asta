@@ -3125,6 +3125,13 @@ async def _followup_changed_nothing(task_id: int, t: dict, result: str) -> bool:
     prs = _pr_links(store.get_task(task_id) or t)
     where = (" " + ", ".join(prname.name_links(u) for u in prs) + " is unchanged"
              + (" and still red." if back == "pr_ci_failed" else ".")) if prs else ""
+    if _RETURNED_PLAN.search(result or ""):
+        # The worker stopped at its plan gate — the right move — and that plan is
+        # what he must see, not "nothing to change". 11 Nov, #521: a colleague's P1/P2
+        # fix came back as a plan and was announced as "already in place".
+        await _stage_returned_plan(task_id, store.get_task(task_id) or t, result, back)
+        store.record_outcome("task", "followup_plan_staged", subject=str(task_id), detail=stopped[:200])
+        return True
     if _ALREADY_IN.search(result or ""):
         # Nothing failed: what he asked for is already there. "⚠️ … Say 'fix #419'
         # to try again" was answered "Fix 419" — a 14-minute leg asking what to fix.
@@ -3136,6 +3143,33 @@ async def _followup_changed_nothing(task_id: int, t: dict, result: str) -> bool:
             f"{where} Say 'fix #{task_id}' to try again.", "task")
     store.record_outcome("task", "followup_no_change", subject=str(task_id), detail=stopped[:200])
     return True
+
+
+#: A follow-up that came back as a plan to approve, not as code.
+_RETURNED_PLAN = re.compile(
+    r"\bplan\s+(?:below|above|follows)\b|\bnot\s+(?:yet\s+)?implemented\b|\bplan[\s-]gate\b"
+    r"|\bwaiting\s+(?:for|on)\s+(?:your|arun'?s)\s+(?:approval|yes|go)\b|^\s*STRUCTURE\b", re.I | re.M)
+
+
+async def _stage_returned_plan(task_id: int, t: dict, result: str, back: str) -> None:
+    """Put a plan a follow-up returned at the change gate — and, when he already
+    said go for this task ("plan then go ahead and implement and raise PR"),
+    approve it at once: one yes, his, already given."""
+    from . import go, notify
+    store.kv_set(f"task_proposal:{task_id}", _json.dumps(
+        {"feedback": go.words(task_id) or "", "status": back if back in REFINABLE else "done",
+         "plan": result, "at": time.time()}))
+    store.kv_set(f"task_gate:{task_id}", "change")
+    store.update_task(task_id, status="awaiting_approval")
+    plan = _phone_text(readable_outcome(result), 1800, head_first=True)
+    if go.ships(task_id):
+        await notify.notify(f"📋 #{task_id} {t.get('title', '')} — plan ready; you already said go, "
+                            f"so I'm implementing it now and will raise the PR:\n\n{plan}", "task")
+        await approve(task_id)
+        return
+    await notify.notify(f"📋 #{task_id} {t.get('title', '')} — proposed change (nothing changed yet):"
+                        f"\n\n{plan}\n\nReply *approve task {task_id}* to apply it, or tell me "
+                        f"what to change.", "task")
 
 
 _ALREADY_IN = re.compile(
@@ -4300,10 +4334,17 @@ async def resume_task(task_id: int, switch_to: str = "") -> str:
             # The same session continues instead, as a follow-up does.
             _graph().revisit(task_id, prompt)
             return f"Task #{task_id}: continuing{note} in its own session."
+        waiting = _drain_addenda(task_id)
+        if waiting:
+            # What he said while it was paused rides in now, not at a later gate
+            # that a build leg may never reach.
+            _graph().revisit(task_id, prompt + waiting)
+            return f"Task #{task_id}: resuming{note} with what you added while it was paused."
         # The checkpoint knows where it stopped; the leg that was cut short
         # knows to continue rather than start again (code_graph._leg).
         _graph().carry_on(task_id)
         return f"Task #{task_id}: resuming{note} from its last checkpoint."
+    prompt += _drain_addenda(task_id)
     job = asyncio.create_task(_resume_worker(task_id, prompt, approved=True))
     _running[task_id] = job
     job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
@@ -5631,6 +5672,15 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
         t = store.get_task(task_id)
     if not approved_plan and t["status"] in REFINABLE and _PLAN_FIRST.search(feedback or ""):
         return await propose_change(task_id, feedback)
+    if t["status"] == "paused":
+        # 11 Nov, #521: "cannot be continued (status=paused)" — his follow-up was
+        # refused while the task waited out a usage limit. It is kept, and the
+        # task resumes now if a brain can take it (else when the limit lifts).
+        note = augment(task_id, feedback, code_change=True)
+        try:
+            return f"{note}\n{await resume_task(task_id)}"
+        except ValueError:
+            return note + " It runs when the task resumes."
     if t["status"] not in REFINABLE:
         raise ValueError(f"task #{task_id} cannot be continued (status={t['status']})")
 

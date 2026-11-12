@@ -271,3 +271,11 @@ def test_outcomes_are_read_back_and_scored(monkeypatch):
     assert "1 fixed by the author · 1 disputed" in review_outcomes.score_line()
     assert review_outcomes.disputes("booking")[-1]["reply"] == "not possible, one leg only"
     assert asyncio.run(review_outcomes.sweep()) == 0, "read again only after a while"
+
+
+def test_the_judge_drops_a_point_the_real_data_contradicts_and_a_non_defect():
+    """Replay of the 1538 shape: the real booking had one leg; a 'consistent with
+    existing code' note is not a finding."""
+    brief = review_proof.VERIFY_BRIEF
+    assert "the booking has one\n  leg; the comment needs several" in brief
+    assert "matches how the\n  codebase already does the same thing" in brief

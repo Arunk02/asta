@@ -120,8 +120,8 @@ Hard rules:
   guess at what it contains.
 - ALREADY RAISED (if shown above — Copilot and people): check EACH point against the code.
   One that is true goes in your notes as yours, with its path:line. One that is wrong goes
-  under NOT AN ISSUE with why — it is shown to Arun, never posted. Never APPROVE past an
-  open one without saying why it is wrong.
+  under NOT AN ISSUE with why — it is shown to Arun, never posted.
+  never APPROVE past an open one without saying why it is wrong.
 - End every BLOCKING bullet with `· proof: <what reaches it — caller path:line, a test, the
   docs, the data>`. No proof, not BLOCKING. Every point is checked for proof before it is
   posted; what cannot be proven is asked as a question.
@@ -1000,19 +1000,19 @@ async def post_inline_review(pr: str, workspace: str = "", repo: str = "",
         await post_review(pr, workspace, repo, action, note)
         return (f"Posted the review on PR #{number} as one comment — GitHub would not "
                 f"take the inline ones ({out.strip()[:120]})")
-    await _remember_posted(cwd, target, number, rows + leftover)
+    _remember_posted(out, target, number, rows + leftover)
     verb = {"approve": "Approved", "comment": "Commented on",
             "request_changes": "Requested changes on"}[action]
     return f"{verb} PR #{number} with {len(rows)} inline comment(s)"
 
 
-async def _remember_posted(cwd: Path, target: str, number: str, comments: list[dict]) -> None:
-    """What was posted, on which head — so what the author did with it can be read back."""
+def _remember_posted(posted: str, target: str, number: str, comments: list[dict]) -> None:
+    """What was posted, on which head (the review's own commit_id) — so what the
+    author did with it can be read back."""
     from . import review_outcomes
     try:
-        rc, head = await _gh(cwd, "api", f"repos/{target}/pulls/{number}", "--jq", ".head.sha",
-                             timeout=30)
-        if rc == 0:
-            review_outcomes.record_posted(target, number, head.strip(), comments)
-    except Exception:                                              # noqa: BLE001
-        pass
+        head = (json.loads(posted or "{}") or {}).get("commit_id") or ""
+    except (ValueError, AttributeError):
+        head = ""
+    if head:
+        review_outcomes.record_posted(target, number, head, comments)

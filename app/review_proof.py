@@ -282,7 +282,11 @@ For each numbered comment, decide:
 - unproven — plausible, but nothing shown makes it happen (a shape the flow may never
   produce, an input nobody sends). "Nothing in the code prevents X" is NOT proof that X
   happens.
-- wrong — the code at the PR head, the docs or the real data contradict it.
+- wrong — the code at the PR head, the docs or the real data contradict it: also when the
+  real data or docs show the input it depends on has another shape (the booking has one
+  leg; the comment needs several) and nothing shows the shape it needs ever occurs; and
+  when it is not a defect at all — a "confirm/consider" note, or code that matches how the
+  codebase already does the same thing elsewhere.
 Open the files you need in this repository. Do not change anything.
 
 Reply with ONLY a JSON array, one object per comment, nothing else:

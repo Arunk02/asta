@@ -25,19 +25,18 @@ mkdir -p data/logs ~/Library/LaunchAgents
 
 UID_N=$(id -u)
 
-# The server supervises the WhatsApp bridge as its own child (app/wa_bridge.py,
-# ASTA_WA_SUPERVISE=1 by default) — it starts it, restarts it on crash, and
-# defers if one is already answering. Loading com.asta.whatsapp as well would put
-# two bridges on port 8323. So launchd runs the server and the keep-awake agent;
-# the bridge rides with the server. (com.asta.whatsapp.plist is kept for the
-# alternative model — set ASTA_WA_SUPERVISE=0 and add it here to hand the bridge
-# to launchd instead.)
-SERVICES="com.asta.server com.asta.caffeinate"
-#: also boot these out on `remove`, in case an older install loaded them.
-LEGACY="com.asta.whatsapp"
+# The WhatsApp bridge is its own launchd job, not a child of the server: launchd
+# kills a job's whole process group when it exits, so a child bridge died with a
+# crashed server and its "server down" alert could never be sent. The server
+# sees ~/Library/LaunchAgents/com.asta.whatsapp.plist and stands down its own
+# supervisor (app/wa_bridge.py), so there is never a second bridge on port 8323.
+# Order matters: the bridge plist is copied before anything is reloaded, so the
+# new server never spawns a child; the server is reloaded before the bridge job,
+# so the old server's child (stopped with it) has freed the port first.
+SERVICES="com.asta.server com.asta.whatsapp com.asta.caffeinate"
 
 if [ "$1" = "remove" ]; then
-  for svc in $SERVICES $LEGACY; do
+  for svc in $SERVICES; do
     launchctl bootout "gui/$UID_N/$svc" 2>/dev/null || true
     rm -f ~/Library/LaunchAgents/$svc.plist
   done
@@ -45,14 +44,8 @@ if [ "$1" = "remove" ]; then
   exit 0
 fi
 
-# A previous install may have loaded the bridge as its own service; retire it so
-# it does not fight the server's supervised child for the port.
-for svc in $LEGACY; do
-  launchctl bootout "gui/$UID_N/$svc" 2>/dev/null || true
-  rm -f ~/Library/LaunchAgents/$svc.plist
-done
-
 echo "NOTE: stop any dev instances first (ports 8321/8323 must be free)."
+cp deploy/com.asta.whatsapp.plist ~/Library/LaunchAgents/
 for svc in $SERVICES; do
   cp "deploy/$svc.plist" ~/Library/LaunchAgents/
   # bootout is ASYNCHRONOUS: launchd tears the old job down in the background,

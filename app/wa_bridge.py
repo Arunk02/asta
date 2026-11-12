@@ -15,8 +15,13 @@ a bridge it started itself. If a bridge is already answering on the port (a
 hand-started one, or launchd's), it leaves it alone and just uses it. It never
 kills a process it did not spawn.
 
-Off switch: ASTA_WA_SUPERVISE=0 for when launchd owns the bridge, or when you
-want to run it by hand.
+launchd owns it when deploy/install.sh has installed com.asta.whatsapp: the
+supervisor then stands down entirely (never spawns), because a child dies with
+the server — launchd kills the whole process group on exit — and the bridge's
+"server down" alert could then only ever fire for a hung server, never a crashed
+one. Its own job keeps the bridge (and that alert) alive while the server is not.
+
+Off switch: ASTA_WA_SUPERVISE=0 to run the bridge by hand.
 """
 
 from __future__ import annotations
@@ -37,14 +42,32 @@ CHECK_SECONDS = 20
 BACKOFF_START = 2
 BACKOFF_MAX = 120
 
+#: The bridge's own launchd job, as deploy/install.sh installs it.
+LAUNCHD_LABEL = "com.asta.whatsapp"
+LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+
 _proc: asyncio.subprocess.Process | None = None
 
 
+def launchd_owned() -> bool:
+    """True when the bridge runs as its own launchd job, not as our child."""
+    return LAUNCHD_PLIST.is_file()
+
+
 def enabled() -> bool:
-    """Supervise unless told not to, and only if the bridge is actually present."""
+    """Supervise unless told not to, launchd owns it, or the bridge is absent."""
     if os.environ.get("ASTA_WA_SUPERVISE", "1").lower() in ("0", "false", "no"):
         return False
+    if launchd_owned():
+        return False
     return BRIDGE_JS.is_file()
+
+
+def owner() -> str:
+    """Who keeps the bridge running: launchd, asta (our child), or manual."""
+    if launchd_owned():
+        return "launchd"
+    return "asta" if enabled() else "manual"
 
 
 def _port() -> int:
@@ -131,7 +154,11 @@ async def stop() -> None:
 
 
 def status() -> dict:
-    """For /api/status and health — is a supervised child alive?"""
+    """For /api/status — who owns the bridge, and is our child (if any) alive?
+
+    Whether the bridge actually answers is health's job (notify.wa_status);
+    child_running is only meaningful when owner == "asta".
+    """
     alive = _proc is not None and _proc.returncode is None
-    return {"supervised": enabled(), "child_running": alive,
+    return {"owner": owner(), "supervised": enabled(), "child_running": alive,
             "pid": (_proc.pid if alive else None)}

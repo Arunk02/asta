@@ -247,6 +247,13 @@ def review(days: int = 14, today: dt.date | None = None) -> str:
     sent = [s for d in logs for s in d["sent_as_him"]]
     auto = kinds.get("authority/auto reply", 0) + kinds.get("authority/used", 0)
     lines.append(f"- lines in Teams under his name: {len(sent)}; under a standing permission: {auto}")
+    try:
+        from . import review_outcomes
+        posted = review_outcomes.score_line(min(days, 7))
+    except Exception:                                          # noqa: BLE001
+        posted = ""
+    if posted:
+        lines.append(f"- {posted}")
 
     # 5. Speed and cost.
     total = [float(t["total_ms"]) / 1000 for t in traces if t.get("total_ms")]

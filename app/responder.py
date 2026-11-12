@@ -520,7 +520,8 @@ _BRIEFS = {
         "separately against the current code and say, per point, whether it is a "
         "real defect, already fixed, or mistaken — with the file and line that "
         "settles it. Do not assume the reviewer is right, and do not change any "
-        "code."
+        "code. When a point is that a case cannot happen, settle it with the "
+        "workspace docs or the real data (Temporal), not the shape of the code."
     ),
     "review_request": (
         "{who} is asking Arun to REVIEW their pull request {pr}:\n\n"

@@ -1838,19 +1838,47 @@ def _copilot_quota_down() -> bool:
     return agent_mod.quota_down("copilot")
 
 
+def _review_pr(task_id: int, t: dict):
+    """The PR number a review task is about (a match, group 1), or None."""
+    import json as _j
+    try:
+        ref = _j.loads(store.kv_get(f"review_origin:{task_id}") or "{}").get("ref", "")
+    except ValueError:
+        ref = ""
+    return re.search(r"#(\d{1,7})$", ref) or re.search(r"\bPR\s*#?(\d{2,7})\b",
+                                                      t.get("title") or "", re.I)
+
+
+def staged_review_note(task_id: int, t: dict) -> str:
+    """What a finished review task STAGED, read from the staged offer — '' if none.
+
+    12 Nov: the done note quoted the worker's own summary ("REQUEST CHANGES,
+    2 blocking") while the proof check had staged a comment review with one
+    question. What waits for his yes is the review; the note says that."""
+    from . import offers, review_proof
+    m = _review_pr(task_id, t) if (t.get("title") or "").startswith("Review ") else None
+    o = offers.review_for_pr(m.group(1)) if m else None
+    if o is None:
+        return ""
+    args = (o.op or {}).get("args") or {}
+    comments = args.get("comments") or []
+    blocking = sum(1 for c in comments if c.get("blocking"))
+    action = args.get("action") or ""
+    verdict = {"approve": "APPROVE", "comment": "COMMENT",
+               "request_changes": "REQUEST CHANGES"}.get(action, action.upper() or "?")
+    report = [ln.strip() for ln in (o.context or "").splitlines() if ln.strip()[:1] in ("✓", "?", "✗")]
+    return (f"Staged: {verdict} review — {len(comments)} inline comment(s), {blocking} blocking. "
+            f"{review_proof.tally(report)}\n\n{(o.context or '')[:700]}").strip()
+
+
 def _how_to_post(task_id: int, t: dict) -> str:
     """For a finished review: the words that post IT.
 
     11 Nov: "Review staged on PR 1532 — waiting on your yes"; his "yes" went to
     an older review queued in front (PR 1536), which then failed. A bare yes
     answers the question in front, so a review that is not in front says so."""
-    import json as _j
     from . import offers
-    try:
-        ref = _j.loads(store.kv_get(f"review_origin:{task_id}") or "{}").get("ref", "")
-    except ValueError:
-        ref = ""
-    m = re.search(r"#(\d{1,7})$", ref) or re.search(r"\bPR\s*#?(\d{2,7})\b", t.get("title") or "", re.I)
+    m = _review_pr(task_id, t)
     if not m:
         return ""
     o = offers.review_for_pr(m.group(1))
@@ -3924,7 +3952,8 @@ async def _worker(task_id: int) -> None:
                 return
             if not t.get("teams_chat") and await answers.offer_correction(task_id, t, result):
                 return
-            snippet = result[:400] + ("…" if len(result) > 400 else "")
+            snippet = staged_review_note(task_id, t) \
+                or result[:400] + ("…" if len(result) > 400 else "")
             waste = _audit_note(task_id)
             await notify.notify(
                 f"✅ Task #{task_id} done — {t['title']}\n\n{snippet}\n\n"

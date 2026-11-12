@@ -1339,7 +1339,7 @@ def _pending_reference(tid: str, now: float) -> dict:
     return pending
 
 
-def _resolved_reference(text: str, candidates: list[str]) -> str:
+def _resolved_reference(text: str, candidates: list[str], titles: dict | None = None) -> str:
     body = clean_message(text).strip().lower()
     if re.search(r"\b(?:both|all)\b", body):
         return " and ".join(candidates)
@@ -1352,17 +1352,27 @@ def _resolved_reference(text: str, candidates: list[str]) -> str:
             return candidates[index]
     hits = [c for c in candidates if c.lower() in body or
             re.search(rf"(?<!\d){re.escape(c.rsplit('/', 1)[-1].lstrip('#'))}(?!\d)", body)]
-    return hits[0] if len(hits) == 1 else ""
+    if len(hits) == 1:
+        return hits[0]
+    if titles and not hits:
+        # "the VTS one": answered with the words of a title, not its number.
+        from . import shared_work
+        rows = [{"label": c, "url": c, "title": titles.get(c, "")} for c in candidates]
+        res = shared_work.resolve(clean_message(text), rows)
+        return (res.get("resolved") or {}).get("url", "")
+    return ""
 
 
 async def _clarify_reference(tid: str, c: dict, question: str, options: tuple[str, list[str]],
                              *, original: str, correction_of: int | None = None,
-                             exchange: list[str] | None = None) -> None:
+                             exchange: list[str] | None = None,
+                             titles: dict | None = None) -> None:
     from . import notify, threads
     if await _say(c["chat"], question, since=c.get("sent_at")):
         store.kv_set(_REFERENCE_KEY + tid, json.dumps({
             "at": time.time(), "original": original,
             "candidates": options[1], "correction_of": correction_of,
+            "titles": titles or {}, "question": question,
             "exchange": (exchange or c["conversation"])[-8:]}))
         threads.update(tid, status="clarifying", asked_back=c["asked_back"] + 1,
                        asta_spoke=1, need=original[:200])
@@ -1873,19 +1883,21 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                                 "thread", urgency="direct", considered=True)
             continue
         pending = _pending_reference(tid, now) if c["one_to_one"] else {}
-        reference = _resolved_reference(incoming, pending.get("candidates") or []) \
-            if pending else ""
+        reference = _resolved_reference(incoming, pending.get("candidates") or [],
+                                        pending.get("titles") or None) if pending else ""
         if pending and not reference and responder.what_it_asks(incoming):
             store.kv_del(_REFERENCE_KEY + tid)
             pending = {}
         if pending and not reference:
-            question = _reference_question(pending["original"], pending["exchange"])
+            question = _reference_question(pending["original"], pending["exchange"]) \
+                or pending.get("question", "")
             if c["asked_back"] < MAX_QUESTIONS and question:
                 await _clarify_reference(tid, c, question,
                                          ("", pending["candidates"]),
                                          original=pending["original"],
                                          correction_of=pending.get("correction_of"),
-                                         exchange=pending["exchange"])
+                                         exchange=pending["exchange"],
+                                         titles=pending.get("titles") or None)
             else:
                 from . import notify
                 store.kv_del(_REFERENCE_KEY + tid)
@@ -1898,6 +1910,28 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             store.kv_del(_REFERENCE_KEY + tid)
             state = "ask"
             c["open_need"] = pending["original"]
+        elif not pending and c["one_to_one"] and not ping and state != "closing":
+            # More from them while the answer to their question waits for his
+            # "send": the draft predates it. 12 Nov: their one-line clarification
+            # changed nothing and the stale "merged" draft stayed in front of
+            # him. The old draft goes; the ask is answered again with it.
+            from . import answers as _ans
+            stale = _ans.draft_waiting(tid, incoming)
+            if stale:
+                original = (_ans._meta(stale["id"]).get("source_text")
+                            or _ans._meta(stale["id"]).get("need") or "")
+                _ans.invalidate_answer(stale["id"])
+                store.record_outcome("answer", "re-answer on follow-up", subject=str(stale["id"]),
+                                     detail=f"{who}: {incoming[:160]}")
+                from . import notify as _alerts
+                await _alerts.notify(
+                    f"↪︎ {who.split()[0]} added “{incoming[:200]}” after the draft for task "
+                    f"#{stale['id']} was written — dropped that draft, answering again with it.",
+                    "answer", urgency="fyi", considered=True)
+                pending = {"original": original, "exchange": c["conversation"][-8:]}
+                reference = clean_message(incoming).strip() or incoming
+                state = "ask"
+                c["open_need"] = original
 
         from . import answers as _answers
         corrected = (store.get_task(int(pending["correction_of"]))
@@ -2014,6 +2048,18 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 await _clarify_reference(tid, c, _reference_question(raw, c["conversation"]),
                                          options, original=raw)
                 continue
+            from . import shared_work
+            if shared_work.vague(raw) and c["asked_back"] < MAX_QUESTIONS:
+                # "that X thing" that fits two of the PRs they and Arun share: one
+                # question naming those, not an investigation that picks one.
+                shared = await asyncio.to_thread(shared_work.rows, c["chat"], who)
+                res = shared_work.resolve(raw, shared, who)
+                if shared_work.must_ask(raw, res):
+                    cands = res["candidates"]
+                    await _clarify_reference(tid, c, shared_work.question(cands),
+                                             ("work", [x["url"] for x in cands]), original=raw,
+                                             titles={x["url"]: x.get("title", "") for x in cands})
+                    continue
 
         if state == "status" and c["one_to_one"] \
                 and answering_him(c["chat"], c.get("first_at") or c.get("sent_at")):

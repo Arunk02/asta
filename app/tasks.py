@@ -3127,7 +3127,7 @@ async def _followup_changed_nothing(task_id: int, t: dict, result: str) -> bool:
              + (" and still red." if back == "pr_ci_failed" else ".")) if prs else ""
     if _RETURNED_PLAN.search(result or ""):
         # The worker stopped at its plan gate — the right move — and that plan is
-        # what he must see, not "nothing to change". 11 Nov, #521: Vinish's P1/P2
+        # what he must see, not "nothing to change". 11 Nov, #521: a colleague's P1/P2
         # fix came back as a plan and was announced as "already in place".
         await _stage_returned_plan(task_id, store.get_task(task_id) or t, result, back)
         store.record_outcome("task", "followup_plan_staged", subject=str(task_id), detail=stopped[:200])

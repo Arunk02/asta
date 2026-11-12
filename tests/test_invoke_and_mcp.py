@@ -153,10 +153,11 @@ def test_config_entry_carries_selected_tools_only_when_given():
     assert narrowed["mcpServers"]["asta"]["env"]["ASTA_MCP_TOOLS"] == "teams_activity,remember"
 
 
-def test_claude_command_passes_the_selected_tools_inline(monkeypatch):
-    """The wiring: whatever the selector picks rides into the spawned MCP server as
-    ASTA_MCP_TOOLS. Passed as INLINE JSON (no file on disk) — claude --mcp-config
-    takes strings, matching the Copilot path and leaving nothing to clean up."""
+def test_claude_command_passes_its_tools_inline_and_always_the_full_set(monkeypatch):
+    """Passed as INLINE JSON (no file on disk) — claude --mcp-config takes strings,
+    matching the Copilot path and leaving nothing to clean up. And never narrowed:
+    the tool list leads the prompt, so a per-message selection rewrote the whole
+    cached prefix on 86 of 96 turns (12 Nov) to save ~6k tokens of schemas."""
     from app import claude_cli, tool_index
     monkeypatch.setenv("ASTA_CLI_MCP", "1")
     monkeypatch.setattr(tool_index, "select_sticky", lambda cid, q, k=8: ["teams_activity", "remember"])
@@ -164,6 +165,33 @@ def test_claude_command_passes_the_selected_tools_inline(monkeypatch):
     arg = cmd[cmd.index("--mcp-config") + 1]
     assert not arg.endswith(".json")                           # inline JSON, not a file path
     env = json.loads(arg)["mcpServers"]["asta"]["env"]         # parses as JSON
+    assert "ASTA_MCP_TOOLS" not in env                          # the full set, not the pick
+
+
+def test_claude_tool_prefix_is_the_same_for_different_messages(monkeypatch):
+    """Two unrelated messages in one chat expose the identical tool config, so the
+    second turn reads the cached prefix instead of rewriting it."""
+    from app import claude_cli
+    monkeypatch.setenv("ASTA_CLI_MCP", "1")
+
+    def tools_env(text):
+        cmd = claude_cli._build_cmd({"id": "ctx-same"}, text)
+        env = json.loads(cmd[cmd.index("--mcp-config") + 1])["mcpServers"]["asta"]["env"]
+        return env.get("ASTA_MCP_TOOLS")
+    assert tools_env("what time is it now?") == tools_env("no, cancel that draft") \
+        == tools_env("status of my PRs") is None
+
+
+def test_copilot_keeps_the_narrowed_selection(monkeypatch):
+    """Copilot bills per request, not per cached token: one policy (for_brain),
+    and for it the narrowing stays."""
+    from app import copilot_cli, tool_index
+    monkeypatch.setenv("ASTA_CLI_MCP", "1")
+    monkeypatch.setattr(tool_index, "select_sticky", lambda cid, q, k=8: ["teams_activity", "remember"])
+    assert tool_index.for_brain("copilot_cli", "c", "any teams messages?") == ["teams_activity", "remember"]
+    assert tool_index.for_brain("claude_cli", "c", "any teams messages?") is None
+    cmd = copilot_cli._build_cmd({"id": "ctx3"}, "any teams messages?")
+    env = json.loads(cmd[cmd.index("--additional-mcp-config") + 1])["mcpServers"]["asta"]["env"]
     assert env["ASTA_MCP_TOOLS"] == "teams_activity,remember"
 
 

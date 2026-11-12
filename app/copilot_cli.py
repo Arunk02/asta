@@ -841,7 +841,7 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
         from . import mcp_server, tool_index
         # Same context-aware narrowing as the Claude path (one selector, both
         # brains): the ~handful the message needs, or the full set when ambiguous.
-        selected = tool_index.select_sticky(conv["id"], ranking_text)
+        selected = tool_index.for_brain("copilot_cli", conv["id"], ranking_text)
         cmd += ["--additional-mcp-config",
                 _json.dumps(mcp_server.config_entry(
                     tools=selected, conv_id=conv["id"],

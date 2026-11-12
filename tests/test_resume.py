@@ -282,4 +282,10 @@ def test_the_cli_gives_a_resumed_turn_the_tools_his_ask_needs(monkeypatch):
     cmd = claude_cli._build_cmd({"id": "c-handoff", "model": "claude", "workspace": None},
                                 resume.handoff_prompt(point, "claude_cli"))
     cfg = cmd[cmd.index("--mcp-config") + 1]
+    # Claude gets the full set every turn (tool_index.for_brain), make_file included.
+    assert "ASTA_MCP_TOOLS" not in json.loads(cfg)["mcpServers"]["asta"]["env"]
+    # Copilot still narrows — on his sentence, not the handoff wrapper.
+    cmd = copilot_cli._build_cmd({"id": "c-handoff", "model": "copilot", "workspace": None},
+                                 resume.handoff_prompt(point, "copilot_cli"))
+    cfg = cmd[cmd.index("--additional-mcp-config") + 1]
     assert "make_file" in json.loads(cfg)["mcpServers"]["asta"]["env"]["ASTA_MCP_TOOLS"]

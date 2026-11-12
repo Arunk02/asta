@@ -418,14 +418,13 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     if copilot_cli.mcp_cli_enabled():
         import json as _json
         from . import mcp_server, tool_index
-        # Context-aware: expose the ~handful of tools this message needs (+ the
-        # ALWAYS floor), not all 50 schemas. select_sticky returns None for an
-        # ambiguous message → the full set (safe default), and the floor only for
-        # a conversational one. INLINE JSON, not a file: `claude --mcp-config`
+        # The FULL set, every turn (tool_index.for_brain): the tool list leads
+        # the prompt, and narrowing it per message rewrote the whole ~60k cached
+        # prefix on almost every turn to save ~6k of schemas. INLINE JSON, not a file: `claude --mcp-config`
         # takes "files or strings", so passing the config directly avoids a
         # per-conversation file on disk (each held a copy of the token and leaked
         # when a chat was deleted) and matches the Copilot path exactly.
-        selected = tool_index.select_sticky(conv["id"], ranking_text)
+        selected = tool_index.for_brain("claude_cli", conv["id"], ranking_text)
         cmd += ["--mcp-config", _json.dumps(mcp_server.config_entry(
             tools=selected, conv_id=conv["id"],
             read_only=capabilities.READ_ONLY_TURN.get(),

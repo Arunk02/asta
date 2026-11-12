@@ -401,6 +401,25 @@ def _floor() -> list[str]:
     return sorted(n for n in capabilities.ALWAYS if n in reg)
 
 
+#: Brains billed on prompt-CACHED tokens. Their tool list is the first thing in
+#: every request, so a list that changes per message invalidates the whole
+#: cached prefix. Measured 12 Nov on Claude CLI: 86 of 96 chat turns in a week
+#: rewrote the full ~60k prefix ($0.33 each, even turns under 5 min apart), while
+#: narrowing saved at most ~6k tokens of schemas. Copilot bills per request and
+#: the in-process brains include small local models, so they keep the narrowing.
+CACHED_BRAINS = frozenset({"claude_cli"})
+
+
+def for_brain(brain: str, conv_id: str, query: str) -> list[str] | None:
+    """The tool set a CLI brain gets this turn — one policy for every brain.
+
+    A cached brain gets the full set (None) every turn, so its prefix is
+    byte-stable and a follow-up reads the cache instead of rewriting it."""
+    if brain in CACHED_BRAINS:
+        return None
+    return select_sticky(conv_id, query)
+
+
 def select_sticky(conv_id: str, query: str, k: int = TOP_K) -> list[str] | None:
     picked = select(query, k)
     # Tier 0: nothing ranked AND clearly conversational -> the floor only, not all

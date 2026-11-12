@@ -307,6 +307,18 @@ def note_rejected(intent: dict) -> None:
     store.kv_set(_REJECTED, json.dumps(rows[-10:]))
 
 
+def last_rejected_to() -> str:
+    """Who the draft he most recently said no to was for, or ''."""
+    from . import store
+    try:
+        rows = json.loads(store.kv_get(_REJECTED) or "[]")
+    except ValueError:
+        return ""
+    now = time.time()
+    live = [r for r in rows if now - float(r.get("at") or 0) < REJECTED_SECONDS]
+    return (live[-1].get("to") or "") if live else ""
+
+
 def rejected_again(text: str) -> str:
     """Why these words must not be sent — '' unless they are a draft he said no to.
 

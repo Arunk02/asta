@@ -2081,6 +2081,37 @@ def contradicts_him(said: str, draft: str) -> str:
     return ""
 
 
+def _same_recipient(a: str, b: str) -> bool:
+    a, b = " ".join(a.lower().split()), " ".join(b.lower().split())
+    return a == b or (bool(a) and bool(b) and (a in b or b in a))
+
+
+def _names_recipient(words: str, to: str, to_group: bool) -> bool:
+    """Did his words name `to`? A group by its full name; a person by first name."""
+    w, t = " ".join(words.lower().split()), " ".join(to.lower().split())
+    if t and t in w:
+        return True
+    person = not to_group and len(t.split()) <= 3 and not re.search(r"[-\d,&]", t)
+    first = re.findall(r"[a-z]{3,}", t)[:1]
+    return person and bool(first) and re.search(rf"\b{re.escape(first[0])}\b", w) is not None
+
+
+def _revision_moves_recipient(said: str, to: str, to_group: bool) -> str:
+    """Why this revision may not stage — '' unless it moves the draft to someone
+    he did not name. Only a turn that is his feedback on a waiting draft."""
+    from . import loop, scorecard
+    if not to or not said.strip().lower().startswith("arun did not approve"):
+        return ""
+    was = loop.last_rejected_to()
+    if not was or _same_recipient(was, to):
+        return ""
+    if _names_recipient(scorecard.his_words(said), to, to_group):
+        return ""
+    return (f"Not staged — this revises the draft to {was}, and Arun did not name "
+            f"{to}. A revision keeps its recipient: stage it to {was}, or, if his words "
+            f"were not a change to that draft, stage nothing and just answer him.")
+
+
 def prepare_to_send(what: str, to: str = "", channel: str = "chat",
                     to_group: bool = False) -> str:
     """Stage an outward-facing message for Arun to approve BEFORE it is sent.
@@ -2139,6 +2170,13 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     ruled = policy.check("send", to, asked=bool(to) and to.lower() in said)
     if not ruled.ok:
         return f"Not staged — {ruled.why}. Tell Arun, in one line, that this rule stopped it."
+    # A revision keeps its recipient. 12 Nov: "test after bridge move: reply with
+    # just 'bridge ok'", typed while a colleague's answer was waiting, was taken
+    # as feedback on it and re-staged to a Teams group that shares one word
+    # ("test") with what he typed. Only a recipient he names moves the draft.
+    moved = _revision_moves_recipient(capabilities.said_this_turn(), to, to_group)
+    if moved:
+        return moved
     # A label is not sendable text, even under an automatic-reply permission.
     if _LABEL_NOT_MESSAGE.match(what.strip()) and len(what.strip()) < 140 \
             and not re.search(r"[.?!]\s|\n", what.strip()):

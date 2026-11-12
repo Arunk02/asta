@@ -1662,7 +1662,9 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
         f"Post this review on PR #{number} as you?", kind="pr_write")
     return (f"Staged a {action.replace('_', ' ')} review on PR #{number}: "
             f"{len(findings)} inline comment(s), {len(blocking)} blocking. "
-            f"Waiting for Arun's yes.")
+            + review_proof.tally(proof_report)
+            + "Waiting for Arun's yes. Report the proof check in these words — the points "
+              "it did not prove were asked as questions or dropped on purpose, not lost.")
 
 
 async def review_pr(pr: str, workspace: str = "", repo: str = "") -> str:

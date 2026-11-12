@@ -4708,12 +4708,16 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             # draft. 8 Oct: "Connect with swamy … and clarify" arrived wrapped as
             # draft feedback and came back as a re-worded TEXT; "What swamy told?"
             # came back as "do you want that message sent?".
-            if staged.get("type") == "answer":
-                # A colleague's answer is still owed: it goes back in the queue
-                # and comes up again, rather than vanishing because he asked
-                # something else first (12 Nov: a colleague's reply was lost so).
+            if staged.get("what") and (staged.get("type") == "answer" or staged.get("to")):
+                # Still owed: it goes back in the queue and comes up again, rather
+                # than vanishing because he asked something else first. A
+                # colleague's answer, and a draft he asked for himself (12 Nov: his
+                # "which one bro, 1409 or 1538?" to Vinish was dropped by the next ask).
                 from . import answers as _answers
                 back = {k: v for k, v in staged.items() if k != "_shown"}
+                if back.get("type") != "answer":
+                    back.update(type="answer", his_draft=True, who=back.get("to") or "them",
+                                need=back.get("need") or "the message you asked me to draft")
                 back["_at"] = time.time()      # undated or old reads as stale and is retired
                 _answers._enqueue(back)
                 store.record_outcome("turn", "draft set aside for new ask", subject=cid,

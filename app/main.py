@@ -3714,6 +3714,22 @@ _POST_YES = re.compile(r"\b(?:send|post|submit|publish|go\s+ahead|yes|ok(?:ay)?|
 _POST_NO = re.compile(r"\b(?:don'?t|do\s+not|not\s+yet|hold|wait|cancel|drop|no)\b", re.I)
 
 
+def _review_no_longer_waiting(text: str) -> str | None:
+    """"post PR N" / "PR N post it" when nothing is recorded for N: the PR number.
+
+    Only an order to POST a review counts — "post" with a PR number, short, no
+    negation — and only when no review for it waits; then nothing may improvise one."""
+    t = text or ""
+    if len(t) > 80 or not re.search(r"\b(?:post|send|submit|publish)\b", t, re.I) or _POST_NO.search(t):
+        return None
+    if re.search(r"\b(?:raise|create|open|description|desc|title|link|to\s+\w+)\b", t, re.I):
+        return None          # "send the PR to Priya", "raise PR", "post the PR link" — not a review
+    prs = _pr_numbers(_EXPLICIT_TASK_REF.sub(" ", t))
+    if len(prs) != 1 or offers.review_for_pr(prs[0]) is not None:
+        return None
+    return prs[0]
+
+
 def _named_review(text: str) -> str | None:
     """The PR whose recorded review he just said to post, by naming it or its task."""
     t = text or ""
@@ -4716,6 +4732,19 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             frontdesk.record("command", f"post review PR {named_pr}")
             await _run_staged_op(review, cid, sink, channel)
             return None
+    gone = None if skip_new_gates or named_pr is not None else _review_no_longer_waiting(user_text)
+    if gone:
+        # 12 Nov: "PR 1532 post it" after its review had expired reached a brain,
+        # which posted a summary with none of the points. Nothing recorded, nothing
+        # posted — he is told, and one word gets a fresh review.
+        line = (f"The review of PR {gone} isn't waiting any more (expired, posted, or the PR "
+                f"changed) — nothing was posted. Say “review PR {gone}” for a fresh one.")
+        store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
+        store.add_ui_message(cid, "assistant", line, {"via": "review-gone", "channel": channel})
+        await sink.send({"type": "note", "text": line})
+        if channel == "web":
+            await sink.send({"type": "done", "tools": []})
+        return None
 
     open_offer = None if skip_new_gates else offers.pending()
     if open_offer and (user_text or "").strip():

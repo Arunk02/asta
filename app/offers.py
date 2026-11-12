@@ -52,6 +52,9 @@ from . import store
 KEY = "pending_offer"
 
 
+#: How long a recorded PR review waits for his "post" — unless its PR moves first.
+REVIEW_TTL_SECONDS = 3 * 24 * 3600
+
 #: How long an offer to answer a ringing call stays answerable.
 CALL_OFFER_SECONDS = 120
 
@@ -95,6 +98,11 @@ class Offer:
         ttl = ttl_seconds()
         if ttl <= 0:
             return False
+        if (self.op or {}).get("name") in _REVIEW_OPS:
+            # 12 Nov: a review staged at 22:39 expired at 04:39; his "post PR 1532"
+            # in the morning found nothing and a brain posted a summary instead.
+            # A review is good until its PR moves (pr_authority.stale_reviews_sweep).
+            ttl = max(ttl, REVIEW_TTL_SECONDS)
         return age > ttl
 
     def mechanical(self) -> bool:

@@ -4712,7 +4712,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                 # Still owed: it goes back in the queue and comes up again, rather
                 # than vanishing because he asked something else first. A
                 # colleague's answer, and a draft he asked for himself (12 Nov: his
-                # "which one bro, 1409 or 1538?" to Vinish was dropped by the next ask).
+                # clarifying question to a colleague was dropped by the next ask).
                 from . import answers as _answers
                 back = {k: v for k, v in staged.items() if k != "_shown"}
                 if back.get("type") != "answer":

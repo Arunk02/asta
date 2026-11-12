@@ -464,6 +464,11 @@ async def sweep() -> list[str]:
     except Exception:                                          # noqa: BLE001
         pass
     try:
+        from . import review_outcomes
+        await review_outcomes.sweep()      # what authors did with posted comments
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
         from . import responder
         for t in await responder.github_review_requests():
             notes.append(f"🔎 Review requested on GitHub — task #{t['id']} is reviewing it; "

@@ -1587,7 +1587,7 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
 
     Call this at the end of every review. Notes that stay in your answer reach
     nobody — that is the failure this path exists to fix."""
-    from . import offers, review, capabilities, store
+    from . import offers, review, capabilities, store, review_proof
     import json
     findings = review.parse_findings(notes)
     action = review.verdict_of(notes)
@@ -1599,6 +1599,19 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
         origin = json.loads(store.kv_get(f"review_origin:{task_id}") or "{}") if task_id else {}
     except ValueError:
         origin = {}
+    # Every point is checked for proof before anything is staged or posted —
+    # including a post he granted in advance (12 Nov: PR 1538's two blockers
+    # described plan shapes the flow never produces).
+    proof_report: list[str] = []
+    if findings:
+        try:
+            findings, action, proof_report = await review_proof.check_pr(
+                findings, action, origin.get("ref") or pr, workspace, repo)
+        except (RuntimeError, ValueError) as exc:
+            return f"Not staged: could not read the PR to check each point — {exc}"
+        if not findings and action != "approve":
+            return ("Not staged: every point was disproved by the check —\n"
+                    + "\n".join(proof_report[:10]))
     number, target = review.pr_target(pr)
     if origin:
         if number != origin["ref"].rsplit("#", 1)[-1] or (
@@ -1630,11 +1643,12 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
         return "Not staged: approval needs an open PR with successful CI checks."
     head = (notes or "").strip().splitlines()
     summary = next((line for line in head if line.upper().startswith("VERDICT")), "")
+    said = {"approve": "APPROVE", "comment": "COMMENT", "request_changes": "REQUEST CHANGES"}[action]
+    summary = re.sub(r"^\s*VERDICT:\s*(?:APPROVE|COMMENT|REQUEST[ _]CHANGES)", f"VERDICT: {said}",
+                     summary, flags=re.I) if summary else f"VERDICT: {said}"
     blocking = [f for f in findings if f["blocking"]]
-    preview = "\n".join(f"• {f['path']}:{f['line']} — {f['body'][:110]}"
-                         for f in findings[:6])
-    if len(findings) > 6:
-        preview += f"\n• …and {len(findings) - 6} more"
+    preview = "\n".join(proof_report[:8]) if proof_report else "\n".join(
+        f"• {f['path']}:{f['line']} — {f['body'][:110]}" for f in findings[:6])
     where = f" in {target}" if target else ""
     verb = {"approve": "Approve", "comment": "Comment on",
             "request_changes": "Request changes on"}[action]

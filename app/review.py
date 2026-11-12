@@ -62,6 +62,7 @@ CI:
 
 {context}
 
+{needs}
 {others}DIFF:
 {diff}
 
@@ -100,6 +101,9 @@ TESTS:
 QUESTIONS (only what the diff truly cannot answer):
 - `path:line` — the one thing you need confirmed
 
+NOT AN ISSUE (other reviewers' points that are wrong — shown to Arun, never posted):
+- `path:line` — their point → why it does not hold
+
 Hard rules:
 - ONE point per bullet. Each bullet ≤ 25 words, starts with `path:line`. If it needs a
   paragraph, it is two points.
@@ -114,9 +118,13 @@ Hard rules:
 - Do NOT restate what the diff does — Arun can read it. Nothing a linter would catch.
 - If a file you needed was not in the diff (see any NOTE above), say which, and do not
   guess at what it contains.
-- ALREADY RAISED (if shown above): check each point against the diff. One still true
-  goes in your notes as yours, with its path:line; never APPROVE past an open one
-  without saying why it is wrong.
+- ALREADY RAISED (if shown above — Copilot and people): check EACH point against the code.
+  One that is true goes in your notes as yours, with its path:line. One that is wrong goes
+  under NOT AN ISSUE with why — it is shown to Arun, never posted.
+  never APPROVE past an open one without saying why it is wrong.
+- End every BLOCKING bullet with `· proof: <what reaches it — caller path:line, a test, the
+  docs, the data>`. No proof, not BLOCKING. Every point is checked for proof before it is
+  posted; what cannot be proven is asked as a question.
 
 Then CALL `propose_pr_review` with the pull request and your notes exactly as written
 above. That is what turns a review into comments the author can act on, each on its own
@@ -266,6 +274,16 @@ def _repo_dir(workspace: str, repo: str = "") -> Path:
     if repo:
         return root / (resolve_repo(root, repo) or repo)
     return root
+
+
+def repo_checkout(meta: dict, workspace: str, repo: str = "") -> Path | None:
+    """The local clone of the PR's repository, if the workspace has one."""
+    name = repo or (meta.get("headRepository") or {}).get("name") or ""
+    try:
+        path = _repo_dir(workspace, name) if name else None
+    except (ValueError, RuntimeError, OSError):
+        return None
+    return path if path and (path / ".git").exists() else None
 
 
 def _where(pr: str, workspace: str, repo: str = "") -> tuple[str, list[str], Path]:
@@ -495,8 +513,10 @@ async def brief(pr: str, workspace: str, repo: str = "") -> tuple[str, dict]:
     The PR body and diff are somebody else's writing, so they are wrapped: a
     "please approve this" line in a description is data, not an instruction.
     """
+    from . import review_proof
     meta = await gather(pr, workspace, repo)
     context = _project_context(workspace, meta)
+    needs = await review_proof.needs(meta, workspace, repo_checkout(meta, workspace, repo))
     header = (
         f"PR #{meta['number']}: {meta['title']}\n"
         f"Author: {(meta.get('author') or {}).get('login', '?')} · "
@@ -512,6 +532,7 @@ async def brief(pr: str, workspace: str, repo: str = "") -> tuple[str, dict]:
         files=_fmt_files(meta.get("files") or []),
         checks=_fmt_checks(meta.get("checks") or []),
         context=context,
+        needs=needs,
         others=("ALREADY RAISED by other reviewers (check each — still true?):\n"
                 + untrusted.wrap(meta["others"], f"reviews on PR #{meta['number']}") + "\n\n")
         if meta.get("others") else "",
@@ -777,7 +798,8 @@ _FINDING = re.compile(
 
 #: The headings the brief asks for, and whether a finding under one blocks a merge.
 _SECTIONS = (("BLOCKING", True), ("NON-BLOCKING", False), ("TESTS", False),
-             ("QUESTIONS", False))
+             ("QUESTIONS", False), ("NOT AN ISSUE", False))
+_PROOF = re.compile(r"\s*[·•|]\s*proof:\s*", re.I)
 
 
 def parse_findings(notes: str) -> list[dict]:
@@ -796,15 +818,17 @@ def parse_findings(notes: str) -> list[dict]:
                 section, blocking = name, blocks
                 break
         found = _FINDING.match(raw)
-        if not found:
-            continue
-        body = found.group(3).strip(" -—–").strip()
+        if not found or section == "NOT AN ISSUE":
+            continue                       # shown to him in the notes, never posted
+        parts = _PROOF.split(found.group(3), maxsplit=1)
+        body, proof = parts[0].strip(" -—–").strip(), (parts[1] if len(parts) > 1 else "")
         if not body:
             continue
         if section == "QUESTIONS":
             body = "Question: " + body
         out.append({"path": found.group(1), "line": int(found.group(2)),
-                    "body": body[:1500], "blocking": blocking and section == "BLOCKING"})
+                    "body": body[:1500], "blocking": blocking and section == "BLOCKING",
+                    "proof": proof.strip()[:300]})
     return _one_per_line(out)
 
 
@@ -976,6 +1000,19 @@ async def post_inline_review(pr: str, workspace: str = "", repo: str = "",
         await post_review(pr, workspace, repo, action, note)
         return (f"Posted the review on PR #{number} as one comment — GitHub would not "
                 f"take the inline ones ({out.strip()[:120]})")
+    _remember_posted(out, target, number, rows + leftover)
     verb = {"approve": "Approved", "comment": "Commented on",
             "request_changes": "Requested changes on"}[action]
     return f"{verb} PR #{number} with {len(rows)} inline comment(s)"
+
+
+def _remember_posted(posted: str, target: str, number: str, comments: list[dict]) -> None:
+    """What was posted, on which head (the review's own commit_id) — so what the
+    author did with it can be read back."""
+    from . import review_outcomes
+    try:
+        head = (json.loads(posted or "{}") or {}).get("commit_id") or ""
+    except (ValueError, AttributeError):
+        head = ""
+    if head:
+        review_outcomes.record_posted(target, number, head, comments)

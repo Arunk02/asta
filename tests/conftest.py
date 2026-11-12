@@ -449,3 +449,25 @@ def _no_real_project_knowledge(monkeypatch, tmp_path):
     yield
     project_knowledge._REPOS.clear()
     project_knowledge._VOCAB.update(words=None, at=0.0)
+
+
+@pytest.fixture(autouse=True)
+def _proof_check_passes_through(request, monkeypatch):
+    """The proof check (`review_proof.check_pr`) reads GitHub and asks a model; a test
+    of staging or posting is not a test of that. It has its own tests, which mark
+    themselves `real_proof_check`."""
+    if request.node.get_closest_marker("real_proof_check"):
+        return
+    from app import review_proof
+
+    async def passes(findings, action, pr, workspace, repo=""):
+        return findings, action, []
+    monkeypatch.setattr(review_proof, "check_pr", passes)
+
+    async def no_needs(meta, workspace, repo_dir):
+        return ""
+    monkeypatch.setattr(review_proof, "needs", no_needs)
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "real_proof_check: run the real review proof check")

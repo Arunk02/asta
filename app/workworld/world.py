@@ -596,6 +596,14 @@ class World:
                 if not pr:
                     return 1, f"PR {target}#{number} is not in this scenario"
                 return 0, json.dumps(pr)
+            # A read of GitHub is observed, not sent: the PR, its diff, its checks,
+            # a file at its head (the proof check before a review is staged).
+            a = [str(x) for x in args]
+            if reaches_github and ((len(a) > 2 and a[1] == "pr" and a[2] in ("view", "diff", "checks"))
+                                   or (len(a) > 1 and a[1] == "api"
+                                       and not {"--method", "-X", "--input"} & set(a))):
+                self.observed.append({"tool": "github_read", "query": cmd})
+                return 0, ""
             self.sent.append({"door": "git", "cmd": cmd, "repo": str(cwd),
                               "body": stdin[:2000]})
             if "gh pr create" in cmd:
@@ -693,6 +701,12 @@ class World:
                 return out
 
             async def one_shot(prompt, **kw):
+                if kw.get("purpose") == "review-proof":
+                    # The proof check before a review is staged. A scenario is about
+                    # the flow, so its points stand; the judging has its own tests.
+                    count = len(re.findall(r"^\d+\. `", prompt or "", re.M))
+                    return json.dumps([{"n": i, "verdict": "proven", "proof": "scenario"}
+                                       for i in range(1, count + 1)])
                 return await task.answer(prompt, flags=kw)
 
             for mod in (claude_cli, copilot_cli):

@@ -398,3 +398,15 @@ async def check_pr(findings: list[dict], action: str, pr: str, workspace: str,
         return findings, action, []
     meta = await review.gather(pr, workspace, repo)
     return await check(findings, action, meta, workspace, review.repo_checkout(meta, workspace, repo))
+
+
+def tally(report: list[str]) -> str:
+    """'Proof check: 2 proven, 2 asked as questions, 1 dropped. ' — or '' when none ran."""
+    proven = sum(1 for r in report if r.startswith("✓"))
+    asked = sum(1 for r in report if r.startswith("?"))
+    dropped = sum(1 for r in report if r.startswith("✗"))
+    if not (proven or asked or dropped):
+        return ""
+    parts = [f"{proven} proven"] + ([f"{asked} asked as questions"] if asked else []) \
+        + ([f"{dropped} dropped"] if dropped else [])
+    return "Proof check: " + ", ".join(parts) + ". "

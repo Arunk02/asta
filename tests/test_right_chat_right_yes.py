@@ -1290,3 +1290,18 @@ def test_a_colleague_answer_is_set_aside_not_lost_when_he_asks_something_else(mo
     back = [i for i in answers._load_queue() if i.get("to") == "Fake Colleague"]
     assert back and back[0]["what"] == "Checked both — the first one stands."
     assert back[0]["type"] == "answer" and "_shown" not in back[0]
+
+
+def test_a_draft_he_asked_for_is_set_aside_too_not_dropped(monkeypatch, told):
+    """12 Nov: his clarifying draft to a colleague was dropped by his next ask."""
+    prompts: list[str] = []
+    monkeypatch.setattr(main, "_start_turn", lambda c, text, s, ch: prompts.append(text))
+    conv = _conv()
+    loop.stage(conv["id"], {"kind": "send", "what": "which one bro, A or B?", "to": "Fake Colleague",
+                            "channel": "teams", "to_group": False})
+    asyncio.run(main._dispatch(
+        conv, "review this PR https://example.test/org/repo/pull/7", _Sink(), "whatsapp"))
+    assert prompts and "set aside" in prompts[0]
+    back = [i for i in answers._load_queue() if i.get("to") == "Fake Colleague"]
+    assert back and back[0]["what"] == "which one bro, A or B?" and back[0]["his_draft"]
+    assert answers.origin_allowed({**back[0], "to_group": True}), "his ask is its origin"

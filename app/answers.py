@@ -634,8 +634,8 @@ def moved_on(chat: str, since: float) -> str:
 
 def origin_allowed(intent: dict) -> bool:
     """A bot-generated group answer must still come from an addressed message."""
-    if not intent.get("to_group"):
-        return True
+    if not intent.get("to_group") or intent.get("his_draft"):
+        return True                    # a draft he asked for has his ask as its origin
     from . import chat_watch, policy
     source_text = intent.get("source_text")
     if not isinstance(source_text, str) or not chat_watch.mentions_him(source_text):

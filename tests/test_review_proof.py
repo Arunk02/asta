@@ -279,3 +279,10 @@ def test_the_judge_drops_a_point_the_real_data_contradicts_and_a_non_defect():
     brief = review_proof.VERIFY_BRIEF
     assert "the booking has one\n  leg; the comment needs several" in brief
     assert "matches how the\n  codebase already does the same thing" in brief
+
+
+def test_the_staging_reply_says_what_the_proof_check_did(monkeypatch):
+    said = _stage(monkeypatch, [{"n": 1, "verdict": "proven", "proof": "caller A:9"},
+                                {"n": 2, "verdict": "wrong", "proof": "one date per leg"}])
+    assert "Proof check: 1 proven, 1 dropped." in said and "not lost" in said
+    assert review_proof.tally([]) == ""

@@ -146,9 +146,17 @@ def rows(chat: str, who: str, now: float | None = None, lookups: int = MAX_LOOKU
                                         "state": t.get("status") or "", "task": t["id"],
                                         "at": created}
     if chat:
-        for r in store.teams_messages(chat=chat, since=since, limit=600):
-            for m in _PR_LINK.finditer(r.get("text") or ""):
-                _pr(m.group(1), m.group(2), m.group(3), float(r.get("sent_at") or 0))
+        # Newest first, this 1:1 only. store.teams_messages returns the OLDEST rows
+        # up to its limit and matches chat names loosely (group titles too): a busy
+        # chat's links from today never made it in (12 Nov replay).
+        with store._connect() as conn:
+            linked = conn.execute(
+                "SELECT text, sent_at FROM teams_messages WHERE lower(chat) = ? AND sent_at >= ? "
+                "AND text LIKE '%/pull/%' ORDER BY sent_at DESC LIMIT 200",
+                (chat_l, since)).fetchall()
+        for text, sent_at in linked:
+            for m in _PR_LINK.finditer(text or ""):
+                _pr(m.group(1), m.group(2), m.group(3), float(sent_at or 0))
     for row in found.values():
         ref = row.pop("_ref", None)
         if not ref or (row["title"] and row["state"]):
@@ -162,7 +170,9 @@ def rows(chat: str, who: str, now: float | None = None, lookups: int = MAX_LOOKU
         if d:
             row["title"] = row["title"] or d.get("title", "")
             row["state"] = row["state"] or d.get("state", "")
-    ordered = sorted(found.values(), key=lambda r: (bool(r["title"]), r["at"]), reverse=True)
+    # PRs first (what "that X thing" usually is), newest first; then tasks.
+    ordered = sorted(found.values(), key=lambda r: (r["url"].startswith("http"), r["at"]),
+                     reverse=True)
     return ordered[:MAX_ROWS]
 
 
@@ -309,8 +319,9 @@ def remember(task_id: int, text: str, res: dict) -> None:
 
 
 def for_brief(chat: str, who: str, text: str) -> tuple[str, dict]:
-    """The brief block and the resolution, for one colleague ask."""
-    shared = rows(chat, who)
+    """The brief block and the resolution, for one colleague ask. No gh here: this
+    runs on the event loop; chat_watch warms the title cache off it first."""
+    shared = rows(chat, who, lookups=0)
     res = resolve(text, shared, who)
     return block(who, shared, res, text), res
 

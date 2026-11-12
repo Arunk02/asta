@@ -2049,10 +2049,12 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                                          options, original=raw)
                 continue
             from . import shared_work
+            # Off the event loop: reads titles of newly linked PRs with gh and
+            # caches them for the brief the responder builds next.
+            shared = await asyncio.to_thread(shared_work.rows, c["chat"], who)
             if shared_work.vague(raw) and c["asked_back"] < MAX_QUESTIONS:
                 # "that X thing" that fits two of the PRs they and Arun share: one
                 # question naming those, not an investigation that picks one.
-                shared = await asyncio.to_thread(shared_work.rows, c["chat"], who)
                 res = shared_work.resolve(raw, shared, who)
                 if shared_work.must_ask(raw, res):
                     cands = res["candidates"]

@@ -2811,7 +2811,8 @@ async def _self_review(task_id: int, t: dict, result: str) -> str:
     if not notes:
         return ""
     stat = " · ".join(f"{name}: {s.splitlines()[-1].strip()}" for name, s, _ in diffs)
-    who = f"{other} read the diff" if other else "I read my own diff"
+    who = ("a fresh Claude session read the diff" if other == "claude"
+           else f"{other} read the diff" if other else "I read my own diff")
     return f"\n\n🔍 {who} ({stat}):\n{clip.clip(notes, 900)}"
 
 
@@ -2821,6 +2822,12 @@ def _second_reviewer(task_id: int) -> str:
     ASTA_CROSS_REVIEW=0 keeps the old single-model self-review."""
     if os.environ.get("ASTA_CROSS_REVIEW", "1").strip().lower() in ("0", "false", "no", "off"):
         return ""
+    # Claude is the primary brain, the reader included (12 Nov: Copilot read a
+    # Claude diff and its raw thinking — "The user wants me to review…" — went
+    # to his phone as the review). A fresh Claude session, read-only, is the
+    # second pair of eyes; Copilot only when Claude cannot take it.
+    if _can_take_over("claude"):
+        return "claude"
     writer = _resolve_executor(task_id)
     return next((b for b in _SIMPLE_BRAINS if b != writer and _can_take_over(b)), "")
 
@@ -5593,6 +5600,31 @@ async def _reopen_merged(task_id: int, t: dict) -> None:
     store.record_outcome("task", "reopened after merge", subject=str(task_id), detail=branch)
 
 
+def _keep_earlier_result(task_id: int, result: str) -> None:
+    """The answer a continuation is about to replace, kept (last 5) — a follow-up
+    must never cost the finding it builds on."""
+    if not (result or "").strip():
+        return
+    try:
+        kept = _json.loads(store.kv_get(f"task_results:{task_id}") or "[]")
+    except ValueError:
+        kept = []
+    if not isinstance(kept, list):
+        kept = []
+    if kept and kept[-1].get("result") == result:
+        return
+    kept.append({"at": time.time(), "result": result[:20000]})
+    store.kv_set(f"task_results:{task_id}", _json.dumps(kept[-5:]))
+
+
+def earlier_results(task_id: int) -> list[dict]:
+    try:
+        kept = _json.loads(store.kv_get(f"task_results:{task_id}") or "[]")
+    except ValueError:
+        return []
+    return kept if isinstance(kept, list) else []
+
+
 async def continue_finished(task_id: int, followup: str, *, record_asked: bool = True) -> str:
     """A finished analysis or draft, carried on with his follow-up — same task.
 
@@ -5612,7 +5644,13 @@ async def continue_finished(task_id: int, followup: str, *, record_asked: bool =
         first = t["prompt"]
         store.kv_set(f"task_prompt0:{task_id}", first)
     said = (followup or "").strip().lstrip("-—:,. ").strip()
-    prompt = (f"{first}\n\nYOUR PREVIOUS ANSWER ON THIS TASK:\n{(t.get('result') or '')[:6000]}"
+    # He names the task by its number; the worker never knew its own number, so
+    # "what did task 559 find?" got "No task 559 exists" (12 Nov).
+    said = re.sub(rf"\b(?:task\s*)?#\s*{task_id}\b|\btask\s*{task_id}\b", "this task",
+                  said, flags=re.I)
+    previous = t.get("result") or ""
+    _keep_earlier_result(task_id, previous)
+    prompt = (f"{first}\n\nTHIS IS TASK #{task_id}. YOUR PREVIOUS ANSWER ON IT:\n{previous[:6000]}"
               f"\n\nARUN'S FOLLOW-UP — answer this, building on the previous answer "
               f"rather than redoing it:\n{said}")
     store.update_task(task_id, prompt=prompt, status="running", error="")

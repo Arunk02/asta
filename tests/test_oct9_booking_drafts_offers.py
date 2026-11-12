@@ -131,6 +131,17 @@ def test_a_booking_the_draft_never_named_is_a_new_ask(text, moves_on):
     assert main._moves_on_from_draft(text, KOMAL_DRAFT) is moves_on
 
 
+@pytest.mark.parametrize("text, moves_on", [
+    ("open https://example.test/org/repo/actions in the browser and tell me if develop passed", True),
+    ("open jira ABC-1234 and tell me its status", True),
+    ("add this link https://example.test/pr/9 to it", False),     # put INTO the draft
+    ("make it shorter, ABC-1234 is fine to mention", False),
+])
+def test_a_link_or_ticket_the_draft_never_named_is_a_new_ask(text, moves_on):
+    """12 Nov: a browser ask typed under a colleague's draft was read as feedback."""
+    assert main._moves_on_from_draft(text, KOMAL_DRAFT) is moves_on
+
+
 # --- 3. a call is asked, not the offer he moved on from -----------------------------
 
 def _vinish_offer():

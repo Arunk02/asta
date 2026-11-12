@@ -1275,3 +1275,18 @@ def test_every_inline_page_script_compiles_too(tmp_path):
                 bad.append(f"{py.relative_to(root.parent)}:{node_.lineno}: {out.stderr.strip().splitlines()[-1][:120]}")
     assert checked >= 20
     assert not bad, "page scripts that do not compile:\n" + "\n".join(bad)
+
+
+def test_a_colleague_answer_is_set_aside_not_lost_when_he_asks_something_else(monkeypatch, told):
+    """12 Nov: a browser ask typed under a colleague's waiting answer dropped it."""
+    prompts: list[str] = []
+    monkeypatch.setattr(main, "_start_turn", lambda c, text, s, ch: prompts.append(text))
+    conv = _conv()
+    _stage(conv["id"], "Fake Colleague", "Checked both — the first one stands.")
+    asyncio.run(main._dispatch(
+        conv, "open https://example.test/org/repo/actions and tell me if develop passed",
+        _Sink(), "whatsapp"))
+    assert prompts and "set aside" in prompts[0] and "did NOT approve" not in prompts[0]
+    back = [i for i in answers._load_queue() if i.get("to") == "Fake Colleague"]
+    assert back and back[0]["what"] == "Checked both — the first one stands."
+    assert back[0]["type"] == "answer" and "_shown" not in back[0]

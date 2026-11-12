@@ -550,6 +550,31 @@ def test_the_diff_is_reviewed_by_the_brain_that_did_not_write_it(monkeypatch):
     assert tasks._second_reviewer(1) == ""
 
 
+def test_claude_reads_a_claude_diff_and_copilot_only_when_claude_is_out(monkeypatch):
+    monkeypatch.setattr(tasks, "_resolve_executor", lambda tid: "claude")
+    monkeypatch.setattr(tasks, "_can_take_over", lambda b: True)
+    assert tasks._second_reviewer(1) == "claude"
+    monkeypatch.setattr(tasks, "_can_take_over", lambda b: b == "copilot")
+    assert tasks._second_reviewer(1) == "copilot"
+
+
+def test_a_model_narrating_its_task_is_not_sent_as_the_review(monkeypatch):
+    from app import memory, review
+
+    async def narrates(prompt, **kw):
+        return ("The user wants me to review a code change (a diff) based on provided "
+                "project context.\n\n**Project Context Summary:** …")
+
+    async def cheap(prompt, *a, **k):
+        return "- the ONE_WAY_FULL case is no longer asserted"
+
+    monkeypatch.setattr(claude_cli, "one_shot", narrates)
+    monkeypatch.setattr(memory, "cheap_complete", cheap)
+    diff = "diff --git a/x.py b/x.py\n+retention = 90\n" * 3
+    assert asyncio.run(review.review_own_diff(diff, reviewer="claude")) == \
+        "- the ONE_WAY_FULL case is no longer asserted"
+
+
 def test_the_second_brain_reviews_read_only_and_a_failure_falls_back(monkeypatch):
     from app import memory, review
     seen: dict = {}

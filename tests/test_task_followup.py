@@ -84,6 +84,35 @@ def test_a_second_follow_up_builds_on_the_original_ask_not_a_nested_prompt():
     assert "Second answer." in prompt and "second question" in prompt and "first question" not in prompt
 
 
+def test_what_it_found_reads_the_result_instead_of_rerunning(monkeypatch):
+    t = _analysis()
+    sink, started, ran, _ = _dispatch(
+        f"what did task {t['id']} find? give me the root cause in 3 lines", monkeypatch)
+    assert not ran and started, "answered from the result, the task is not re-run"
+    assert store.get_task(t["id"])["status"] == "done"
+    assert store.get_task(t["id"])["result"] == "The workflow code has not changed since August."
+
+
+def test_a_recap_with_more_work_still_continues(monkeypatch):
+    t = _analysis()
+    _, _, ran, _ = _dispatch(f"task {t['id']} - summarise it, then what if the same issue happens again in future", monkeypatch)
+    assert ran == [t["id"]]
+
+
+def test_the_worker_is_told_its_own_number_and_the_old_answer_is_kept():
+    t = _analysis()
+
+    async def go():
+        await tasks.continue_finished(t["id"], f"why did task {t['id']} rule out the activity?")
+        await asyncio.sleep(0)
+    asyncio.run(go())
+    prompt = store.get_task(t["id"])["prompt"]
+    assert f"THIS IS TASK #{t['id']}" in prompt
+    assert f"task {t['id']}" not in prompt.split("FOLLOW-UP", 1)[1] and "why did this task" in prompt
+    kept = tasks.earlier_results(t["id"])
+    assert kept and kept[-1]["result"] == "The workflow code has not changed since August."
+
+
 def test_a_cancelled_code_task_is_still_not_continued(monkeypatch):
     t = store.create_task("Skip the tracker call", "code", "p", "ws")
     store.update_task(t["id"], status="cancelled")

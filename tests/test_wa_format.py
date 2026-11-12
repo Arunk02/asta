@@ -408,3 +408,20 @@ def test_the_suite_cannot_reach_his_phone():
 
     assert notify.bridge_url() == "http://127.0.0.1:9"      # a closed port
     assert telegram.enabled() is False
+
+
+def test_a_markdown_table_reaches_whatsapp_as_lines():
+    """12 Nov: a PR-status table arrived on his phone as raw pipes and dashes."""
+    from app import wa_format
+    got = wa_format.for_whatsapp(
+        "Your PRs:\n\n| PR | CI | Review |\n|---|---|---|\n"
+        "| **1523** avro | green | required |\n| 1486 RFP | green | **CONFLICTING** |")
+    assert "|" not in got
+    assert "_PR — CI · Review_" in got
+    assert "• *1523* avro — green · required" in got and "• 1486 RFP — green · *CONFLICTING*" in got
+
+
+def test_pipes_in_a_fence_or_a_sentence_are_left_alone():
+    from app import wa_format
+    got = wa_format.for_whatsapp("```\n| a | b | c |\n```\nsay a | b to me")
+    assert "| a | b | c |" in got and "say a | b to me" in got

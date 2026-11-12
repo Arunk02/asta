@@ -2385,7 +2385,18 @@ def _moves_on_from_draft(text: str, draft: str = "") -> bool:
     if named and not _STARTS_AS_EDIT.match(text) \
             and not named & (_subjects(draft) | set(re.findall(r"\d{2,6}", draft or ""))):
         return True
+    # A link or a ticket the draft never mentions is something else he wants
+    # done. 12 Nov: "open https://github.com/…/actions … tell me if develop
+    # passed", typed under a colleague's draft, went to the brain as feedback on it.
+    elsewhere = set(_URL.findall(text)) | set(_TICKET.findall(text))
+    if elsewhere and not _STARTS_AS_EDIT.match(text) and not _EDITS_A_DRAFT.search(text) \
+            and not any(e in (draft or "") for e in elsewhere):
+        return True
     return bool(_ASKS_WHAT_HAPPENED.search(text)) and not _EDITS_A_DRAFT.search(text)
+
+
+_URL = re.compile(r"https?://\S+")
+_TICKET = re.compile(r"\b[A-Z][A-Z0-9]{1,14}-\d{1,7}\b")
 
 
 #: Words that put Asta in front of a bare "sent to …".
@@ -4697,11 +4708,24 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             # draft. 8 Oct: "Connect with swamy … and clarify" arrived wrapped as
             # draft feedback and came back as a re-worded TEXT; "What swamy told?"
             # came back as "do you want that message sent?".
-            store.record_outcome("turn", "draft dropped for new ask", subject=cid,
-                                 detail=user_text[:200])
-            prompt = (f"{user_text.strip()}\n\n(The draft to {staged.get('to') or 'them'} "
-                      f"that was waiting is dropped — he moved on to this. Do not stage it "
-                      f"again unless he asks.)")
+            if staged.get("type") == "answer":
+                # A colleague's answer is still owed: it goes back in the queue
+                # and comes up again, rather than vanishing because he asked
+                # something else first (12 Nov: a colleague's reply was lost so).
+                from . import answers as _answers
+                back = {k: v for k, v in staged.items() if k != "_shown"}
+                back["_at"] = time.time()      # undated or old reads as stale and is retired
+                _answers._enqueue(back)
+                store.record_outcome("turn", "draft set aside for new ask", subject=cid,
+                                     detail=user_text[:200])
+                prompt = (f"{user_text.strip()}\n\n(The draft to {staged.get('to') or 'them'} "
+                          f"is set aside — it waits and comes up again. Do not stage it now.)")
+            else:
+                store.record_outcome("turn", "draft dropped for new ask", subject=cid,
+                                     detail=user_text[:200])
+                prompt = (f"{user_text.strip()}\n\n(The draft to {staged.get('to') or 'them'} "
+                          f"that was waiting is dropped — he moved on to this. Do not stage it "
+                          f"again unless he asks.)")
         else:
             # "Revise accordingly" is one reading. "enable MX … in develop and
             # 3.1.6" typed at a waiting draft was a new instruction, and the
@@ -5056,7 +5080,8 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     # normal answer, which reads the result as it is.
     finished = store.get_task(explicit) if explicit is not None else None
     if finished and finished["kind"] != "code" and finished["status"] in ("done", "failed") \
-            and not _JUST_THE_RESULT.match(_strip_task_ref(user_text)):
+            and not _JUST_THE_RESULT.match(_strip_task_ref(user_text)) \
+            and not _asks_what_it_found(user_text):
         note = await tasks.continue_finished(explicit, _strip_task_ref(user_text))
         store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
         store.add_ui_message(cid, "assistant", note, {"via": "task-continue", "channel": channel})
@@ -5335,6 +5360,26 @@ _JUST_THE_RESULT = re.compile(
     r"^[\s:,.—-]*(?:(?:the|its|whats|what's|what is|show|send|give|share)\s+){0,2}"
     r"(?:result|results|output|answer|summary|status|update|findings)\b"
     r"(?:\s+(?:pls|please|plz|now|again|here))?[\s?.!]*$", re.I)
+
+
+#: "what did task 559 find? give me the root cause in 3 lines" — a recap of what
+#: the task already found, read from its result. 12 Nov: that question re-ran task
+#: 559, whose brain answered "No task 559 exists" over its own finding.
+_WHAT_IT_FOUND = re.compile(
+    r"\bwhat\s+(?:did|has|was)\s+(?:it|this|that|the\s+task)?\s*(?:find|found|conclude|say|"
+    r"come\s+up\s+with)\b|\b(?:the\s+)?(?:result|findings?|root\s*cause|summary|conclusion)\s+"
+    r"(?:of|from)\s+(?:it|this|that|the\s+task)?\b|\b(?:summari[sz]e|recap|tl;?dr)\b|"
+    r"\bin\s+(?:\d|one|two|three|a\s+few)\s+(?:lines?|points?|bullets?)\b", re.I)
+#: …unless he asks for more work in the same breath.
+_MORE_WORK = re.compile(
+    r"\b(?:check|re-?check|dig|debug|verify|investigate|look\s+(?:again|into|at)|again|"
+    r"fix|change|implement|what\s+if|how\s+(?:to|do|can|would)|compare|also|add)\b", re.I)
+
+
+def _asks_what_it_found(text: str) -> bool:
+    """A question that only recaps a finished task's answer — no new digging."""
+    t = text or ""
+    return len(t) <= 200 and bool(_WHAT_IT_FOUND.search(t)) and not _MORE_WORK.search(t)
 
 
 _EXPLICIT_TASK_REF = re.compile(r"(?:\btask\s*#?\s*|(?:^|[\s(\[])#)(\d{1,5})\b", re.I)

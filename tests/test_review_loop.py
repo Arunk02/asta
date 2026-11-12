@@ -24,10 +24,13 @@ NEW = REF + "@" + "b" * 40 + ":f2"
 
 @pytest.fixture
 def pr_head(monkeypatch):
-    state = {"head": OLD, "spawned": []}
+    state = {"head": OLD, "spawned": [], "state": "OPEN"}
 
     async def revision(pr):
         return state["head"], True
+
+    async def revision_and_state(pr):
+        return state["head"], True, state["state"]
 
     async def brief(pr, ws="", repo=""):
         return "BRIEF", {"state": "OPEN", "author": {"login": "priya"}}
@@ -37,9 +40,18 @@ def pr_head(monkeypatch):
         state["spawned"].append((t["id"], prompt))
         return t
     monkeypatch.setattr(review, "revision", revision)
+    monkeypatch.setattr(review, "revision_and_state", revision_and_state)
     monkeypatch.setattr(review, "brief", brief)
     monkeypatch.setattr(tasks, "spawn", spawn)
     return state
+
+
+def test_a_merged_pr_is_not_watched_any_more(pr_head):
+    """12 Nov: PR 1536 merged and stayed on the watch list for its full week."""
+    pr_authority.watch_after_post(URL, "request_changes", OLD)
+    pr_head["state"] = "MERGED"
+    assert asyncio.run(pr_authority.watch_sweep()) == [] and not pr_head["spawned"]
+    assert not store.kv_like(pr_authority.WATCH + "%")
 
 
 def test_a_review_with_findings_waits_for_the_authors_fix(pr_head):

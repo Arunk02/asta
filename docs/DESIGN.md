@@ -1337,7 +1337,9 @@ sh deploy/install.sh        # remove with: sh deploy/install.sh remove
 ```
 
 Installs `com.asta.server` and `com.asta.whatsapp` as user LaunchAgents: start at
-login, auto-restart on crash, logs in `data/logs/`. The server runs under
+login, auto-restart on crash, logs in `data/logs/`. The bridge is its own job, not
+the server's child, so it survives a server crash and can tell you the server is
+down (after 5 min); the server sees the installed plist and never spawns a bridge. The server runs under
 `caffeinate -si`, which prevents system sleep **on AC power** — screen off, locked,
 lid open, it keeps working.
 

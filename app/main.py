@@ -247,9 +247,9 @@ async def startup() -> None:
     daemon.start("delivery_chase", delivery.chase_loop)
     daemon.start("delivery_flush", delivery.flush_loop)
     daemon.start("learning", _learning_loop)
-    # The WhatsApp bridge is a child of Asta's lifecycle now, not a manual step:
-    # it starts with the server and is restarted on crash, so "no bridge" stops
-    # being the default after every restart.
+    # The WhatsApp bridge runs as its own launchd job when installed (so it, and
+    # its "server down" alert, outlive a server crash); otherwise it is our child:
+    # started with the server and restarted on crash.
     if wa_bridge.enabled():
         asyncio.create_task(wa_bridge.supervise())
 

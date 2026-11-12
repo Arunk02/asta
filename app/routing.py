@@ -156,6 +156,46 @@ def _cell(brain: str, tier: int) -> tuple[str, str]:
     return _TABLE.get(brain, {}).get(tier, ("", ""))
 
 
+# --- chat turns ----------------------------------------------------------------------
+# 12 Nov: a chat turn cost ~$0.33 — ~80k tokens of resumed session re-read for
+# every message, "who messaged me" included. A read of what Asta already holds
+# needs neither the long session nor the deep model: it runs at T1, in a one-off
+# session with the last few lines of the conversation. Deep work keeps the full one.
+
+#: Questions that READ state: messages, PR/task status, a task's result.
+_LIGHT_READ = re.compile(
+    r"^\W*(?:(?:hey\s+|hi\s+|ok\s+)?asta\W+)?(?:"
+    r"who\s+(?:all\s+)?(?:messaged|pinged|mailed|called|wrote\s+to|tagged|mentioned)\s+me"
+    r"|(?:any(?:thing)?|new)\s+(?:new\s+)?(?:messages?|pings?|mails?|emails?)\b"
+    r"|what(?:'s|\s+is|\s+are)\s+(?:the\s+)?status\s+of\s+(?:my\s+|the\s+)?(?:open\s+)?"
+    r"(?:prs?|pull\s+requests?|tasks?)\b"
+    r"|status\s+of\s+(?:my\s+|the\s+)?(?:open\s+)?(?:prs?|pull\s+requests?|tasks?)\b"
+    r"|(?:my\s+)?open\s+prs?\b"
+    r"|task\s*#?\s*\d{1,5}\s+(?:result|status|update|findings?)\b"
+    r"|what\s+did\s+task\s*#?\s*\d{1,5}\s+(?:find|conclude|say)\b"
+    r"|what(?:'s|\s+is)\s+(?:still\s+)?pending\b)", re.I)
+#: An order anywhere in it makes it work, not a read: "…and send it to Priya".
+_ORDER = re.compile(
+    r"(?:^|[.;!?]\s*|\b(?:and|then|also|pls|please)\s+)"
+    r"(?:fix|send|post|approve|merge|raise|implement|draft|reply|tell|ping|review|open|create|"
+    r"delete|close|run|deploy|change|update|add|remove|rerun|retry|cancel|stop|investigate|"
+    r"debug|check|ask|share|forward|comment|push|commit)\b", re.I)
+
+
+def chat_light(text: str) -> bool:
+    """A short read of what Asta holds, with no order in it."""
+    t = (text or "").strip()
+    return 0 < len(t) <= 200 and bool(_LIGHT_READ.search(t)) and not _ORDER.search(t)
+
+
+def chat_choice(brain: str, text: str) -> Choice | None:
+    """T1 for a light read on Claude; None = the full session at his chosen model."""
+    if not brain.startswith("claude") or not chat_light(text):
+        return None
+    model, effort = _cell("claude", T1)
+    return Choice(T1, model, effort, "a read of what Asta already holds")
+
+
 def _key(task_id: int) -> str:
     return f"task_tier:{task_id}"
 

@@ -994,6 +994,9 @@ def test_voice_context_cap_is_below_the_slow_recorded_prompt(monkeypatch):
     monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "100000")
     assert main.session_max_tokens("voice") == 24000
     assert main.session_max_tokens("whatsapp") == 100000
+    monkeypatch.delenv("ASTA_SESSION_MAX_TOKENS")
+    assert main.session_max_tokens("whatsapp") == 70000
+    monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "100000")
     monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "16000")
     assert main.session_max_tokens("voice") == 16000
     monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "0")

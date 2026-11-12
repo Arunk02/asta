@@ -321,3 +321,59 @@ def test_the_mcp_server_starts_from_any_directory():
     from app import mcp_server
     entry = mcp_server.config_entry(conv_id="c")["mcpServers"][mcp_server.SERVER_NAME]
     assert entry["env"]["PYTHONPATH"] == str(mcp_server.ROOT)
+
+
+# --- 12 Nov: light reads run at T1 in a one-off session -------------------------------
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("text", [
+    "who messaged me today on teams? anything i need to reply to?",
+    "what's the status of my open PRs in booking service? which ones are blocked",
+    "what did task 12 find? give me the root cause in 3 lines",
+    "task 12 result",
+    "any new messages?",
+])
+def test_a_read_of_what_asta_holds_is_light(text):
+    from app import routing
+    assert routing.chat_light(text), text
+
+
+@_pytest.mark.parametrize("text", [
+    "who messaged me today? reply to Priya that it is merged",
+    "status of my PRs and merge the green one",
+    "did you check the workflow history size and who terminated it?",
+    "review booking PR 12",
+    "fix the P2 and send him the PR",
+    "",
+])
+def test_work_is_never_light(text):
+    from app import routing
+    assert not routing.chat_light(text), text
+
+
+def test_a_light_read_skips_the_saved_session_and_uses_the_t1_model(monkeypatch):
+    from app import agent, claude_cli, store
+    monkeypatch.setattr(agent, "tier_of", lambda b: "opus")
+    conv = store.create_conversation(model="claude_cli", workspace=None)
+    store.kv_set(f"claude_session:{conv['id']}", "saved-session-id")
+    store.add_ui_message(conv["id"], "user", "earlier question", {})
+    store.add_ui_message(conv["id"], "assistant", "earlier answer", {})
+    cmd = claude_cli._build_cmd(dict(conv), "who messaged me today?")
+    assert "--resume" not in cmd and "saved-session-id" not in cmd
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+    assert cmd[cmd.index("--effort") + 1] == "low"
+    assert "earlier answer" in cmd[cmd.index("--append-system-prompt") + 1]
+    assert store.kv_get(f"claude_session:{conv['id']}") == "saved-session-id"
+    deep = claude_cli._build_cmd(dict(conv), "did you check the workflow history size?")
+    assert deep[deep.index("--resume") + 1] == "saved-session-id"
+    assert deep[deep.index("--model") + 1] == "opus"
+
+
+def test_his_own_model_choice_is_never_routed(monkeypatch):
+    from app import agent, claude_cli, store
+    agent.set_tier("claude_cli", "opus")
+    conv = store.create_conversation(model="claude_cli", workspace=None)
+    cmd = claude_cli._build_cmd(dict(conv), "who messaged me today?")
+    assert cmd[cmd.index("--model") + 1] == "opus"

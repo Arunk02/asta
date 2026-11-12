@@ -390,9 +390,9 @@ def session_max_tokens(channel: str = "") -> int:
     0 disables. Voice shares the long-running phone conversation but needs a
     shorter session so its first spoken answer does not wait on old context."""
     try:
-        cap = int(os.environ.get("ASTA_SESSION_MAX_TOKENS", "100000") or 0)
+        cap = int(os.environ.get("ASTA_SESSION_MAX_TOKENS", "70000") or 0)
     except ValueError:
-        cap = 100000
+        cap = 70000
     return min(cap, 24000) if cap and channel == "voice" else cap
 
 

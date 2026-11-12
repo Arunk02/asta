@@ -385,6 +385,43 @@ async function sendNow(text) {
   return true;
 }
 
+// The server cannot report its own outage; the bridge is the one process still
+// holding his phone. Any HTTP answer (even 401) means the server is up — no
+// token, no work on its side. Unanswered for DOWN_ALERT_MS: one line to him,
+// and one more when it answers again.
+const DOWN_CHECK_MS = 60 * 1000;
+const DOWN_ALERT_MS = 5 * 60 * 1000;
+let downSince = 0;
+let downAlerted = false;
+async function serverAnswers() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    await fetch(`${ASTA_URL}/api/health`, { signal: ctrl.signal });
+    return true;
+  } catch (e) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function minutes(ms) { return Math.max(1, Math.round(ms / 60000)); }
+setInterval(async () => {
+  const up = await serverAnswers();
+  const now = Date.now();
+  if (up) {
+    if (downAlerted) await send(`✅ Asta's server is answering again (down ~${minutes(now - downSince)} min).`);
+    downSince = 0; downAlerted = false;
+    return;
+  }
+  if (!downSince) downSince = now;
+  if (!downAlerted && now - downSince >= DOWN_ALERT_MS) {
+    const at = new Date(downSince).toTimeString().slice(0, 5);
+    downAlerted = await send(`⚠️ Asta's server hasn't answered for ${minutes(now - downSince)} min ` +
+      `(since ${at}). Restart: launchctl kickstart -k gui/$(id -u)/com.asta.server`);
+  }
+}, DOWN_CHECK_MS);
+
 http
   .createServer(async (req, res) => {
     const auth = req.headers.authorization || "";

@@ -112,8 +112,34 @@ def _go_sentence(text: str) -> tuple[bool, int | None]:
     return True, (int(ref.group(1) or ref.group(2)) if ref else None)
 
 
+#: "approve task 567, don't push or raise PR", "567 approve, no PR" — an approval
+#: that keeps the change local. 12 Nov: read as plan feedback, it re-planned and
+#: asked for the same yes again.
+_APPROVE_LOCAL = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|yes|pls|please|then|so)[\s,]+)*(?:(?:task\s*)?#?(\d{1,5})[\s,:—-]+)?"
+    r"(?:approve[ds]?|approval|go\s+ahead|implement|proceed)(?:\s+(?:the\s+)?plan)?"
+    r"(?:\s+(?:for\s+|on\s+)?(?:task\s*)?#?(\d{1,5}))?[\s,.;—-]*(?:but\s+|and\s+|just\s+)?"
+    r"(?:don'?t|do\s+not|no|without|never|not)\s+(?:to\s+)?"
+    r"(?:push|raise|open|create|pr\b|prs\b|a\s+pr\b|the\s+pr\b)"
+    r"[\w\s,/'-]{0,40}?[.!]*\s*$", re.I)
+_NO_PR = re.compile(r"\b(?:don'?t|do\s+not|no|without|never|not)\s+(?:to\s+)?"
+                    r"(?:push|raise|open|create|(?:a\s+|the\s+)?prs?\b)", re.I)
+
+
+def approves_locally(text: str) -> tuple[bool, int | None]:
+    """An approval with the push/PR held back — (is it?, the task he named)."""
+    m = _APPROVE_LOCAL.match(text or "")
+    if not m or wants_merge(text or ""):
+        return False, None
+    n = m.group(1) or m.group(2)
+    return True, (int(n) if n else None)
+
+
 def command(text: str) -> tuple[bool, int | None]:
     """(is this whole message a go-ahead?, the task number he named)."""
+    local, number = approves_locally(text)
+    if local:
+        return True, number
     stop = _STOP_MERGE.match(text or '')
     if stop:
         return True, int(stop.group(1)) if stop.group(1) else None
@@ -176,8 +202,10 @@ def grant(task_id: int, words: str = "", *, ship: bool = True) -> None:
         merge = False
     elif wants_merge(words):
         merge = True
+    # "…don't push / no PR" said now outranks a ship granted earlier.
+    keep_local = bool(_NO_PR.search(words or "")) and not ship
     store.kv_set(f"task_go:{task_id}", json.dumps(
-        {"ship": bool(ship or prior.get("ship")), "words": (words or "")[:300],
+        {"ship": False if keep_local else bool(ship or prior.get("ship")), "words": (words or "")[:300],
          "merge": merge, "merge_words": words if wants_merge(words) else prior.get('merge_words', ''),
          "at": time.time()}))
     store.add_task_event(task_id, "go", f"he said go{' + PR' if ship else ''}: {(words or '')[:160]}")

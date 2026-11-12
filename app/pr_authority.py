@@ -388,9 +388,12 @@ async def watch_sweep(now: float | None = None) -> list[str]:
             store.kv_del(key)
             continue
         try:
-            current, _ = await review.revision(w["url"])
+            current, _, state = await review.revision_and_state(w["url"])
         except (RuntimeError, ValueError):
-            continue                      # transient, or closed: the next pass reads it
+            continue                      # transient: the next pass reads it
+        if state in ("MERGED", "CLOSED"):
+            store.kv_del(key)             # nothing left to re-review (12 Nov: 1536 watched for days)
+            continue
         if not w.get("revision") or review.same_commit(current, w["revision"]):
             continue                      # nothing new from the author yet
         if int(w.get("rounds") or 0) >= MAX_ROUNDS:

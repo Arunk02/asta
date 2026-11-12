@@ -127,6 +127,9 @@ ROLES: dict[str, tuple[str, str]] = {
 - Point at the line. A finding without a file and a line is an opinion.
 - Check the change against what it claims to do, then against what the code
   around it already assumed.
+- Blocking needs a real input that reaches it (test, documented flow, real data);
+  what only might happen is a question, never blocking. If the author says it
+  can't happen, check the domain and real data, not the code shape again.
 - Say what is good, briefly and specifically, and never approve by default."""),
 }
 

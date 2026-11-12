@@ -109,6 +109,8 @@ Hard rules:
   still names its path:line; it is posted in the review body instead.
 - Judge against how THIS codebase already does things (the PROJECT CONTEXT above), not a
   generic style guide.
+- BLOCKING needs a real input that reaches it (a test, fixture, documented flow shape or
+  real data). A case that only might happen is a QUESTION, never BLOCKING.
 - Do NOT restate what the diff does — Arun can read it. Nothing a linter would catch.
 - If a file you needed was not in the diff (see any NOTE above), say which, and do not
   guess at what it contains.
@@ -169,6 +171,12 @@ async def revision(pr: str) -> tuple[str, bool]:
     No bare PR number is accepted: numbers collide across repositories. GitHub
     errors are propagated rather than treating unknown state as a cache hit.
     """
+    rev, good, _state = await revision_and_state(pr)
+    return rev, good
+
+
+async def revision_and_state(pr: str) -> tuple[str, bool, str]:
+    """`revision`, plus the PR's state (OPEN / MERGED / CLOSED) from the same call."""
     number, target = pr_target(pr)
     if not target or not number.isdigit():
         raise ValueError("a full owner/repo pull request link is required")
@@ -186,7 +194,8 @@ async def revision(pr: str) -> tuple[str, bool]:
     fingerprint = hashlib.sha256(json.dumps(checks).encode()).hexdigest()[:16]
     good = (data.get("state") == "OPEN" and not data.get("isDraft") and bool(checks)
             and all(state in ("SUCCESS", "NEUTRAL", "SKIPPED") for _, state in checks))
-    return f"{target.lower()}#{number}@{head.lower()}:{fingerprint}", good
+    return (f"{target.lower()}#{number}@{head.lower()}:{fingerprint}", good,
+            str(data.get("state") or "").upper())
 
 
 def _linked_recently(number: str, days: float = 7) -> str:
@@ -531,7 +540,7 @@ async def post_review(pr: str, workspace: str, repo: str = "",
     to do about it. An approval with no body is fine and common.
     """
     from . import writing
-    body = writing.outward(body)
+    body = plain_body(writing.outward(body))
     flag = ACTIONS.get(action)
     if flag is None:
         raise RuntimeError(f"unknown review action '{action}' — one of: "
@@ -579,12 +588,26 @@ async def review_own_diff(diff: str, workspace: str = "", reviewer: str = "",
         "DIFF:\n" + untrusted.wrap(_prioritise_diff(body), "diff written by Asta"))
     notes = ""
     if reviewer:
-        notes = await _second_brain(reviewer, prompt, cwd)
+        notes = _review_notes_only(await _second_brain(reviewer, prompt, cwd))
     if not notes:
-        notes = (await memory.cheap_complete(prompt, 500, paid_ok=True) or "").strip()
+        notes = _review_notes_only((await memory.cheap_complete(prompt, 500, paid_ok=True) or "").strip())
     if not notes or notes.upper().startswith("LOOKS SOUND"):
         return ""
     return notes
+
+
+#: A model narrating its task instead of doing it ("The user wants me to review…",
+#: "**Project Context Summary:**") — 12 Nov, sent to his phone as the review.
+_NARRATION = re.compile(
+    r"^\W*(?:the\s+user\b|user\s+wants|i\s+(?:need|will|'ll|am\s+going)\s+to\b|let\s+me\b|"
+    r"okay\b|ok,|alright\b|my\s+task\b|we\s+need\s+to\b|first,?\s+i\b|"
+    r"(?:\*\*)?project\s+context\b|thinking\b)", re.I)
+
+
+def _review_notes_only(notes: str) -> str:
+    """The notes, or '' when the model wrote about the task instead of the diff."""
+    notes = (notes or "").strip()
+    return "" if notes and _NARRATION.match(notes) else notes
 
 
 async def _second_brain(reviewer: str, prompt: str, cwd: str) -> str:
@@ -746,7 +769,10 @@ async def merge(pr: str, workspace: str, repo: str = "", method: str = "squash",
 #: `- \`path/to/File.java:88\` — what is wrong → what to do`, in any of the shapes
 #: a model writes it: backticks or not, an em dash, a colon or an arrow.
 _FINDING = re.compile(
-    r"^\s*[-*]\s*`?([\w./+-]+\.[\w]{1,8})`?\s*[:#]\s*L?(\d{1,6})`?\s*"
+    r"^\s*[-*]\s*`?([\w./+-]+\.[\w]{1,8})`?\s*[:#]\s*L?(\d{1,6})"
+    # a range — "File.java:336-339" — is one finding on its first line. 12 Nov,
+    # PR 1538: the "-339" was read as the separator and "339 (and the…" posted.
+    r"(?:\s*[-–]\s*L?\d{1,6})?`?\s*"
     r"(?:[—\-–:]|->|→)?\s*(.+)$", re.M)
 
 #: The headings the brief asks for, and whether a finding under one blocks a merge.
@@ -779,7 +805,58 @@ def parse_findings(notes: str) -> list[dict]:
             body = "Question: " + body
         out.append({"path": found.group(1), "line": int(found.group(2)),
                     "body": body[:1500], "blocking": blocking and section == "BLOCKING"})
+    return _one_per_line(out)
+
+
+_FILLER = frozenset("the and with for not this that from into are was has have any add run".split())
+
+
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9_]{3,}", (text or "").lower())) - _FILLER
+
+
+def _one_per_line(found: list[dict]) -> list[dict]:
+    """One comment per line: the same point twice is dropped, two points are joined.
+
+    12 Nov, PR 1481: `pom.xml:46` got "no auth regression test" twice and
+    a consumer class line the same "untested" point three times —
+    from the blocking and the tests sections both."""
+    out: list[dict] = []
+    at: dict[tuple[str, int], dict] = {}
+    for f in found:
+        key = (f["path"], f["line"])
+        kept = at.get(key)
+        if kept is None:
+            at[key] = dict(f)
+            out.append(at[key])
+            continue
+        kept["blocking"] = kept["blocking"] or f["blocking"]
+        new, old = _words(f["body"]), _words(kept["body"])
+        if new and len(new & old) / min(len(new), len(old) or 1) >= 0.5:
+            if len(f["body"]) > len(kept["body"]):
+                kept["body"] = f["body"]          # the same point: the fuller wording
+            continue
+        kept["body"] = (kept["body"] + "\n\n" + f["body"])[:3000]
     return out
+
+
+#: "VERDICT: REQUEST CHANGES — why" is the worker's line to Asta; posted as him it
+#: reads as a machine's (12 Nov, PR 1538: the whole review body was that label).
+_VERDICT_LINE = re.compile(r"^\s*VERDICT:\s*(APPROVE|COMMENT|REQUEST[ _]CHANGES)\b[\s—\-–:.]*",
+                           re.I | re.M)
+
+
+def plain_body(body: str, comments: int = 0) -> str:
+    """The review body as a person writes it: the reason, not the label."""
+    found = _VERDICT_LINE.search(body or "")
+    text = _VERDICT_LINE.sub("", body or "", count=1).strip()
+    if text:
+        return text[0].upper() + text[1:]
+    if comments:
+        return "Comments inline."
+    if found and found.group(1).upper().startswith("REQUEST"):
+        return "Requesting changes."
+    return ""
 
 
 def verdict_of(notes: str) -> str:
@@ -852,8 +929,8 @@ async def post_inline_review(pr: str, workspace: str = "", repo: str = "",
         raise RuntimeError(f"unknown review action '{action}' — one of: "
                            + ", ".join(sorted(ACTIONS)))
     from . import writing
-    body = writing.outward(body)
     comments = [{**c, "body": writing.outward(str(c.get("body") or ""))} for c in (comments or [])]
+    body = plain_body(writing.outward(body), len(comments))
     number, where, cwd = _where(pr, workspace, repo)
     target = where[1] if where else ""
     if not target:

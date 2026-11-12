@@ -145,3 +145,46 @@ def test_posting_a_review_drops_every_other_copy_of_it(monkeypatch):
     asyncio.run(ops._pr_review_inline(pr=mine, action="request_changes", body="x", comments=[]))
     assert offers.review_for_pr("4321") is None
     assert offers.review_for_pr("4300") is not None, "another PR's review is untouched"
+
+
+# --- an approval that keeps it local (12 Nov: it re-planned and asked again) ---------
+
+@pytest.mark.parametrize("said, task", [
+    ("approve task 567, don't push or raise PR", 567),
+    ("approve task 567 but don't raise PR", 567),
+    ("567 approve, no PR", 567),
+    ("approve 567 no pr yet", 567),
+])
+def test_approve_without_the_pr_is_still_one_yes(said, task):
+    assert go.command(said) == (True, task)
+    assert not go.wants_pr(said)
+
+
+@pytest.mark.parametrize("said", [
+    "don't approve 567",
+    "approve task 567 but change the test name",          # feedback, not a bare approval
+    "approve, don't merge",
+])
+def test_these_are_not_a_local_approval(said):
+    assert go.approves_locally(said)[0] is False
+
+
+def test_a_local_approval_approves_the_plan_and_ships_nothing(monkeypatch):
+    from app import tasks
+    t = store.create_task("Add a unit test", "code", "p", "ws")
+    store.update_task(t["id"], status="awaiting_approval")
+    approved = []
+
+    async def approve(task_id):
+        approved.append(task_id)
+    monkeypatch.setattr(tasks, "approve", approve)
+    out = asyncio.run(go.act(f"approve task {t['id']}, don't push or raise PR", t["id"]))
+    assert approved == [t["id"]] and "going ahead now" in out
+    assert not go.ships(t["id"])
+
+
+def test_no_pr_said_now_outranks_a_pr_granted_earlier():
+    t = store.create_task("Add a unit test", "code", "p", "ws")
+    go.grant(t["id"], "approve and raise PR", ship=True)
+    go.grant(t["id"], "approve, don't raise PR", ship=False)
+    assert not go.ships(t["id"])

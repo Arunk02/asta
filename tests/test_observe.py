@@ -522,6 +522,35 @@ def test_a_stuck_workflow_says_what_it_is_waiting_on(temporal_envs, monkeypatch)
     assert "payment gateway timeout" in text
 
 
+def test_a_describe_shows_history_size_and_who_closed_it(temporal_envs, monkeypatch):
+    _cli(monkeypatch, json.dumps({
+        "workflowExecutionInfo": {"execution": {"workflowId": "BK-2_EVENTS"},
+                                  "type": {"name": "bookingEventsWorkflow"},
+                                  "status": "WORKFLOW_EXECUTION_STATUS_TERMINATED",
+                                  "startTime": "2026-10-01T06:11:24Z",
+                                  "closeTime": "2026-11-06T10:27:53Z",
+                                  "historyLength": "7000", "historySizeBytes": "47959613"},
+        "executionConfig": {"defaultWorkflowTaskTimeout": "10s"},
+        "closeEvent": {"eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED",
+                       "eventTime": "2026-11-06T10:27:53.28Z",
+                       "workflowExecutionTerminatedEventAttributes": {
+                           "reason": "Terminated from the Web UI by someone@example.com",
+                           "identity": "someone@example.com"}}}))
+    text = temporal.render_one(asyncio.run(temporal.describe("prod", "BK-2_EVENTS")), "prod")
+    assert "7000 events, 45.7 MB" in text and "past Temporal's warning" in text
+    assert "continueAsNew" in text and "workflow task timeout 10s" in text
+    assert "closed by: terminated" in text and "Terminated from the Web UI by someone@example.com" in text
+
+
+def test_a_small_history_carries_no_warning(temporal_envs, monkeypatch):
+    _cli(monkeypatch, json.dumps({
+        "workflowExecutionInfo": {"execution": {"workflowId": "BK-3"},
+                                  "status": "WORKFLOW_EXECUTION_STATUS_COMPLETED",
+                                  "historyLength": "40", "historySizeBytes": "20480"}}))
+    text = temporal.render_one(asyncio.run(temporal.describe("prod", "BK-3")), "prod")
+    assert "40 events, 0.0 MB" in text and "warning" not in text
+
+
 def test_describing_nothing_is_refused(temporal_envs, monkeypatch):
     _cli(monkeypatch, "")
     with pytest.raises(temporal.TemporalError):

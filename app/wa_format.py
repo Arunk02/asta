@@ -61,6 +61,15 @@ def for_whatsapp(text: str) -> str:
         if in_fence:
             out.append(line)
             continue
+        cells = _cells(line)
+        if cells is not None:
+            if all(_RULE.match(c) for c in cells):
+                # The |---| rule: the row above it was the header — a label line.
+                if out and out[-1].startswith("• "):
+                    out[-1] = "_" + out[-1][2:].replace("*", "") + "_"
+            else:
+                out.append(_table_row(cells))
+            continue
         head = _HEADING.match(line)
         if head:
             out.append(f"*{head.group(1)}*" if head.group(1).strip() else "")
@@ -71,6 +80,26 @@ def for_whatsapp(text: str) -> str:
         line = _BULLET.sub(r"\1• ", line)
         out.append(line)
     return "\n".join(out)
+
+
+_RULE = re.compile(r"^\s*:?-{2,}:?\s*$")
+
+
+def _cells(line: str) -> list[str] | None:
+    """The cells of a markdown table row, or None for any other line."""
+    t = line.strip()
+    if not (t.startswith("|") and t.endswith("|") and t.count("|") >= 3):
+        return None
+    return [c.strip() for c in t[1:-1].split("|")]
+
+
+def _table_row(cells: list[str]) -> str:
+    """A table row as a line: WhatsApp has no tables, so pipes reached his phone
+    as pipes (12 Nov). First cell leads, the rest follow it."""
+    cells = [_TICKS.sub(r"\1", _BOLD.sub(r"*\1*", c)) for c in cells if c]
+    if not cells:
+        return ""
+    return "• " + cells[0] + ((" — " + " · ".join(cells[1:])) if len(cells) > 1 else "")
 
 
 def clip(text: str, width: int) -> str:

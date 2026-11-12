@@ -232,9 +232,53 @@ def render_one(found: dict, env: str) -> str:
                      f" · attempt {_of(activity, 'attempt') or '?'}"
                      + (f" · last failure: {_of(activity, 'lastFailure', 'message')[:200]}"
                         if _of(activity, "lastFailure", "message") else ""))
-    if not pending and status.lower().endswith("failed"):
+    lines += _size_and_close(found, info)
+    if not pending and status.lower().endswith("failed") and not found.get("closeEvent"):
         lines.append("  it failed — read the history for the event that ended it")
     return "\n".join(lines)
+
+
+#: Temporal's own history limits: it warns at 10k events / 10 MB and terminates
+#: the run at 51,200 events / 50 MB. A run near them replays slowly, misses its
+#: workflow-task timeout, and looks "stuck" for reasons no log line names.
+_WARN_EVENTS, _MAX_EVENTS = 10_000, 51_200
+_WARN_BYTES, _MAX_BYTES = 10 * 2**20, 50 * 2**20
+
+
+def _size_and_close(found: dict, info: dict) -> list[str]:
+    """History size against Temporal's limits, the task timeout, and who/what closed it.
+
+    12 Nov, a prod booking: the describe carried a 47.9 MB history and "Terminated
+    from the Web UI by …", and the answer said the cause was "not confirmed" —
+    these lines were never rendered, so the brain never saw them."""
+    out = []
+    try:
+        events = int(_of(info, "historyLength") or 0)
+        size = int(_of(info, "historySizeBytes") or 0)
+    except ValueError:
+        events = size = 0
+    if events or size:
+        line = f"  history: {events} events, {size / 2**20:.1f} MB"
+        if events >= _WARN_EVENTS or size >= _WARN_BYTES:
+            line += (f" — past Temporal's warning ({_WARN_EVENTS} events / 10 MB; it terminates "
+                     f"at {_MAX_EVENTS} / 50 MB): replays get slow and workflow tasks time out; "
+                     f"check continueAsNew")
+        out.append(line)
+    timeout = _of(found, "executionConfig", "defaultWorkflowTaskTimeout")
+    if timeout:
+        out.append(f"  workflow task timeout {timeout}")
+    close = found.get("closeEvent") or {}
+    if isinstance(close, dict) and close:
+        kind = (close.get("eventType") or "").replace("EVENT_TYPE_WORKFLOW_EXECUTION_", "").lower()
+        attrs = next((v for k, v in close.items() if k.endswith("EventAttributes")
+                      and isinstance(v, dict)), {})
+        why = (_of(attrs, "reason") or _of(attrs, "failure", "message")
+               or _of(attrs, "failure", "cause", "message"))
+        who = _of(attrs, "identity")
+        out.append(f"  closed by: {kind or 'close event'} at {(close.get('eventTime') or '?')[:19]}"
+                   + (f" · reason: {why[:200]}" if why else "")
+                   + (f" · by {who}" if who and who not in why else ""))
+    return out
 
 
 _LINK = re.compile(r"https?://[^\s/]*service-composition[^\s/]*/namespaces/([^/\s]+)/workflows/"

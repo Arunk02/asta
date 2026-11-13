@@ -2635,7 +2635,7 @@ async def log_counts(term: str = "", env: str = "", by: str = "app", hours: floa
 
 
 async def log_lines(env: str, service: str = "", contains=(), logger: str = "", at: str = "",
-                    minutes: int = 10, start: str = "", end: str = "", limit: int = 40,
+                    minutes: int = 0, start: str = "", end: str = "", limit: int = 40,
                     newest_first: bool = False, pod: str = "") -> str:
     """The EXACT log lines — quote them, never paraphrase them — with a Grafana
     link to the same query a colleague can open.
@@ -2643,7 +2643,8 @@ async def log_lines(env: str, service: str = "", contains=(), logger: str = "", 
     env: one environment. service: part of an app name ("booking-service").
     contains: text every line must carry (an id, "Successfully consumed").
     logger: a class name to keep to. Time: `at` (ISO; no zone = UTC) with
-    `minutes` around it, or `start`/`end`. Oldest first unless newest_first.
+    `minutes` around it (default 10), or `start`/`end`, or `minutes` alone for
+    the last N minutes (default 30). Oldest first unless newest_first.
     Every line shows UTC and local time — logs here are written in UTC.
 
     Use it for "share the logs" and for reading what one class logged around a
@@ -2654,7 +2655,13 @@ async def log_lines(env: str, service: str = "", contains=(), logger: str = "", 
         mid = _when(at)
         if not mid:
             return "Invalid time — use ISO, e.g. 2026-10-12T09:50:03Z."
-        s, e = mid - _dt.timedelta(minutes=minutes / 2), mid + _dt.timedelta(minutes=minutes / 2)
+        span = minutes or 10
+        s, e = mid - _dt.timedelta(minutes=span / 2), mid + _dt.timedelta(minutes=span / 2)
+    elif not s and minutes:
+        # No moment given: `minutes` is how far back. Ignored, a three-day ask
+        # read the last 30 minutes, three times over (13 Nov).
+        e = e or _dt.datetime.now(_dt.timezone.utc)
+        s = e - _dt.timedelta(minutes=minutes)
     try:
         found = await debugkit.lines(env, service, _terms(contains), logger, s, e, limit,
                                      "backward" if newest_first else "forward", pod)

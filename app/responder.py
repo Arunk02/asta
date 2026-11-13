@@ -810,7 +810,53 @@ def brief_for(kind: str, who: str, text: str) -> str:
     hat = roles.briefed(roles.role_for(text, kind=kind))
     out = (body + _CLOSING).format(who=who or "A colleague", text=message_of(text),
                                    pr=f"#{pr}" if pr else "(number not stated)")
+    asked = he_asked_too(text)
+    if asked:
+        out = f"{asked}\n\n{out}"
+    if kind in ("debug", "incident", "ask"):
+        try:
+            from . import debug_hints
+            where = debug_hints.hints("", text, text)
+        except Exception:                                      # noqa: BLE001
+            where = ""
+        if where:
+            out = f"{where}\n\n{out}"
     return f"{hat}\n\n{out}" if hat else out
+
+
+#: Booking, order and job ids: upper-case letters and digits, both present.
+_MIXED_ID = re.compile(r"\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{8,20}\b")
+HE_ASKED_SECONDS = 3600
+
+
+def he_asked_too(text: str, now: float | None = None) -> str:
+    """A line saying Arun asked about the same thing himself, or "".
+
+    His "unless you ask" rules are about HIS asking. 13 Nov: he asked about a
+    booking in his own chat, a colleague asked about the same booking a minute
+    later, and the colleague's task stopped to ask his permission under the
+    incident rule. The id in both messages is the link."""
+    import time as _t
+    from . import answers, threads
+    ids = set(_MIXED_ID.findall(text or "")) | {e for e in threads.entities_in(text or "")
+                                                if len(e) >= 5}
+    cid = answers.phone_conversation()
+    if not ids or not cid:
+        return ""
+    now = _t.time() if now is None else now
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT content, created_at FROM ui_messages WHERE conv_id=? AND role='user' "
+            "AND created_at>=? ORDER BY id DESC LIMIT 30", (cid, now - HE_ASKED_SECONDS)).fetchall()
+    for content, at in rows:
+        hit = next((i for i in ids if i.lower() in (content or "").lower()), "")
+        if hit:
+            words = " ".join((content or "").split())[-200:]
+            when = _t.strftime("%H:%M", _t.localtime(float(at)))
+            return (f"[Arun asked about {hit} himself at {when}: \"{words}\". This is his ask "
+                    f"as well — investigate it; do not stop to ask his permission under an "
+                    f"\"unless you ask\" rule.]")
+    return ""
 
 
 def _gist(text: str, limit: int = 52) -> str:

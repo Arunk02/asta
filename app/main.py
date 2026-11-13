@@ -2291,8 +2291,8 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
     fresh = not has_session(conv["id"])
     try:
         reply = await cli.run_turn(
-            conv, _with_open_reply(conv["id"], _with_open_case(
-                conv["id"], _with_side_answers(conv["id"], user_text))),
+            conv, _with_debug_hints(conv["id"], user_text, _with_open_reply(
+                conv["id"], _with_open_case(conv["id"], _with_side_answers(conv["id"], user_text)))),
             on_delta, **kwargs)
     except Exception as exc:
         # Whatever it managed to stream before dying is the only record of how far
@@ -3228,6 +3228,16 @@ def _with_open_case(cid: str, text: str, now: float | None = None) -> str:
             f"and name anything you overturn:{held}]\n\n{text}")
 
 
+def _with_debug_hints(cid: str, user_text: str, text: str) -> str:
+    """`text`, preceded by where a debugging turn must look (app/debug_hints.py)."""
+    try:
+        from . import debug_hints
+        block = debug_hints.hints(cid, user_text, text)
+    except Exception:                                          # noqa: BLE001
+        return text
+    return f"{block}\n\n{text}" if block else text
+
+
 def _with_open_reply(cid: str, text: str) -> str:
     """`text`, preceded by where the reply he is working on goes, when that is a
     group: told up front, the brain stages it there the first time instead of
@@ -3734,6 +3744,7 @@ def _settle_feedback(cid: str, intent: dict | None) -> None:
         return
     staged, said, at = held
     if _SAYS_NO.search(said or ""):
+        loop.end_reply(cid)
         return
     # A send the turn started (or tried) acted on the draft just as a staged
     # revision does. 13 Nov: the brain sent its revision straight out, and the
@@ -4756,6 +4767,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
         # A plain no drops the draft. Handing "no" to a brain as revision feedback
         # got the draft re-staged, and his next message eaten as feedback on it.
         loop.clear_awaiting(cid)
+        loop.end_reply(cid)
         await sink.send({"type": "note", "text": "👍 Dropped the draft — nothing was sent."})
         if channel == "web":
             await sink.send({"type": "done", "tools": []})

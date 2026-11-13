@@ -357,21 +357,76 @@ def test_asta_tools_load_up_front_not_behind_tool_search(monkeypatch):
         claude_cli._subprocess_env().get("ENABLE_TOOL_SEARCH") != "false"
 
 
+def _fake_browser(monkeypatch):
+    """A pooled page that is an object, and a record of every discard."""
+    page = object()
+
+    async def pooled():
+        return page
+
+    discarded: list[str] = []
+
+    async def discard(why):
+        discarded.append(why)
+
+    monkeypatch.setattr(teams_bridge, "_pooled_page", pooled)
+    monkeypatch.setattr(teams_bridge, "_discard_pool", discard)
+    return discarded
+
+
 def test_a_chat_read_cannot_hold_the_browser_for_minutes(monkeypatch):
     """14 Oct: chat_watch.new_in held the Teams browser 666 s."""
-    async def stuck(*a, **k):
+    discarded = _fake_browser(monkeypatch)
+
+    async def stuck(page, chat):
         await asyncio.sleep(3600)
 
-    monkeypatch.setattr(teams_bridge, "_read_history", stuck)
+    monkeypatch.setattr(teams_bridge, "row_unread", stuck)
     monkeypatch.setattr(teams_bridge, "READ_TIMEOUT", 0.05)
     t = time.monotonic()
     with pytest.raises(RuntimeError, match="gave up"):
         asyncio.run(teams_bridge.read_history("Vinish Kumar", max_scrolls=0))
     assert time.monotonic() - t < 1
+    assert not discarded, "out of time is not a broken page"
+    assert not teams_bridge._lock.locked()
+
+
+def test_waiting_for_the_browser_is_not_the_read_being_slow(monkeypatch):
+    """13 Nov: reads queued behind the watcher's pass "timed out" at 90 s without
+    ever touching Teams. The limit is on holding the browser, not on the queue."""
+    _fake_browser(monkeypatch)
+
+    async def scenario():
+        async def holder():
+            async with teams_bridge.teams_page():
+                await asyncio.sleep(0.3)
+
+        first = asyncio.create_task(holder())
+        await asyncio.sleep(0.01)
+        t = time.monotonic()
+        async with teams_bridge.teams_page(work_timeout=0.1):
+            waited = time.monotonic() - t
+        await first
+        return waited
+
+    assert asyncio.run(scenario()) >= 0.25            # waited its turn, and was not failed
+
+
+def test_a_slow_holder_still_runs_out_of_time(monkeypatch):
+    _fake_browser(monkeypatch)
+
+    async def slow():
+        async with teams_bridge.teams_page(work_timeout=0.05):
+            await asyncio.sleep(5)
+
+    t = time.monotonic()
+    with pytest.raises(TimeoutError):
+        asyncio.run(slow())
+    assert time.monotonic() - t < 1
 
 
 def test_a_normal_read_is_untouched(monkeypatch):
-    async def fine(chat, since=None, limit=200, max_scrolls=0):
+    async def fine(chat, since=None, limit=200, max_scrolls=0, budget=None):
         return [{"text": "hi", "chat": chat}]
 
     monkeypatch.setattr(teams_bridge, "_read_history", fine)

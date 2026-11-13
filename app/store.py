@@ -1366,6 +1366,15 @@ def teams_senders_known(limit: int = 400) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def teams_chats_since(since: float) -> list[str]:
+    """Threads with a stored message at or after `since`, most recent first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT chat, MAX(sent_at) last FROM teams_messages WHERE sent_at >= ? "
+            "GROUP BY chat ORDER BY last DESC", (since,)).fetchall()
+    return [r["chat"] for r in rows]
+
+
 def teams_chats_known() -> list[str]:
     """Thread names history has been stored under."""
     with _connect() as conn:

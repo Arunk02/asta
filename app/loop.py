@@ -303,20 +303,26 @@ def note_rejected(intent: dict) -> None:
     except ValueError:
         rows = []
     rows = [r for r in rows if now - float(r.get("at") or 0) < REJECTED_SECONDS]
-    rows.append({"what": what, "to": intent.get("to") or "", "at": now})
+    rows.append({"what": what, "to": intent.get("to") or "",
+                 "group": bool(intent.get("to_group")), "at": now})
     store.kv_set(_REJECTED, json.dumps(rows[-10:]))
 
 
-def last_rejected_to() -> str:
-    """Who the draft he most recently said no to was for, or ''."""
+def last_rejected() -> dict:
+    """The draft he most recently said no to — {'to', 'group', 'at'} — or {}."""
     from . import store
     try:
         rows = json.loads(store.kv_get(_REJECTED) or "[]")
     except ValueError:
-        return ""
+        return {}
     now = time.time()
     live = [r for r in rows if now - float(r.get("at") or 0) < REJECTED_SECONDS]
-    return (live[-1].get("to") or "") if live else ""
+    return live[-1] if live else {}
+
+
+def last_rejected_to() -> str:
+    """Who the draft he most recently said no to was for, or ''."""
+    return last_rejected().get("to") or ""
 
 
 def rejected_again(text: str) -> str:

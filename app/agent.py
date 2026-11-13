@@ -2112,6 +2112,52 @@ def _revision_moves_recipient(said: str, to: str, to_group: bool) -> str:
             f"were not a change to that draft, stage nothing and just answer him.")
 
 
+_ONE_TO_ONE = re.compile(r"\b(?:1\s*:\s*1|one[- ]to[- ]one|personally|directly|"
+                         r"privately|in (?:a )?dm|dm (?:him|her|them))\b", re.I)
+
+
+def _in_group(person: str, group: str) -> bool:
+    """Is `person` one of the people in Teams group chat `group`? Named in a
+    member-list title ("Ravi Menon, Priya, +2"), or has written in it."""
+    from . import store
+    first = re.findall(r"[a-z]{3,}", person.lower())[:1]
+    if first and re.search(rf"\b{re.escape(first[0])}\b", group.lower()):
+        return True
+    try:
+        rows = store.teams_messages(chat=group, limit=200)
+    except Exception:                                          # noqa: BLE001
+        return False
+    return any(_same_recipient(r.get("sender") or "", person) for r in rows)
+
+
+def _group_draft_moves_to_member(said: str, to: str, to_group: bool) -> str:
+    """Why this may not stage — '' unless it moves a group's conversation to one
+    of its members' 1:1 chat without his saying so.
+
+    12 Nov: a colleague asked in a group; that draft was answered with feedback,
+    and his next plain line ("ask him to use develop") was staged 1:1 to the
+    colleague and sent there — the group never saw it. The revision guard
+    covers only turns that are feedback on a waiting draft, so the turns after
+    the rejected group draft could stage to anyone."""
+    from . import loop, scorecard
+    was = loop.last_rejected()
+    group = was.get("to") or ""
+    # Exact, not `_same_recipient`: a member-list title contains its members.
+    if not to or to_group or not group or " ".join(group.lower().split()) == " ".join(to.lower().split()):
+        return ""
+    from . import teams_bridge as _tb
+    if not (was.get("group") or _tb._is_member_list(group)):
+        return ""
+    if not _in_group(to, group):
+        return ""
+    words = scorecard.his_words(said) or said
+    if _ONE_TO_ONE.search(words) or _names_recipient(words, to, False):
+        return ""
+    return (f"Not staged — this continues the conversation in the group {group}, "
+            f"and Arun did not ask for {to} 1:1. Stage it to {group} (to_group=true), "
+            f"or ask him in one line whether it goes to the group or to {to} directly.")
+
+
 def prepare_to_send(what: str, to: str = "", channel: str = "chat",
                     to_group: bool = False) -> str:
     """Stage an outward-facing message for Arun to approve BEFORE it is sent.
@@ -2174,7 +2220,8 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # just 'bridge ok'", typed while a colleague's answer was waiting, was taken
     # as feedback on it and re-staged to a Teams group that shares one word
     # ("test") with what he typed. Only a recipient he names moves the draft.
-    moved = _revision_moves_recipient(capabilities.said_this_turn(), to, to_group)
+    moved = (_revision_moves_recipient(capabilities.said_this_turn(), to, to_group)
+             or _group_draft_moves_to_member(capabilities.said_this_turn(), to, to_group))
     if moved:
         return moved
     # A label is not sendable text, even under an automatic-reply permission.

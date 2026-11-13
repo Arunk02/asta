@@ -104,6 +104,8 @@ async def startup() -> None:
         worker_auth.prune()
     store.init()
     memory.ensure_dirs()
+    with contextlib.suppress(Exception):
+        reset_sessions_if_tools_changed()
     # Voice mode starts OFF on every start; if it had been on, he hears so once.
     from . import voice_mode as _voice_mode
     if _voice_mode.startup():
@@ -365,6 +367,41 @@ async def _learning_loop() -> None:
         except Exception:
             pass
         await asyncio.sleep(86400)
+
+
+def tool_schema_hash() -> str:
+    """One hash of every tool's name, signature and description."""
+    import hashlib
+    import inspect
+    from . import capabilities, mcp_server
+    parts = []
+    for cap in sorted(capabilities.registry().values(), key=lambda c: c.name):
+        with contextlib.suppress(Exception):
+            parts.append(f"{cap.name}{inspect.signature(cap.fn)}{mcp_server._describe(cap)}")
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+def reset_sessions_if_tools_changed() -> list[str]:
+    """A deploy that changes a tool starts every chat session fresh, with a recap.
+
+    A resumed CLI session keeps the tool schemas and descriptions it loaded
+    earlier. 13 Nov: after `files` was added to prepare_to_send, the running
+    session insisted the parameter did not exist. Returns the conversations reset."""
+    now = tool_schema_hash()
+    before = store.kv_get("tool_schema_hash") or ""
+    store.kv_set("tool_schema_hash", now)
+    if not before or before == now:
+        return []
+    reset = []
+    live = {key.split(":", 1)[1] for pat in ("claude_session:%", "copilot_session:%")
+            for key, sid in store.kv_like(pat).items() if (sid or "").strip()}
+    for cid in sorted(live):
+        if cid:
+            rotate_sessions(cid)
+            store.kv_set(f"session_recap:{cid}", "1")
+            reset.append(cid)
+    store.record_outcome("session", "tools changed", detail=f"reset {len(reset)} chat session(s)")
+    return reset
 
 
 def rotate_sessions(conv_id: str) -> list[str]:
@@ -3743,6 +3780,16 @@ _SAYS_NO = re.compile(r"^\s*(?:no|nope|nah|ignore|skip|drop|leave|cancel|stop|sc
                       r"don'?t|dont|not\s+now)\b|\b(?:don'?t|do\s+not|never)\s+send\b", re.I)
 
 
+def _same_chat(a: str, b: str) -> bool:
+    """One recipient under the names a send and a draft give it ("Alex" / "Alex
+    Kumar (You)", a group's member list with "+2" or "+3"). 13 Nov: a test send
+    to his own chat was taken as acting on a group draft, and the draft was lost."""
+    from . import responder
+    ka, kb = responder._chat_key(a), responder._chat_key(b)
+    ka, kb = re.sub(r"\s*\(you\)$", "", ka), re.sub(r"\s*\(you\)$", "", kb)
+    return bool(ka and kb) and (ka == kb or ka.startswith(kb + " ") or kb.startswith(ka + " "))
+
+
 def _settle_feedback(cid: str, intent: dict | None) -> None:
     """After the turn: a staged revision means it WAS feedback (the old draft
     stays refused). No revision and no "no" means it was something else: the
@@ -3757,7 +3804,9 @@ def _settle_feedback(cid: str, intent: dict | None) -> None:
     # A send the turn started (or tried) acted on the draft just as a staged
     # revision does. 13 Nov: the brain sent its revision straight out, and the
     # draft was "kept — not about it" and offered again.
-    if any(t >= at for t in teams_bridge.STARTED) or any(t >= at for t, _ in teams_bridge.SENT):
+    to = staged.get("to") or ""
+    if any(t >= at and _same_chat(c, to) for t, c in teams_bridge.STARTED_TO) \
+            or any(t >= at and _same_chat(c, to) for t, c in teams_bridge.SENT):
         return
     loop.unreject(staged)
     store.kv_set(f"amending:{cid}", "")

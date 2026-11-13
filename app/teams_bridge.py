@@ -1876,6 +1876,9 @@ SENT: list[tuple[float, str]] = []
 #: When each send began — a send the brain started a moment ago may still be
 #: on its way when the brain says so.
 STARTED: list[float] = []
+#: The same starts with the chat each was addressed to — so "a send happened"
+#: can be asked about one recipient, not the whole turn.
+STARTED_TO: list[tuple[float, str]] = []
 _automatic_send: contextvars.ContextVar[str] = contextvars.ContextVar(
     "teams_automatic_send", default="")
 #: Asked once the browser is ours, before anything is typed: a reason to hold
@@ -1991,6 +1994,8 @@ async def send_message(chat: str, text: str, allow_group: bool = False,
     started_at = time.time()
     STARTED.append(started_at)
     del STARTED[:-50]
+    STARTED_TO.append((started_at, chat))
+    del STARTED_TO[:-50]
     async with teams_page() as page:
         gate = send_gate.get()
         why = gate() if gate else ""

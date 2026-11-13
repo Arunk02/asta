@@ -801,7 +801,7 @@ def case_so_far(chat: str, who: str, now: float | None = None) -> str:
         body = " ".join((analysis or t["result"]).split())[:700]
         found.append(f"- #{t['id']} at {time.strftime('%H:%M', time.localtime(float(t['created_at'])))}"
                      f" ({t.get('title') or ''}): {body}")
-    told, theirs, group_lines = [], [], []
+    told, theirs, group_lines, asked = [], [], [], []
     if chat:
         from . import chat_watch
         rows = store.teams_messages(chat=chat, since=since)[-40:]
@@ -812,6 +812,9 @@ def case_so_far(chat: str, who: str, now: float | None = None) -> str:
         for row in rows[-30:]:
             if chat_watch.is_from_him(row.get("sender", "")):
                 told.append(f"- {row.get('stamp') or ''}: {' '.join((row.get('text') or '').split())[:300]}")
+            elif (row.get("text") or "").strip():
+                asked.append(f"- {row.get('sender') or '?'}, {row.get('stamp') or ''}: "
+                             f"{' '.join((row.get('text') or '').split())[:600]}")
         # What he said to them in a GROUP is part of their case too: 6 Nov, his
         # review of her branch was in the team chat and her 1:1 questions were
         # about it, but the case read only the 1:1.
@@ -830,6 +833,12 @@ def case_so_far(chat: str, who: str, now: float | None = None) -> str:
         out.append(f"Their work is in {where}. Answer from that repo and branch; bring in "
                    f"another repo only when they ask about it.")
     out += found[-5:]
+    if asked:
+        # Their own words — the log line they quoted, the class, the time. 13 Nov:
+        # the case carried only findings and his replies, so a colleague's exact
+        # failing line never reached the brain, and it guessed.
+        out.append("What they wrote (their words, newest last):")
+        out += asked[-4:]
     if told:
         out.append("Already said to them, in Arun's name:")
         out += told[-6:]

@@ -39,8 +39,10 @@ def op(name: str, describe):
 
 
 @op("teams_send", lambda a: (f"Message {a.get('to', '?')} on Teams"
-                             + (" (GROUP)" if a.get("to_group") else "")))
-async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> str:
+                             + (" (GROUP)" if a.get("to_group") else "")
+                             + (f" + {len(a['files'])} file(s)" if a.get("files") else "")))
+async def _teams_send(to: str = "", text: str = "", to_group: bool = False,
+                      files: list | None = None) -> str:
     """Send the approved words, unchanged.
 
     This is the op that was missing. A Teams send used to be approved and then
@@ -53,7 +55,12 @@ async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> s
     """
     from . import attention, senior, teams_bridge
     with senior.approved():           # this op runs only on his "send"
-        where = await teams_bridge.send_message(to, text, allow_group=to_group)
+        if files:
+            from . import attachments
+            files = attachments.check(files)      # re-checked at send, not trusted from the stage
+            where = await teams_bridge.send_message(to, text, allow_group=to_group, files=files)
+        else:
+            where = await teams_bridge.send_message(to, text, allow_group=to_group)
     # A reply IS the answer. Without this, Asta sent the message he approved and
     # then went on chasing him at end of day about the very question it had just
     # answered on his behalf — "Retry fix merged?" was still listed as waiting on him
@@ -61,7 +68,8 @@ async def _teams_send(to: str = "", text: str = "", to_group: bool = False) -> s
     # which is the one the ledger stored, not the shorter one he typed.
     settled = attention.settle_with(where) or attention.settle_with(to)
     tail = f" ({settled} cleared from your list)" if settled else ""
-    return f"✅ Sent to {where}.{tail}"
+    attached = f" with {attachments.names(files)}" if files else ""
+    return f"✅ Sent to {where}{attached}.{tail}"
 
 
 @op("teams_call", lambda a: f"Call {a.get('who', '?')} on Teams")

@@ -2204,7 +2204,7 @@ def _route_recipient(cid: str, said: str, to: str, to_group: bool,
 
 
 def prepare_to_send(what: str, to: str = "", channel: str = "chat",
-                    to_group: bool = False) -> str:
+                    to_group: bool = False, files: list[str] | None = None) -> str:
     """Stage an outward-facing message for Arun to approve BEFORE it is sent.
 
     Use this whenever you've drafted something to send outside this chat — a Teams
@@ -2222,7 +2222,11 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
 
     `to` on Teams means a PERSON's 1:1 chat. Set to_group=True ONLY when Arun named a
     group or channel himself ("post it in the prod issue group") — never because a
-    group happens to share a word with the name he used."""
+    group happens to share a word with the name he used.
+
+    `files` — local paths to attach (Teams only, at most 5, from his home
+    folder, never secrets or hidden config). A message with files is always
+    shown to him first, with each file named; it never goes on its own."""
     from . import capabilities, loop, policy, tasks, writing
     if channel.strip().lower() == "jira":
         return ("Not staged — Jira is not a send channel. Use jira_comment for the "
@@ -2231,6 +2235,26 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
+    if files:
+        from . import attachments
+        if channel.strip().lower() != "teams":
+            return "Not staged — files can only be attached to a Teams message."
+        if capabilities.FROM_TASK.get():
+            return ("Not staged — a background task cannot attach files. Name the file "
+                    "path in the task result; Arun attaches it from the chat.")
+        try:
+            files = attachments.check(files)
+        except attachments.Refused as exc:
+            return f"Not staged — {exc}. Tell Arun in one line."
+    else:
+        # A revision of a draft that carries files keeps them: he changed the
+        # words, not what was attached.
+        waiting = loop.awaiting(cid) or {}
+        if not waiting.get("files"):
+            from . import main as _main            # the draft his feedback is on
+            waiting = (_main._under_feedback.get(cid) or ({},))[0] or {}
+        if waiting.get("files") and (waiting.get("to") or "").lower() == (to or "").strip().lower():
+            files = list(waiting["files"])
     if channel.strip().lower() == "pr" and not tasks.resolve_task_pr(to or what):
         # A review already recorded for this PR is the one to post: a "pr" text copy
         # of it went back to a brain with no tool on "send" and was staged again
@@ -2284,9 +2308,9 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     from . import scorecard
     clash = contradicts_him(scorecard.his_words(capabilities.said_this_turn())
                             or capabilities.said_this_turn(), what)
-    if clash:
+    if clash or files:
         above = True                    # every automatic path below is skipped
-    if channel == "teams" and not to_group and not clash and authority.auto_reply_to(to):
+    if channel == "teams" and not to_group and not above and authority.auto_reply_to(to):
         import asyncio
         body = writing.fit_address(writing.tidy_links(what), to)
         try:
@@ -2359,8 +2383,12 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
         staged = (f"Draft staged{tgt} on {channel}. Arun sees it, labelled with this task, "
                   f"when the task finishes; staging again replaces it.")
     else:
-        loop.set_pending_send(cid, what, to, channel, to_group=to_group)
+        loop.set_pending_send(cid, what, to, channel, to_group=to_group,
+                              **({"files": files} if files else {}))
         staged = f"Draft staged{tgt} on {channel}. Asking Arun to confirm before it's sent."
+        if files:
+            from . import attachments
+            staged += f" Attached: {attachments.names(files)}."
     if clash:
         staged += (f" Held for his yes: the draft says “{clash}”, which contradicts what he "
                    f"just told you. Check the current facts (the PR's files, the task) and "

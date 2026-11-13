@@ -80,7 +80,7 @@ def set_continue(cid: str, next_step: str) -> None:
 
 
 def set_pending_send(cid: str, what: str, to: str = "", channel: str = "chat",
-                     to_group: bool = False) -> None:
+                     to_group: bool = False, files: list[str] | None = None) -> None:
     if cid:
         _next[cid] = {
             "kind": "send",
@@ -91,6 +91,8 @@ def set_pending_send(cid: str, what: str, to: str = "", channel: str = "chat",
             # fourteen people in it is not somewhere to end up by resemblance.
             "to_group": bool(to_group),
         }
+        if files:
+            _next[cid]["files"] = list(files)
 
 
 def set_task_send(task_id: int | str, what: str, to: str, channel: str = "chat") -> None:

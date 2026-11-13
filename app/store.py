@@ -1375,6 +1375,15 @@ def teams_chats_since(since: float) -> list[str]:
     return [r["chat"] for r in rows]
 
 
+def chat_senders(chat: str, limit: int = 50) -> list[str]:
+    """Who has written in the chat stored under exactly this name (any case)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT sender FROM teams_messages WHERE lower(chat) = lower(?) LIMIT ?",
+            (chat or "", limit)).fetchall()
+    return [r["sender"] for r in rows if r["sender"]]
+
+
 def teams_chats_known() -> list[str]:
     """Thread names history has been stored under."""
     with _connect() as conn:

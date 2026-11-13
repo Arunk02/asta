@@ -3804,9 +3804,11 @@ def _settle_feedback(cid: str, intent: dict | None) -> None:
     # A send the turn started (or tried) acted on the draft just as a staged
     # revision does. 13 Nov: the brain sent its revision straight out, and the
     # draft was "kept — not about it" and offered again.
-    to = staged.get("to") or ""
-    if any(t >= at and _same_chat(c, to) for t, c in teams_bridge.STARTED_TO) \
-            or any(t >= at and _same_chat(c, to) for t, c in teams_bridge.SENT):
+    # Its chat or its person: 13 Nov a group draft's revision was sent to the
+    # colleague 1:1 — still acting on the draft. A send to anyone else is not.
+    mine = [x for x in (staged.get("to"), staged.get("who")) if x]
+    if any(t >= at and any(_same_chat(c, m) for m in mine) for t, c in teams_bridge.STARTED_TO) \
+            or any(t >= at and any(_same_chat(c, m) for m in mine) for t, c in teams_bridge.SENT):
         return
     loop.unreject(staged)
     store.kv_set(f"amending:{cid}", "")

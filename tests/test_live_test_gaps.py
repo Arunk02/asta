@@ -101,6 +101,18 @@ def test_a_send_to_the_drafts_chat_is_acting_on_it(conv, monkeypatch):
     assert not kept
 
 
+def test_a_revision_sent_to_the_drafts_person_is_acting_on_it(conv, monkeypatch):
+    staged = {"kind": "send", "what": "x", "to": "Ledger Triage", "to_group": True, "who": "Pat Quill"}
+    at = time.time()
+    main._under_feedback[conv] = (staged, "tell him I'm on it", at)
+    monkeypatch.setattr(tb, "STARTED_TO", [(at + 1, "Pat Quill")])
+    monkeypatch.setattr(tb, "SENT", [])
+    kept = []
+    monkeypatch.setattr(main, "_set_aside", lambda *a, **k: kept.append(a[1]) or True)
+    main._settle_feedback(conv, None)
+    assert not kept
+
+
 def test_same_chat_matching():
     assert main._same_chat("Arunkumar K (You)", "Arunkumar K")
     assert main._same_chat("Pat Quill\nIra Moss\n+2", "Pat Quill, Ira Moss, +5")

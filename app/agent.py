@@ -1986,6 +1986,11 @@ def _he_asked_to_send(to: str, cid: str) -> bool:
     first = (to or "").split()[0].lower() if (to or "").split() else ""
     if not said or len(first) < 3 or not _SEND_VERB.search(said):
         return False
+    # A group never goes out on "he asked": it waits for his yes. And its first
+    # word is not a first name (a common word in his sentence is not him
+    # naming the group that word starts).
+    if _is_group_chat(to):
+        return False
     if re.search(rf"\b{re.escape(first)}\b", said):
         return True
     if not re.search(r"\b(?:him|her|them)\b", said):
@@ -2086,12 +2091,31 @@ def _same_recipient(a: str, b: str) -> bool:
     return a == b or (bool(a) and bool(b) and (a in b or b in a))
 
 
+def _is_group_chat(name: str) -> bool:
+    """A chat known to hold people other than him and the one it is named after:
+    a group or channel, whatever its name looks like. 13 Nov: a three-word group
+    name with no comma passed as a person, and its first word, used in his
+    sentence about a task, counted as him naming it — a reply to a colleague's
+    1:1 went to that group."""
+    from . import chat_watch, store
+    from . import teams_bridge as _tb
+    if _tb._is_member_list(name):
+        return True
+    try:
+        senders = store.chat_senders(name)
+    except Exception:                                          # noqa: BLE001
+        return False
+    own = _norm(name)
+    return any(_norm(s) != own and not chat_watch.is_from_him(s) for s in senders)
+
+
 def _names_recipient(words: str, to: str, to_group: bool) -> bool:
     """Did his words name `to`? A group by its full name; a person by first name."""
     w, t = " ".join(words.lower().split()), " ".join(to.lower().split())
     if t and t in w:
         return True
-    person = not to_group and len(t.split()) <= 3 and not re.search(r"[-\d,&]", t)
+    person = not to_group and len(t.split()) <= 3 and not re.search(r"[-\d,&]", t) \
+        and not _is_group_chat(to)
     first = re.findall(r"[a-z]{3,}", t)[:1]
     return person and bool(first) and re.search(rf"\b{re.escape(first[0])}\b", w) is not None
 
@@ -2192,7 +2216,7 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # "Shabda Anubhav, Vinish, +2" is a group by its very shape — a brain that
     # forgot to say so must not turn it into a search for the people in it.
     from . import teams_bridge as _tb
-    if channel == "teams" and _tb._is_member_list(to):
+    if channel == "teams" and to and not to_group and _is_group_chat(to):
         to_group = True
     # Where the reply belongs, before any rule or automatic send sees `to`.
     to, to_group, routed = _route_recipient(cid, capabilities.said_this_turn(), to, to_group,

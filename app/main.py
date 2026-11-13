@@ -3717,7 +3717,7 @@ def _set_aside(cid: str, staged: dict, said: str, outcome: str) -> bool:
 #: something else, and the draft is kept. 13 Nov: "how many Teams chats …? just
 #: the number" under a colleague's reply was answered "1" — and the reply, read as
 #: feedback before the brain ran, was gone.
-_under_feedback: dict[str, tuple[dict, str]] = {}
+_under_feedback: dict[str, tuple[dict, str, float]] = {}
 
 _SAYS_NO = re.compile(r"^\s*(?:no|nope|nah|ignore|skip|drop|leave|cancel|stop|scrap|"
                       r"don'?t|dont|not\s+now)\b|\b(?:don'?t|do\s+not|never)\s+send\b", re.I)
@@ -3730,8 +3730,13 @@ def _settle_feedback(cid: str, intent: dict | None) -> None:
     held = _under_feedback.pop(cid, None)
     if not held or (intent and intent.get("kind") == "send"):
         return
-    staged, said = held
+    staged, said, at = held
     if _SAYS_NO.search(said or ""):
+        return
+    # A send the turn started (or tried) acted on the draft just as a staged
+    # revision does. 13 Nov: the brain sent its revision straight out, and the
+    # draft was "kept — not about it" and offered again.
+    if any(t >= at for t in teams_bridge.STARTED) or any(t >= at for t, _ in teams_bridge.SENT):
         return
     loop.unreject(staged)
     store.kv_set(f"amending:{cid}", "")
@@ -4871,7 +4876,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             # 3.1.6" typed at a waiting draft was a new instruction, and the
             # draft was re-staged as a label of itself (30 Sep).
             loop.note_rejected(staged)
-            _under_feedback[cid] = (staged, user_text)
+            _under_feedback[cid] = (staged, user_text, time.time())
             prompt = (f"Arun did NOT approve sending the draft as-is. His feedback:\n"
                       f"{user_text.strip()}\n\nRevise accordingly — change only what he asked "
                       f"for, in his words, and add nothing from his other conversations (15 Oct: "

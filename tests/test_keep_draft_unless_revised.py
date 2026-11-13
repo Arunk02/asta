@@ -88,3 +88,14 @@ def test_settling_twice_or_with_nothing_held_does_nothing(waiting):
     conv, _, queued = waiting
     main._settle_feedback(conv["id"], None)
     assert not queued
+
+
+def test_a_send_the_turn_started_acted_on_the_draft(waiting, monkeypatch):
+    """13 Nov: the brain sent its revision straight out (to the wrong chat) and the
+    draft was "kept — not about it" and offered again."""
+    from app import teams_bridge
+    conv, _, queued = waiting
+    _say(conv, "tell him I am working on it, will update once done")
+    monkeypatch.setattr(teams_bridge, "STARTED", [time.time() + 1])
+    main._settle_feedback(conv["id"], None)
+    assert not queued

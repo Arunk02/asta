@@ -145,3 +145,56 @@ def test_the_brain_is_told_where_the_open_reply_goes():
     assert said.startswith("[Open reply: Ravi Menon asked in the group") and GROUP in said
     loop.note_reply("c-one", {"to": "Priya Nair"})
     assert main._with_open_reply("c-one", "hi") == "hi"
+
+
+# --- a group's first word is not a first name ----------------------------------
+# 13 Nov 11:40: the reply waiting was to a colleague 1:1. His feedback said
+# "previous Kafka <word> producer task … tell him working on creating producer".
+# The brain picked a group whose name starts with that word; the word in his
+# sentence counted as him naming it, and the send-when-asked path sent it at once.
+
+GROUP_NAMED = "Release Order intake"
+
+
+def _seed_group():
+    import time as _t
+    from app import store
+    store.save_teams_messages([
+        {"key": f"g{i}", "chat": GROUP_NAMED, "sender": s, "text": "hi", "sent_at": _t.time() - 900 + i}
+        for i, s in enumerate(["Asha Rao", "Kiran Das", "Ravi Menon"])]
+        + [{"key": "p1", "chat": "Ravi Menon", "sender": "Ravi Menon", "text": "check dev?",
+            "sent_at": _t.time() - 300}])
+
+
+FEEDBACK = ("This related to the previous Kafka release producer create task one.. tell him "
+            "working on creating producer will update him once it done")
+
+
+def test_a_word_of_his_that_starts_a_group_name_does_not_move_the_reply(monkeypatch):
+    from app import tasks
+    _seed_group()
+    agent, cid = _asked(monkeypatch, _feedback(FEEDBACK))
+    monkeypatch.setattr(tasks, "current_conversation", lambda: cid)
+    loop.note_reply(cid, {"to": "Ravi Menon", "who": "Ravi Menon", "what": "which one?"})
+    out = agent.prepare_to_send("Working on creating the producer, will update you once done.",
+                                to=GROUP_NAMED, channel="teams")
+    assert out.startswith("Not staged") and "Ravi Menon" in out, out
+
+
+def test_a_known_group_never_goes_out_on_he_asked(monkeypatch):
+    from app import tasks
+    _seed_group()
+    agent, cid = _asked(monkeypatch, "tell release order intake the build is green")
+    monkeypatch.setattr(tasks, "current_conversation", lambda: cid)
+    assert agent._is_group_chat(GROUP_NAMED)
+    assert not agent._he_asked_to_send(GROUP_NAMED, cid)
+    out = agent.prepare_to_send("Build is green.", to=GROUP_NAMED, channel="teams")
+    assert out.startswith(f"Draft staged to group {GROUP_NAMED}"), out
+
+
+def test_a_person_is_still_a_person(monkeypatch):
+    _seed_group()
+    from app import agent
+    assert not agent._is_group_chat("Ravi Menon")              # him and Ravi only
+    assert agent._names_recipient("send it to ravi instead", "Ravi Menon", False)
+    assert not agent._names_recipient(FEEDBACK, GROUP_NAMED, False)

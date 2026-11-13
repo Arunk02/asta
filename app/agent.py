@@ -3580,7 +3580,9 @@ async def teams_unread(debug: bool = False) -> str:
     a conversation — never appears there at all.
 
     Looking does not mark anything as handled, so asking twice gives the same
-    answer. `debug=True` returns the raw rail signals instead."""
+    answer. It answers from what the watcher already read (it reads every chat
+    each minute) and opens no chat itself. `debug=True` returns the raw rail
+    signals instead."""
     from . import chat_watch, teams_bridge
     if not teams_bridge.enabled():
         return "Teams bridge is off (set TEAMS_BRIDGE=1 in .env)."

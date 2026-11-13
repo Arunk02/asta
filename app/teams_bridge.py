@@ -459,11 +459,15 @@ def stuck_for() -> float:
 
 
 @contextlib.asynccontextmanager
-async def teams_page():
+async def teams_page(work_timeout: float | None = None):
     """The one way a headless operation gets at Teams.
 
     Serialised by the same lock as before — a Chromium profile is single-writer —
     but the expensive part now happens once rather than per operation.
+
+    `work_timeout` limits the time spent HOLDING the browser, never the wait for
+    it: queued behind another reader is not slow. Expiring raises TimeoutError
+    and keeps the page, as a cancelled read always has.
     """
     who = _caller()
     async with _lock:
@@ -475,8 +479,10 @@ async def teams_page():
         except BaseException:
             _HELD["since"] = 0.0
             raise
+        limit = asyncio.timeout(work_timeout) if work_timeout else contextlib.nullcontext()
         try:
-            yield page
+            async with limit:
+                yield page
         except NotFound as exc:
             # Nothing was typed and the browser is healthy — a search result
             # that did not match. Relaunching Chrome for it (29 Sep: twelve
@@ -506,6 +512,8 @@ async def teams_page():
                     await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=60000)
             raise
         except Exception:
+            if work_timeout and limit.expired():
+                raise           # out of time, not broken: kept, as a cancelled read was
             # The operation failed with the page in an unknown state: half-typed
             # into a composer, a dialog open, a navigation in flight. Reusing that
             # is how one failure becomes several, so it is thrown away.
@@ -1720,12 +1728,16 @@ READ_TIMEOUT = float(os.environ.get("ASTA_TEAMS_READ_TIMEOUT", "90"))
 
 async def read_history(chat: str, since: float | None = None, limit: int = 200,
                        max_scrolls: int = MAX_SCROLLBACKS) -> list[dict]:
-    """`_read_history`, never longer than READ_TIMEOUT plus 3 s per scroll back."""
+    """`_read_history`, holding the browser no longer than READ_TIMEOUT plus 3 s
+    per scroll back. The wait for the browser does not count: 13 Nov, all 116
+    "timeouts" in six days were 90 s budgets, 61 of them while the watcher's own
+    pass held the browser — reads failed in the queue without touching Teams.
+    A hold that never ends is the watchdog's (STUCK_SECONDS)."""
     budget = READ_TIMEOUT + 3 * max(0, max_scrolls or 0)
     try:
-        return await asyncio.wait_for(
-            _read_history(chat, since=since, limit=limit, max_scrolls=max_scrolls), budget)
-    except asyncio.TimeoutError:
+        return await _read_history(chat, since=since, limit=limit, max_scrolls=max_scrolls,
+                                   budget=budget)
+    except TimeoutError:
         store.record_outcome("teams", "read_timeout", subject=(chat or "")[:80],
                              detail=f"gave up after {int(budget)}s")
         raise RuntimeError(f"reading {chat} took over {int(budget)}s — gave up so other "
@@ -1733,7 +1745,8 @@ async def read_history(chat: str, since: float | None = None, limit: int = 200,
 
 
 async def _read_history(chat: str, since: float | None = None, limit: int = 200,
-                        max_scrolls: int = MAX_SCROLLBACKS) -> list[dict]:
+                        max_scrolls: int = MAX_SCROLLBACKS,
+                        budget: float | None = None) -> list[dict]:
     """Read a thread, scrolling back far enough to cover `since`.
 
     Returns message dicts oldest-first. Everything read is persisted, so the
@@ -1741,7 +1754,7 @@ async def _read_history(chat: str, since: float | None = None, limit: int = 200,
     browser at all.
     """
     _refuse_blank(chat)
-    async with teams_page() as page:
+    async with teams_page(work_timeout=budget) as page:
         # Whether HE had read it, before Asta opening it says he has.
         was_unread = await row_unread(page, chat)
         # The rail row itself, when the chat is on it. A group chat nobody named

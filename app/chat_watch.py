@@ -843,6 +843,11 @@ async def new_in(chat: str, advance: bool = True) -> list[dict]:
     """
     from . import teams_bridge
     rows = await teams_bridge.read_history(chat, limit=READ_LIMIT, max_scrolls=0)
+    return _fresh(chat, rows or [], advance)
+
+
+def _fresh(chat: str, rows: list[dict], advance: bool) -> list[dict]:
+    """What in `rows` Asta has not processed, excluding his own — read or stored."""
     fresh = unseen(chat, rows or [])
     if fresh:
         news_in(chat)
@@ -890,22 +895,29 @@ def without_image_paths(text: str) -> str:
     return (f"{body} ({tag})" if body else tag) if n else (text or "")
 
 
-async def pending() -> list[dict]:
+#: How far back "what haven't I dealt with" looks in what the watcher stored.
+PENDING_HOURS = 24
+
+
+async def pending(now: float | None = None) -> list[dict]:
     """Everything Asta has not processed yet, without marking any of it processed.
 
-    Backs the `teams_unread` tool. Deliberately not the rail's unread styling:
-    this Teams build exposes none (empty aria-label, empty data-tid, hashed Fluent
-    class names — checked live), and keying off his read state would hide anything
-    he glanced at on his phone, which is the opposite of what he asked for.
+    Backs the `teams_unread` tool — from what the watcher has already read and
+    stored, not by opening every chat again. 13 Nov: it re-read each chat on the
+    rail in the one shared browser while the watcher's own pass read the same
+    chats; both queued behind each other, three reads "timed out" waiting, and
+    the brain's turn hit its five-minute ceiling with no answer. The watcher
+    reads every chat each minute, so the store is at most that far behind.
     """
+    since = (time.time() if now is None else now) - PENDING_HOURS * 3600
     out: list[dict] = []
-    for chat in await candidates():
-        try:
-            for m in await new_in(chat, advance=False):
-                out.append({"chat": chat, "who": m.get("sender") or chat,
-                            "text": (m.get("text") or "").strip()})
-        except Exception:                                      # noqa: BLE001
-            continue
+    for chat in store.teams_chats_since(since):
+        # `teams_messages` matches a chat name loosely; only this thread's rows.
+        rows = [r for r in store.teams_messages(chat=chat, since=since, limit=2000)
+                if r.get("chat") == chat]
+        for m in _fresh(chat, rows, advance=False):
+            out.append({"chat": chat, "who": m.get("sender") or chat,
+                        "text": (m.get("text") or "").strip()})
     return out
 
 

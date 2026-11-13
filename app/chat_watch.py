@@ -1511,10 +1511,16 @@ def held(chat: str) -> dict:
     return _held_all().get(chat) or {}
 
 
-def hold(chat: str, msgs: list[dict], why: str, since: float) -> None:
+def hold(chat: str, msgs: list[dict], why: str, since: float, wanted: bool = False) -> None:
+    """`wanted` is the ledger's push decision for these messages. Reading them
+    the first time spends it — the row is stamped `notified` — so the re-read
+    after the hold cannot ask again: it carries the answer instead. 12 Nov:
+    without it "now check" came back ambient and stayed in the bell."""
     allh = _held_all()
-    first = float((allh.get(chat) or {}).get("first") or time.time())
+    prev = allh.get(chat) or {}
+    first = float(prev.get("first") or time.time())
     allh[chat] = {"since": since, "why": why, "first": first,
+                  "wanted": bool(wanted or prev.get("wanted")),
                   "msgs": [{k: m.get(k) for k in ("sender", "text", "sent_at")} for m in msgs]}
     store.kv_set(_HELD_KEY, json.dumps(allh))
 
@@ -1745,6 +1751,11 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
             # "can you please merge this": his reaction answered the thanks, not
             # the merge. Latest wins, so a follow-up is never swallowed.
             c["handled_by_him"] = answered_by_him(chat, m)
+        if waiting.get("wanted"):
+            # The push these messages earned before they were held.
+            for c in convs.values():
+                if c["chat"] == chat:
+                    c["wanted"] = True
     if opened and failed >= opened:
         attention.note_scrape_error(
             "teams-chat", RuntimeError(f"all {opened} chat(s) failed to open"))
@@ -1800,7 +1811,7 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
                 # Due QUIET_SECONDS after their newest message — each new one
                 # moves it on, up to MAX_HOLD_SECONDS in all.
                 since = float(c.get("sent_at") or now) - (HOLD_SECONDS - QUIET_SECONDS)
-            hold(c["chat"], c["raw"], why_wait, since)
+            hold(c["chat"], c["raw"], why_wait, since, wanted=c["wanted"])
             store.record_outcome("chatwatch", "held", subject=c["chat"][:80],
                                  detail=f"{why_wait} — {(c['last'] or '')[:100]}")
             del convs[tid]

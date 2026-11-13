@@ -143,3 +143,38 @@ def test_a_new_message_makes_the_conversation_digestible_again():
     store.add_ui_message(conv["id"], "user", "one more thing")
     assert store.get_conversation(conv["id"])["digested"] == 0
     assert conv["id"] in {c["id"] for c in store.stale_undigested_conversations(idle_seconds=-1)}
+
+
+# --- measured from where the session started ----------------------------------
+
+def test_a_fresh_session_is_never_retired_for_being_its_own_size(monkeypatch, quiet_digest):
+    """12 Nov: the full tool set put a fresh chat at ~85k, over the 70k cap, and
+    every turn retired its session — a recap each turn instead of the thread."""
+    monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "70000")
+    conv = store.create_conversation("claude_cli", None)
+    asyncio.run(main._run_turn_cli(_Sink(), conv, "hi", _brain(85_000), "claude_cli",
+                                   channel="whatsapp"))
+    store.kv_set(f"claude_session:{conv['id']}", "sid-new")     # the CLI saved its session
+    asyncio.run(main._run_turn_cli(_Sink(), conv, "and?", _brain(88_000), "claude_cli",
+                                   channel="whatsapp"))
+    assert store.kv_get(f"claude_session:{conv['id']}") == "sid-new"
+    assert quiet_digest == []
+
+
+def test_it_is_retired_once_it_grows_past_its_floor(monkeypatch, quiet_digest):
+    monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "70000")
+    conv = store.create_conversation("claude_cli", None)
+    asyncio.run(main._run_turn_cli(_Sink(), conv, "hi", _brain(85_000), "claude_cli"))
+    store.kv_set(f"claude_session:{conv['id']}", "sid-new")
+    asyncio.run(main._run_turn_cli(_Sink(), conv, "more", _brain(85_000 + main.SESSION_GROWTH_TOKENS + 1),
+                                   "claude_cli"))
+    assert not (store.kv_get(f"claude_session:{conv['id']}") or "").strip()
+
+
+def test_one_ballooned_first_call_is_still_retired(monkeypatch, quiet_digest):
+    """Twice the cap is the ceiling, whatever the floor."""
+    monkeypatch.setenv("ASTA_SESSION_MAX_TOKENS", "70000")
+    conv = store.create_conversation("claude_cli", None)
+    asyncio.run(main._run_turn_cli(_Sink(), conv, "hi", _brain(232_000), "claude_cli"))
+    assert quiet_digest == [f"digest:{conv['id']}"]
+    assert store.kv_get(f"session_recap:{conv['id']}") == "1"

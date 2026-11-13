@@ -835,3 +835,25 @@ def test_more_from_them_while_their_draft_waits_replaces_the_draft(rail, monkeyp
     assert "that one way thing merged?" in rail.asked[0]["text"]
     assert "no tracking call for OWE" in rail.asked[0]["text"]
     assert any("dropped that draft" in m for m in told)
+
+
+def test_a_message_held_while_they_type_still_reaches_his_phone(rail, monkeypatch):
+    """12 Nov: "now check" was read, judged worth a push, then held because they
+    might still be typing. Being read the first time spent its one push in the
+    ledger, so the re-read after the hold found it "already notified", the line
+    went out ambient, and ambient waits while he is at the laptop — bell only."""
+    from app import chat_watch
+    monkeypatch.setenv("ASTA_ATTENTION", "1")          # the ledger, as it runs live
+    monkeypatch.setattr(chat_watch, "QUIET_SECONDS", 40.0)
+    rail.rows["Ravi Menon"] = [_msg("Ravi Menon", "fixed the conflict on PR 42, now check")]
+    rail.script["teams:Ravi Menon"] = {"state": "ask", "need": "Check and merge PR 42",
+                                       "closing_confidence": 0.05, "entities": [],
+                                       "summary": "Ravi fixed the conflict on PR 42."}
+    rail.sweep()
+    assert chat_watch.held("Ravi Menon") and not rail.pushes, "held while they type"
+    monkeypatch.setattr(chat_watch, "QUIET_SECONDS", 0.0)
+    rail.rows["Ravi Menon"] = []
+    rail.sweep()
+    assert not chat_watch.held("Ravi Menon")
+    assert rail.pushes and rail.pushes[0]["urgency"] == "direct"
+    assert "PR 42" in rail.pushes[0]["text"]

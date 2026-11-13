@@ -325,7 +325,8 @@ def context_for(person: str, now: float | None = None, channel: str = "teams") -
     if live and (live.get("summary") or live.get("need")):
         state = {"awaiting_arun": "answer waiting for Arun's approval",
                  "clarifying": "asked them to clarify", "working": "being looked into",
-                 "checked_in": "asked if anything else is needed"}.get(live["status"], live["status"])
+                 "checked_in": "asked if anything else is needed",
+                 "answered": "already answered — nothing waiting"}.get(live["status"], live["status"])
         lines.append(f"Now ({state}): {live.get('need') or ''} — {live.get('summary') or ''}".strip(" —"))
     with store._connect() as conn:
         rows = [dict(r) for r in conn.execute(

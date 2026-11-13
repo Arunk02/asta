@@ -279,8 +279,14 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
             f"💬 You've already answered {first} yourself — what I found, in case "
             f"it helps:\n\n{(analysis or reply).strip()[:1500]}",
             "answer", urgency="fyi", considered=True)
+        # The case is over — he closed it. Left as "awaiting_arun", the next
+        # chat turn was told "answer waiting for Arun's approval" with this
+        # finding attached, and "share the module to <colleague>" was read as
+        # "send the finding" — a second answer on top of his own (13 Nov).
         if thread:
-            threads.update(thread, status="awaiting_arun")
+            threads.update(thread, status="answered")
+        from . import attention
+        attention.settle_with(who or chat)
         store.record_outcome("answer", "he answered", subject=str(task_id or ""),
                              detail=f"{who}: {need}"[:200])
         return True

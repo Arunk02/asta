@@ -346,6 +346,17 @@ def note_rejected(intent: dict) -> None:
     store.kv_set(_REJECTED, json.dumps(rows[-10:]))
 
 
+def unreject(intent: dict) -> None:
+    """Take back a refusal: the draft was not what his message was about."""
+    from . import store
+    what = _plain(intent.get("what") or "")
+    try:
+        rows = json.loads(store.kv_get(_REJECTED) or "[]")
+    except ValueError:
+        return
+    store.kv_set(_REJECTED, json.dumps([r for r in rows if r.get("what") != what]))
+
+
 def last_rejected_to() -> str:
     """Who the draft he most recently said no to was for, or ''."""
     from . import store

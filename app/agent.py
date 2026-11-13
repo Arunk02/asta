@@ -2037,17 +2037,54 @@ def _approves_waiting_draft(to: str, cid: str) -> bool:
     return bool(waiting_for and now_for) and waiting_for[0] == now_for[0]
 
 
-async def _send_as_asked(cid: str, to: str, body: str) -> None:
-    """Send what he asked for, as a recorded call, and say how it ended."""
-    from . import notify, ops, store
+def _he_wrote_since(cid: str, since: float) -> bool:
+    """Has he sent this conversation anything after `since`?"""
+    from . import store
+    with store._connect() as conn:
+        row = conn.execute("SELECT 1 FROM ui_messages WHERE conv_id=? AND role='user' "
+                           "AND created_at>? LIMIT 1", (cid, since)).fetchone()
+    return bool(row)
+
+
+async def _send_as_asked(cid: str, to: str, body: str, hold_if_he_writes: bool = False) -> None:
+    """Send what he asked for, as a recorded call, and say how it ended.
+
+    `hold_if_he_writes` — the words are a brain's reading of his ask, not his
+    own and not a draft he read. If he writes again before the browser is free,
+    the send is held and comes back as a draft. 13 Nov: "share the module to
+    <colleague>" was read as "send the finding"; his "send him the producer
+    file" came 49 s before the queued send went out — and it went anyway."""
+    from . import notify, ops, store, teams_bridge
+    decided = time.time()
+    token = teams_bridge.send_gate.set(
+        (lambda: "he wrote again before it went" if _he_wrote_since(cid, decided) else "")
+        if hold_if_he_writes else None)
     try:
         line = await ops.run({"name": "teams_send", "args": {"to": to, "text": body,
                                                              "to_group": False}})
+    except teams_bridge.SendHeld:
+        _hold_as_draft(cid, to, body)
+        msg = (f"⏸ Held, not sent to {to} — you wrote again before it went. "
+               f"It comes back as a draft for your yes.")
+        store.add_ui_message(cid, "assistant", msg, {"via": "sent-as-asked-held"})
+        await notify.notify(msg, "action", urgency="direct", considered=True)
+        return
     except Exception as exc:                                   # noqa: BLE001
         line = f"⚠️ Could not confirm delivery to {to} — {type(exc).__name__}: {exc}. Check the chat before retrying."
+    finally:
+        teams_bridge.send_gate.reset(token)
     quoted = "> " + body.replace("\n", "\n> ")
     store.add_ui_message(cid, "assistant", f"{line}\n\n{quoted}", {"via": "sent-as-asked"})
     await notify.notify(f"{line}\n\n{quoted}", "action", urgency="direct", considered=True)
+
+
+def _hold_as_draft(cid: str, to: str, body: str) -> None:
+    """Queue a held send as a draft — shown once nothing else waits for his yes."""
+    from . import answers, store
+    answers._enqueue({"type": "answer", "his_draft": True, "kind": "send", "what": body,
+                      "to": to, "channel": "teams", "to_group": False, "who": to,
+                      "need": "the message you asked me to send", "_at": time.time()})
+    store.record_outcome("send", "held", subject=to[:80], detail="he wrote again before it went")
 
 
 async def _send_auto_reply(cid: str, to: str, body: str) -> None:
@@ -2284,8 +2321,8 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # the revision: one yes, not one per wording.
     if channel in ("teams", "chat") and to and not to_group and not above \
             and not _LABEL_NOT_MESSAGE.match(what.strip()) \
-            and ((_he_asked_to_send(to, cid)
-                  and (len(what.strip()) <= SEND_WHEN_ASKED_MAX or verbatim))
+            and ((he_asked_now := (_he_asked_to_send(to, cid)
+                                   and (len(what.strip()) <= SEND_WHEN_ASKED_MAX or verbatim)))
                  or _approves_waiting_draft(to, cid)):
         import asyncio
         # His own words go exactly as he wrote them; only a brain's are re-addressed.
@@ -2296,7 +2333,8 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
         except RuntimeError:
             pass
         else:
-            asyncio.ensure_future(_send_as_asked(cid, to, body))
+            asyncio.ensure_future(_send_as_asked(
+                cid, to, body, hold_if_he_writes=bool(he_asked_now) and not verbatim))
             return (f"Sending to {to} now — he asked for this himself, so it is not staged. "
                     f"Tell Arun in one line what is going and to whom; the send result "
                     f"follows on its own.")

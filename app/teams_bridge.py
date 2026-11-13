@@ -1692,7 +1692,26 @@ def _capture(chat: str, raw: list[dict]) -> list[dict]:
         except Exception:
             # History is a bonus on top of the read, never a reason to fail it.
             pass
+        _settle_answered(chat, rows)
     return rows
+
+
+def _settle_answered(chat: str, rows: list[dict]) -> None:
+    """A reply of his in this chat settles what they raised before it.
+
+    The watcher skips his own messages, so the only thing that settled an ask
+    was seeing his reply at the moment their message was read. 13 Nov: their
+    question was read four seconds before his answer and sat on his list as
+    "waiting" for two and a half hours. Only person rows match: attention rows
+    are keyed by sender, so a group title never settles anything here."""
+    try:
+        from . import attention, chat_watch
+        his = [float(r["sent_at"]) for r in rows
+               if r.get("sent_at") and chat_watch.written_by_him(r, chat)]
+        if his:
+            attention.settle_with(chat, why="he replied", before=max(his))
+    except Exception:                                          # noqa: BLE001
+        pass
 
 
 def fmt_message(r: dict) -> str:
@@ -1859,6 +1878,14 @@ SENT: list[tuple[float, str]] = []
 STARTED: list[float] = []
 _automatic_send: contextvars.ContextVar[str] = contextvars.ContextVar(
     "teams_automatic_send", default="")
+#: Asked once the browser is ours, before anything is typed: a reason to hold
+#: the send, or "". A send queued behind a long read can go out a minute after
+#: it was decided — long enough for him to have said it was the wrong message.
+send_gate: contextvars.ContextVar = contextvars.ContextVar("teams_send_gate", default=None)
+
+
+class SendHeld(RuntimeError):
+    """Nothing was typed: the send's gate said to hold it."""
 
 
 async def send_automatic(chat: str, text: str) -> str:
@@ -1903,6 +1930,10 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
     STARTED.append(started_at)
     del STARTED[:-50]
     async with teams_page() as page:
+        gate = send_gate.get()
+        why = gate() if gate else ""
+        if why:
+            raise SendHeld(why)
         title = await _open_target(page, chat, allow_group)
         box = None
         for sel in ('[data-tid="ckeditor"] [contenteditable="true"]',

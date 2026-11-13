@@ -650,7 +650,8 @@ def mark_acted(key: str, now: float | None = None, why: str = "acted") -> None:
         _label(row, why)
 
 
-def settle_with(who: str, why: str = "he replied", now: float | None = None) -> int:
+def settle_with(who: str, why: str = "he replied", now: float | None = None,
+                before: float | None = None) -> int:
     """Everything this person was owed is settled — he has now answered them.
 
     The gap this closes is the one Arun hit hardest. Nothing in the live product
@@ -665,10 +666,15 @@ def settle_with(who: str, why: str = "he replied", now: float | None = None) -> 
     would have left the other two chasing him at end of day.
 
     Returns how many it settled, so a caller can say so rather than guess.
+
+    `before` — only what they raised before this moment (his reply's time): an
+    ask that came after his reply is still owed.
     """
     n = 0
     for row in store.attention_open_from(who):
         if self_originated(row):
+            continue
+        if before is not None and float(row.get("first_seen") or 0) >= before:
             continue
         mark_acted(row["key"], now=now, why=why)
         n += 1

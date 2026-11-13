@@ -2291,7 +2291,8 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
     fresh = not has_session(conv["id"])
     try:
         reply = await cli.run_turn(
-            conv, _with_open_case(conv["id"], _with_side_answers(conv["id"], user_text)),
+            conv, _with_open_reply(conv["id"], _with_open_case(
+                conv["id"], _with_side_answers(conv["id"], user_text))),
             on_delta, **kwargs)
     except Exception as exc:
         # Whatever it managed to stream before dying is the only record of how far
@@ -3225,6 +3226,19 @@ def _with_open_case(cid: str, text: str, now: float | None = None) -> str:
     store.kv_set(key, str(now))
     return (f"[This message is about {chat}'s open case. What it holds — build on it, "
             f"and name anything you overturn:{held}]\n\n{text}")
+
+
+def _with_open_reply(cid: str, text: str) -> str:
+    """`text`, preceded by where the reply he is working on goes, when that is a
+    group: told up front, the brain stages it there the first time instead of
+    to the person 1:1 (agent._route_recipient still holds either way)."""
+    from . import loop
+    ctx = loop.reply_context(cid)
+    if not ctx.get("group"):
+        return text
+    who = ctx.get("who") or "someone"
+    return (f"[Open reply: {who} asked in the group {ctx['to']}. A reply to them goes to "
+            f"that group (to_group=true) unless Arun names someone else or says 1:1.]\n\n{text}")
 
 
 def _keep_side_answer(cid: str, side_id: str, asked: str, channel: str) -> None:

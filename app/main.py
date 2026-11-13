@@ -3399,6 +3399,7 @@ async def _conduct(conv0: dict, first_text: str, sink, channel: str) -> None:
                     await sink.send({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
 
         intent = loop.take(cid) if loop.enabled() else None
+        _settle_feedback(cid, intent)
 
         # A drafted outward send is the one thing that interrupts everything: show it
         # and wait for his yes/no — nothing leaves the machine unconfirmed.
@@ -3693,6 +3694,48 @@ def _judge_staged(cid: str, staged: dict, user_text: str) -> None:
         row = ledger.record("send", target, "amended", channel=staged.get("channel"))
         store.kv_set(f"amending:{cid}", _json.dumps(
             {"id": row, "before": staged.get("what") or "", "to": target}))
+
+
+def _set_aside(cid: str, staged: dict, said: str, outcome: str) -> bool:
+    """Put a waiting draft back in the queue, to come up again. False when it is
+    not one that is owed (no words, or neither an answer nor addressed)."""
+    if not (staged.get("what") and (staged.get("type") == "answer" or staged.get("to"))):
+        return False
+    from . import answers as _answers
+    back = {k: v for k, v in staged.items() if k != "_shown"}
+    if back.get("type") != "answer":
+        back.update(type="answer", his_draft=True, who=back.get("to") or "them",
+                    need=back.get("need") or "the message you asked me to draft")
+    back["_at"] = time.time()      # undated or old reads as stale and is retired
+    _answers._enqueue(back)
+    store.record_outcome("turn", outcome, subject=cid, detail=(said or "")[:200])
+    return True
+
+
+#: The draft his message was read as feedback on, until the turn shows whether it
+#: was: a revision staged means it was; nothing staged and no "no" means it was
+#: something else, and the draft is kept. 13 Nov: "how many Teams chats …? just
+#: the number" under a colleague's reply was answered "1" — and the reply, read as
+#: feedback before the brain ran, was gone.
+_under_feedback: dict[str, tuple[dict, str]] = {}
+
+_SAYS_NO = re.compile(r"^\s*(?:no|nope|nah|ignore|skip|drop|leave|cancel|stop|scrap|"
+                      r"don'?t|dont|not\s+now)\b|\b(?:don'?t|do\s+not|never)\s+send\b", re.I)
+
+
+def _settle_feedback(cid: str, intent: dict | None) -> None:
+    """After the turn: a staged revision means it WAS feedback (the old draft
+    stays refused). No revision and no "no" means it was something else: the
+    draft's words are un-refused and it is set aside to come up again."""
+    held = _under_feedback.pop(cid, None)
+    if not held or (intent and intent.get("kind") == "send"):
+        return
+    staged, said = held
+    if _SAYS_NO.search(said or ""):
+        return
+    loop.unreject(staged)
+    store.kv_set(f"amending:{cid}", "")
+    _set_aside(cid, staged, said, "draft kept — his message was not about it")
 
 
 def _revision_staged(cid: str, intent: dict) -> None:
@@ -4810,20 +4853,11 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             # draft. 8 Oct: "Connect with swamy … and clarify" arrived wrapped as
             # draft feedback and came back as a re-worded TEXT; "What swamy told?"
             # came back as "do you want that message sent?".
-            if staged.get("what") and (staged.get("type") == "answer" or staged.get("to")):
-                # Still owed: it goes back in the queue and comes up again, rather
-                # than vanishing because he asked something else first. A
-                # colleague's answer, and a draft he asked for himself (12 Nov: his
-                # clarifying question to a colleague was dropped by the next ask).
-                from . import answers as _answers
-                back = {k: v for k, v in staged.items() if k != "_shown"}
-                if back.get("type") != "answer":
-                    back.update(type="answer", his_draft=True, who=back.get("to") or "them",
-                                need=back.get("need") or "the message you asked me to draft")
-                back["_at"] = time.time()      # undated or old reads as stale and is retired
-                _answers._enqueue(back)
-                store.record_outcome("turn", "draft set aside for new ask", subject=cid,
-                                     detail=user_text[:200])
+            # Still owed: it goes back in the queue and comes up again, rather
+            # than vanishing because he asked something else first. A
+            # colleague's answer, and a draft he asked for himself (12 Nov: his
+            # clarifying question to a colleague was dropped by the next ask).
+            if _set_aside(cid, staged, user_text, "draft set aside for new ask"):
                 prompt = (f"{user_text.strip()}\n\n(The draft to {staged.get('to') or 'them'} "
                           f"is set aside — it waits and comes up again. Do not stage it now.)")
             else:
@@ -4837,6 +4871,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             # 3.1.6" typed at a waiting draft was a new instruction, and the
             # draft was re-staged as a label of itself (30 Sep).
             loop.note_rejected(staged)
+            _under_feedback[cid] = (staged, user_text)
             prompt = (f"Arun did NOT approve sending the draft as-is. His feedback:\n"
                       f"{user_text.strip()}\n\nRevise accordingly — change only what he asked "
                       f"for, in his words, and add nothing from his other conversations (15 Oct: "
@@ -4844,8 +4879,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                       f"someone else). When it's ready to send "
                       f"again, stage it with prepare_to_send; otherwise just continue the work. "
                       f"If what he typed is a new instruction rather than a change to the "
-                      f"draft, do that instead and do NOT stage the draft again — it is "
-                      f"dropped unless he asks for it.")
+                      f"draft, do that instead and do NOT stage the draft again.")
         return _start_turn(conv, prompt, sink, channel)
 
     # Asta offered to go do something ("CI failed — want me to analyse?"). His yes

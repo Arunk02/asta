@@ -2096,20 +2096,50 @@ def _names_recipient(words: str, to: str, to_group: bool) -> bool:
     return person and bool(first) and re.search(rf"\b{re.escape(first[0])}\b", w) is not None
 
 
-def _revision_moves_recipient(said: str, to: str, to_group: bool) -> str:
-    """Why this revision may not stage — '' unless it moves the draft to someone
-    he did not name. Only a turn that is his feedback on a waiting draft."""
+_ONE_TO_ONE = re.compile(r"\b(?:1\s*:\s*1|one[- ]to[- ]one|personally|directly|"
+                         r"privately|in (?:a )?dm|dm (?:him|her|them))\b", re.I)
+
+
+def _norm(name: str) -> str:
+    return " ".join((name or "").lower().split())
+
+
+def _route_recipient(cid: str, said: str, to: str, to_group: bool,
+                     channel: str = "teams") -> tuple[str, bool, str]:
+    """Where this draft goes, given the reply it belongs to: (to, to_group, note).
+    A note starting "Not staged" stops it; any other note says it was moved.
+
+    The ONE recipient rule, against the reply context `loop.stage` records —
+    where the ask came from. A recipient he names, or "1:1", always wins.
+    - The person who asked in a group, or a member its title lists → the group.
+      12 Nov: a colleague asked in a group, his next line ("ask him to use
+      develop") was staged 1:1 and sent there; the group never saw it.
+    - His feedback on a draft moving it to a chat he did not name → stopped.
+      12 Nov: a test line taken as feedback was re-staged to a group that
+      shared one word ("test") with it.
+    Moved, it is still staged: he sees where it goes before his yes."""
     from . import loop, scorecard
-    if not to or not said.strip().lower().startswith("arun did not approve"):
-        return ""
-    was = loop.last_rejected_to()
-    if not was or _same_recipient(was, to):
-        return ""
-    if _names_recipient(scorecard.his_words(said), to, to_group):
-        return ""
-    return (f"Not staged — this revises the draft to {was}, and Arun did not name "
-            f"{to}. A revision keeps its recipient: stage it to {was}, or, if his words "
-            f"were not a change to that draft, stage nothing and just answer him.")
+    from . import teams_bridge as _tb
+    ctx = loop.reply_context(cid)
+    chat = ctx.get("to") or ""
+    if not to or not chat or _norm(chat) == _norm(to):
+        return to, to_group, ""
+    words = scorecard.his_words(said) or said
+    if _ONE_TO_ONE.search(words) or _names_recipient(words, to, to_group):
+        return to, to_group, ""
+    if channel in ("teams", "chat") and not to_group \
+            and (ctx.get("group") or _tb._is_member_list(chat)):
+        listed = _tb._is_member_list(chat) and _names_recipient(chat, to, False)
+        if _same_recipient(to, ctx.get("who") or "") or listed:
+            return chat, True, (f"Staged to the group {chat}, not to {to} 1:1 — the ask came "
+                                f"from that group and Arun did not ask for 1:1. Tell him in "
+                                f"one line where it is going.")
+    if said.strip().lower().startswith("arun did not approve") and not _same_recipient(chat, to):
+        return to, to_group, (f"Not staged — this revises the draft to {chat}, and Arun did not "
+                              f"name {to}. A revision keeps its recipient: stage it to {chat}, "
+                              f"or, if his words were not a change to that draft, stage nothing "
+                              f"and just answer him.")
+    return to, to_group, ""
 
 
 def prepare_to_send(what: str, to: str = "", channel: str = "chat",
@@ -2164,19 +2194,17 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     from . import teams_bridge as _tb
     if channel == "teams" and _tb._is_member_list(to):
         to_group = True
+    # Where the reply belongs, before any rule or automatic send sees `to`.
+    to, to_group, routed = _route_recipient(cid, capabilities.said_this_turn(), to, to_group,
+                                            channel)
+    if routed.startswith("Not staged"):
+        return routed
     # His standing rules, before anything is even drafted for him to approve.
     # "Unless I ask" holds when the person is named in what he said this turn.
     said = capabilities.said_this_turn().lower()
     ruled = policy.check("send", to, asked=bool(to) and to.lower() in said)
     if not ruled.ok:
         return f"Not staged — {ruled.why}. Tell Arun, in one line, that this rule stopped it."
-    # A revision keeps its recipient. 12 Nov: "test after bridge move: reply with
-    # just 'bridge ok'", typed while a colleague's answer was waiting, was taken
-    # as feedback on it and re-staged to a Teams group that shares one word
-    # ("test") with what he typed. Only a recipient he names moves the draft.
-    moved = _revision_moves_recipient(capabilities.said_this_turn(), to, to_group)
-    if moved:
-        return moved
     # A label is not sendable text, even under an automatic-reply permission.
     if _LABEL_NOT_MESSAGE.match(what.strip()) and len(what.strip()) < 140 \
             and not re.search(r"[.?!]\s|\n", what.strip()):
@@ -2279,6 +2307,8 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     # writes; this is what notices when it did not listen. Reported to the BRAIN
     # here — the draft is staged either way, because it is his to approve, but a
     # brain told its draft reads like a bot can shorten it before he ever sees it.
+    if routed:
+        staged = f"{routed}\n{staged}"
     if channel in ("teams", "chat", "whatsapp", "email"):
         overrun = writing.too_long(what, to)
         if overrun:

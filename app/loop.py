@@ -24,6 +24,7 @@ restart. That would be the least expected and least safe behaviour.
 
 from __future__ import annotations
 
+import contextlib
 import json
 
 import os
@@ -241,6 +242,44 @@ def stage(cid: str, intent: dict) -> None:
         _awaiting[cid] = intent
         _kv("set", cid, json.dumps(intent))
         _remember_version(cid, intent)
+        note_reply(cid, intent)
+
+
+#: The conversation a draft belongs to — where the ask came from — kept while he
+#: works on it, so a follow-up line goes back there rather than to whichever
+#: chat a name resolves to. 12 Nov: a colleague asked in a group, his next line
+#: ("ask him to use develop") was staged 1:1 and sent there.
+_REPLY = "reply_context:"
+REPLY_SECONDS = 3600
+
+
+def note_reply(cid: str, intent: dict) -> None:
+    """Remember where this draft goes: {'to', 'group', 'who', 'at'}."""
+    from . import store
+    to = (intent.get("to") or "").strip()
+    if not cid or not to:
+        return
+    group = bool(intent.get("to_group"))
+    prev = reply_context(cid)
+    who = (intent.get("who") or "").strip()
+    if not who:
+        who = (prev.get("who") or "") if prev.get("to") == to else ("" if group else to)
+    with contextlib.suppress(Exception):
+        store.kv_set(_REPLY + cid, json.dumps({"to": to, "group": group, "who": who,
+                                               "at": time.time()}))
+
+
+def reply_context(cid: str, now: float | None = None) -> dict:
+    """The reply he is working on in this conversation, or {} — for an hour."""
+    from . import store
+    if not cid:
+        return {}
+    try:
+        ctx = json.loads(store.kv_get(_REPLY + cid) or "{}")
+    except Exception:                                          # noqa: BLE001
+        return {}
+    now = time.time() if now is None else now
+    return ctx if ctx.get("to") and now - float(ctx.get("at") or 0) < REPLY_SECONDS else {}
 
 
 #: Each staged wording, so "send the previous one" has something to send. 15 Oct:

@@ -396,6 +396,37 @@ def session_max_tokens(channel: str = "") -> int:
     return min(cap, 24000) if cap and channel == "voice" else cap
 
 
+#: How far a session may grow past its own first call before it is retired.
+#: The cap alone assumed every fresh session starts well under it. 12 Nov: the
+#: full tool set (asta PR 250) put a FRESH chat at ~85k, over the 70k cap, so
+#: every turn retired its session — a recap instead of the conversation, and
+#: ~20k of prompt rewritten to the cache each turn.
+SESSION_GROWTH_TOKENS = 30_000
+
+
+def has_session(conv_id: str) -> bool:
+    """Whether the next call resumes a CLI session, or starts a new one."""
+    return any((store.kv_get(f"{k}:{conv_id}") or "").strip()
+               for k in ("copilot_session", "claude_session"))
+
+
+def session_limit(conv_id: str, context: int, cap: int, fresh: bool) -> int:
+    """The context past which THIS session is retired.
+
+    Measured from where the session started: a fresh session's first call is
+    its floor, and it is retired once it has grown SESSION_GROWTH_TOKENS past
+    that or past the cap, whichever is later — never for being its own size.
+    Twice the cap is the hard ceiling, so one ballooned first call is still
+    retired."""
+    if fresh:
+        store.kv_set(f"session_floor:{conv_id}", str(int(context)))
+    try:
+        floor = int(store.kv_get(f"session_floor:{conv_id}") or 0)
+    except ValueError:
+        floor = 0
+    return min(max(cap, floor + SESSION_GROWTH_TOKENS), 2 * cap)
+
+
 def retire_session_for_size(conv: dict, context: int) -> list[str]:
     """Drop this conversation's CLI sessions because ONE call grew past the cap.
 
@@ -2257,9 +2288,11 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
     if "on_usage" in accepts:
         kwargs["on_usage"] = on_usage
 
+    fresh = not has_session(conv["id"])
     try:
         reply = await cli.run_turn(
-            conv, _with_open_case(conv["id"], _with_side_answers(conv["id"], user_text)),
+            conv, _with_open_reply(conv["id"], _with_open_case(
+                conv["id"], _with_side_answers(conv["id"], user_text))),
             on_delta, **kwargs)
     except Exception as exc:
         # Whatever it managed to stream before dying is the only record of how far
@@ -2307,7 +2340,7 @@ async def _run_turn_cli(out, conv: dict, user_text: str, cli, via: str,
     # Retire a session that has grown past the cap NOW, before the next message
     # can resume it — the idle digest never fires on a thread that never idles.
     cap = session_max_tokens(channel)
-    if cap and spent.context > cap:
+    if cap and spent.context > session_limit(conv["id"], spent.context, cap, fresh):
         retire_session_for_size(conv, spent.context)
     await out.send({"type": "done", "tools": [tool_name]})
 
@@ -3193,6 +3226,19 @@ def _with_open_case(cid: str, text: str, now: float | None = None) -> str:
     store.kv_set(key, str(now))
     return (f"[This message is about {chat}'s open case. What it holds — build on it, "
             f"and name anything you overturn:{held}]\n\n{text}")
+
+
+def _with_open_reply(cid: str, text: str) -> str:
+    """`text`, preceded by where the reply he is working on goes, when that is a
+    group: told up front, the brain stages it there the first time instead of
+    to the person 1:1 (agent._route_recipient still holds either way)."""
+    from . import loop
+    ctx = loop.reply_context(cid)
+    if not ctx.get("group"):
+        return text
+    who = ctx.get("who") or "someone"
+    return (f"[Open reply: {who} asked in the group {ctx['to']}. A reply to them goes to "
+            f"that group (to_group=true) unless Arun names someone else or says 1:1.]\n\n{text}")
 
 
 def _keep_side_answer(cid: str, side_id: str, asked: str, channel: str) -> None:

@@ -377,6 +377,7 @@ def rotate_sessions(conv_id: str) -> list[str]:
     sent into a single, ever-growing session.
     """
     tool_index.forget(conv_id)
+    forget_cases_told(conv_id)
     dropped = []
     for key in (f"copilot_session:{conv_id}", f"claude_session:{conv_id}"):
         if (store.kv_get(key) or "").strip():
@@ -3167,6 +3168,13 @@ def _with_side_answers(cid: str, text: str, now: float | None = None) -> str:
     return (f"[While you were busy, a separate read-only turn answered him. You did not "
             f"see it until now; he did. Build on it, or say plainly where it was wrong:\n"
             f"{said}]\n\n{text}")
+
+
+def forget_cases_told(cid: str) -> None:
+    """A new session has been told nothing: every case is told to it again.
+    13 Nov: a case told at 18:04 was skipped for the session started at 18:16."""
+    for key in store.kv_like(f"case_told:{cid}:%"):
+        store.kv_del(key)
 
 
 #: How long a case told to the chat brain stays told within its session.

@@ -630,13 +630,60 @@ def handed_chats(now: float | None = None) -> list[str]:
 
 
 def case_for_text(text: str, now: float | None = None) -> tuple[str, str]:
-    """(chat, what the case holds) when `text` names someone whose case is open —
-    by their first name, as he writes it ("what about Vinish's one?")."""
-    for chat in named_handed(text, now):
+    """(chat, what the case holds) for the case `text` is about: the chat where
+    an id it names was raised, else someone named whose case is open — by first
+    name, as he writes it ("what about Pat's one?").
+
+    The id first: it is the more specific fact. 13 Nov: a task brief named only
+    a booking id, so no case was attached, and the brain filled the gap with the
+    time and status of another colleague's billing failure."""
+    found = cases_for(text, now, limit=1)
+    return found[0] if found else ("", "")
+
+
+def just_handed(now: float | None = None, seconds: float = 1800) -> list[str]:
+    """Cases handed over in the last half hour — the one a reset lands in the
+    middle of when nothing in the recent lines names it."""
+    now = time.time() if now is None else now
+    live = [_handed(v) for v in store.kv_like("case_handed:%").values()]
+    return [chat for at, chat in sorted(live, reverse=True) if chat and now - at <= seconds]
+
+
+def cases_for(text: str, now: float | None = None, limit: int = 2) -> list[tuple[str, str]]:
+    """Every open case `text` is about, most specific first: by id, then by name."""
+    out: list[tuple[str, str]] = []
+    for chat in chats_raising(text, now) + named_handed(text, now):
+        if len(out) >= limit or any(_chat_key(c) == _chat_key(chat) for c, _ in out):
+            continue
         held = case_so_far(chat, chat, now)
         if held:
-            return chat, held
-    return "", ""
+            out.append((chat, held))
+    return out
+
+
+def chats_raising(text: str, now: float | None = None) -> list[str]:
+    """Chats where someone OTHER than him raised an id `text` names, recently."""
+    from . import chat_watch
+    now = time.time() if now is None else now
+    chats: list[str] = []
+    for ident in dict.fromkeys(_MIXED_ID.findall(text or "")):
+        rows = [r for r in store.teams_search(ident, limit=30)
+                if ident.lower() in (r.get("text") or "").lower()
+                and float(r.get("sent_at") or 0) >= now - CASE_WINDOW_SECONDS
+                and not chat_watch.is_from_him(r.get("sender", ""))]
+        for r in sorted(rows, key=lambda r: float(r.get("sent_at") or 0), reverse=True):
+            if all(_chat_key(r["chat"]) != _chat_key(c) for c in chats):
+                chats.append(r["chat"])
+    return chats
+
+
+def _chat_key(chat: str) -> str:
+    """One group under its several spellings: the rail lists members on separate
+    lines, and "+2" becomes "+3" when someone joins."""
+    parts = [p.strip() for p in re.split(r"[,\n]", chat or "") if p.strip()]
+    if parts and re.fullmatch(r"\+\d+", parts[-1]):
+        parts = parts[:-1]
+    return ", ".join(parts).lower()
 
 
 def named_handed(text: str, now: float | None = None) -> list[str]:

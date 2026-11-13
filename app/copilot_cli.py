@@ -172,6 +172,17 @@ def _switch_recap(conv: dict, via: str) -> str:
             lines.append(f"{who}: {text}")
     if not lines:
         return ""
+    from . import responder
+    # What was last FOUND on the ids still being talked about, even when it is
+    # older than six lines. 13 Nov: the finding sat seven messages back; the
+    # fresh session never saw it and later disowned it.
+    ids = set(responder._MIXED_ID.findall("\n".join(lines)))
+    if ids:
+        for m in reversed(msgs[-40:-6]):
+            body = " ".join((m.get("content") or "").split())
+            if m.get("role") != "user" and any(i in body for i in ids):
+                lines.insert(0, f"You (earlier, your last finding on it): {body[:800]}")
+                break
     why = ("your previous session was retired to keep its context small — this is "
            "the same conversation continuing" if rotated
            else "you're continuing it after a model switch")
@@ -180,11 +191,17 @@ def _switch_recap(conv: dict, via: str) -> str:
     # Six lines are not a case. 5 Nov: the session was retired at 133k tokens in
     # the middle of one, and the fresh session asked him to choose what the old
     # one had told him minutes before.
-    from . import responder
-    for chat in responder.handed_chats()[:2]:
-        held = responder.case_so_far(chat, chat)
-        if held:
-            recap += f"\n\nOpen case — {chat}:{held[:1500]}"
+    # Only the cases these lines are about — by id, then by name. The two most
+    # recent cases were attached whatever the topic, and another colleague's
+    # failure times were carried into this booking's task brief (13 Nov).
+    cases = responder.cases_for("\n".join(lines))
+    if not cases:
+        # Nothing in the lines names a case: the one handed over minutes ago is
+        # the one being worked (5 Nov), never one from hours before.
+        cases = [(c, h) for c in responder.just_handed()[:1]
+                 for h in [responder.case_so_far(c, c)] if h]
+    for chat, held in cases:
+        recap += f"\n\nOpen case — {chat}:{held[:1500]}"
     return recap
 
 

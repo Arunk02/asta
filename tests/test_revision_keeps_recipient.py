@@ -106,3 +106,17 @@ def test_a_member_who_wrote_in_a_named_group_counts(monkeypatch):
                         if chat == "Release Prep - Oct" else [])
     assert agent._in_group("Kiran Das", "Release Prep - Oct")
     assert not agent._in_group("Asha Rao", "Release Prep - Oct")
+
+
+def test_in_a_busy_named_group_the_person_who_just_asked_counts(monkeypatch):
+    """A group with its own name lists no members — who wrote in it decides,
+    and the recent asker must be found under hundreds of older lines."""
+    import time
+    from app import agent, store
+    now = time.time()
+    store.save_teams_messages(
+        [{"key": f"old-{i}", "chat": "Release Prep - Oct", "sender": "Asha Rao",
+          "text": f"line {i}", "sent_at": now - 5 * 86400 + i} for i in range(300)]
+        + [{"key": "ask", "chat": "Release Prep - Oct", "sender": "Kiran Das",
+            "text": "please check the build", "sent_at": now - 600}])
+    assert agent._in_group("Kiran Das", "Release Prep - Oct")

@@ -2123,8 +2123,10 @@ def _in_group(person: str, group: str) -> bool:
     first = re.findall(r"[a-z]{3,}", person.lower())[:1]
     if first and re.search(rf"\b{re.escape(first[0])}\b", group.lower()):
         return True
+    # Recent, not the oldest 200: `teams_messages` is oldest-first, and in a busy
+    # named group that missed the very person whose ask the draft answered.
     try:
-        rows = store.teams_messages(chat=group, limit=200)
+        rows = store.teams_messages(chat=group, since=time.time() - 14 * 86400, limit=5000)
     except Exception:                                          # noqa: BLE001
         return False
     return any(_same_recipient(r.get("sender") or "", person) for r in rows)

@@ -271,6 +271,16 @@ def note_reply(cid: str, intent: dict) -> None:
                                                "at": time.time()}))
 
 
+def end_reply(cid: str) -> None:
+    """He dropped the reply: where it would have gone stops steering his next
+    lines. 13 Nov: a group reply he said to ignore was still attached to his
+    messages for the rest of the hour, including an unrelated booking question."""
+    from . import store
+    if cid:
+        with contextlib.suppress(Exception):
+            store.kv_del(_REPLY + cid)
+
+
 def reply_context(cid: str, now: float | None = None) -> dict:
     """The reply he is working on in this conversation, or {} — for an hour."""
     from . import store

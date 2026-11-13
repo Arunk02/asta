@@ -3506,6 +3506,8 @@ async def _present_staged_send(sink, cid: str, intent: dict, channel: str) -> No
     to = f" to {where}*{intent['to']}*" if intent.get("to") else ""
     body = (f"📤 Ready to send{to} on **{intent.get('channel', 'chat')}** — can I send this?\n\n"
             f"———\n{intent.get('what', '')}\n———\n\n"
+            + (f"📎 Attached: {', '.join(Path(f).name for f in intent['files'])}\n\n"
+               if intent.get("files") else "")
             + _recipient_warning(intent)
             + ("🔒 *Manager and above* — this goes only on your “send”. Check every word.\n\n"
                if _senior(intent) else "") +
@@ -3913,8 +3915,10 @@ def _mechanical_send(staged: dict) -> dict | None:
     to, what = (staged.get("to") or "").strip(), (staged.get("what") or "").strip()
     if not to or not what:
         return None            # nothing to address it to — let the model sort it out
-    return {"name": "teams_send", "args": {"to": to, "text": what,
-                                           "to_group": bool(staged.get("to_group"))}}
+    args = {"to": to, "text": what, "to_group": bool(staged.get("to_group"))}
+    if staged.get("files"):
+        args["files"] = list(staged["files"])
+    return {"name": "teams_send", "args": args}
 
 
 async def _run_op(op: dict, cid: str, sink, channel: str,

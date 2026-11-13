@@ -1890,8 +1890,70 @@ def _automatic_receipt(chat: str, text: str, raw: list[dict], started_at: float)
     return True
 
 
-async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
+_ATTACH_BUTTON = ('button[data-tid="file-attach-button"]',
+                  'button[data-tid*="FileAttachment"]',
+                  'button[aria-label="Attach file"]',
+                  'button[aria-label*="Attach"]',
+                  'button[title*="Attach"]')
+_UPLOAD_FROM_DEVICE = ('[role="menuitem"]:has-text("Upload from this device")',
+                       '[role="menuitem"]:has-text("Upload from my computer")',
+                       'button:has-text("Upload from this device")')
+
+
+async def _attach(page, files: list[str]) -> None:
+    """Put the files in the composer and wait until Teams has uploaded them.
+
+    Raises before anything is sent: a message that goes without the file it
+    talks about is worse than one held back."""
+    names = [Path(f).name for f in files]
+    chosen = False
+    try:
+        async with page.expect_file_chooser(timeout=8000) as fc:
+            if not await _click_any(page, _ATTACH_BUTTON, timeout=3000):
+                raise RuntimeError("no attach button in the composer")
+            await asyncio.sleep(0.5)
+            # The menu, when this Teams shows one; with none, the click above
+            # already opened the chooser and this finds nothing.
+            await _click_any(page, _UPLOAD_FROM_DEVICE, timeout=2500)
+        chooser = await fc.value
+        await chooser.set_files(files)
+        chosen = True
+    except Exception as exc:                                   # noqa: BLE001
+        why = exc
+    if not chosen:
+        with contextlib.suppress(Exception):
+            await page.keyboard.press("Escape")
+        inp = await page.query_selector('input[type="file"]')
+        if not inp:
+            raise RuntimeError(f"could not attach {', '.join(names)} — {why}. Nothing was sent.")
+        await inp.set_input_files(files)
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        state = await page.evaluate(
+            """(names) => {
+                const t = document.body.innerText || '';
+                const busy = document.querySelector('[role="progressbar"]');
+                return {all: names.every(n => t.includes(n)), busy: !!busy};
+            }""", names)
+        if state["all"] and not state["busy"]:
+            return
+        await asyncio.sleep(1.0)
+    raise RuntimeError(f"{', '.join(names)} did not finish uploading in 90 s — nothing was sent")
+
+
+async def _clear_composer(page) -> None:
+    """Empty the box after a failed attach, so nothing half-made goes later."""
+    with contextlib.suppress(Exception):
+        await page.keyboard.press("Meta+A")
+        await page.keyboard.press("Backspace")
+
+
+async def send_message(chat: str, text: str, allow_group: bool = False,
+                       files: list[str] | None = None) -> str:
     """Send a message to a person's 1:1 chat. Returns the chat it landed in.
+
+    `files` — local paths already passed by app/attachments.check; they go in
+    the same message as the text, or nothing goes.
 
     Groups/channels require allow_group=True — Arun's standing rule is that a
     "ping X" means X's personal chat, never a team channel. A group is opened
@@ -1935,6 +1997,12 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
                 await page.keyboard.insert_text(line)
             if i < len(lines) - 1:
                 await page.keyboard.press("Shift+Enter")
+        if files:
+            try:
+                await _attach(page, files)
+            except Exception:
+                await _clear_composer(page)
+                raise
         # A line starting with "- " or "* " auto-converts to a bullet list
         # in ckeditor; once that happens, a bare Enter just adds another
         # list item instead of submitting, so the message never sends.
@@ -1969,6 +2037,18 @@ async def send_message(chat: str, text: str, allow_group: bool = False) -> str:
         if not landed:
             raise RuntimeError(
                 f"message does not appear in '{title}' after sending — treat as NOT sent")
+        if files:
+            names = [Path(f).name for f in files]
+            shown = await page.evaluate(
+                """(names) => {
+                    const nodes = document.querySelectorAll('[data-tid="chat-pane-message"]');
+                    const tail = Array.from(nodes).slice(-3).map(n => n.innerText || '').join(' ');
+                    return names.filter(n => tail.includes(n));
+                }""", names)
+            missing = [n for n in names if n not in (shown or [])]
+            if missing:
+                raise RuntimeError(f"the text reached '{title}' but {', '.join(missing)} "
+                                   f"does not show in the chat — check before resending")
         if _automatic_send.get() == chat:
             try:
                 raw = await page.evaluate(_MESSAGE_JS, 6)

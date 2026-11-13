@@ -1973,6 +1973,16 @@ def continue_working(next_step: str) -> str:
 SEND_WHEN_ASKED_MAX = 600
 #: A message he asked for by name goes out without a second yes. Tests may set it.
 SEND_WHEN_ASKED = True
+#: A file on this Mac named in a message: "/Users/…", "~/…".
+_LOCAL_PATH = re.compile(r"(?:^|[\s(\[\"'`])(?:/Users/|/private/|/tmp/|~/)[^\s)\]\"'`]+")
+
+#: He wants it staged, not sent: "only stage it", "I will not send it", "draft only".
+_STAGE_ONLY = re.compile(
+    r"\b(?:only\s+stage|just\s+stage|stage\s+(?:it\s+)?only|stage\s+it\s+for\s+my\s+yes|"
+    r"draft\s+only|just\s+(?:a\s+)?draft|(?:don'?t|do\s+not|will\s+not|won'?t|i'?ll\s+not)\s+send|"
+    r"not\s+send\s+(?:it|yet)|show\s+me\s+first|let\s+me\s+(?:see|check|read)\s+(?:it\s+)?first)\b",
+    re.I)
+
 _SEND_VERB = re.compile(r"\b(?:send|share|ping|tell|ask|message|msg|forward|inform|nudge|"
                         r"reply\s+to|let\s+\w+\s+know)\b", re.I)
 
@@ -1984,7 +1994,7 @@ def _he_asked_to_send(to: str, cid: str) -> bool:
     from . import capabilities, scorecard, store
     said = scorecard.his_words(capabilities.said_this_turn()).lower()
     first = (to or "").split()[0].lower() if (to or "").split() else ""
-    if not said or len(first) < 3 or not _SEND_VERB.search(said):
+    if not said or len(first) < 3 or not _SEND_VERB.search(said) or _STAGE_ONLY.search(said):
         return False
     # A group never goes out on "he asked": it waits for his yes. And its first
     # word is not a first name (a common word in his sentence is not him
@@ -2205,7 +2215,8 @@ def _route_recipient(cid: str, said: str, to: str, to_group: bool,
 
 def prepare_to_send(what: str, to: str = "", channel: str = "chat",
                     to_group: bool = False, files: list[str] | None = None) -> str:
-    """Stage an outward-facing message for Arun to approve BEFORE it is sent.
+    """Stage an outward-facing message (Teams: optionally with `files` attached) for
+    Arun to approve BEFORE it is sent.
 
     Use this whenever you've drafted something to send outside this chat — a Teams
     reply, an email, a PR description, a message to a person. Jira comments and
@@ -2235,6 +2246,11 @@ def prepare_to_send(what: str, to: str = "", channel: str = "chat",
     cid = tasks.current_conversation()
     if not cid:
         return "No active conversation — cannot stage a send."
+    if not files and channel.strip().lower() in ("teams", "chat") and _LOCAL_PATH.search(what or ""):
+        # 13 Nov: the brain wrote "(attachment: /Users/…/x.txt)" into the text; it
+        # went out as text, mangled by the rewording, with no file.
+        return ("Not staged — the message names a local file path. To attach it, call "
+                "prepare_to_send again with that path in `files` and the words without it.")
     if files:
         from . import attachments
         if channel.strip().lower() != "teams":

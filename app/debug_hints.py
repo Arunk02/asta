@@ -100,7 +100,9 @@ def hints(cid: str, his_text: str, full_text: str, roots: list[Path] | None = No
     """One bracketed block for the turn, or "" when there is nothing to pin."""
     lines = []
     refs = temporal_refs(full_text)
-    classes = list(dict.fromkeys(_CLASS.findall(full_text or "")))[:3]
+    # His words first, then the rest; up to ten looked up, three reported. The
+    # first three in a long case were often not his repos' classes at all.
+    classes = list(dict.fromkeys(_CLASS.findall(his_text or "") + _CLASS.findall(full_text or "")))[:10]
     if not (refs or classes or _DEBUGGY.search(his_text or "")):
         return ""
     env, when = pinned_env(cid, his_text, now) if cid else (_env_of(his_text), "now")
@@ -114,9 +116,13 @@ def hints(cid: str, his_text: str, full_text: str, roots: list[Path] | None = No
     for ns, wid in refs:
         lines.append(f"Temporal link: namespace {ns}, workflow {wid or '(open the link)'}"
                      f" — read its history with temporal_workflow before the logs.")
+    named = 0
     for cls in classes:
+        if named >= 3:
+            break
         repo = owner_of(cls, roots)
         if repo:
+            named += 1
             lines.append(f"{cls} is declared in {repo} — start from that service's logs "
                          f"and code; downstream services come after.")
     if not lines:

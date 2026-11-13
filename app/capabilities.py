@@ -203,9 +203,12 @@ _TABLE: tuple[Capability, ...] = (
                     "Use it instead of asking 'shall I?' in prose — prose is lost when the "
                     "turn ends. Not for anything leaving the chat: that is prepare_to_send."),
     Capability("prepare_to_send", "loop",
-               http='POST /api/loop/prepare-send {"what":"…","to":"…","channel":"teams|email|pr|chat"}',
+               http='POST /api/loop/prepare-send {"what":"…","to":"…","channel":"teams|email|pr|chat",'
+                    '"to_group":false,"files":["/abs/path"]}',
                note="The ONLY approved way to send on Arun's behalf: it STAGES the draft "
                     "and asks him to confirm — nothing goes out until he says yes. "
+                    "To attach a file on Teams, pass its path in `files` — a path written "
+                    "in `what` is not an attachment and is refused. "
                     "Jira is NOT a send channel: use jira_comment / jira_transition, "
                     "which stage recorded operations for their own confirmation."),
     # --- workspace / code context -------------------------------------------

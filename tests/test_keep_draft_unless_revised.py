@@ -96,6 +96,6 @@ def test_a_send_the_turn_started_acted_on_the_draft(waiting, monkeypatch):
     from app import teams_bridge
     conv, _, queued = waiting
     _say(conv, "tell him I am working on it, will update once done")
-    monkeypatch.setattr(teams_bridge, "STARTED", [time.time() + 1])
+    monkeypatch.setattr(teams_bridge, "STARTED_TO", [(time.time() + 1, "Ravi Menon")])
     main._settle_feedback(conv["id"], None)
     assert not queued

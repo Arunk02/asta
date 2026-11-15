@@ -96,6 +96,11 @@ def test_a_pi_account_error_builds_on_claude_and_says_so_once(pi_on, monkeypatch
 
     async def _cli(task_id, executor, prompt, **kw):
         ran.append(executor)
+        assert prompt.count("build it") <= 1 and prompt.count("next leg") <= 1
+        if executor == "claude":
+            from app import guardrails
+            rules = guardrails.block("code")
+            assert not rules or prompt.count(rules) <= 1, "rules sent twice on fallback"
         if executor == "pi":
             raise pi_cli.Unavailable("Third-party apps now draw from your extra usage")
         return "built on claude"

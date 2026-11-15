@@ -2316,6 +2316,7 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     dying on a FRESH leg fails over to claude transparently; mid-pipeline it
     surfaces an actionable error instead (claude can't adopt a copilot session)."""
     ex = leg_executor(task_id)
+    as_given = prompt                 # a fallback re-enters with this, not the decorated one
     # Rounds are the signal that a run taught something: a task that took one leg
     # ran a standard flow, one that took several hit something worth recording.
     store.kv_set(f"task_rounds:{task_id}", str(_rounds(task_id) + 1))
@@ -2375,7 +2376,7 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
                 store.kv_del(sid_key)
             store.add_task_event(task_id, "route", f"pi out, building on {_resolve_executor(task_id)}")
             back = _resolve_executor(task_id)
-            return await _code_leg(task_id, prompt, cwd,
+            return await _code_leg(task_id, as_given, cwd,
                                    resume=bool(store.kv_get(f"task_session:{task_id}:{back}")),
                                    effort=effort, workspace=workspace)
     if ex == "claude":

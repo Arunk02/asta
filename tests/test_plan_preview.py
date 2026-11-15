@@ -43,21 +43,40 @@ def test_a_plan_too_long_for_the_phone_arrives_in_full_as_a_file(phone):
     (path, body), = phone["documents"]
     assert path.endswith(f"plan-{tid}.md") and body.startswith(f"# Plan for task #{tid} — Cap the retry")
     assert "79. In Service79.java" in body and "1. In Service1.java" in body
-    assert "full plan is attached" in phone["messages"][-1]
+    assert "whole plan is attached" in phone["messages"][-1]
     assert f"approve task {tid}" in phone["messages"][-1]
+    assert len(phone["messages"][-1]) < 1300, "the card is a summary once the file carries it"
 
 
-def test_a_plan_that_fits_sends_no_file(phone):
+def test_every_plan_arrives_as_a_file_even_a_short_one(phone):
+    """His words, 15 Nov: "send the plan.md file in whatsapp since message is
+    not comfortable to read the whole plan"."""
     tid = _code()
     asyncio.run(tasks.announce_plan(tid, store.get_task(tid), SHORT))
-    assert phone["documents"] == [] and "attached" not in phone["messages"][-1]
+    (path, body), = phone["documents"]
+    assert path.endswith(f"plan-{tid}.md") and "Change the validator" in body
 
 
-def test_at_the_laptop_the_phone_stays_quiet_and_the_path_is_given(phone):
+def test_at_the_laptop_the_plan_file_still_goes_with_its_card(phone):
+    """The card itself reaches his phone wherever he is; a card that says the
+    plan is attached and is not would be worse than either."""
     phone["at_laptop"] = True
     tid = _code()
     asyncio.run(tasks.announce_plan(tid, store.get_task(tid), LONG))
-    assert phone["documents"] == [] and f"plan-{tid}.md" in phone["messages"][-1]
+    assert len(phone["documents"]) == 1 and "attached" in phone["messages"][-1]
+
+
+def test_when_the_phone_cannot_take_the_file_the_path_is_given(phone, monkeypatch):
+    async def down(path, caption=""):
+        return False
+    monkeypatch.setattr(notify, "wa_document", down)
+    tid = _code()
+    asyncio.run(tasks.announce_plan(tid, store.get_task(tid), LONG))
+    assert f"plan-{tid}.md" in phone["messages"][-1]
+
+
+def test_a_big_change_is_asked_for_a_plain_text_diagram():
+    assert "add a `DIAGRAM` block" in tasks.CODE_OVERRIDES and "no Mermaid" in tasks.CODE_OVERRIDES
 
 
 def test_a_revised_plan_is_a_new_file_and_the_one_he_read_is_kept():

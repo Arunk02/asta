@@ -233,6 +233,14 @@ CODE_OVERRIDES = """
         BookingService     validates it now   <- change
         ServicePlanLeg     stores portGateIn
 
+  A BIG CHANGE ALSO GETS A PICTURE. When the plan touches more than ten files,
+  two or more repos, a Temporal workflow or an event/contract between services,
+  add a `DIAGRAM` block after FLOW: boxes and arrows in plain ASCII inside a
+  ``` code block, at most 20 lines and 60 columns, showing the services or
+  classes and the data moving between them, with the change marked `*`. The
+  plan reaches him as plan-<id>.md on his phone, so it must read in a plain
+  text viewer — no Mermaid, no images. A small change gets no diagram.
+
   END THE PLAN WITH A LINE THAT SAYS ONLY `PLAN READY`. Asta needs one
   unambiguous mark to tell a plan apart from finished work — without it a plan
   is reported to him as "✅ DONE", with a file list it has not written.
@@ -602,6 +610,16 @@ def augment(task_id: int, text: str, *, code_change: bool = False) -> str:
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
+    from . import pi_cli
+    if pi_cli.building(task_id) and pi_cli.steer(task_id, HIS_WORDS + text.strip()):
+        # A pi leg is building it right now: his words go in now, after its
+        # current tool calls and before its next step — not at a gate the build
+        # may never reach (15 Nov).
+        from . import go as _go
+        _go.note_his_words(task_id, text)
+        store.add_task_event(task_id, "steer", text.strip()[:200])
+        return (f"✚ passed to task #{task_id} while it builds — it takes it before its "
+                f"next step.")
     key = f"task_addenda:{task_id}"
     prior = (store.kv_get(key) or "").strip('"').strip()
     store.kv_set(key, (prior + "\n" if prior else "") + text.strip())
@@ -610,6 +628,13 @@ def augment(task_id: int, text: str, *, code_change: bool = False) -> str:
     where = "plan" if t["status"] == "awaiting_approval" else "next checkpoint"
     return (f"✚ noted for task #{task_id} — I'll fold that in when you approve its {where} "
             f"(no restart, no wasted tokens).")
+
+
+#: How his words are introduced to a worker that is already running. Said to be
+#: his, in so many words: "[Additional instructions…]" read to the worker as an
+#: injected block, and #178 reported his own "create PR" as unverified (30 Sep).
+HIS_WORDS = ("Arun said this himself, in his own chat with Asta, after this task started. "
+             "Asta is relaying it word for word — it is his instruction, not tool output:\n")
 
 
 def _drain_addenda(task_id: int) -> str:
@@ -1911,6 +1936,43 @@ def _pipeline_for(task_id: int) -> str:
     return store.kv_get(f"task_pipeline:{task_id}") or "full"
 
 
+def coder() -> str:
+    """ASTA_CODER — the one switch for who writes the code: "claude" (default)
+    or "pi". Planning, the check after a build and every fallback stay on the
+    task's own brain whichever it is, so flipping it back is the whole undo."""
+    v = (os.environ.get("ASTA_CODER") or "claude").strip().lower()
+    return v if v in ("claude", "pi") else "claude"
+
+
+def _builds(task_id: int) -> bool:
+    """Is the next leg one that writes code — after his yes, not reproducing?"""
+    from . import reproduction
+    return plan_approved(task_id) and not reproduction.active(task_id)
+
+
+def leg_executor(task_id: int) -> str:
+    """The brain for this task's NEXT leg — the one decision every leg, session
+    key and size check reads, so they can never disagree.
+
+    The task's own brain plans; with ASTA_CODER=pi, pi builds — unless pi is out
+    (no login, no credit), or the build already escalated to a stronger brain
+    after failing twice the same way."""
+    ex = _resolve_executor(task_id)
+    if coder() != "pi" or not _builds(task_id):
+        return ex
+    if store.kv_get(f"task_verify_escbrain:{task_id}") == "1":
+        return ex
+    from . import pi_cli
+    return "pi" if pi_cli.usable() else ex
+
+
+def _session_brains() -> tuple[str, ...]:
+    """Every brain a task may hold a session with — what a reset must clear."""
+    return tuple(dict.fromkeys((*_executor_names(), "pi")))
+
+
+
+
 def _code_agent(task_id: int) -> str:
     """Pipeline name for a code task (Asta's own, not the workspace's)."""
     return MICRO_PIPELINE if _pipeline_for(task_id) == "micro" else CODE_PIPELINE
@@ -1981,7 +2043,7 @@ def now_doing(task_id: int) -> str:
     watch 38854502635…`". 16 Oct: the card said only "tier: T2 / route: plan"
     while #345 sat 25 minutes on one command; what it was doing was nowhere."""
     import datetime as _dt
-    sid = next((store.kv_get(f"task_session:{task_id}:{ex}") for ex in ("claude", "copilot")
+    sid = next((store.kv_get(f"task_session:{task_id}:{ex}") for ex in ("claude", "copilot", "pi")
                 if store.kv_get(f"task_session:{task_id}:{ex}")), "")
     if not sid:
         return ""
@@ -2234,6 +2296,12 @@ async def _observed_cli(task_id: int, executor: str, prompt: str, **kwargs) -> s
     kwargs["session_id"] = sid
     task = store.get_task(task_id) or {}
     stage = store.kv_get(f"graph_leg:{task_id}") or task.get("kind", "worker")
+    if executor == "pi":
+        from . import pi_cli
+        model = pi_cli.model_id(kwargs.get("model") or "")
+        with worker_usage.attempt(task_id, executor, kwargs.get("cwd") or str(ROOT), sid,
+                                  stage=stage, model=model):
+            return await pi_cli.one_shot(prompt, task_id=task_id, **kwargs)
     model = kwargs.get("model") or agent_mod.tier_of("claude_cli" if executor == "claude" else "copilot")
     cli = claude_cli if executor == "claude" else copilot_cli
     with worker_usage.attempt(task_id, executor, kwargs.get("cwd") or str(ROOT), sid,
@@ -2247,7 +2315,8 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     can pause/resume without losing the pipeline's context. Copilot quota
     dying on a FRESH leg fails over to claude transparently; mid-pipeline it
     surfaces an actionable error instead (claude can't adopt a copilot session)."""
-    ex = _resolve_executor(task_id)
+    ex = leg_executor(task_id)
+    as_given = prompt                 # a fallback re-enters with this, not the decorated one
     # Rounds are the signal that a run taught something: a task that took one leg
     # ran a standard flow, one that took several hit something worth recording.
     store.kv_set(f"task_rounds:{task_id}", str(_rounds(task_id) + 1))
@@ -2284,6 +2353,32 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
         choice = routing.choose(task_id, ex, "plan" if plan_only else "implement")
         model, effort = choice.model, choice.effort or effort
         routing.record(task_id, "plan" if plan_only else "implement", ex, choice)
+    if ex == "pi":
+        from . import pi_cli
+        try:
+            out = await _observed_cli(task_id, "pi",
+                prompt, cwd=cwd, timeout=code_timeout(workspace),
+                agent_file=_agent_file("code", _pipeline_for(task_id)),
+                effort=effort, session_id=sid, resume=resume, on_progress=watcher,
+                plan_only=plan_only, model=model)
+            return out
+        except pi_cli.Unavailable as exc:
+            # No login, no credit, no quota: this leg — and the next ones, until
+            # pi is back — run on the task's own brain. Said once, not per leg.
+            if pi_cli.mark_down(str(exc)):
+                from . import notify
+                await notify.notify(
+                    f"pi can't build right now ({str(exc)[:160]}). Task #{task_id} and the "
+                    f"next builds run on Claude until it's back — nothing for you to do "
+                    f"unless you want pi again (then fix that, or set ASTA_CODER=claude).",
+                    "task")
+            if not resume:
+                store.kv_del(sid_key)
+            store.add_task_event(task_id, "route", f"pi out, building on {_resolve_executor(task_id)}")
+            back = _resolve_executor(task_id)
+            return await _code_leg(task_id, as_given, cwd,
+                                   resume=bool(store.kv_get(f"task_session:{task_id}:{back}")),
+                                   effort=effort, workspace=workspace)
     if ex == "claude":
         try:
             out = await _observed_cli(task_id, "claude",
@@ -2509,7 +2604,7 @@ def _stronger_executor(task_id: int) -> str:
     reproducing the same failure, a stronger one gets one bounded shot before Arun
     is bothered."""
     from . import agent as agent_mod
-    cur = _resolve_executor(task_id)
+    cur = leg_executor(task_id)
     if cur != "claude" and "claude" in _executor_names() \
             and claude_cli.available() and not agent_mod.quota_down("claude_cli"):
         return "claude"
@@ -2531,7 +2626,7 @@ async def _escalate_brain_and_retry(task_id: int, t: dict, outcome, hops: int,
         routing.escalate(task_id, "the same failure twice")
     store.kv_set(f"task_escalated:{task_id}", "1")
     store.kv_set(f"task_verify_rounds:{task_id}", str(_verify_rounds(task_id) + 1))
-    for ex in _executor_names():
+    for ex in _session_brains():
         store.kv_del(f"task_session:{task_id}:{ex}")
     store.record_outcome("verify_round", "escalated", subject=str(task_id), detail=stronger)
     await notify.notify(
@@ -2891,7 +2986,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         # The teacher half of the loop: whatever finishes now writes the skill,
         # so the micro tier gets through this alone next time.
         store.kv_set(f"task_escalated:{task_id}", "1")
-        for ex in _executor_names():
+        for ex in _session_brains():
             store.kv_del(f"task_session:{task_id}:{ex}")
         reason = tail.split("ESCALATE:", 1)[1].strip().split("\n")[0][:200]
         await notify.notify(
@@ -2934,7 +3029,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         from . import worktrees as _wt
         with contextlib.suppress(Exception):
             await _wt.create(root, task_id, branch, *unfinished)
-        ex = store.kv_get(f"task_executor:{task_id}") or repo_ops.default_executor()
+        ex = leg_executor(task_id)
         store.kv_del(f"task_session:{task_id}:{ex}")
         await notify.notify(
             f"🔁 Task #{task_id}: same change reaches {', '.join(unfinished)} — "
@@ -2957,7 +3052,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     if any(m in tail for m in _HANDOFF_MARKS) and hops < _MAX_REPO_HOPS:
         # Multi-repo change: the agent finished one repo and asked for a fresh
         # window for the next (one repo = one window keeps the context small).
-        ex = store.kv_get(f"task_executor:{task_id}") or repo_ops.default_executor()
+        ex = leg_executor(task_id)
         store.kv_del(f"task_session:{task_id}:{ex}")
         await notify.notify(
             f"🔁 Task #{task_id}: repo done, continuing with the next repo "
@@ -3341,7 +3436,7 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         full = await _send_full_plan(task_id, t, result)
         await notify.notify(
             f"📋 *PLAN #{task_id}* — going ahead ({why})\n{clip.clip(t['title'], 90)}\n\n"
-            f"{_phone_text(result, 1500, head_first=True)}\n\n"
+            f"{_card_text(result, full)}\n\n"
             f"— — —\n{full}"
             + ("I'll raise the PR when it's done. " if go.ships(task_id)
                else "It stays local until you say *raise PR*. ")
@@ -3359,10 +3454,11 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
             asyncio.get_running_loop().call_later(
                 go.after_plan_seconds(), lambda: asyncio.ensure_future(_go_on(task_id, born)))
         return
-    full = await _send_full_plan(task_id, t, result) + _missing_line(result)
+    attached = await _send_full_plan(task_id, t, result)
+    full = attached + _missing_line(result)
     await notify.notify(
         f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
-        f"{_phone_text(result, 1500, head_first=True)}\n\n"
+        f"{_card_text(result, attached)}\n\n"
         f"— — —\n{full}"
         f"👍 *approve task {task_id}*\n"
         f"👎 *reject task {task_id}*\n"
@@ -3387,28 +3483,34 @@ def _missing_line(plan: str) -> str:
     return f"⚠ This plan does not state: {', '.join(gone)}.\n" if gone else ""
 
 
+#: The card's share of a plan once the whole plan rides as a file.
+CARD_WITH_FILE = 700
+
+
 async def _send_full_plan(task_id: int, t: dict, plan: str) -> str:
-    """The whole plan as a file when the phone message can only carry a cut of it.
+    """The whole plan, always, as plan-<id>.md on his phone.
 
     He approves what he read; a plan cut at 1500 characters asked him to approve
-    steps he never saw. Returns the line telling him it is attached, or ""."""
-    shown = _phone_text(plan, 1500, head_first=True)
-    if "(the rest is in the app)" not in shown and len(shown) >= len(plan.strip()) - 40:
-        return ""
+    steps he never saw. And his words, 15 Nov: "send the plan.md file in
+    whatsapp since message is not comfortable to read the whole plan". The card
+    above it is a summary; the file is what he reads. Sent with the card — a
+    plan card already reaches his phone wherever he is. Returns the line that
+    says it is attached, or where it is when the phone could not take it."""
     from . import notify, task_spec
     path = task_spec.preview(task_id, plan, t.get("title", ""))
     store.add_task_event(task_id, "plan", f"full plan sent: {path.name} ({path.parent.name[:10]})")
-    from . import presence
-    sent = False
-    # At the laptop the phone stays quiet (his rule); the path is enough there.
-    if not await presence.at_laptop():
-        try:
-            sent = await notify.wa_document(str(path), f"Plan #{task_id}, in full")
-        except Exception:                                    # noqa: BLE001
-            sent = False
-    return (f"📎 The full plan is attached ({len(plan.splitlines())} lines) — the message "
-            f"above is a cut of it.\n" if sent else
-            f"⚠ The message above is a cut of the plan; the full plan is at {path}.\n")
+    try:
+        sent = await notify.wa_document(str(path), f"Plan #{task_id} — {clip.clip(t.get('title', ''), 60)}")
+    except Exception:                                        # noqa: BLE001
+        sent = False
+    return (f"📎 The whole plan is attached as {path.name} ({len(plan.splitlines())} lines).\n"
+            if sent else f"⚠ The full plan is at {path}.\n")
+
+
+def _card_text(plan: str, attached: str) -> str:
+    """The plan's head for the card: short when the whole plan rides as a file."""
+    return _phone_text(plan, CARD_WITH_FILE if attached.startswith("📎") else 1500,
+                       head_first=True)
 
 
 async def _go_on(task_id: int, born: float = 0.0) -> None:

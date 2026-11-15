@@ -77,7 +77,10 @@ def _task(tid: int) -> dict:
 
 
 def _has_session(tid: int) -> bool:
-    ex = _tasks()._resolve_executor(tid)
+    """Does the brain that runs the NEXT leg already hold a session for this task?
+    With ASTA_CODER=pi the plan is Claude's and the build is pi's, so the first
+    build leg has none — it starts fresh, with the plan handed over in full."""
+    ex = _tasks().leg_executor(tid)
     return bool(store.kv_get(f"task_session:{tid}:{ex}"))
 
 
@@ -120,13 +123,14 @@ def _too_large(tid: int, t: dict) -> int:
     from 176k to 332k tokens and every turn re-read all of it — 53.5M tokens over
     233 turns. Chat sessions were already retired by size; task sessions were not."""
     cap = session_cap()
-    ex = _tasks()._resolve_executor(tid)
+    ex = _tasks().leg_executor(tid)
     sid = store.kv_get(f"task_session:{tid}:{ex}") or ""
-    if not cap or ex != "claude" or not sid:
+    if not cap or ex not in ("claude", "pi") or not sid:
         return 0
-    from app import token_audit
+    from app import pi_cli, token_audit
     try:
-        size = token_audit.context_tokens(_tasks().task_cwd(tid, t["workspace"]), sid)
+        size = (pi_cli.context_tokens(sid) if ex == "pi" else
+                token_audit.context_tokens(_tasks().task_cwd(tid, t["workspace"]), sid))
     except Exception:                                       # noqa: BLE001
         return 0
     return size if size > cap else 0
@@ -145,7 +149,7 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
     # Plan legs too (26 Oct): #419's re-plan after shipping resumed the 332k session.
     large = _too_large(tid, t) if session and stage in ("plan", "implement") else 0
     if large:
-        store.kv_del(f"task_session:{tid}:{tasks._resolve_executor(tid)}")
+        store.kv_del(f"task_session:{tid}:{tasks.leg_executor(tid)}")
         notes.add(tid, f"{stage.capitalize()} continued in a fresh session — the last one "
                        f"was {large // 1000}k tokens")
         session = False
@@ -166,7 +170,8 @@ async def _leg(tid: int, stage: str, fresh_prompt: str, *, effort: str,
         prompt = body + ending(False)
     else:
         from app import context_pack
-        prompt = (fresh_prompt + context_pack.build(tid, stage if stage in ("plan", "reproduce") else "implement")
+        prompt = (fresh_prompt + context_pack.build(tid, stage if stage in ("plan", "reproduce") else "implement",
+                                                    handover=tasks.leg_executor(tid) != tasks._resolve_executor(tid))
                   + ending(True))
     if stage == "reproduce" and not (session and store.kv_get(mark) == stage):
         store.kv_set(carry, prompt)
@@ -250,7 +255,7 @@ async def escalate(state: JobState) -> dict:
     _task(tid)
     store.kv_set(f"task_pipeline:{tid}", "full")
     store.kv_set(f"task_escalated:{tid}", "1")
-    for ex in tasks._executor_names():
+    for ex in tasks._session_brains():
         store.kv_del(f"task_session:{tid}:{ex}")
     reason = (state.get("outcome") or {}).get("summary", "")
     notes.add(tid, f"Escalated from micro to the full pipeline: {reason}")
@@ -385,8 +390,7 @@ async def hop(state: JobState) -> dict:
     t = _task(tid)
     unfinished = tasks._repos_still_needed(tid, t, (state.get("text") or "")[-2500:])
     await _prepare_repos(tid, t, unfinished)
-    ex = store.kv_get(f"task_executor:{tid}") or "copilot"
-    store.kv_del(f"task_session:{tid}:{ex}")
+    store.kv_del(f"task_session:{tid}:{tasks.leg_executor(tid)}")
     hops = state.get("hops", 0) + 1
     notes.add(tid, f"Change reaches {', '.join(unfinished)} — checkout prepared")
     await notify.notify(f"🔁 Task #{tid}: same change reaches {', '.join(unfinished)} — "
@@ -490,7 +494,7 @@ async def stronger(state: JobState) -> dict:
         routing.escalate(tid, "the same failure twice")
     store.kv_set(f"task_escalated:{tid}", "1")
     store.kv_set(f"task_verify_rounds:{tid}", str(tasks._verify_rounds(tid) + 1))
-    for ex in tasks._executor_names():
+    for ex in tasks._session_brains():
         store.kv_del(f"task_session:{tid}:{ex}")
     store.record_outcome("verify_round", "escalated", subject=str(tid), detail=better)
     notes.add(tid, f"Stuck on the same failure — moved to {better} for a fresh attempt")

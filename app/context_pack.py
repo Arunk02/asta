@@ -62,18 +62,29 @@ def _how_it_works(t: dict) -> str:
             "code wins and the plan says so]\n" + found)
 
 
-def build(task_id: int, stage: str) -> str:
+#: A build leg on another brain than the one that planned (ASTA_CODER=pi) has
+#: never seen the planning session: the plan and the job notes are all it gets,
+#: so they ride in full instead of as an excerpt.
+HANDOVER_CAP = 16000
+HANDOVER_PLAN = 12000
+
+
+def build(task_id: int, stage: str, handover: bool = False) -> str:
     """The pack for this leg, or '' when there is nothing worth carrying."""
     from .graph import notes
     t = store.get_task(task_id) or {}
-    cap = CAPS.get(stage, 2500)
+    cap = HANDOVER_CAP if handover else CAPS.get(stage, 2500)
     parts: list[str] = []
 
     if stage not in ("plan", "reproduce"):
         plan = _approved_plan(task_id)
         if plan:
-            parts.append("[The plan Arun approved — the definition of done]\n"
-                         + task_spec.prompt_block(task_id, plan, limit=min(3000, cap // 2)))
+            head = ("[The plan Arun approved — the definition of done. Another brain "
+                    "planned this task and you have not seen its session: this plan and "
+                    "the notes below are what it found. Build exactly this]\n"
+                    if handover else "[The plan Arun approved — the definition of done]\n")
+            limit = HANDOVER_PLAN if handover else min(3000, cap // 2)
+            parts.append(head + task_spec.prompt_block(task_id, plan, limit=limit))
 
     # Reserve project evidence before optional conversational notes. Previously
     # a full notes block could silently evict the very flow docs used to plan.

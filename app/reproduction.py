@@ -141,7 +141,7 @@ async def run(task_id: int, task: dict, leg) -> dict:
     # A planning session carries instructions to ask for approval. Start a fresh
     # reproduction session once; quota retries retain that session and scope.
     if store.kv_get(f'graph_leg:{task_id}') != 'reproduce':
-        for ex in tasks._executor_names():
+        for ex in tasks._session_brains():
             store.kv_del(f'task_session:{task_id}:{ex}')
     prompt = (
         'REPRODUCTION FIRST. Do not write a solution plan or implement a fix. '
@@ -182,7 +182,7 @@ async def run(task_id: int, task: dict, leg) -> dict:
     if result['status'] == 'confirmed':
         notes.add(task_id, 'Reproduction test failed: ' + json.dumps(result))
         store.kv_del(f'graph_leg:{task_id}')
-        for ex in tasks._executor_names():
+        for ex in tasks._session_brains():
             store.kv_del(f'task_session:{task_id}:{ex}')
         await notify.notify(f"Task #{task_id}: reproduction assertion failed; now planning from this evidence.\n{text}", 'task')
         return {'reproduction_next': 'plan', 'answer': {}, 'text': text}

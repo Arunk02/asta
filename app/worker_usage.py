@@ -22,6 +22,9 @@ ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar('worker_attempt', 
 
 
 def _snapshot(executor: str, cwd: str, session_id: str) -> dict | None:
+    if executor == 'pi':
+        from . import pi_cli
+        return pi_cli.session_totals(session_id)
     if executor != 'claude':
         # Copilot's current parser does not establish complete input/cache usage.
         return None

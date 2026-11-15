@@ -602,6 +602,16 @@ def augment(task_id: int, text: str, *, code_change: bool = False) -> str:
     t = store.get_task(task_id)
     if not t:
         raise ValueError(f"no task #{task_id}")
+    from . import pi_cli
+    if pi_cli.building(task_id) and pi_cli.steer(task_id, HIS_WORDS + text.strip()):
+        # A pi leg is building it right now: his words go in now, after its
+        # current tool calls and before its next step — not at a gate the build
+        # may never reach (15 Nov).
+        from . import go as _go
+        _go.note_his_words(task_id, text)
+        store.add_task_event(task_id, "steer", text.strip()[:200])
+        return (f"✚ passed to task #{task_id} while it builds — it takes it before its "
+                f"next step.")
     key = f"task_addenda:{task_id}"
     prior = (store.kv_get(key) or "").strip('"').strip()
     store.kv_set(key, (prior + "\n" if prior else "") + text.strip())
@@ -610,6 +620,13 @@ def augment(task_id: int, text: str, *, code_change: bool = False) -> str:
     where = "plan" if t["status"] == "awaiting_approval" else "next checkpoint"
     return (f"✚ noted for task #{task_id} — I'll fold that in when you approve its {where} "
             f"(no restart, no wasted tokens).")
+
+
+#: How his words are introduced to a worker that is already running. Said to be
+#: his, in so many words: "[Additional instructions…]" read to the worker as an
+#: injected block, and #178 reported his own "create PR" as unverified (30 Sep).
+HIS_WORDS = ("Arun said this himself, in his own chat with Asta, after this task started. "
+             "Asta is relaying it word for word — it is his instruction, not tool output:\n")
 
 
 def _drain_addenda(task_id: int) -> str:
@@ -1911,6 +1928,43 @@ def _pipeline_for(task_id: int) -> str:
     return store.kv_get(f"task_pipeline:{task_id}") or "full"
 
 
+def coder() -> str:
+    """ASTA_CODER — the one switch for who writes the code: "claude" (default)
+    or "pi". Planning, the check after a build and every fallback stay on the
+    task's own brain whichever it is, so flipping it back is the whole undo."""
+    v = (os.environ.get("ASTA_CODER") or "claude").strip().lower()
+    return v if v in ("claude", "pi") else "claude"
+
+
+def _builds(task_id: int) -> bool:
+    """Is the next leg one that writes code — after his yes, not reproducing?"""
+    from . import reproduction
+    return plan_approved(task_id) and not reproduction.active(task_id)
+
+
+def leg_executor(task_id: int) -> str:
+    """The brain for this task's NEXT leg — the one decision every leg, session
+    key and size check reads, so they can never disagree.
+
+    The task's own brain plans; with ASTA_CODER=pi, pi builds — unless pi is out
+    (no login, no credit), or the build already escalated to a stronger brain
+    after failing twice the same way."""
+    ex = _resolve_executor(task_id)
+    if coder() != "pi" or not _builds(task_id):
+        return ex
+    if store.kv_get(f"task_verify_escbrain:{task_id}") == "1":
+        return ex
+    from . import pi_cli
+    return "pi" if pi_cli.usable() else ex
+
+
+def _session_brains() -> tuple[str, ...]:
+    """Every brain a task may hold a session with — what a reset must clear."""
+    return tuple(dict.fromkeys((*_executor_names(), "pi")))
+
+
+
+
 def _code_agent(task_id: int) -> str:
     """Pipeline name for a code task (Asta's own, not the workspace's)."""
     return MICRO_PIPELINE if _pipeline_for(task_id) == "micro" else CODE_PIPELINE
@@ -1981,7 +2035,7 @@ def now_doing(task_id: int) -> str:
     watch 38854502635…`". 16 Oct: the card said only "tier: T2 / route: plan"
     while #345 sat 25 minutes on one command; what it was doing was nowhere."""
     import datetime as _dt
-    sid = next((store.kv_get(f"task_session:{task_id}:{ex}") for ex in ("claude", "copilot")
+    sid = next((store.kv_get(f"task_session:{task_id}:{ex}") for ex in ("claude", "copilot", "pi")
                 if store.kv_get(f"task_session:{task_id}:{ex}")), "")
     if not sid:
         return ""
@@ -2234,6 +2288,12 @@ async def _observed_cli(task_id: int, executor: str, prompt: str, **kwargs) -> s
     kwargs["session_id"] = sid
     task = store.get_task(task_id) or {}
     stage = store.kv_get(f"graph_leg:{task_id}") or task.get("kind", "worker")
+    if executor == "pi":
+        from . import pi_cli
+        model = pi_cli.model_id(kwargs.get("model") or "")
+        with worker_usage.attempt(task_id, executor, kwargs.get("cwd") or str(ROOT), sid,
+                                  stage=stage, model=model):
+            return await pi_cli.one_shot(prompt, task_id=task_id, **kwargs)
     model = kwargs.get("model") or agent_mod.tier_of("claude_cli" if executor == "claude" else "copilot")
     cli = claude_cli if executor == "claude" else copilot_cli
     with worker_usage.attempt(task_id, executor, kwargs.get("cwd") or str(ROOT), sid,
@@ -2247,7 +2307,7 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     can pause/resume without losing the pipeline's context. Copilot quota
     dying on a FRESH leg fails over to claude transparently; mid-pipeline it
     surfaces an actionable error instead (claude can't adopt a copilot session)."""
-    ex = _resolve_executor(task_id)
+    ex = leg_executor(task_id)
     # Rounds are the signal that a run taught something: a task that took one leg
     # ran a standard flow, one that took several hit something worth recording.
     store.kv_set(f"task_rounds:{task_id}", str(_rounds(task_id) + 1))
@@ -2284,6 +2344,32 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
         choice = routing.choose(task_id, ex, "plan" if plan_only else "implement")
         model, effort = choice.model, choice.effort or effort
         routing.record(task_id, "plan" if plan_only else "implement", ex, choice)
+    if ex == "pi":
+        from . import pi_cli
+        try:
+            out = await _observed_cli(task_id, "pi",
+                prompt, cwd=cwd, timeout=code_timeout(workspace),
+                agent_file=_agent_file("code", _pipeline_for(task_id)),
+                effort=effort, session_id=sid, resume=resume, on_progress=watcher,
+                plan_only=plan_only, model=model)
+            return out
+        except pi_cli.Unavailable as exc:
+            # No login, no credit, no quota: this leg — and the next ones, until
+            # pi is back — run on the task's own brain. Said once, not per leg.
+            if pi_cli.mark_down(str(exc)):
+                from . import notify
+                await notify.notify(
+                    f"pi can't build right now ({str(exc)[:160]}). Task #{task_id} and the "
+                    f"next builds run on Claude until it's back — nothing for you to do "
+                    f"unless you want pi again (then fix that, or set ASTA_CODER=claude).",
+                    "task")
+            if not resume:
+                store.kv_del(sid_key)
+            store.add_task_event(task_id, "route", f"pi out, building on {_resolve_executor(task_id)}")
+            back = _resolve_executor(task_id)
+            return await _code_leg(task_id, prompt, cwd,
+                                   resume=bool(store.kv_get(f"task_session:{task_id}:{back}")),
+                                   effort=effort, workspace=workspace)
     if ex == "claude":
         try:
             out = await _observed_cli(task_id, "claude",
@@ -2509,7 +2595,7 @@ def _stronger_executor(task_id: int) -> str:
     reproducing the same failure, a stronger one gets one bounded shot before Arun
     is bothered."""
     from . import agent as agent_mod
-    cur = _resolve_executor(task_id)
+    cur = leg_executor(task_id)
     if cur != "claude" and "claude" in _executor_names() \
             and claude_cli.available() and not agent_mod.quota_down("claude_cli"):
         return "claude"
@@ -2531,7 +2617,7 @@ async def _escalate_brain_and_retry(task_id: int, t: dict, outcome, hops: int,
         routing.escalate(task_id, "the same failure twice")
     store.kv_set(f"task_escalated:{task_id}", "1")
     store.kv_set(f"task_verify_rounds:{task_id}", str(_verify_rounds(task_id) + 1))
-    for ex in _executor_names():
+    for ex in _session_brains():
         store.kv_del(f"task_session:{task_id}:{ex}")
     store.record_outcome("verify_round", "escalated", subject=str(task_id), detail=stronger)
     await notify.notify(
@@ -2891,7 +2977,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         # The teacher half of the loop: whatever finishes now writes the skill,
         # so the micro tier gets through this alone next time.
         store.kv_set(f"task_escalated:{task_id}", "1")
-        for ex in _executor_names():
+        for ex in _session_brains():
             store.kv_del(f"task_session:{task_id}:{ex}")
         reason = tail.split("ESCALATE:", 1)[1].strip().split("\n")[0][:200]
         await notify.notify(
@@ -2934,7 +3020,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         from . import worktrees as _wt
         with contextlib.suppress(Exception):
             await _wt.create(root, task_id, branch, *unfinished)
-        ex = store.kv_get(f"task_executor:{task_id}") or repo_ops.default_executor()
+        ex = leg_executor(task_id)
         store.kv_del(f"task_session:{task_id}:{ex}")
         await notify.notify(
             f"🔁 Task #{task_id}: same change reaches {', '.join(unfinished)} — "
@@ -2957,7 +3043,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
     if any(m in tail for m in _HANDOFF_MARKS) and hops < _MAX_REPO_HOPS:
         # Multi-repo change: the agent finished one repo and asked for a fresh
         # window for the next (one repo = one window keeps the context small).
-        ex = store.kv_get(f"task_executor:{task_id}") or repo_ops.default_executor()
+        ex = leg_executor(task_id)
         store.kv_del(f"task_session:{task_id}:{ex}")
         await notify.notify(
             f"🔁 Task #{task_id}: repo done, continuing with the next repo "

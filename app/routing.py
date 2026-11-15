@@ -49,6 +49,15 @@ _TICKET = re.compile(r"\b[A-Z][A-Z0-9]{1,15}-\d{1,6}\b")
 _CONTRACT = re.compile(
     r"\b(schema|migration|migrate|avro|dto|api contract|protobuf|"
     r"liquibase|flyway|ddl|alter table|breaking change)\b", re.I)
+#: Work whose mistakes are expensive however small the diff: a Temporal workflow
+#: (replay breaks running instances), money, and who may do what. Read from the
+#: PLAN, where it names what the change touches. 15 Nov: a one-file workflow
+#: change was tiered T1 by size alone.
+_IMPACT = re.compile(
+    r"\b(workflow\.getversion|getversion|replay|@workflowmethod|@signalmethod|"
+    r"workflow (?:class|method|definition|code)|continue-?as-?new|"
+    r"billing|invoic\w*|price owner|"
+    r"authenticat\w*|authoris\w*|authoriz\w*|oauth|jwt|credentials?)\b", re.I)
 _PROD_DOWN = re.compile(r"\b(prod(uction)? (is )?(down|broken|on fire)|outage|sev ?[12]|p1 incident)\b",
                         re.I)
 _SMALL = re.compile(r"\b(typo|rename|one[- ]line|single line|log line|comment|bump|"
@@ -127,6 +136,8 @@ def plan_tier(plan: str, outcome: dict | None = None) -> tuple[int, str]:
         return T3, f"changes a contract ({_CONTRACT.search(text).group(0)})"
     if re.search(r"\brisk\s*[:=]\s*high\b", text, re.I):
         return T3, "the plan rates its risk high"
+    if _IMPACT.search(text):
+        return T3, f"high impact ({_IMPACT.search(text).group(0)})"
     n = _structure_entries(text) or len(set(_FILE.findall(text)))
     if n >= 3:
         return T2, f"{n} classes/files"
@@ -143,6 +154,8 @@ def plan_tier(plan: str, outcome: dict | None = None) -> tuple[int, str]:
 _TABLE = {
     "claude": {T1: ("sonnet", "low"), T2: ("sonnet", "high"), T3: ("opus", "xhigh")},
     "copilot": {T1: ("", "low"), T2: ("", "high"), T3: ("", "xhigh")},
+    # pi builds on the same Claude models (pi_cli.model_id maps the aliases).
+    "pi": {T1: ("sonnet", "low"), T2: ("sonnet", "high"), T3: ("opus", "xhigh")},
 }
 #: Every plan runs at T2, at planning effort — a plan is read, not built.
 _PLAN = {"claude": ("sonnet", "medium"), "copilot": ("", "medium")}

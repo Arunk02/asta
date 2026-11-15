@@ -291,3 +291,31 @@ def test_a_big_feature_is_t3_by_its_size():
 def test_pi_builds_on_the_same_claude_models():
     assert routing._cell("pi", routing.T3) == routing._cell("claude", routing.T3) == ("opus", "high")
     assert pi_cli.model_id("sonnet") == "anthropic/claude-sonnet-5"
+
+
+def test_a_pi_build_leg_gets_the_booking_workspace_context(pi_on, monkeypatch, tmp_path, task):
+    """His question, 15 Nov: does pi use the booking .asta-context? The boot line
+    and the workspace note are added before the brain is chosen, so every brain
+    gets them the same way."""
+    root = tmp_path / "booking-workspace"
+    (root / ".asta-context").mkdir(parents=True)
+    (root / ".asta-context" / "boot.sh").write_text("echo boot")
+    (root / "AGENTS.md").write_text("rules")
+    checkout = tmp_path / "worktrees" / f"task-{task}"
+    checkout.mkdir(parents=True)
+    monkeypatch.setattr(tasks, "code_cwd", lambda ws: str(root))
+    monkeypatch.setattr(tasks, "task_tools", lambda *a, **k: "")
+    tasks.mark_approved(task)
+    seen = {}
+
+    async def _cli(task_id, executor, prompt, **kw):
+        seen.update(executor=executor, prompt=prompt)
+        return "built"
+
+    monkeypatch.setattr(tasks, "_observed_cli", _cli)
+    asyncio.run(tasks._code_leg(task, "build it" + tasks.CODE_OVERRIDES, str(checkout),
+                                resume=False, effort="high", workspace="booking"))
+    assert seen["executor"] == "pi"
+    assert f"sh {root}/.asta-context/boot.sh" in seen["prompt"]
+    note = tasks.workspace_context_note("booking", str(checkout), "")
+    assert str(root / "AGENTS.md") in note

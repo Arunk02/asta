@@ -209,12 +209,31 @@ def test_a_pi_leg_is_measured_from_its_own_session(tmp_path, monkeypatch):
 
 # --- the fence, in pi's own runtime language -----------------------------------
 
+def _node_flags() -> list[str] | None:
+    """How this node runs TypeScript, or None when it cannot (CI runners may be older)."""
+    if not shutil.which("node"):
+        return None
+    raw = subprocess.run(["node", "--version"], capture_output=True, text=True).stdout
+    try:
+        major, minor = (int(x) for x in raw.strip().lstrip("v").split(".")[:2])
+    except ValueError:
+        return None
+    if (major, minor) >= (23, 6):
+        return []
+    if (major, minor) >= (22, 6):
+        return ["--experimental-strip-types"]
+    return None
+
+
 def _refused(tmp_path, command, deny):
+    flags = _node_flags()
+    if flags is None:
+        pytest.skip("this node cannot run TypeScript")
     mod = tmp_path / "pi_fence.mts"           # node runs .mts as an ES module
     shutil.copy(pi_cli.FENCE, mod)
     js = (f"import {{ refused }} from {json.dumps(str(mod))};"
           f"console.log(JSON.stringify(refused({json.dumps(command)}, {json.dumps(deny)}) ?? null));")
-    out = subprocess.run(["node", "--input-type=module", "-e", js], capture_output=True,
+    out = subprocess.run(["node", *flags, "--input-type=module", "-e", js], capture_output=True,
                          text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout.strip())

@@ -6,14 +6,15 @@ the stage, never by what the work needed: a one-line fix and a three-repo
 schema change got the same model at the same effort.
 
     T1 · fast      one repo, no ticket, ≤ 2 files, no schema or config words
-    T2 · standard  a ticket, 3–10 files, logs to read            (plans run here)
+    T2 · standard  a ticket, 3–10 files, logs to read
     T3 · max       ≥ 2 repos, a schema/contract/migration change, "prod is down",
-                   or the same failure twice
+                   a Temporal workflow, billing or auth, or the same failure twice
 
-Two-stage. Before the plan, only cheap signals exist, so every plan runs at T2.
-The plan then says how big the change really is — which repos, which files, a
-schema change — and the implementation runs at THAT tier. A plan that names two
-repos implements at T3 without anyone asking.
+Two-stage. The PLAN runs on the best model for anything ticket-sized or bigger
+(his words, 15 Nov: "plan leg is the core … use the best model there"): opus at
+high for T2, xhigh for T3; only a T1 ask plans on sonnet. The plan then says how
+big the change really is — which repos, which files, a schema change — and the
+BUILD runs at that tier: sonnet at high for T1/T2, opus only when the plan is T3.
 
 Brains stay sticky once a session exists (a session cannot move between them),
 so a tier changes the model and effort of the brain the task is on. He can
@@ -152,21 +153,29 @@ def plan_tier(plan: str, outcome: dict | None = None) -> tuple[int, str]:
 #: Copilot's model list differs by account, so it keeps its own and moves on
 #: effort. Override any cell with ASTA_ROUTE_<BRAIN>_<T#>="model:effort".
 _TABLE = {
-    "claude": {T1: ("sonnet", "low"), T2: ("sonnet", "high"), T3: ("opus", "xhigh")},
+    "claude": {T1: ("sonnet", "high"), T2: ("sonnet", "high"), T3: ("opus", "xhigh")},
     "copilot": {T1: ("", "low"), T2: ("", "high"), T3: ("", "xhigh")},
     # pi builds on the same Claude models (pi_cli.model_id maps the aliases).
-    "pi": {T1: ("sonnet", "low"), T2: ("sonnet", "high"), T3: ("opus", "xhigh")},
+    "pi": {T1: ("sonnet", "high"), T2: ("sonnet", "high"), T3: ("opus", "xhigh")},
 }
-#: Every plan runs at T2, at planning effort — a plan is read, not built.
-_PLAN = {"claude": ("sonnet", "medium"), "copilot": ("", "medium")}
+#: The plan is where a task is won or lost: the best model plans anything
+#: ticket-sized or bigger. Override with ASTA_ROUTE_<BRAIN>_PLAN_<T#>.
+_PLAN = {
+    "claude": {T1: ("sonnet", "medium"), T2: ("opus", "high"), T3: ("opus", "xhigh")},
+    "copilot": {T1: ("", "medium"), T2: ("", "high"), T3: ("", "xhigh")},
+}
+#: A chat turn that only reads what Asta holds (chat_light).
+_LIGHT = ("sonnet", "low")
 
 
-def _cell(brain: str, tier: int) -> tuple[str, str]:
-    raw = os.environ.get(f"ASTA_ROUTE_{brain.upper()}_{NAMES[tier]}", "").strip()
+def _cell(brain: str, tier: int, stage: str = "") -> tuple[str, str]:
+    table = _PLAN if stage == "plan" else _TABLE
+    key = f"ASTA_ROUTE_{brain.upper()}_{'PLAN_' if stage == 'plan' else ''}{NAMES[tier]}"
+    raw = os.environ.get(key, "").strip()
     if raw:
         model, _, effort = raw.partition(":")
         return model.strip(), effort.strip()
-    return _TABLE.get(brain, {}).get(tier, ("", ""))
+    return table.get(brain, {}).get(tier, ("", ""))
 
 
 # --- chat turns ----------------------------------------------------------------------
@@ -205,7 +214,7 @@ def chat_choice(brain: str, text: str) -> Choice | None:
     """T1 for a light read on Claude; None = the full session at his chosen model."""
     if not brain.startswith("claude") or not chat_light(text):
         return None
-    model, effort = _cell("claude", T1)
+    model, effort = _LIGHT
     return Choice(T1, model, effort, "a read of what Asta already holds")
 
 
@@ -258,12 +267,12 @@ def choose(task_id: int, brain: str, stage: str) -> Choice:
     """The model and effort for this leg, on the brain the task is on."""
     brain = "claude" if brain.startswith("claude") else brain
     if stage == "plan":
-        model, effort = _PLAN.get(brain, ("", "medium"))
-        pinned = store.kv_get(f"task_tier_pinned:{task_id}") and tier_of(task_id) == T3
-        if pinned:
-            model, effort = _cell(brain, T3)
-            return Choice(T3, model, effort, "planning at T3 — you asked for max")
-        return Choice(T2, model, effort, "every plan runs at T2")
+        tier = tier_of(task_id) or T2
+        model, effort = _cell(brain, tier, "plan")
+        pinned = store.kv_get(f"task_tier_pinned:{task_id}") and tier == T3
+        return Choice(tier, model, effort,
+                      "planning at T3 — you asked for max" if pinned else
+                      f"plan at {NAMES[tier]} — the best model plans anything ticket-sized")
     tier = tier_of(task_id) or T2
     model, effort = _cell(brain, tier)
     return Choice(tier, model, effort, f"{NAMES[tier]} on {brain}")

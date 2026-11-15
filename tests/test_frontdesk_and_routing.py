@@ -55,12 +55,23 @@ def test_his_words_override(text, want):
     assert routing.overrides(text) == want
 
 
-def test_plans_run_at_t2_and_builds_at_the_tier(monkeypatch):
+def test_the_best_model_plans_and_sonnet_builds_unless_it_is_big(monkeypatch):
+    """His words, 15 Nov: "plan leg is the core … use the best model there; for
+    coding sonnet high, opus if required"."""
     t = store.create_task("x", "code", "p", None)
+    routing.set_tier(t["id"], routing.T2, "a ticket", "signals")
+    plan = routing.choose(t["id"], "claude", "plan")
+    assert (plan.model, plan.effort) == ("opus", "high")
+    routing.set_tier(t["id"], routing.T3, "a contract", "signals")
+    assert (routing.choose(t["id"], "claude", "plan").model,
+            routing.choose(t["id"], "claude", "plan").effort) == ("opus", "xhigh")
     routing.set_tier(t["id"], routing.T1, "small", "signals")
-    assert routing.choose(t["id"], "claude", "plan") == routing.Choice(
-        routing.T2, "sonnet", "medium", "every plan runs at T2")
-    assert routing.choose(t["id"], "claude", "implement").effort == "low"
+    assert routing.choose(t["id"], "claude", "plan").model == "sonnet"
+    build = routing.choose(t["id"], "claude", "implement")
+    assert (build.model, build.effort) == ("sonnet", "high")
+    routing.set_tier(t["id"], routing.T3, "2 repos", "plan")
+    assert routing.choose(t["id"], "claude", "implement").model == "opus"
+    routing.set_tier(t["id"], routing.T1, "small", "signals")
     assert routing.choose(t["id"], "copilot", "implement").model == ""   # account-specific list
     monkeypatch.setenv("ASTA_ROUTE_CLAUDE_T1", "haiku:low")
     assert routing.choose(t["id"], "claude", "implement").model == "haiku"

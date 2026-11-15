@@ -79,18 +79,28 @@ def usable() -> bool:
     return available() and not down()
 
 
+_TOLD_KEY = "pi_down_told"
+
+
 def mark_down(reason: str, now: float | None = None) -> bool:
-    """Record pi as out. True the first time in a down period — tell him then."""
+    """Record pi as out. True only the first time for this reason — tell him
+    then. An account that needs his action stays out every time pi is retried,
+    and the same news every six hours is noise; pi working again resets it."""
     now = time.time() if now is None else now
-    first = not down()
     store.kv_set(_DOWN_KEY, json.dumps({"until": now + DOWN_SECONDS, "reason": reason[:300]}))
     store.record_outcome("pi", "down", detail=reason[:300])
-    return first
+    told = store.kv_get(_TOLD_KEY) or ""
+    if told == reason[:120]:
+        return False
+    store.kv_set(_TOLD_KEY, reason[:120])
+    return True
 
 
 def mark_ok() -> None:
     if store.kv_get(_DOWN_KEY):
         store.kv_set(_DOWN_KEY, "")
+    if store.kv_get(_TOLD_KEY):
+        store.kv_set(_TOLD_KEY, "")
 
 
 def model_id(name: str) -> str:

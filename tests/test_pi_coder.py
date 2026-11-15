@@ -112,6 +112,13 @@ def test_a_pi_account_error_builds_on_claude_and_says_so_once(pi_on, monkeypatch
     assert ran[-1] == "claude" and len(told) == 1, "pi stays out; he is not told twice"
 
 
+def test_the_same_account_problem_is_told_once_not_every_retry():
+    assert pi_cli.mark_down("extra usage needed", now=0) is True
+    assert pi_cli.mark_down("extra usage needed") is False, "retried after the window"
+    pi_cli.mark_ok()
+    assert pi_cli.mark_down("extra usage needed") is True, "working again resets it"
+
+
 # --- the pi runner, against a stand-in pi ---------------------------------------
 
 FAKE_PI = textwrap.dedent('''\

@@ -7,14 +7,15 @@ schema change got the same model at the same effort.
 
     T1 · fast      one repo, no ticket, ≤ 2 files, no schema or config words
     T2 · standard  a ticket, 3–10 files, logs to read
-    T3 · max       ≥ 2 repos, a schema/contract/migration change, "prod is down",
-                   a Temporal workflow, billing or auth, or the same failure twice
+    T3 · big       > 10 files, ≥ 2 repos, a schema/contract/migration change,
+                   "prod is down", a Temporal workflow, billing or auth, or the
+                   same failure twice
 
 Two-stage. The PLAN runs on the best model for anything ticket-sized or bigger
 (his words, 15 Nov: "plan leg is the core … use the best model there"): opus at
 high for T2, xhigh for T3; only a T1 ask plans on sonnet. The plan then says how
 big the change really is — which repos, which files, a schema change — and the
-BUILD runs at that tier: sonnet at high for T1/T2, opus only when the plan is T3.
+BUILD runs at that tier: sonnet medium (T1), sonnet high (T2), opus high (T3).
 
 Brains stay sticky once a session exists (a session cannot move between them),
 so a tier changes the model and effort of the brain the task is on. He can
@@ -43,6 +44,8 @@ def enabled() -> bool:
 
 # --- what the words say ------------------------------------------------------------
 
+#: More classes/files than this, or two repos, is a big feature: opus builds it.
+BIG_FEATURE_FILES = 10
 _TICKET = re.compile(r"\b[A-Z][A-Z0-9]{1,15}-\d{1,6}\b")
 #: A change to a contract other code depends on: always worth the best model.
 #: Deliberately not "contract" or "kafka topic" on their own: every change in his
@@ -107,6 +110,8 @@ def pre_tier(title: str, prompt: str) -> tuple[int, str]:
     if _CONTRACT.search(text):
         return T3, f"touches a contract ({_CONTRACT.search(text).group(0)})"
     files = set(_FILE.findall(text))
+    if len(files) > BIG_FEATURE_FILES:
+        return T3, f"a big feature ({len(files)} files named)"
     if _TICKET.search(text) or len(files) >= 3:
         return T2, "a ticket" if _TICKET.search(text) else f"{len(files)} files named"
     if _SMALL.search(text) or len(text) < 160:
@@ -140,6 +145,8 @@ def plan_tier(plan: str, outcome: dict | None = None) -> tuple[int, str]:
     if _IMPACT.search(text):
         return T3, f"high impact ({_IMPACT.search(text).group(0)})"
     n = _structure_entries(text) or len(set(_FILE.findall(text)))
+    if n > BIG_FEATURE_FILES:
+        return T3, f"a big feature ({n} classes/files)"
     if n >= 3:
         return T2, f"{n} classes/files"
     if n:
@@ -153,10 +160,12 @@ def plan_tier(plan: str, outcome: dict | None = None) -> tuple[int, str]:
 #: Copilot's model list differs by account, so it keeps its own and moves on
 #: effort. Override any cell with ASTA_ROUTE_<BRAIN>_<T#>="model:effort".
 _TABLE = {
-    "claude": {T1: ("sonnet", "high"), T2: ("sonnet", "high"), T3: ("opus", "xhigh")},
+    # His call, 15 Nov: a big feature (> 10 files, cross-repo) builds on opus at
+    # high, a medium task on sonnet at high; a small one does not need high.
+    "claude": {T1: ("sonnet", "medium"), T2: ("sonnet", "high"), T3: ("opus", "high")},
     "copilot": {T1: ("", "low"), T2: ("", "high"), T3: ("", "xhigh")},
     # pi builds on the same Claude models (pi_cli.model_id maps the aliases).
-    "pi": {T1: ("sonnet", "high"), T2: ("sonnet", "high"), T3: ("opus", "xhigh")},
+    "pi": {T1: ("sonnet", "medium"), T2: ("sonnet", "high"), T3: ("opus", "high")},
 }
 #: The plan is where a task is won or lost: the best model plans anything
 #: ticket-sized or bigger. Override with ASTA_ROUTE_<BRAIN>_PLAN_<T#>.

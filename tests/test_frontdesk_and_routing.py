@@ -67,10 +67,13 @@ def test_the_best_model_plans_and_sonnet_builds_unless_it_is_big(monkeypatch):
             routing.choose(t["id"], "claude", "plan").effort) == ("opus", "xhigh")
     routing.set_tier(t["id"], routing.T1, "small", "signals")
     assert routing.choose(t["id"], "claude", "plan").model == "sonnet"
+    assert routing.choose(t["id"], "claude", "implement").model == "sonnet"
+    routing.set_tier(t["id"], routing.T2, "5 files", "plan")
     build = routing.choose(t["id"], "claude", "implement")
     assert (build.model, build.effort) == ("sonnet", "high")
     routing.set_tier(t["id"], routing.T3, "2 repos", "plan")
-    assert routing.choose(t["id"], "claude", "implement").model == "opus"
+    build = routing.choose(t["id"], "claude", "implement")
+    assert (build.model, build.effort) == ("opus", "high")
     routing.set_tier(t["id"], routing.T1, "small", "signals")
     assert routing.choose(t["id"], "copilot", "implement").model == ""   # account-specific list
     monkeypatch.setenv("ASTA_ROUTE_CLAUDE_T1", "haiku:low")

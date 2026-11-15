@@ -233,6 +233,14 @@ CODE_OVERRIDES = """
         BookingService     validates it now   <- change
         ServicePlanLeg     stores portGateIn
 
+  A BIG CHANGE ALSO GETS A PICTURE. When the plan touches more than ten files,
+  two or more repos, a Temporal workflow or an event/contract between services,
+  add a `DIAGRAM` block after FLOW: boxes and arrows in plain ASCII inside a
+  ``` code block, at most 20 lines and 60 columns, showing the services or
+  classes and the data moving between them, with the change marked `*`. The
+  plan reaches him as plan-<id>.md on his phone, so it must read in a plain
+  text viewer — no Mermaid, no images. A small change gets no diagram.
+
   END THE PLAN WITH A LINE THAT SAYS ONLY `PLAN READY`. Asta needs one
   unambiguous mark to tell a plan apart from finished work — without it a plan
   is reported to him as "✅ DONE", with a file list it has not written.
@@ -3427,7 +3435,7 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         full = await _send_full_plan(task_id, t, result)
         await notify.notify(
             f"📋 *PLAN #{task_id}* — going ahead ({why})\n{clip.clip(t['title'], 90)}\n\n"
-            f"{_phone_text(result, 1500, head_first=True)}\n\n"
+            f"{_card_text(result, full)}\n\n"
             f"— — —\n{full}"
             + ("I'll raise the PR when it's done. " if go.ships(task_id)
                else "It stays local until you say *raise PR*. ")
@@ -3445,10 +3453,11 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
             asyncio.get_running_loop().call_later(
                 go.after_plan_seconds(), lambda: asyncio.ensure_future(_go_on(task_id, born)))
         return
-    full = await _send_full_plan(task_id, t, result) + _missing_line(result)
+    attached = await _send_full_plan(task_id, t, result)
+    full = attached + _missing_line(result)
     await notify.notify(
         f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
-        f"{_phone_text(result, 1500, head_first=True)}\n\n"
+        f"{_card_text(result, attached)}\n\n"
         f"— — —\n{full}"
         f"👍 *approve task {task_id}*\n"
         f"👎 *reject task {task_id}*\n"
@@ -3473,28 +3482,34 @@ def _missing_line(plan: str) -> str:
     return f"⚠ This plan does not state: {', '.join(gone)}.\n" if gone else ""
 
 
+#: The card's share of a plan once the whole plan rides as a file.
+CARD_WITH_FILE = 700
+
+
 async def _send_full_plan(task_id: int, t: dict, plan: str) -> str:
-    """The whole plan as a file when the phone message can only carry a cut of it.
+    """The whole plan, always, as plan-<id>.md on his phone.
 
     He approves what he read; a plan cut at 1500 characters asked him to approve
-    steps he never saw. Returns the line telling him it is attached, or ""."""
-    shown = _phone_text(plan, 1500, head_first=True)
-    if "(the rest is in the app)" not in shown and len(shown) >= len(plan.strip()) - 40:
-        return ""
+    steps he never saw. And his words, 15 Nov: "send the plan.md file in
+    whatsapp since message is not comfortable to read the whole plan". The card
+    above it is a summary; the file is what he reads. Sent with the card — a
+    plan card already reaches his phone wherever he is. Returns the line that
+    says it is attached, or where it is when the phone could not take it."""
     from . import notify, task_spec
     path = task_spec.preview(task_id, plan, t.get("title", ""))
     store.add_task_event(task_id, "plan", f"full plan sent: {path.name} ({path.parent.name[:10]})")
-    from . import presence
-    sent = False
-    # At the laptop the phone stays quiet (his rule); the path is enough there.
-    if not await presence.at_laptop():
-        try:
-            sent = await notify.wa_document(str(path), f"Plan #{task_id}, in full")
-        except Exception:                                    # noqa: BLE001
-            sent = False
-    return (f"📎 The full plan is attached ({len(plan.splitlines())} lines) — the message "
-            f"above is a cut of it.\n" if sent else
-            f"⚠ The message above is a cut of the plan; the full plan is at {path}.\n")
+    try:
+        sent = await notify.wa_document(str(path), f"Plan #{task_id} — {clip.clip(t.get('title', ''), 60)}")
+    except Exception:                                        # noqa: BLE001
+        sent = False
+    return (f"📎 The whole plan is attached as {path.name} ({len(plan.splitlines())} lines).\n"
+            if sent else f"⚠ The full plan is at {path}.\n")
+
+
+def _card_text(plan: str, attached: str) -> str:
+    """The plan's head for the card: short when the whole plan rides as a file."""
+    return _phone_text(plan, CARD_WITH_FILE if attached.startswith("📎") else 1500,
+                       head_first=True)
 
 
 async def _go_on(task_id: int, born: float = 0.0) -> None:

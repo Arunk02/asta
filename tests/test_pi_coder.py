@@ -283,6 +283,11 @@ def test_a_small_ordinary_change_stays_small():
     assert routing.plan_tier("STRUCTURE\nEquipmentMapper.java\n")[0] == routing.T1
 
 
+def test_a_big_feature_is_t3_by_its_size():
+    plan = "STRUCTURE\n" + "\n".join(f"  Class{i}.java  changes" for i in range(11))
+    assert routing.plan_tier(plan) == (routing.T3, "a big feature (11 classes/files)")
+
+
 def test_pi_builds_on_the_same_claude_models():
-    assert routing._cell("pi", routing.T3) == ("opus", "xhigh")
+    assert routing._cell("pi", routing.T3) == routing._cell("claude", routing.T3) == ("opus", "high")
     assert pi_cli.model_id("sonnet") == "anthropic/claude-sonnet-5"

@@ -348,13 +348,13 @@ def test_yes_update_and_send_sends_the_revision_to_the_waiting_draft(monkeypatch
     assert not agent._approves_waiting_draft("Vinish Kumar", cid), "only the person the draft is for"
 
 
-def test_asta_tools_load_up_front_not_behind_tool_search(monkeypatch):
-    from app import claude_cli
+def test_the_debug_kit_loads_up_front_not_behind_tool_search(monkeypatch):
+    """14 Oct: 0 of 42 investigations reached the debug kit it could not see.
+    Pinned per tool now (15 Nov), so tool search can stay on for the rest."""
+    from app import mcp_server
     monkeypatch.delenv("ASTA_TOOL_SEARCH", raising=False)
-    assert claude_cli._subprocess_env()["ENABLE_TOOL_SEARCH"] == "false"
-    monkeypatch.setenv("ASTA_TOOL_SEARCH", "1")
-    assert "ENABLE_TOOL_SEARCH" not in claude_cli._subprocess_env() or \
-        claude_cli._subprocess_env().get("ENABLE_TOOL_SEARCH") != "false"
+    for name in ("log_counts", "log_lines", "find_id", "log_gaps"):
+        assert mcp_server.tool_meta(name) == {"anthropic/alwaysLoad": True}
 
 
 def _fake_browser(monkeypatch):

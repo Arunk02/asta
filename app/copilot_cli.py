@@ -557,7 +557,73 @@ def turn_context(user_text: str, conv_id: str = "") -> str:
 
 
 def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "") -> str:
-    """Orientation block for a fresh CLI session (it has no Asta memory).
+    """Orientation block for a fresh CLI session (it has no Asta memory): the
+    stable part every turn of a session shares, then this message's hints.
+
+    Copilot carries it on turn 1 only, in the message. Claude carries the stable
+    part as its system prompt on EVERY turn and the hints in the message — see
+    claude_cli._build_cmd for why the two must be kept apart there.
+    """
+    hints = turn_hints(conv, via, user_text)
+    base = stable_context(conv, via, user_text=user_text, fresh=True)
+    return base + (f"\n\n{hints}" if hints else "")
+
+
+def turn_hints(conv: dict, via: str, user_text: str = "", *, recap: bool = True) -> str:
+    """What THIS message needs that the next one may not: which expert answers,
+    the file-ask rule, and — on a session's first turn — the recap of where the
+    conversation stood. Never part of a cached system prompt: each changes with
+    the message, and a system prompt that changes rewrites the whole cache."""
+    from . import consent, roles
+    parts: list[str] = []
+    # Which expert is answering. One shared function, so the chat brain, the task
+    # pipeline and the responder's investigations all reach the same answer about
+    # the same sentence — see app/roles.py for why that is not a nicety.
+    hat = roles.briefed(roles.role_for(user_text))
+    if hat:
+        parts.append(hat)
+    # A file ask is the one where shelling out looks plausible: the module that
+    # writes files is right there in the repo, so a brain reads app/files.py and
+    # tries to run it. Live, twice on 16 Sep, that ended in a five-minute repo
+    # hunt, a delegated code task, and no file — while `make_file` sat in its own
+    # tool list. So when he is plainly asking to be handed a file, say which tool
+    # that is. Every brain gets the same sentence, because a rule that holds on
+    # one CLI and not the other is two assistants. Same definition the
+    # substitution guard uses, so the prompt and the refusal cannot drift apart.
+    if consent.asked_for_a_file(user_text or ""):
+        parts.append(
+            "THIS MESSAGE ASKS FOR A FILE. `make_file` is how that happens: you "
+            "decide the rows (header first) and the title, it writes the "
+            "xlsx/csv/md/docx/pptx/pdf, checks what it wrote and sends it to his "
+            "phone. Call it directly. Do NOT write a script, do NOT run "
+            "app/files.py yourself, and do NOT delegate a task for it — a file he "
+            "asked for is one tool call, not a piece of engineering.")
+    if recap:
+        held = _switch_recap(conv, via)
+        if held:
+            parts.append(held)
+    return "\n\n".join(parts)
+
+
+def _memory_index(cid: str, fresh: bool) -> str:
+    """His memory index as this session first saw it. Read live, every `remember`
+    changed the system prompt and so rewrote the session's whole cache; a later
+    turn reaches anything new through recall_block instead."""
+    key = f"session_memidx:{cid}"
+    if cid and not fresh:
+        held = store.kv_get(key)
+        if held:
+            return held.strip()
+    idx = memory.index_text().strip()[:1500]
+    if cid:
+        store.kv_set(key, idx or " ")
+    return idx
+
+
+def stable_context(conv: dict, via: str = "Copilot CLI", *, user_text: str = "",
+                   fresh: bool = False) -> str:
+    """Who Asta is, his rules, the tools and the flow — the same text on every
+    turn of a session, so a cached prefix stays valid.
 
     The capability list is GENERATED from the same registry that gives the chat
     agent its tools, so a new tool is taught here the moment it is added — there
@@ -569,35 +635,23 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
 
     CLI brains never see agent.PERSONA, so the safety policy rides here.
 
-    The full capability spec is ranked against this first message and narrowed to
-    what the turn likely needs — the same per-turn selection the in-process agent
-    already gets, which the CLI paths were throwing away and so paid for all ~34
-    every session. Safe because cli_block still lists every un-expanded tool by
-    name: a mis-rank costs one round-trip to ask, never a lost capability. This
-    runs once per CLI session (the CLI remembers the rest), so the index tail is
-    what keeps a later message in the same session reachable.
+    `user_text` matters only without MCP, where the curl catalogue is ranked
+    against the first message (Copilot's turn 1); with MCP the tools arrive as
+    schemas and nothing here depends on the message.
     """
-    # Which expert is answering. One shared function, so the chat brain, the task
-    # pipeline and the responder's investigations all reach the same answer about
-    # the same sentence — see app/roles.py for why that is not a nicety.
-    from . import roles
-    hat = roles.briefed(roles.role_for(user_text))
-
-    from . import capabilities, consent, guardrails, skills, tool_index
+    from . import capabilities, guardrails, skills, tool_index
     name = os.environ.get("ASSISTANT_NAME", "Asta")
     parts = [
         f"You are acting as {name}, Arun's assistant, via {via}. Be concise and direct.",
     ]
-    if hat:
-        parts.append(hat)
     # His standing instructions — the same block the in-process brain gets from
     # agent.build_instructions, so a rule holds whichever brain took the turn.
     rules = guardrails.block("chat")
     if rules:
         parts.append(rules)
-    idx = memory.index_text().strip()
+    idx = _memory_index(conv.get("id", ""), fresh)
     if idx:
-        parts.append("Arun's memory index (for orientation):\n" + idx[:1500])
+        parts.append("Arun's memory index (for orientation):\n" + idx)
     # The skill catalogue is progressive disclosure: only these one-liners ride in
     # the prompt; the CLI pulls a skill's full body with GET /api/skills/{name}
     # (load_skill) when its one-liner matches — parity with the in-process brain.
@@ -622,26 +676,6 @@ def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "
     else:
         selected = tool_index.select(user_text) if user_text else None
         parts.append(capabilities.cli_block(port, str(ROOT), selected))
-    # A file ask is the one where shelling out looks plausible: the module that
-    # writes files is right there in the repo, so a brain reads app/files.py and
-    # tries to run it. Live, twice on 16 Sep, that ended in a five-minute repo
-    # hunt, a delegated code task, and no file — while `make_file` sat in its own
-    # tool list. So when he is plainly asking to be handed a file, say which tool
-    # that is. Outside the MCP branch on purpose: every brain gets the same
-    # sentence, because a rule that holds on one CLI and not the other is two
-    # assistants. Same definition the substitution guard uses, so the prompt and
-    # the refusal cannot drift apart.
-    if consent.asked_for_a_file(user_text or ""):
-        parts.append(
-            "THIS MESSAGE ASKS FOR A FILE. `make_file` is how that happens: you "
-            "decide the rows (header first) and the title, it writes the "
-            "xlsx/csv/md/docx/pptx/pdf, checks what it wrote and sends it to his "
-            "phone. Call it directly. Do NOT write a script, do NOT run "
-            "app/files.py yourself, and do NOT delegate a task for it — a file he "
-            "asked for is one tool call, not a piece of engineering.")
-    recap = _switch_recap(conv, via)
-    if recap:
-        parts.append(recap)
     cid = conv.get("id", "")
     parts.append(
         f'AUTONOMOUS LOOP — this conversation\'s id is "{cid}". You do not have to stop '

@@ -96,6 +96,42 @@ def _allowed_tools() -> set[str] | None:
     return names | set(capabilities.ALWAYS)
 
 
+#: The capabilities a Claude brain always has in view; every other one waits
+#: behind Claude Code's tool search and is loaded the moment the brain asks.
+#:
+#: 15 Nov: a fresh chat session started at 93k tokens before he said a word.
+#: Tool search had been switched off so these tools would never hide behind a
+#: search (14 Oct: 48 of 84 tool-using turns spent their first round trip
+#: searching, and the debug kit was never found) — which also loaded ~20k of
+#: Claude Code built-ins no Asta call uses, and all 108 Asta schemas. Measured
+#: on the real command: 93k → 42k with everything searchable, 66k with every
+#: used tool pinned. Anthropic's own advice for tool search is to pin only the
+#: few most-used tools, so this is that: the ALWAYS floor, the debug kit the 14
+#: Oct turns could not find, and the most-called tools of the 45 days to 15 Nov
+#: (top 10 of 58 = 64% of all calls). A tool added later is searchable, never
+#: lost: its name is listed and one search loads it. Copilot ignores the mark.
+HOT = frozenset(capabilities.ALWAYS) | frozenset({
+    # the debug kit
+    "log_lines", "log_counts", "find_id", "log_gaps", "grafana_logs",
+    "temporal_workflow", "temporal_workflows", "resolve_context",
+    # the most-called beyond those
+    "task_result", "propose_pr_review", "read_workspace_file",
+})
+
+
+def defer_tail() -> bool:
+    """ASTA_TOOL_SEARCH: 0 (default) = the HOT set is pinned and the rest is
+    found by tool search; 1 = every Asta tool waits behind the search."""
+    return os.environ.get("ASTA_TOOL_SEARCH", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def tool_meta(name: str) -> dict | None:
+    """Claude Code's per-tool load hint, or None to leave the tool searchable."""
+    if defer_tail() or name not in HOT:
+        return None
+    return {"anthropic/alwaysLoad": True}
+
+
 def build_server():
     """One MCP tool per capability, each forwarding to the running Asta server so
     the function executes where its in-process state lives (see _proxy). When
@@ -109,7 +145,8 @@ def build_server():
             continue
         if os.environ.get("ASTA_MCP_READ_ONLY") == "1" and cap.name not in capabilities.SIDE_READS | {'load_skill'}:
             continue
-        server.add_tool(_proxy(cap), name=cap.name, description=_describe(cap))
+        server.add_tool(_proxy(cap), name=cap.name, description=_describe(cap),
+                        meta=tool_meta(cap.name))
     return server
 
 

@@ -67,13 +67,19 @@ def _subprocess_env() -> dict:
     # `remember` tool and his guardrails file; nothing else. Measured: with this
     # set, the session reports no memory directory; without it, it has one.
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
-    # Asta's own tools load up front instead of behind ToolSearch. Measured 14
-    # Oct: 48 of 84 tool-using chat turns spent their first round trip on
-    # ToolSearch, and 0 of 42 investigations reached the debug kit (log_counts,
-    # find_id…) the brain could not see. Off costs ~4.6k cached tokens per call.
-    if os.environ.get("ASTA_TOOL_SEARCH", "0").strip().lower() not in ("1", "true", "yes", "on"):
-        env["ENABLE_TOOL_SEARCH"] = "false"
+    # Tool search stays ON. Asta's own tools are kept in view per tool instead
+    # (mcp_server.tool_meta marks them always-loaded), so the 14 Oct failure —
+    # the debug kit hidden behind a search — cannot come back. Switching tool
+    # search off for that, as this used to, also loaded ~20k tokens of Claude
+    # Code built-ins no Asta call uses: 93k → 45k for a fresh chat, measured
+    # 15 Nov. A value inherited from the parent shell is not ours to keep.
+    env.pop("ENABLE_TOOL_SEARCH", None)
     return env
+
+
+#: Claude Code's own skill catalogue (dataviz, artifacts, …) — ~3k tokens per
+#: call that no Asta session has used. Asta's skills arrive through load_skill.
+NO_SKILLS = "--disable-slash-commands"
 
 
 #: What a PLANNING leg may not do — the same ban as _CHAT_DENY, for the same
@@ -128,7 +134,7 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
     # copilot_cli.now_line for the Monday this is here to stop repeating.
     from . import copilot_cli
     prompt = f"{copilot_cli.now_line()}\n{prompt}"
-    cmd = ["claude", "-p", prompt,
+    cmd = ["claude", "-p", prompt, NO_SKILLS,
            # Parity with the copilot path's --allow-all-tools: the pipeline
            # must run builds/tests unattended. Workspace repos only.
            "--permission-mode", "default" if tools_off else "bypassPermissions"]
@@ -355,17 +361,26 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     # Asta at all — "I'm just Claude Code, I don't have those tools" — the exact
     # failure Arun hit. As a system prompt it is authoritative, the same way the
     # task pipeline (--append-system-prompt) always worked where chat didn't.
-    # Re-sent every turn (a stable system prompt is nearly free under prompt
-    # caching) so a resumed session never drifts back to plain Claude Code.
-    system = copilot_cli._first_turn_context(
-        conv, via="Claude Code CLI", user_text=ranking_text)
+    # Re-sent every turn so a resumed session never drifts back to plain Claude
+    # Code — and it must be the SAME text every turn. The system prompt sits in
+    # front of the whole conversation in the cache, so one changed byte rewrites
+    # all of it: measured over 14 days to 15 Nov, 98 of 187 turns wrote 50–90k
+    # tokens to the cache, because the expert line, the file hint and the recap
+    # changed with each message. Those ride in the message now (turn_hints).
+    # A light read is a side session: it reads the main session's memory
+    # snapshot and never replaces it (that would rewrite the main cache).
+    system = copilot_cli.stable_context(conv, via="Claude Code CLI", fresh=is_new and not light)
+    hints = copilot_cli.turn_hints(conv, "Claude Code CLI", ranking_text,
+                                   recap=is_new and not light)
     if light:
-        system += _recent_lines(conv)
+        hints += _recent_lines(conv)
+    if hints.strip():
+        umsg = f"{hints.strip()}\n\n{umsg}"
     cmd = [
         "claude",
         "--resume" if not is_new else "--session-id", sid,
         "--append-system-prompt", system,
-        "-p", umsg,
+        "-p", umsg, NO_SKILLS,
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",                       # required for stream-json

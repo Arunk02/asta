@@ -364,7 +364,10 @@ def test_a_light_read_skips_the_saved_session_and_uses_the_t1_model(monkeypatch)
     assert "--resume" not in cmd and "saved-session-id" not in cmd
     assert cmd[cmd.index("--model") + 1] == "sonnet"
     assert cmd[cmd.index("--effort") + 1] == "low"
-    assert "earlier answer" in cmd[cmd.index("--append-system-prompt") + 1]
+    # In the message, not the system prompt: the side session's prefix then
+    # matches the main one's (15 Nov, app/claude_cli._build_cmd).
+    assert "earlier answer" in cmd[cmd.index("-p") + 1]
+    assert "earlier answer" not in cmd[cmd.index("--append-system-prompt") + 1]
     assert store.kv_get(f"claude_session:{conv['id']}") == "saved-session-id"
     deep = claude_cli._build_cmd(dict(conv), "did you check the workflow history size?")
     assert deep[deep.index("--resume") + 1] == "saved-session-id"

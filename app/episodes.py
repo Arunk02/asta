@@ -30,11 +30,17 @@ def applies_to(channel: str) -> bool:
 
 
 def gap_seconds() -> float:
-    """How long a silence ends a sitting. ASTA_EPISODE_GAP_MINUTES, default 120."""
+    """How long a silence ends a sitting. ASTA_EPISODE_GAP_MINUTES, default 60.
+
+    60 because that is how long Claude's prompt cache holds a session (measured
+    15 Nov: a resume 9 minutes after the last turn read the cache, one 64
+    minutes after rewrote all 108k of it). Past that, resuming re-pays the whole
+    conversation, while a fresh session pays only its 50k start and the recap —
+    which carries the open work as well as the last lines (copilot_cli.open_work)."""
     try:
-        return float(os.environ.get("ASTA_EPISODE_GAP_MINUTES", "120") or 120) * 60
+        return float(os.environ.get("ASTA_EPISODE_GAP_MINUTES", "60") or 60) * 60
     except ValueError:
-        return 7200.0
+        return 3600.0
 
 
 def _key(cid: str) -> str:

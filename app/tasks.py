@@ -2385,7 +2385,8 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
                 prompt, cwd=cwd, timeout=code_timeout(workspace),
                 agent_file=reproduction_agent if reproducing else _agent_file("code", _pipeline_for(task_id)),
                 effort=effort, session_id=sid, resume=resume, on_progress=watcher,
-                mcp_config=dev_cfg, plan_only=plan_only, model=model)
+                mcp_config=dev_cfg, plan_only=plan_only, model=model,
+                builtins=claude_cli.CODE_TOOLS)
             agent_mod.mark_quota_ok("claude_cli")
             return out
         except claude_cli.AuthenticationRequired as exc:

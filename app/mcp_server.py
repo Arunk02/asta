@@ -126,7 +126,13 @@ def defer_tail() -> bool:
 
 
 def tool_meta(name: str) -> dict | None:
-    """Claude Code's per-tool load hint, or None to leave the tool searchable."""
+    """Claude Code's per-tool load hint, or None to leave the tool searchable.
+
+    A task worker's server (ASTA_MCP_SCOPED) carries only the handful of tools
+    its scope grants — report_outcome and the like, called on most legs — so all
+    of them are pinned: searching for one would cost a round trip per leg."""
+    if os.environ.get("ASTA_MCP_SCOPED") == "1":
+        return {"anthropic/alwaysLoad": True}
     if defer_tail() or name not in HOT:
         return None
     return {"anthropic/alwaysLoad": True}

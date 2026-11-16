@@ -20,6 +20,7 @@ import json
 import os
 import time
 import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -81,6 +82,43 @@ def _subprocess_env() -> dict:
 #: call that no Asta session has used. Asta's skills arrive through load_skill.
 NO_SKILLS = "--disable-slash-commands"
 
+#: The first CLI measured to keep MCP tools when `--tools` names the built-ins.
+#: 2.1.212 (17 Sep) stripped every mcp__ tool with it; 2.1.267 and 2.1.311 (16
+#: Nov) keep all of them, and accept --exclude-dynamic-system-prompt-sections.
+#: An older or unreadable version gets neither flag — the safe old command.
+LEAN_FLAGS_FROM = (2, 1, 267)
+_version: tuple[int, ...] | None = None
+
+
+def cli_version() -> tuple[int, ...]:
+    global _version
+    if _version is None:
+        try:
+            out = subprocess.run(["claude", "--version"], capture_output=True, text=True,
+                                 timeout=20, stdin=subprocess.DEVNULL).stdout
+            _version = tuple(int(x) for x in out.split()[0].split(".")[:3])
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+            _version = ()
+    return _version
+
+
+def lean_flags() -> bool:
+    """May this CLI take --tools beside MCP, and the dynamic-sections flag?"""
+    v = cli_version()
+    return bool(v) and v >= LEAN_FLAGS_FROM
+
+
+#: Moves cwd, env and git status out of the system prompt into the first
+#: message, so every leg and chat session starts from the same cached prefix
+#: whatever checkout it runs in (system prompt 5.0k → 4.4k, measured 16 Nov).
+SAME_PREFIX = "--exclude-dynamic-system-prompt-sections"
+
+#: The built-in tools a code leg gets. 60 days of task legs to 16 Nov: Bash 70%,
+#: Read 12%, Edit 9%, Asta's MCP tools 8%, sub-agents 0.7%, Write 0.5% — and
+#: Claude Code loaded ~30k tokens of others into every leg. ToolSearch stays so
+#: a searchable Asta tool can still be found. 41k → 18.5k per fresh leg.
+CODE_TOOLS = "Bash,Read,Edit,Write,Grep,Glob,ToolSearch,Task"
+
 
 #: What a PLANNING leg may not do — the same ban as _CHAT_DENY, for the same
 #: reason in a different place: a leg that has not been approved yet may read
@@ -94,7 +132,7 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                    session_id: str = "", resume: bool = False,
                    on_progress=None, mcp_config: str = "", plan_only: bool = False,
                    model: str = "", tools_off: bool = False,
-                   purpose: str = "") -> str:
+                   purpose: str = "", builtins: str = "") -> str:
     """Headless claude run with the same contract as copilot_cli.one_shot.
 
     agent_file — a .github/agents/*.agent.md whose CONTENT becomes the appended
@@ -107,6 +145,8 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
                  and permissions are the CLI's own defaults. For classifying
                  untrusted text, where the worst a hostile message may do is be
                  misread. Measured at ~7s against ~14s with tools loaded.
+    builtins   — the only built-in tools this run gets (CODE_TOOLS for a code
+                 leg); MCP tools are unaffected on a CLI that passes lean_flags.
     """
     if not available():
         raise RuntimeError("claude CLI is not installed")
@@ -117,19 +157,19 @@ async def one_shot(prompt: str, cwd: str | None = None, timeout: int = 600,
     from . import agent as agent_mod, call_ledger
     if call_ledger.inside_worker():  # worker_usage.attempt already measures this leg
         return await _one_shot(prompt, cwd, timeout, agent_file, effort, session_id, resume,
-                               on_progress, mcp_config, plan_only, model, tools_off)
+                               on_progress, mcp_config, plan_only, model, tools_off, builtins)
     # A named session is the only way to find this run's own log afterwards.
     session_id = session_id or str(uuid.uuid4())
     with call_ledger.call("claude", cwd or str(ROOT), session_id,
                           purpose=purpose or call_ledger.caller(),
                           model=model or agent_mod.tier_of("claude_cli")):
         return await _one_shot(prompt, cwd, timeout, agent_file, effort, session_id, resume,
-                               on_progress, mcp_config, plan_only, model, tools_off)
+                               on_progress, mcp_config, plan_only, model, tools_off, builtins)
 
 
 async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str, effort: str,
                     session_id: str, resume: bool, on_progress, mcp_config: str,
-                    plan_only: bool, model: str, tools_off: bool) -> str:
+                    plan_only: bool, model: str, tools_off: bool, builtins: str = "") -> str:
     # Same stamp the chat turn gets, from the same function — see
     # copilot_cli.now_line for the Monday this is here to stop repeating.
     from . import copilot_cli
@@ -142,6 +182,10 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
     fence = task_fence.MODE.get()
     if tools_off:
         cmd += ["--tools", ""]
+    elif builtins and lean_flags():
+        cmd += ["--tools", builtins]
+    if lean_flags():
+        cmd.append(SAME_PREFIX)
     if mcp_config or tools_off or fence:
         cmd += ["--mcp-config", mcp_config or '{"mcpServers":{}}']
         if tools_off or fence:
@@ -292,7 +336,8 @@ _CHAT_DENY = ("Write", "Edit", "NotebookEdit",
 
 
 #: The built-in tools a chat turn gets. "default" hands back Claude Code's whole set.
-CHAT_TOOLS = "Bash,Read,Grep,Glob,WebFetch,WebSearch"
+#: ToolSearch is how a chat reaches Asta's searchable tools (mcp_server.HOT).
+CHAT_TOOLS = "Bash,Read,Grep,Glob,WebFetch,WebSearch,ToolSearch"
 
 #: What a chat turn may run, when it may not write. Anything else is REFUSED by
 #: the CLI itself (--permission-mode dontAsk), whatever the model decides.
@@ -320,7 +365,11 @@ def chat_allow() -> str:
 
 def chat_tools() -> str:
     raw = os.environ.get("ASTA_CLAUDE_CHAT_TOOLS", CHAT_TOOLS).strip()
-    return "" if raw.lower() in ("", "default", "all") else raw
+    if raw.lower() in ("", "default", "all"):
+        return ""
+    # A list without ToolSearch would leave every searchable Asta tool
+    # unreachable — the 17 Sep failure by another route. It always rides.
+    return raw if "ToolSearch" in raw.split(",") else f"{raw},ToolSearch"
 
 
 def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
@@ -380,7 +429,7 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         "claude",
         "--resume" if not is_new else "--session-id", sid,
         "--append-system-prompt", system,
-        "-p", umsg, NO_SKILLS,
+        "-p", umsg, NO_SKILLS, *([SAME_PREFIX] if lean_flags() else []),
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",                       # required for stream-json
@@ -422,7 +471,7 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         # heavy built-ins are dropped through _CHAT_DENY above, which leaves MCP
         # alone (measured: 22 tools still callable).
         lean = chat_tools()
-        if lean and not copilot_cli.mcp_cli_enabled():
+        if lean and (not copilot_cli.mcp_cli_enabled() or lean_flags()):
             cmd += ["--tools", lean]
     if capabilities.READ_ONLY_TURN.get():
         cmd += ["--disallowed-tools", "Bash"]

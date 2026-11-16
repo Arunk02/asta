@@ -448,8 +448,9 @@ def _recent_asks(conv_id: str, current: str, within: float = 1800.0) -> str:
 def _on_change(conv_id: str, name: str, block: str, fresh: bool, remember: bool) -> str:
     """`block`, unless this session was already sent exactly this.
 
-    His open work and his PR list rode on EVERY turn (~2k characters), unchanged
-    turn after turn; the session already held them. Now they go on a session's
+    His open work, his PR list, the people he just named, their chat and the
+    conversation's open state rode on EVERY turn (~5-6k characters on 16 Nov,
+    live), unchanged turn after turn; the session already held them. Now they go on a session's
     first turn and whenever they change. `remember` is off for a side session
     (a light read), whose copy never reaches the main session's history."""
     if not block or not conv_id:
@@ -485,13 +486,14 @@ def turn_context(user_text: str, conv_id: str = "", *, fresh: bool = True,
     parts: list[str] = []
     with contextlib.suppress(Exception):
         from . import referents, threads
-        people = referents.block()
+        people = _on_change(conv_id, "people", referents.block(), fresh, remember)
         if people:
             parts.append(people)
         # …and what is going on with the first two of them, so "what did she
         # want?" or "send her the fix" continues their conversation.
         for r in referents.recent()[:2]:
-            known = threads.context_for(r["who"])
+            known = _on_change(conv_id, f"thread:{r['who']}", threads.context_for(r["who"]),
+                               fresh, remember)
             if known:
                 parts.append(known)
     # The conversation ITSELF, not a summary of it. 1 Oct: "go ahead as vinish
@@ -502,7 +504,7 @@ def turn_context(user_text: str, conv_id: str = "", *, fresh: bool = True,
     with contextlib.suppress(Exception):
         from . import referents
         who = _named_in(user_text) or next((r["who"] for r in referents.recent()[:1]), "")
-        convo = _teams_with(who) if who else ""
+        convo = _on_change(conv_id, f"convo:{who}", _teams_with(who), fresh, remember) if who else ""
         if convo:
             parts.append(convo)
     with contextlib.suppress(Exception):
@@ -514,7 +516,7 @@ def turn_context(user_text: str, conv_id: str = "", *, fresh: bool = True,
     # Komal's?" — "my PR, why would I chase others' PRs, simple things" — and a
     # follow-up said to be scheduled for 14:32 had never been stored at all.
     with contextlib.suppress(Exception):
-        state = conversation_state(conv_id)
+        state = _on_change(conv_id, "state", conversation_state(conv_id), fresh, remember)
         if state:
             parts.append(state)
         work = _on_change(conv_id, "open_work", open_work(), fresh, remember)

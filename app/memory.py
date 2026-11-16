@@ -510,7 +510,22 @@ RECENCY_HALFLIFE = float(os.environ.get("ASTA_RECALL_HALFLIFE", "45"))
 RECALL_FLOOR = float(os.environ.get("ASTA_RECALL_FLOOR", "0.35"))
 
 
-def recall(query: str, k: int = 4, *, workspace: str = "") -> list[dict]:
+#: What a chat turn is handed UNASKED: his curated memory — facts, gotchas,
+#: preferences — never the digests of past chats. Measured 16 Nov over six real
+#: questions: the per-turn notes were almost all chat digests (136 of 167
+#: memories are), often of one-line test chats, and one said a tool did not exist
+#: because of a bug fixed two months before. Past chats stay one search_memory
+#: call away, which the brain makes when the turn needs history.
+TURN_KINDS = ("fact", "gotcha", "preference")
+
+#: The bar for those unasked notes. The local embedder scores almost any pair of
+#: texts 0.45-0.65, so RECALL_FLOOR (0.35) passed everything; the curated notes
+#: that bore on the six questions scored 0.66-0.69.
+TURN_RECALL_FLOOR = 0.65
+
+
+def recall(query: str, k: int = 4, *, workspace: str = "",
+           kinds: tuple[str, ...] | None = None, floor: float | None = None) -> list[dict]:
     """Top-k memories that are actually about the query — or nothing.
 
     FTS5 alone is keyword-only: "what breaks the grafana proxy" misses a fact
@@ -524,7 +539,11 @@ def recall(query: str, k: int = 4, *, workspace: str = "") -> list[dict]:
     surviving FTS hit is at least on a real topic — take only the few best, and
     lean on the caller framing recall as "ignore if not relevant".
     """
-    hits = store.memory_search(query, max(k * 4, 12), workspace=workspace)
+    # A kind filter casts a wider net first: chat digests outnumber the curated
+    # memory several times over and would fill a narrow one.
+    hits = store.memory_search(query, 60 if kinds else max(k * 4, 12), workspace=workspace)
+    if kinds:
+        hits = [h for h in hits if h.get("mtype") in kinds]
     if workspace:
         # Still checked against the file: the index may predate a frontmatter edit.
         scoped = []
@@ -540,12 +559,14 @@ def recall(query: str, k: int = 4, *, workspace: str = "") -> list[dict]:
         return []
     vecs = local_embed([query] + [f"{h['title']} {h.get('snippet', '')}" for h in hits])
     if not vecs:
-        return hits[:min(k, 3)]
+        # No embedder to judge meaning: an unasked note is not worth the risk.
+        return [] if floor is not None else hits[:min(k, 3)]
     qv, hvs = vecs[0], vecs[1:]
+    bar = RECALL_FLOOR if floor is None else floor
     scored = []
     for h, hv in zip(hits, hvs):
         sim = _cosine(qv, hv)
-        if sim < RECALL_FLOOR:
+        if sim < bar:
             continue                     # unrelated — don't surface it at all
         recency = 0.5 ** (_age_days(h.get("date", "")) / RECENCY_HALFLIFE)
         # Meaning dominates; recency only separates near-ties, and can never lift
@@ -555,8 +576,14 @@ def recall(query: str, k: int = 4, *, workspace: str = "") -> list[dict]:
     return [h for _, h in scored[:k]]
 
 
-def recall_block(query: str, *, workspace: str = "") -> str:
-    hits = recall(query, workspace=workspace) if workspace else recall(query)
+def turn_recall_block(query: str, *, workspace: str = "") -> str:
+    """The curated notes a chat turn gets unasked — or nothing (see TURN_KINDS)."""
+    return recall_block(query, workspace=workspace, kinds=TURN_KINDS, floor=TURN_RECALL_FLOOR, k=3)
+
+
+def recall_block(query: str, *, workspace: str = "", kinds: tuple[str, ...] | None = None,
+                 floor: float | None = None, k: int = 4) -> str:
+    hits = recall(query, k=k, workspace=workspace, kinds=kinds, floor=floor)
     if not hits:
         return ""
     lines = [f"- **{h['title']}** ({h['mtype']}, {h.get('date') or 'undated'}, "

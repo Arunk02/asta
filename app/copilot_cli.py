@@ -563,7 +563,11 @@ def turn_context(user_text: str, conv_id: str = "", *, fresh: bool = True,
         case = booking_case.for_turn(user_text, _recent_asks(conv_id, user_text)).strip()
         if case:
             parts.append(case)
-    if _SEEKING.search(user_text or "") or case:
+    from . import project_knowledge as _pk
+    # The same test calls and voice use (project_knowledge.is_knowledge_question):
+    # a question about how the project works, or one naming a project subject.
+    # "Any question" pulled billing docs into "what reminders do I have?" (16 Nov).
+    if _pk.is_knowledge_question(user_text or "") or case:
         with contextlib.suppress(Exception):
             # The same lookup every channel uses: his documents AND the repo
             # summaries, misheard words corrected, ~500 tokens. Docs-only at 60%
@@ -724,7 +728,8 @@ def on_demand_context(conv: dict, *, fresh: bool = False) -> str:
         "(Bash, Read, Grep, WebFetch…). Load the one you need with ToolSearch — by what it "
         "does, or `select:<name>` when you know it — then call it. Never say a capability "
         "is missing before searching, and never curl Asta's HTTP API or shell out for "
-        "something a tool does.")
+        "something a tool does. Past conversations, decisions and what he told you before: "
+        "search_memory.")
     from . import capabilities
     if capabilities.READ_ONLY_TURN.get():
         parts.append(
@@ -932,7 +937,7 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     else:
         # The orientation block only rides on turn 1; recall keeps long-lived
         # sessions anchored to memory on every later turn (Copilot is flat-rate).
-        rb = memory.recall_block(user_text, workspace=conv['workspace']) if conv.get('workspace') else memory.recall_block(user_text)
+        rb = memory.turn_recall_block(user_text, workspace=conv.get('workspace') or '')
         if rb:
             prompt = f"[{rb}]\n\n{user_text}"
     cmd = [

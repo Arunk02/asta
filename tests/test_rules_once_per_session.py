@@ -141,3 +141,36 @@ def test_a_call_that_attaches_servers_keeps_them(monkeypatch):
     cfg = '{"mcpServers":{"serena":{"command":"serena"}}}'
     cmd = _one_shot_cmd(monkeypatch, on=False, mcp_config=cfg)
     assert cmd[cmd.index("--mcp-config") + 1] == cfg
+
+
+# --- a fresh building leg on Asta's own prompt ---------------------------------------
+
+def _leg_cmd(monkeypatch, plan_only, resume):
+    from app import claude_cli
+    seen = {}
+
+    async def _exec(*cmd, **_k):
+        seen["cmd"] = list(cmd)
+        raise RuntimeError("captured")
+
+    monkeypatch.setenv("ASTA_ON_DEMAND", "1")
+    monkeypatch.setattr(claude_cli, "_version", (2, 1, 311))
+    monkeypatch.setattr(claude_cli, "available", lambda: True)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+    with pytest.raises(RuntimeError, match="captured"):
+        asyncio.run(claude_cli._one_shot("build it", "/tmp", 60, "", "", "sid", resume, None,
+                                         '{"mcpServers":{}}', plan_only, "", False,
+                                         builtins=claude_cli.CODE_TOOLS))
+    return seen["cmd"]
+
+
+def test_a_fresh_building_leg_runs_on_asta_s_coder_prompt(monkeypatch):
+    from app import claude_cli
+    cmd = _leg_cmd(monkeypatch, plan_only=False, resume=False)
+    assert cmd[cmd.index("--system-prompt") + 1] == claude_cli.CODER_PROMPT
+    assert "--setting-sources" not in cmd, "the repo's CLAUDE.md still loads"
+
+
+def test_planning_and_resumed_legs_keep_claude_code_s_prompt(monkeypatch):
+    assert "--system-prompt" not in _leg_cmd(monkeypatch, plan_only=True, resume=False)
+    assert "--system-prompt" not in _leg_cmd(monkeypatch, plan_only=False, resume=True)

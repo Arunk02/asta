@@ -27,7 +27,17 @@ def asked(text: str) -> bool:
         return False
     if re.search(r"(?:don'?t|do not|never)\s+(?:try to\s+)?(?:replicate|reproduce|recreate)\b", text, re.I):
         return False
-    return bool(re.search(r"\b(?:replicate|reproduce|recreate)\b[^.!?\n]{0,100}\b(?:first|scenario|issue|bug|failure)\b", text, re.I))
+    # 16 Nov: "replicate it and fix" was missed — the old rule wanted "issue",
+    # "bug" or "first" after the verb. What is being replicated has to be a
+    # problem ("it", "the bug", "the NPE", "the scenario") or the fix has to
+    # follow; "replicate the configuration" is copying, not reproducing.
+    if re.search(r"\bfailing\s+(?:unit\s+)?test\s+first\b", text, re.I):
+        return True
+    return bool(re.search(
+        r"\b(?:replicate|reproduce|recreate|repro)\b(?:\s+(?:it|this|that|them)\b|"
+        r"[^.!?\n]{0,100}\b(?:first|scenarios?|issues?|bugs?|failures?|problems?|errors?|"
+        r"exceptions?|npe|crash\w*|fails?|failing|behaviou?r|cases?)\b|"
+        r"[^.!?\n]{0,60}\b(?:and|then|,)\s*(?:then\s+)?(?:do\s+the\s+)?fix)", text, re.I))
 
 
 def request(task_id: int, words: str) -> None:
@@ -45,15 +55,6 @@ def state(task_id: int) -> dict:
 
 def pending(task_id: int) -> bool:
     return state(task_id).get('state') == 'pending'
-
-
-def fix_authorized(task_id: int) -> bool:
-    """Only the user's conditional fix instruction, after an observed failing test."""
-    saved = state(task_id)
-    words = saved.get('words', '').replace('’', "'")
-    if saved.get('state') != 'confirmed' or re.search(r"\b(?:don'?t|do not|never|before|hold)\b[^.!?\n]{0,50}\bfix", words, re.I):
-        return False
-    return bool(re.search(r"\b(?:if|once)\b[^.!?\n]{0,90}\b(?:reproduc\w*|replicat\w*|confirm\w*)\b[^.!?\n]{0,70}\bfix\b", words, re.I))
 
 
 def active(task_id: int) -> bool:

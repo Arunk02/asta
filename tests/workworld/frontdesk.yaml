@@ -108,13 +108,15 @@ scenarios:
       - brain_flags: {kind: task, leg: 1, model: sonnet, effort: medium, plan_only: false}
 
   - id: a-one-file-plan-is-shown-and-goes-ahead
-    title: A one-file plan reaches his phone and starts — he is not asked to approve it
+    title: A one-file plan he said go on reaches his phone and starts — no second ask
     why: >
       30 Sep, #178: one line in a Helm values file took five messages and three
-      approvals. "For a big coding task, plan and get approval is fine, but
-      getting too much approval is drag." The plan is still his to read, and to stop.
+      approvals. 16 Nov he set the rule: every code change waits for his approval
+      unless his own words for it said to go all the way ("just do it", "…and
+      raise the PR"). Here they did; the plan is still his to read, and to stop.
     setup:
-      approval_from_tier: 2
+      kv:
+        "task_go:1": '{"ship": false, "words": "fix the typo in the README heading, just do it", "merge": false}'
     brains:
       task:
         - text: |
@@ -126,11 +128,32 @@ scenarios:
             PLAN READY
         - {text: "Fixed the heading. Tests: n/a."}
     steps:
-      - spawn: {title: "fix the typo in the README heading", prompt: "fix the typo in the README heading", kind: code, workspace: booking, as: job}
+      - spawn: {title: "fix the typo in the README heading", prompt: "fix the typo in the README heading, just do it", kind: code, workspace: booking, as: job}
     checks:
       - task_status: {task: job, is: done}
       - brain_flags: {kind: task, leg: 0, plan_only: true}
       - brain_flags: {kind: task, leg: 1, plan_only: false}
+
+  - id: a-one-file-plan-waits-for-his-yes
+    title: A one-file fix waits for his approval when he did not say go
+    why: >
+      16 Nov, his rule: "make plan approval mandatory for all kind of coding
+      tasks / bug fixes — before coding, what if it incorrectly identifies and
+      does the changes." Size no longer decides.
+    brains:
+      task:
+        - text: |
+            STRUCTURE
+              README.md          heading typo fixed
+
+            RISK: none
+
+            PLAN READY
+    steps:
+      - spawn: {title: "fix the typo in the README heading", prompt: "fix the typo in the README heading", kind: code, workspace: booking, as: job}
+    checks:
+      - task_status: {task: job, is: awaiting_approval}
+      - brain_flags: {kind: task, leg: 0, plan_only: true}
 
   - id: a-two-repo-plan-still-waits-for-him
     title: A plan that reports two repos waits for his approval, however short it reads

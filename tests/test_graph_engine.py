@@ -438,8 +438,11 @@ def test_rejecting_at_the_gate_ends_it_quietly(world, monkeypatch):
     assert sum("plan_only" in c for c in brain.calls) == 1
 
 
-def test_feedback_on_finished_work_goes_straight_back_to_building(world, monkeypatch):
-    brain = _use(monkeypatch, Brain("Plan\n\nPLAN READY", "Implemented.", "Covered amend too."))
+def test_feedback_on_finished_work_plans_first_then_builds_on_his_yes(world, monkeypatch):
+    """16 Nov, his rule: every code change waits for his approval — a follow-up too."""
+    brain = _use(monkeypatch, Brain("Plan\n\nPLAN READY", "Implemented.",
+                                    "Change: cover amend in the mapper.\n\nPLAN READY",
+                                    "Covered amend too."))
 
     async def go():
         t = _spawn()
@@ -449,13 +452,39 @@ def test_feedback_on_finished_work_goes_straight_back_to_building(world, monkeyp
         assert _status(t["id"]) == "done"
         await tasks.refine(t["id"], "also cover the amend path")
         await _settle(t["id"])
+        for _ in range(50):
+            if _status(t["id"]) == "awaiting_approval":
+                break
+            await asyncio.sleep(0.02)
+        assert _status(t["id"]) == "awaiting_approval", "the follow-up waits for him"
+        assert brain.calls[2]["plan_only"] is True, "and planning it changed nothing"
+        tasks.reply(t["id"], "approve")
+        for _ in range(100):
+            if _status(t["id"]) == "done" and len(brain.calls) >= 4:
+                break
+            await asyncio.sleep(0.02)
+        await _settle(t["id"])
         return t["id"]
 
     tid = asyncio.run(go())
     assert _status(tid) == "done"
-    assert len(brain.calls) == 3                              # no second plan leg
-    assert "also cover the amend path" in brain.calls[2]["prompt"]
-    assert brain.calls[2]["plan_only"] is False
+    assert brain.calls[-1]["plan_only"] is False
+
+
+def test_a_follow_up_he_says_to_ship_goes_straight_to_building(world, monkeypatch):
+    brain = _use(monkeypatch, Brain("Plan\n\nPLAN READY", "Implemented.", "Covered amend too."))
+
+    async def go():
+        t = _spawn()
+        await _settle(t["id"])
+        tasks.reply(t["id"], "PLAN APPROVED")
+        await _settle(t["id"])
+        await tasks.refine(t["id"], "also cover the amend path, just do it")
+        await _settle(t["id"])
+        return t["id"]
+
+    tid = asyncio.run(go())
+    assert len(brain.calls) == 3 and brain.calls[2]["plan_only"] is False
 
 
 def test_a_task_finishes_on_the_engine_it_started_on(world, monkeypatch):

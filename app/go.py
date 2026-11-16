@@ -81,11 +81,58 @@ def enabled() -> bool:
     return True
 
 
+#: The sentence asks something, or says he will do it himself — not a go.
+_ASKING = re.compile(r"^\s*(?:should|shall|can|could|do|did|will|would|may|must|is|are|why|when|how)\b", re.I)
+_HIMSELF = re.compile(r"\b(?:i'?ll|i\s+will|i'?m\s+going\s+to|i\s+can|let\s+me)\b[^.\n!?]{0,20}$|\bmyself\b",
+                      re.I)
+
+
+def _sentence_at(text: str, pos: int) -> tuple[str, str]:
+    """(the sentence up to pos, the whole sentence) around a match."""
+    start = max(text.rfind(c, 0, pos) for c in ".!?\n") + 1
+    ends = [i for i in (text.find(c, pos) for c in ".!?\n") if i >= 0]
+    end = min(ends) + 1 if ends else len(text)
+    return text[start:pos], text[start:end]
+
+
 def wants_pr(text: str) -> bool:
-    """Did he ask for the push / PR — and not ask for it to be held?"""
-    for m in _PR.finditer(text or ""):
-        if not _NOT.search((text or "")[:m.start()]):
-            return True
+    """Did he ask for the push / PR — and not ask for it to be held?
+
+    16 Nov: "should I raise the PR?" and "fix it, I'll raise the PR myself" read
+    as a request to raise it — and a request to raise it is a go-ahead to build."""
+    text = text or ""
+    for m in _PR.finditer(text):
+        before, sentence = _sentence_at(text, m.start())
+        if _NOT.search(text[:m.start()]):
+            continue
+        if sentence.rstrip().endswith("?") or _ASKING.match(sentence):
+            continue
+        if _HIMSELF.search(before) or re.search(r"\bmyself\b", sentence, re.I):
+            continue
+        return True
+    return False
+
+
+#: His own words that skip the plan gate without a PR: "just do it", "no need to
+#: show me the plan", "go ahead and fix it", "don't wait for my approval".
+_GO_AHEAD = re.compile(
+    r"\bjust\s+do\s+it\b"
+    r"|\bno\s+need\s+(?:to\s+)?(?:show|ask|wait|check\s+with|approv\w*|for\s+(?:my\s+)?(?:approval|plan))\b"
+    r"|\b(?:don'?t|do\s+not)\s+wait\s+for\s+(?:my\s+)?(?:approval|yes|go|ok)\b"
+    r"|\bwithout\s+(?:waiting\s+for\s+)?(?:my\s+)?approval\b"
+    r"|\bno\s+approval\s+(?:needed|required)\b"
+    r"|\bskip\s+(?:the\s+)?(?:plan\s+)?approval\b"
+    r"|\bgo\s+ahead\s+and\s+(?:fix|implement|do|change|make|add|update|build)\b", re.I)
+
+
+def go_ahead(text: str) -> bool:
+    """His words say to build without showing him the plan first."""
+    text = text or ""
+    for m in _GO_AHEAD.finditer(text):
+        _, sentence = _sentence_at(text, m.start())
+        if sentence.rstrip().endswith("?") or _ASKING.match(sentence):
+            continue
+        return True
     return False
 
 
@@ -328,61 +375,99 @@ def reviewed_by_him(task_id: int) -> bool:
 
 
 def no_ask(task_id: int, plan: str) -> str:
-    """Why this plan goes ahead without waiting for him — "" when it must wait.
+    """Why this plan goes ahead without waiting for him — "" when it waits.
 
-    His rule (30 Sep): "for a big coding task, plan and get approval is fine,
-    but getting too much approval is drag." So a plan waits for him only when
-    the change is big, and never when he has already said go on this task."""
-    if not enabled():
+    His rule, 16 Nov: every code change waits for his approval — a one-line fix
+    included, because a plan built on a misread is cheaper to correct than a
+    diff — UNLESS his own words for this task said to go all the way ("…and
+    raise the PR", "just do it", "no need to show me the plan"). Size never
+    decides any more (it did from 30 Sep). Even with his go, the plan stops for
+    him when it asks something, is big or risky, or is about something other
+    than what he named (stop_reason says which)."""
+    store.kv_del(_stop_key(task_id))
+    if not granted(task_id):
         return ""
-    # Before "as you said": a go-ahead for the task is not a go-ahead to skip the
-    # approval he asked someone else for, nor to skip the plan's own questions.
-    if waits_for_someone(task_id):
+    reason = _stop(task_id, plan)
+    if reason:
+        store.kv_set(_stop_key(task_id), reason)
+        store.add_task_event(task_id, "go", f"waits despite his go-ahead: {reason}")
         return ""
-    from . import reproduction
-    authorized_fix = reproduction.fix_authorized(task_id)
-    questions = plan or ""
-    if authorized_fix:
-        # A model repeating the approval ceremony cannot revoke a recorded
-        # conditional fix grant. Actual questions and outside approval still gate.
-        questions = re.sub(r"\bawaiting\s+(?:your|arun'?s|his)\s+approval\b", "", questions, flags=re.I)
-        # Lettered reproduced findings are a summary, not alternatives. Keep
-        # the conservative option gate everywhere else, including explicit
-        # decision language in a reproduced-finding paragraph.
-        paragraphs = []
-        for paragraph in questions.split("\n"):
-            if (re.match(r"\s*Reproduced\b", paragraph, re.I)
-                    and not re.search(r"\b(?:choose|choice|option|decide|decision|recommend|whether|or)\b|\?", paragraph, re.I)):
-                paragraph = re.sub(r"\([a-z]\)", "", paragraph, flags=re.I)
-            paragraphs.append(paragraph)
-        questions = "\n".join(paragraphs)
-    if _PLAN_ASKS.search(questions):
-        return ""
-    if authorized_fix:
-        return "you authorized a fix if reproduced, and the reproduction test failed"
+    return "as you said"
+
+
+def _stop_key(task_id: int) -> str:
+    return f"task_go_stopped:{task_id}"
+
+
+def stop_reason(task_id: int) -> str:
+    """Why a plan he said go on still waits for him, or ""."""
+    return store.kv_get(_stop_key(task_id)) or ""
+
+
+def _stop(task_id: int, plan: str) -> str:
+    who = waits_for_someone(task_id)
+    if who:
+        return "you asked for someone else's approval first"
     if reviewed_by_him(task_id):
-        return ""
-    if granted(task_id):
-        return "as you said"
+        return "you are reviewing this plan"
+    # A model repeating the approval ceremony is not a question.
+    asks = re.sub(r"\bawaiting\s+(?:your|arun'?s|his)\s+approval\b", "", plan or "", flags=re.I)
+    if _PLAN_ASKS.search(asks):
+        return "the plan asks you something"
+    from . import reproduction
+    st = reproduction.state(task_id).get("state")
+    if st and st != "confirmed":
+        return "the bug was not reproduced"
     from . import routing
+    from .graph import outcome as _outcome
+    reported = _outcome.reported(task_id, 0)
     try:
-        # What the brain REPORTED counts too: a plan that lists two classes and
-        # reports two repos is a two-repo change, and that one waits.
-        from .graph import outcome as _outcome
-        tier, why = routing.plan_tier(plan, _outcome.reported(task_id, 0))
+        tier, why = routing.plan_tier(plan, reported)
     except Exception:                                       # noqa: BLE001
-        return ""                       # cannot size it: it waits, as before
-    if tier < ask_from_tier():
-        return f"small change — {why}"
+        return "the plan's size could not be read"
+    if tier >= routing.T3:
+        return f"a big or risky change — {why}"
+    off = _off_scope(task_id, plan, reported or {})
+    if off:
+        return off
+    return ""
+
+
+def _off_scope(task_id: int, plan: str, reported: dict) -> str:
+    """The plan is about another ticket or repo than the one he named."""
+    from . import routing
+    t = store.get_task(task_id) or {}
+    his = f"{t.get('title') or ''}\n{t.get('prompt') or ''}\n{words(task_id)}"
+    his_tickets = {k.upper() for k in routing._TICKET.findall(his)}
+    plan_tickets = {k.upper() for k in routing._TICKET.findall(plan or "")}
+    if his_tickets and plan_tickets and not (his_tickets & plan_tickets):
+        return f"the plan is about {', '.join(sorted(plan_tickets))}, not {', '.join(sorted(his_tickets))}"
+    repos = [r for r in reported.get("repos") or [] if r]
+    if repos:
+        try:
+            from .workspace import registry
+            ws = registry.get(t.get("workspace") or "")
+            known = list(getattr(ws, "repos", None) or [])
+        except Exception:                                   # noqa: BLE001
+            known = []
+        named = {r for r in known if re.search(rf"\b{re.escape(r)}\b", his, re.I)}
+        if named and not (named & set(repos)):
+            return f"the plan changes {', '.join(repos)}, not {', '.join(sorted(named))}"
     return ""
 
 
 def on_spawn(task_id: int, said: str) -> bool:
-    """His own ask said "…and raise the PR": the go-ahead rides with the task."""
-    if not enabled() or not (wants_pr(said) or wants_merge(said)):
+    """His own ask said to go all the way: the go-ahead rides with the task.
+    "…and raise the PR" also ships it; "just do it" builds and stays local."""
+    if not enabled():
         return False
-    grant(task_id, said, ship=True)
-    return True
+    if wants_pr(said) or wants_merge(said):
+        grant(task_id, said, ship=True)
+        return True
+    if go_ahead(said):
+        grant(task_id, said, ship=False)
+        return True
+    return False
 
 
 def _candidates(now: float) -> list[dict]:

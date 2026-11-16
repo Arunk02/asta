@@ -34,20 +34,25 @@ def test_lettered_options_are_a_question_for_him(monkeypatch):
     assert go.no_ask(_task()["id"], plan) == ""
 
 
-def test_a_small_plan_he_never_answered_still_goes_ahead(monkeypatch):
-    monkeypatch.setattr(go, "APPROVAL_FROM_TIER", 2)
-    assert go.no_ask(_task()["id"], SMALL).startswith("small change")
+def test_a_small_plan_waits_unless_his_words_said_go(monkeypatch):
+    """16 Nov: size never decides — his words do."""
+    t = _task()
+    assert go.no_ask(t["id"], SMALL) == ""
+    go.on_spawn(t["id"], "rename it and raise the PR")
+    assert go.no_ask(t["id"], SMALL) == "as you said"
 
 
-def test_lettered_findings_do_not_revoke_conditional_fix_authority():
+def test_his_go_after_a_reproduction_still_stops_on_options_and_outside_approval():
     import json
     from app import reproduction
     t = _task()
-    reproduction.request(t['id'], 'Reproduce first; if confirmed fix it')
+    reproduction.request(t['id'], 'Reproduce first; if confirmed go ahead and fix it')
+    go.on_spawn(t['id'], 'Reproduce first; if confirmed go ahead and fix it')
     saved = reproduction.state(t['id'])
     store.kv_set(f"reproduction:{t['id']}", json.dumps({**saved, 'state': 'confirmed'}))
     plan = 'Reproduced: (A) line 355 accepts skipped checks; (B) promotion changes content. Awaiting your approval.'
-    assert 'authorized a fix' in go.no_ask(t['id'], plan)
+    assert go.no_ask(t['id'], plan) == '', "lettered findings read as options: it waits"
+    assert go.no_ask(t['id'], 'Reproduced: line 355 accepts skipped checks. Awaiting your approval.') == 'as you said'
     assert go.no_ask(t['id'], 'Open questions: choose (A) return false, (B) fail the workflow.') == ''
     assert go.no_ask(t['id'], '(a) return false, (b) fail the workflow.') == ''
     assert go.no_ask(t['id'], 'Reproduced; choose (A) return false, (B) fail.') == ''
@@ -55,7 +60,7 @@ def test_lettered_findings_do_not_revoke_conditional_fix_authority():
     assert go.no_ask(t['id'], plan) == ''
 
 
-def test_conditional_authority_is_explicit_in_the_plan_prompt():
+def test_a_reproduced_bug_is_planned_on_its_failing_test():
     import json
     from app import reproduction, tasks
     t = _task()
@@ -63,4 +68,4 @@ def test_conditional_authority_is_explicit_in_the_plan_prompt():
     saved = reproduction.state(t['id'])
     store.kv_set(f"reproduction:{t['id']}", json.dumps({**saved, 'state': 'confirmed'}))
     prompt = tasks.first_code_prompt(t['id'], t)
-    assert 'do not request another approval for this same fix' in prompt
+    assert 'Plan the fix on that evidence' in prompt and 'name the failing test' in prompt

@@ -111,10 +111,13 @@ async def test_explicit_edit_resumes_existing_task_not_a_new_one(monkeypatch):
         return None
 
     monkeypatch.setattr(tasks, "_resume_worker", resumed)
+
+    async def propose(task_id, feedback):
+        return f"Task #{task_id}: planning the change — you'll approve it before anything changes."
+    monkeypatch.setattr(tasks, "propose_change", propose)
     sink = Sink()
     await main._dispatch(conv, f"Task {tid} also handle the amend path", sink, "whatsapp")
-    assert "continuing the open PR" in sink.text
-    assert store.get_task(tid)["status"] == "running"
+    assert "approve it before anything changes" in sink.text
 
 
 @pytest.mark.asyncio
@@ -544,7 +547,7 @@ async def test_feedback_on_shipped_work_resumes_it(monkeypatch):
         return None
     monkeypatch.setattr(tasks, "_resume_worker", resumed)
     sink = Sink()
-    await main._dispatch(conv, f"task {tid} - {DOMAIN_FEEDBACK}", sink, "whatsapp")
+    await main._dispatch(conv, f"task {tid} - {DOMAIN_FEEDBACK}, just do it", sink, "whatsapp")
     assert "continuing the open PR" in sink.text
     assert store.get_task(tid)["status"] == "running"
 

@@ -163,7 +163,7 @@ def test_a_merged_task_takes_a_follow_up_on_a_fresh_branch(monkeypatch, tmp_path
     t = _merged()
 
     async def go():
-        out = await tasks.refine(t["id"], "also skip it for grey pool orders")
+        out = await tasks.refine(t["id"], "also skip it for grey pool orders, just do it")
         await asyncio.sleep(0)
         return out
     said = asyncio.run(go())

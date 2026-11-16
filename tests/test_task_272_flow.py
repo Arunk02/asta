@@ -109,10 +109,9 @@ def test_a_plan_with_its_own_open_question_waits(monkeypatch):
     assert go.no_ask(t["id"], PLAN) == ""
 
 
-def test_a_small_plain_plan_still_goes_ahead(monkeypatch):
-    monkeypatch.setattr(go, "APPROVAL_FROM_TIER", 2)          # the live setting
+def test_a_small_plain_plan_waits_for_him(monkeypatch):
     t = _task("rename the logger field")
-    assert go.no_ask(t["id"], "STRUCTURE\n  A.java  rename the field").startswith("small change")
+    assert go.no_ask(t["id"], "STRUCTURE\n  A.java  rename the field") == ""
 
 
 def test_approving_a_plan_closes_its_gate():

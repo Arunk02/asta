@@ -173,7 +173,7 @@ def _describe(cap) -> str:
 
 def config_entry(tools: list[str] | None = None, conv_id: str = "",
                  task_id: str = "", read_only: bool = False,
-                 message_id: int | None = None) -> dict:
+                 message_id: int | None = None, defer_all: bool = False) -> dict:
     """The mcpServers entry a CLI needs to spawn this server.
 
     The env is carried explicitly rather than left to inheritance: the spawned
@@ -218,6 +218,9 @@ def config_entry(tools: list[str] | None = None, conv_id: str = "",
         env["ASTA_MCP_TASK"] = str(task_id)
     if read_only:
         env["ASTA_MCP_READ_ONLY"] = "1"
+    if defer_all:
+        # The on-demand chat: no Asta tool pinned, every one found by search.
+        env["ASTA_TOOL_SEARCH"] = "1"
     if message_id is not None:
         env["ASTA_MCP_MESSAGE_ID"] = str(message_id)
     return {

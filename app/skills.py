@@ -83,8 +83,15 @@ def index_block() -> str:
     )
 
 
+#: Playbooks that live in Asta's code rather than in skills/: the on-demand
+#: chat keeps them out of its prompt and loads them like any other.
+def _builtin() -> dict[str, str]:
+    from . import copilot_cli
+    return {"code-work": copilot_cli.CODE_WORK_PLAYBOOK}
+
+
 def load(name: str) -> str | None:
     for s in discover():
         if s["name"] == name:
             return s["body"]
-    return None
+    return _builtin().get(name)

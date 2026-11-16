@@ -1083,7 +1083,7 @@ def load_skill(name: str) -> str:
         # reads these counters.
         learn.record_use(name)
     if body is None:
-        available = ", ".join(s["name"] for s in skills.discover()) or "(none)"
+        available = ", ".join(["code-work"] + [s["name"] for s in skills.discover()])
         return f"No skill '{name}'. Available: {available}"
     return body
 

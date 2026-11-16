@@ -61,6 +61,21 @@ def active(task_id: int) -> bool:
     return ACTIVE.get() == task_id and pending(task_id)
 
 
+#: What running a test leaves behind in a repo that does not ignore it. 16 Nov,
+#: live: a reproduction that wrote its failing test correctly was blocked as
+#: "production files changed" — by Python's own __pycache__/*.pyc from the run.
+#: Only ever UNTRACKED files: a tracked file is compared whatever its name.
+_BUILD_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+               "target", "node_modules", ".gradle", ".next", "coverage", "htmlcov",
+               "surefire-reports", "failsafe-reports", "test-results", ".eggs"}
+_BUILD_SUFFIXES = (".pyc", ".pyo", ".class", ".o", ".log", ".coverage")
+
+
+def _build_output(f: Path) -> bool:
+    return bool(_BUILD_DIRS & set(f.parts)) or f.name.endswith(_BUILD_SUFFIXES) \
+        or f.name == ".coverage" or f.suffix == ".egg-info" or any(p.endswith(".egg-info") for p in f.parts)
+
+
 def production_snapshot(cwd: str) -> dict[str, str]:
     """Hash tracked production files in every task repo; test/build output excluded.
 
@@ -73,12 +88,16 @@ def production_snapshot(cwd: str) -> dict[str, str]:
         raise ValueError('No task checkout found for reproduction')
     found = {}
     for repo in repos:
+        tracked = set(subprocess.run(['git', 'ls-files', '-z', '--cached'], cwd=repo, check=True,
+                                     capture_output=True).stdout.decode().split('\0'))
         out = subprocess.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
                              cwd=repo, check=True, capture_output=True).stdout
         for name in out.decode().split('\0'):
             if not name:
                 continue
             f = Path(name)
+            if name not in tracked and _build_output(f):
+                continue                     # made by running the tests, not a fix
             if ('test' in f.parts or 'tests' in f.parts or '__tests__' in f.parts
                     or f.name.startswith('test_') or f.name.endswith(('_test.py', '.test.js', '.test.ts', '.spec.ts'))):
                 continue

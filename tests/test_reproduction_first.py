@@ -292,3 +292,26 @@ def test_repo_relative_report_resolves_only_when_unambiguous(tmp_path):
         reproduction.evidence(text, str(tmp_path), since)
     explicit = text.replace('target/report.xml', 'one/target/report.xml')
     assert reproduction.evidence(explicit, str(tmp_path), since)['tests'] == 1
+
+
+def test_running_the_tests_is_not_a_production_change(tmp_path):
+    """16 Nov, live: __pycache__ from the reproduction run blocked a real repro."""
+    import subprocess
+    repo = tmp_path / "calc"
+    repo.mkdir()
+    (repo / "calc.py").write_text("def divide(a, b):\n    return a // b\n")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed"], cwd=repo, check=True)
+    before = reproduction.production_snapshot(str(repo))
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "calc.cpython-313.pyc").write_bytes(b"\x00compiled")
+    (repo / "target" / "classes").mkdir(parents=True)
+    (repo / "target" / "classes" / "Calc.class").write_bytes(b"\xca\xfe")
+    (repo / ".coverage").write_text("x")
+    assert reproduction.production_snapshot(str(repo)) == before
+    (repo / "calc.py").write_text("def divide(a, b):\n    return a / b\n")
+    assert reproduction.production_snapshot(str(repo)) != before, "a real edit is still caught"
+    (repo / "calc.py").write_text("def divide(a, b):\n    return a // b\n")
+    (repo / "helper.py").write_text("x = 1\n")
+    assert reproduction.production_snapshot(str(repo)) != before, "a new source file is still caught"

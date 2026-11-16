@@ -101,3 +101,43 @@ def test_a_side_read_never_marks_a_block_as_sent(monkeypatch):
     cid = store.create_conversation(model="claude_cli", workspace=None)["id"]
     assert "OPEN-WORK-BLOCK" in copilot_cli.turn_context("hi", cid, fresh=True, remember=False)
     assert "OPEN-WORK-BLOCK" in copilot_cli.turn_context("hi", cid, fresh=False, remember=True)
+
+
+# --- background calls ------------------------------------------------------------
+
+def _one_shot_cmd(monkeypatch, on, **kw):
+    from app import claude_cli
+    seen = {}
+
+    async def _exec(*cmd, **_k):
+        seen["cmd"] = list(cmd)
+        raise RuntimeError("captured")
+
+    if on:
+        monkeypatch.setenv("ASTA_ON_DEMAND", "1")
+    monkeypatch.setattr(claude_cli, "_version", (2, 1, 311))
+    monkeypatch.setattr(claude_cli, "available", lambda: True)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+    with pytest.raises(RuntimeError, match="captured"):
+        asyncio.run(claude_cli._one_shot("review this", "/tmp", 60, "", "", "sid", False, None,
+                                         kw.get("mcp_config", ""), False, "", False))
+    return seen["cmd"]
+
+
+def test_a_background_call_never_gets_his_personal_servers(monkeypatch):
+    cmd = _one_shot_cmd(monkeypatch, on=False)
+    assert "--strict-mcp-config" in cmd
+    assert cmd[cmd.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+
+
+def test_a_background_call_loads_tools_on_demand(monkeypatch):
+    from app import claude_cli
+    cmd = _one_shot_cmd(monkeypatch, on=True)
+    assert cmd[cmd.index("--plugin-dir") + 1] == str(claude_cli.ON_DEMAND_CHAT_PLUGIN)
+    assert "--tools" not in cmd
+
+
+def test_a_call_that_attaches_servers_keeps_them(monkeypatch):
+    cfg = '{"mcpServers":{"serena":{"command":"serena"}}}'
+    cmd = _one_shot_cmd(monkeypatch, on=False, mcp_config=cfg)
+    assert cmd[cmd.index("--mcp-config") + 1] == cfg

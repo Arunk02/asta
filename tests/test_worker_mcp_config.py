@@ -30,9 +30,8 @@ def test_worker_mcp_is_explicit_and_strict(monkeypatch, mode, configured):
         assert asyncio.run(_REAL_ONE_SHOT('prompt', mcp_config=config)) == 'done'
     finally:
         task_fence.MODE.reset(token)
-    assert ('--strict-mcp-config' in seen) is bool(mode)
-    if configured or mode:
-        actual = json.loads(seen[seen.index('--mcp-config') + 1])
-        assert actual == (json.loads(config) if config else {'mcpServers': {}})
-    else:
-        assert '--mcp-config' not in seen
+    # Strict whenever the leg is fenced — and whenever nothing is attached at all:
+    # a call with no servers of its own no longer inherits his personal ones (16 Nov).
+    assert ('--strict-mcp-config' in seen) is (bool(mode) or not configured)
+    actual = json.loads(seen[seen.index('--mcp-config') + 1])
+    assert actual == (json.loads(config) if config else {'mcpServers': {}})

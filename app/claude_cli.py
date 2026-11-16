@@ -209,6 +209,11 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
         cmd += ["--plugin-dir", str(ON_DEMAND_CODE_PLUGIN)]
     elif builtins and lean_flags():
         cmd += ["--tools", builtins]
+    elif on_demand():
+        # A background call (a review, a memory verdict, a context refresh)
+        # names no tools: every built-in waits behind ToolSearch, as in chat.
+        # It started at ~32k with all of them loaded (16 Nov).
+        cmd += ["--plugin-dir", str(ON_DEMAND_CHAT_PLUGIN)]
     if lean_flags():
         cmd.append(SAME_PREFIX)
     if mcp_config or tools_off or fence:
@@ -218,6 +223,12 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
             # Ambient user/project servers add unrelated tools, context and
             # credentials; disabling Asta MCP must not silently restore them.
             cmd += ["--strict-mcp-config"]
+    else:
+        # A call that attaches nothing gets nothing: his own Claude Code servers
+        # (Atlassian, Temporal, Grafana, Context7, Claude Docs) connected to
+        # every review and memory call, and none of them reads those. Asta
+        # reaches Jira, Grafana and Temporal through its own API tools.
+        cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
     if session_id:
         cmd += (["--resume", session_id] if resume else ["--session-id", session_id])
     if agent_file:

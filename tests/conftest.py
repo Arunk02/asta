@@ -34,6 +34,15 @@ from app import store  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _claude_cli_version_is_not_this_machines(monkeypatch):
+    """Which flags a Claude command carries depends on the installed CLI
+    (claude_cli.lean_flags). A test runs as on a machine without it — the old,
+    safe command — unless it says which version it means."""
+    from app import claude_cli
+    monkeypatch.setattr(claude_cli, "_version", ())
+
+
+@pytest.fixture(autouse=True)
 def _no_repos_outside_the_workspace(monkeypatch):
     """This machine's ~/Projects is not a fixture: a test names the repos it has."""
     from app import worktrees

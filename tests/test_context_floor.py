@@ -123,3 +123,59 @@ def test_claude_codes_own_skill_catalogue_stays_out(conv):
 def test_a_sitting_ends_when_the_cache_would_have_gone_cold(monkeypatch):
     monkeypatch.delenv("ASTA_EPISODE_GAP_MINUTES", raising=False)
     assert episodes.gap_seconds() == 3600
+
+
+# --- task legs: only the tools a build uses (16 Nov) ----------------------------
+
+def _leg_cmd(monkeypatch, version, **kw):
+    seen = {}
+
+    async def _exec(*cmd, **_k):
+        seen["cmd"] = list(cmd)
+        raise RuntimeError("captured")
+
+    monkeypatch.setattr(claude_cli, "_version", version)
+    monkeypatch.setattr(claude_cli, "available", lambda: True)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+    with pytest.raises(RuntimeError, match="captured"):
+        asyncio.run(claude_cli._one_shot("build it", "/tmp", 60, "", "", "sid", False, None,
+                                         '{"mcpServers":{}}', False, "", False, **kw))
+    return seen["cmd"]
+
+
+def test_a_code_leg_carries_only_the_build_tools(monkeypatch):
+    cmd = _leg_cmd(monkeypatch, (2, 1, 311), builtins=claude_cli.CODE_TOOLS)
+    tools = cmd[cmd.index("--tools") + 1].split(",")
+    assert {"Bash", "Read", "Edit", "Write", "ToolSearch"} <= set(tools)
+    assert "WebFetch" not in tools and "NotebookEdit" not in tools
+    assert claude_cli.SAME_PREFIX in cmd
+
+
+def test_an_old_cli_gets_the_old_command(monkeypatch):
+    cmd = _leg_cmd(monkeypatch, (2, 1, 212), builtins=claude_cli.CODE_TOOLS)
+    assert "--tools" not in cmd and claude_cli.SAME_PREFIX not in cmd
+
+
+def test_a_one_shot_that_names_no_tools_keeps_the_full_set(monkeypatch):
+    cmd = _leg_cmd(monkeypatch, (2, 1, 311))
+    assert "--tools" not in cmd
+
+
+def test_the_code_leg_asks_for_the_build_tools(monkeypatch):
+    from app import tasks
+    t = store.create_task("x", "code", "p", None)["id"]
+    seen = {}
+
+    async def _cli(task_id, executor, prompt, **kw):
+        seen.update(kw)
+        return "ok"
+
+    monkeypatch.setattr(tasks, "_observed_cli", _cli)
+    monkeypatch.setattr(tasks, "task_tools", lambda *a, **k: "")
+    asyncio.run(tasks._code_leg(t, "build", "/tmp", resume=False, effort="high"))
+    assert seen["builtins"] == claude_cli.CODE_TOOLS
+
+
+def test_a_task_worker_pins_every_tool_its_scope_grants(monkeypatch):
+    monkeypatch.setenv("ASTA_MCP_SCOPED", "1")
+    assert mcp_server.tool_meta("report_outcome") == {"anthropic/alwaysLoad": True}

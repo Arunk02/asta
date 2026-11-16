@@ -303,13 +303,33 @@ def test_the_lean_tool_list_is_never_sent_alongside_his_capabilities(monkeypatch
     with --disallowed-tools instead, which leaves MCP alone."""
     from app import copilot_cli
     monkeypatch.setattr(copilot_cli, "mcp_cli_enabled", lambda: True)
+    monkeypatch.setattr(claude_cli, "_version", (2, 1, 212))
     cmd = claude_cli._build_cmd({"id": "c-mcp", "workspace": "", "model": "claude_cli"},
                                 "remind me tomorrow to chase the PRs")
     assert "--mcp-config" in cmd
-    assert "--tools" not in cmd, "the lean list would strip every mcp__asta tool"
+    assert "--tools" not in cmd, "on 2.1.212 the lean list strips every mcp__asta tool"
     denied = cmd[cmd.index("--disallowed-tools") + 1]
     for heavy in ("Task", "TodoWrite", "NotebookEdit"):
         assert heavy in denied
+
+
+def test_a_cli_that_keeps_mcp_gets_the_lean_list_with_its_search(monkeypatch):
+    """Measured 16 Nov on 2.1.267 and 2.1.311: --tools names the built-ins and
+    every mcp__asta tool stays (13 of 13). A fresh chat 50k → 28k."""
+    from app import copilot_cli
+    monkeypatch.setattr(copilot_cli, "mcp_cli_enabled", lambda: True)
+    monkeypatch.setattr(claude_cli, "_version", (2, 1, 311))
+    cmd = claude_cli._build_cmd({"id": "c-mcp2", "workspace": "", "model": "claude_cli"},
+                                "remind me tomorrow to chase the PRs")
+    assert "--mcp-config" in cmd
+    lean = cmd[cmd.index("--tools") + 1].split(",")
+    assert "ToolSearch" in lean and "Bash" in lean
+    assert claude_cli.SAME_PREFIX in cmd
+
+
+def test_his_own_chat_tool_list_still_gets_the_search(monkeypatch):
+    monkeypatch.setenv("ASTA_CLAUDE_CHAT_TOOLS", "Bash,Read")
+    assert claude_cli.chat_tools() == "Bash,Read,ToolSearch"
 
 
 def test_a_chat_that_may_edit_keeps_every_tool(monkeypatch):

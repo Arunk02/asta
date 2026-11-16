@@ -174,3 +174,21 @@ def test_a_fresh_building_leg_runs_on_asta_s_coder_prompt(monkeypatch):
 def test_planning_and_resumed_legs_keep_claude_code_s_prompt(monkeypatch):
     assert "--system-prompt" not in _leg_cmd(monkeypatch, plan_only=True, resume=False)
     assert "--system-prompt" not in _leg_cmd(monkeypatch, plan_only=False, resume=True)
+
+
+def test_people_threads_and_state_go_once_per_session_too(monkeypatch):
+    from app import copilot_cli, referents, threads
+    monkeypatch.setattr(referents, "block", lambda: "PEOPLE-BLOCK")
+    monkeypatch.setattr(referents, "recent", lambda: [{"who": "Pat Example"}])
+    monkeypatch.setattr(threads, "context_for", lambda who: f"THREAD-{who}")
+    monkeypatch.setattr(copilot_cli, "_teams_with", lambda who: f"CONVO-{who}")
+    monkeypatch.setattr(copilot_cli, "conversation_state", lambda cid: "STATE-BLOCK")
+    cid = store.create_conversation(model="claude_cli", workspace=None)["id"]
+    first = copilot_cli.turn_context("hi", cid, fresh=True, remember=True)
+    for b in ("PEOPLE-BLOCK", "THREAD-Pat Example", "CONVO-Pat Example", "STATE-BLOCK"):
+        assert b in first
+    again = copilot_cli.turn_context("and?", cid, fresh=False, remember=True)
+    for b in ("PEOPLE-BLOCK", "THREAD-Pat Example", "CONVO-Pat Example", "STATE-BLOCK"):
+        assert b not in again
+    monkeypatch.setattr(copilot_cli, "conversation_state", lambda cid: "STATE-BLOCK v2")
+    assert "STATE-BLOCK v2" in copilot_cli.turn_context("now?", cid, fresh=False, remember=True)

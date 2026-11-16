@@ -127,3 +127,61 @@ def test_a_parallel_read_only_answer_is_told_so(conv, monkeypatch):
     finally:
         capabilities.READ_ONLY_TURN.reset(token)
     assert "parallel read-only answer" in system
+
+
+# --- code legs (16 Nov) -------------------------------------------------------
+
+def _leg(monkeypatch, on, version=(2, 1, 311)):
+    import asyncio
+    seen = {}
+
+    async def _exec(*cmd, **_k):
+        seen["cmd"] = list(cmd)
+        raise RuntimeError("captured")
+
+    if on:
+        monkeypatch.setenv("ASTA_ON_DEMAND", "1")
+    monkeypatch.setattr(claude_cli, "_version", version)
+    monkeypatch.setattr(claude_cli, "available", lambda: True)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+    with pytest.raises(RuntimeError, match="captured"):
+        asyncio.run(claude_cli._one_shot("build it", "/tmp", 60, "", "", "sid", False, None,
+                                         '{"mcpServers":{}}', False, "", False,
+                                         builtins=claude_cli.CODE_TOOLS))
+    return seen["cmd"]
+
+
+def test_a_code_leg_on_demand_keeps_every_tool_reachable(monkeypatch):
+    cmd = _leg(monkeypatch, on=True)
+    assert "--tools" not in cmd
+    assert _flag(cmd, "--plugin-dir") == str(claude_cli.ON_DEMAND_CODE_PLUGIN)
+    assert "--system-prompt" not in cmd and "--setting-sources" not in cmd, \
+        "a code leg keeps Claude Code's coding prompt and the repo's CLAUDE.md"
+
+
+def test_a_code_leg_off_or_on_an_old_cli_is_unchanged(monkeypatch):
+    assert "--tools" in _leg(monkeypatch, on=False)
+    assert "--plugin-dir" not in _leg(monkeypatch, on=True, version=(2, 1, 267))
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not installed")
+def test_the_code_plugin_keeps_the_build_tools_in_front(tmp_path):
+    mod = tmp_path / "register.mjs"
+    shutil.copy(claude_cli.ON_DEMAND_CODE_PLUGIN / "hooks" / "register.js", mod)
+    js = textwrap.dedent(f"""
+        import {{ register }} from {json.dumps(str(mod))};
+        let hook;
+        register((event, h) => {{ if (event === "tool.describe") hook = h; }});
+        const out = {{}};
+        for (const tool of ["Bash", "Read", "Edit", "Write", "ToolSearch", "WebFetch", "Task", "CronCreate"]) {{
+          const r = hook(null, {{ tool, description: "d" }}, (x) => ({{ ...x, passed: true }}));
+          out[tool] = r.isDeferred === true ? "deferred" : "front";
+        }}
+        console.log(JSON.stringify(out));
+    """)
+    out = subprocess.run(["node", "--input-type=module", "-e", js], capture_output=True,
+                         text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == {"Bash": "front", "Read": "front", "Edit": "front",
+                                      "Write": "front", "ToolSearch": "front", "WebFetch": "deferred",
+                                      "Task": "deferred", "CronCreate": "deferred"}

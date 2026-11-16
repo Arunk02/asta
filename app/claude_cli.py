@@ -112,6 +112,9 @@ def lean_flags() -> bool:
 #: this CLI or later; older ones get the classic command whatever the flag.
 ON_DEMAND_FROM = (2, 1, 293)
 ON_DEMAND_CHAT_PLUGIN = Path(__file__).resolve().parent / "claude_plugins" / "on-demand-chat"
+#: A code leg's: Bash, Read, Edit, Write and ToolSearch in front, the rest on
+#: demand. Claude Code's coding prompt and the repo's CLAUDE.md stay.
+ON_DEMAND_CODE_PLUGIN = Path(__file__).resolve().parent / "claude_plugins" / "on-demand-code"
 
 
 def on_demand() -> bool:
@@ -200,6 +203,10 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
     fence = task_fence.MODE.get()
     if tools_off:
         cmd += ["--tools", ""]
+    elif builtins and on_demand():
+        # Nothing cut: the build tools in front, every other built-in one
+        # search away. Measured 16 Nov, live model: 23.0k restricted → 19.5k.
+        cmd += ["--plugin-dir", str(ON_DEMAND_CODE_PLUGIN)]
     elif builtins and lean_flags():
         cmd += ["--tools", builtins]
     if lean_flags():

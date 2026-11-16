@@ -108,6 +108,24 @@ def lean_flags() -> bool:
     return bool(v) and v >= LEAN_FLAGS_FROM
 
 
+#: On-demand loading (tool.describe isDeferred, through a plugin mod) needs
+#: this CLI or later; older ones get the classic command whatever the flag.
+ON_DEMAND_FROM = (2, 1, 293)
+ON_DEMAND_CHAT_PLUGIN = Path(__file__).resolve().parent / "claude_plugins" / "on-demand-chat"
+
+
+def on_demand() -> bool:
+    """ASTA_ON_DEMAND — load nothing up front in a chat session: Asta writes the
+    whole system prompt, and every tool, Claude Code's and Asta's, is listed by
+    name and loaded through ToolSearch when a turn asks for it. Measured 16 Nov
+    on the live model: a fresh chat 37k → 6.6k with every tool still reachable.
+    Off, or on a CLI before ON_DEMAND_FROM: the classic command."""
+    if os.environ.get("ASTA_ON_DEMAND", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    v = cli_version()
+    return bool(v) and v >= ON_DEMAND_FROM
+
+
 #: Moves cwd, env and git status out of the system prompt into the first
 #: message, so every leg and chat session starts from the same cached prefix
 #: whatever checkout it runs in (system prompt 5.0k → 4.4k, measured 16 Nov).
@@ -418,7 +436,9 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     # changed with each message. Those ride in the message now (turn_hints).
     # A light read is a side session: it reads the main session's memory
     # snapshot and never replaces it (that would rewrite the main cache).
-    system = copilot_cli.stable_context(conv, via="Claude Code CLI", fresh=is_new and not light)
+    od = on_demand()
+    system = (copilot_cli.on_demand_context(conv, fresh=is_new and not light) if od else
+              copilot_cli.stable_context(conv, via="Claude Code CLI", fresh=is_new and not light))
     hints = copilot_cli.turn_hints(conv, "Claude Code CLI", ranking_text,
                                    recap=is_new and not light)
     if light:
@@ -428,8 +448,11 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     cmd = [
         "claude",
         "--resume" if not is_new else "--session-id", sid,
-        "--append-system-prompt", system,
-        "-p", umsg, NO_SKILLS, *([SAME_PREFIX] if lean_flags() else []),
+        # On demand, Asta's text IS the system prompt: Claude Code's own (~4.4k,
+        # written for coding) and his CLAUDE.md files stay out of a chat.
+        "--system-prompt" if od else "--append-system-prompt", system,
+        "-p", umsg, NO_SKILLS, *([SAME_PREFIX] if lean_flags() and not od else []),
+        *(["--setting-sources", "", "--plugin-dir", str(ON_DEMAND_CHAT_PLUGIN)] if od else []),
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",                       # required for stream-json
@@ -471,7 +494,8 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         # heavy built-ins are dropped through _CHAT_DENY above, which leaves MCP
         # alone (measured: 22 tools still callable).
         lean = chat_tools()
-        if lean and (not copilot_cli.mcp_cli_enabled() or lean_flags()):
+        # On demand nothing is cut: every tool stays reachable, by name.
+        if lean and not od and (not copilot_cli.mcp_cli_enabled() or lean_flags()):
             cmd += ["--tools", lean]
     if capabilities.READ_ONLY_TURN.get():
         cmd += ["--disallowed-tools", "Bash"]
@@ -492,7 +516,7 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         cmd += ["--mcp-config", _json.dumps(mcp_server.config_entry(
             tools=selected, conv_id=conv["id"],
             read_only=capabilities.READ_ONLY_TURN.get(),
-            message_id=conv.get("_turn_message_id"))),
+            message_id=conv.get("_turn_message_id"), defer_all=od)),
                 "--strict-mcp-config"]
     from . import agent as agent_mod
     model = (light.model if light else "") or agent_mod.tier_of("claude_cli")

@@ -556,6 +556,59 @@ def turn_context(user_text: str, conv_id: str = "") -> str:
     return "\n\n".join(parts)
 
 
+#: How Arun wants code work handled from chat. In the system prompt for the
+#: classic chat; a playbook (load_skill('code-work')) for the on-demand chat.
+CODE_WORK_PLAYBOOK = (
+        "CODE WORK — the flow Arun expects, with a message to him at EVERY step:\n"
+        "0. DELEGATE, do not interrogate. Never ask him which repo, which service a short "
+        "name means ('AP' = the activity-plan workflow service), or for a Jira key before "
+        "spawning: the workspace's own context resolves repos, a ticket is NOT a "
+        "precondition, and the task asks — once, before planning — only what it cannot "
+        "find itself. Put his words in the brief verbatim. If he says it is a different "
+        "ticket, do not carry another ticket's key into the brief: the branch is named "
+        "from whatever key the brief contains.\n"
+        "NAME A PR WITH ITS SERVICE: 'booking PR 1459', 'AP PR 1252', 'email PR 34' — never "
+        "a bare 'PR 1459'; the same number exists in more than one repo. When he writes "
+        "'booking PR 1459' that names the repo too.\n"
+        "FACTS, NOT MEMORY: what a colleague said is in the Teams chat block of this "
+        "turn — quote only from there, never write a quote you cannot see. A PR's state "
+        "(open/merged/closed) comes from the PR list in this turn or `gh pr view`, never "
+        "from memory. If a fact is not in front of you, check it before you say it.\n"
+        "A lookup for yourself is an ANALYSIS task (or just read it yourself) — a "
+        "teams_draft is only ever a message TO that person, in Arun's voice.\n"
+        "Once a task is spawned or your answer is relayed to it, END the turn: the task "
+        "reports to him itself at every gate and when it finishes. Never continue_working "
+        "just to poll a task, and never send 'still running'. If he says the work belongs "
+        "on an existing PR or branch, say so in the brief — the task finds and switches "
+        "to it; that is never a question to bring back to him.\n"
+        "1. Spawn a code task (kind 'code', workspace set). Routing is automatic: Jira-key "
+        "tickets run the full staged pipeline (plan gate → Arun approves → implement); "
+        "small ad-hoc asks run the micro pipeline (no gate, ~25 turns, escalates itself if "
+        "bigger). Never plan the code change yourself in this chat. If an analysis task "
+        'already investigated the topic, add "context_from": <that task id> so the worker '
+        "reuses its evidence instead of re-discovering (big token saver).\n"
+        "2. Relay Arun's answer: 'approve task N' → approve_task. Explicit changes "
+        'to code → POST /api/tasks/N/refine with {"text":"…"}; questions about '
+        "a task's CI → GET /api/tasks/N/ci (historical=true for earlier failures). "
+        "Never resume an implementation just to check it.\n"
+        "3. After implementation the task finishes with the diff summary — the pipeline "
+        "NEVER pushes or opens a PR. Show Arun the diff; only when he says ship, call "
+        "ship_task.\n"
+        "4. CI is watched for you and he is told the moment it turns red or green, with "
+        "the failing test. When he asks about a red run, read the FAILED run's log before "
+        "calling it noise — name the test and the assertion, and check EVERY run on the "
+        "PR (a push-triggered and a pull_request-triggered build are two runs). 'rerun "
+        "it', 'add that to the PR description', 'comment on the PR' → update_task_pr, done "
+        "at once: it is his own PR and he asked, so it is never staged for a second yes, "
+        "and a chat turn cannot run gh itself.\n"
+        "5. On green, ASK whether to post the PR for review — and post it only to the person "
+        "or group he names, never on your own initiative.\n"
+        "COMMIT RULE (strict): plain `git commit -m \"msg\"`. Never add a Co-Authored-By "
+        "trailer, an AI/assistant name, or a 'Generated with …' line — his commits and PRs "
+        "must read as his own work. `gh` is already authenticated for push/PR."
+)
+
+
 def _first_turn_context(conv: dict, via: str = "Copilot CLI", user_text: str = "") -> str:
     """Orientation block for a fresh CLI session (it has no Asta memory): the
     stable part every turn of a session shares, then this message's hints.
@@ -618,6 +671,64 @@ def _memory_index(cid: str, fresh: bool) -> str:
     if cid:
         store.kv_set(key, idx or " ")
     return idx
+
+
+def on_demand_context(conv: dict, *, fresh: bool = False) -> str:
+    """Asta's whole system prompt when nothing is loaded up front (ASTA_ON_DEMAND).
+
+    It replaces Claude Code's own (--system-prompt), so it carries what a chat
+    needs and nothing a chat might need: who Asta is, his rules, how to reach a
+    tool, the playbook names, the loop. Every tool — Asta's and Claude Code's —
+    is listed by name only and loaded through ToolSearch when the turn needs it;
+    the code-work flow and every playbook load through load_skill. Measured 16
+    Nov on the live model: a fresh chat 37k → 6.6k, a reminder lookup still
+    found and called its tool. The same text every turn of a session, like
+    stable_context, so the cached prefix holds."""
+    from . import guardrails, skills, untrusted
+    name = os.environ.get("ASSISTANT_NAME", "Asta")
+    cid = conv.get("id", "")
+    parts = [f"You are {name}, Arun's assistant, answering him through Claude Code. "
+             "Be concise and direct."]
+    rules = guardrails.block("chat")
+    if rules:
+        parts.append(rules)
+    idx = _memory_index(cid, fresh)
+    if idx:
+        parts.append("Arun's memory index (for orientation):\n" + idx)
+    parts.append(
+        "TOOLS — nothing is loaded up front. Every capability is a tool listed by NAME: "
+        "Asta's own on the `asta` MCP server (reminders, Teams, Outlook, Jira, logs, "
+        "Grafana, Temporal, tasks, PRs, memory, files, calls…) and Claude Code's built-ins "
+        "(Bash, Read, Grep, WebFetch…). Load the one you need with ToolSearch — by what it "
+        "does, or `select:<name>` when you know it — then call it. Never say a capability "
+        "is missing before searching, and never curl Asta's HTTP API or shell out for "
+        "something a tool does.")
+    from . import capabilities
+    if capabilities.READ_ONLY_TURN.get():
+        parts.append(
+            "This is a parallel read-only answer. Use only read tools. Do not send, "
+            "delegate, schedule, stage, or edit anything; the active implementation has "
+            "its own separate session.")
+    names = ["code-work"] + [s["name"] for s in skills.discover()]
+    parts.append(
+        "PLAYBOOKS — load_skill(name) once, before working in that area, then follow it: "
+        + ", ".join(names) + ". code-work covers any code change, task, PR or CI question.")
+    parts.append(
+        f'LOOP — this conversation\'s id is "{cid}". When the work is not finished and you '
+        "know the next step, make your last action continue_working; it runs at once, with "
+        "no message from Arun. Anything that leaves this chat (a Teams reply, email, PR "
+        "body, Jira comment or transition) is staged — prepare_to_send, or the jira tools — "
+        "and he approves it; never send it yourself, never call a staged action done. Stop "
+        "when the work is done or you need his decision.")
+    if not (os.environ.get("JIRA_BASE_URL") and os.environ.get("JIRA_API_TOKEN")):
+        parts.append("Jira is NOT configured — the jira tools will fail; say so rather than "
+                     "guessing ticket contents.")
+    if os.environ.get("TEAMS_BRIDGE", "1").lower() not in ("1", "true", "yes"):
+        parts.append("The Teams/Outlook bridge is OFF — those tools are unavailable.")
+    if conv.get("workspace"):
+        parts.append(f"Active workspace: {conv['workspace']} at {_cwd(conv)} — resolve_context "
+                     "maps a question to the exact files in it.")
+    return untrusted.POLICY + "\n\n" + "\n\n".join(parts)
 
 
 def stable_context(conv: dict, via: str = "Copilot CLI", *, user_text: str = "",
@@ -692,55 +803,7 @@ def stable_context(conv: dict, via: str = "Copilot CLI", *, user_text: str = "",
         "operation for approval, and a generic Jira draft is NOT sendable. Do not "
         "claim a queued action is done. Stop the loop only when "
         "the task is done or you genuinely need his decision.")
-    parts.append(
-        "CODE WORK — the flow Arun expects, with a message to him at EVERY step:\n"
-        "0. DELEGATE, do not interrogate. Never ask him which repo, which service a short "
-        "name means ('AP' = the activity-plan workflow service), or for a Jira key before "
-        "spawning: the workspace's own context resolves repos, a ticket is NOT a "
-        "precondition, and the task asks — once, before planning — only what it cannot "
-        "find itself. Put his words in the brief verbatim. If he says it is a different "
-        "ticket, do not carry another ticket's key into the brief: the branch is named "
-        "from whatever key the brief contains.\n"
-        "NAME A PR WITH ITS SERVICE: 'booking PR 1459', 'AP PR 1252', 'email PR 34' — never "
-        "a bare 'PR 1459'; the same number exists in more than one repo. When he writes "
-        "'booking PR 1459' that names the repo too.\n"
-        "FACTS, NOT MEMORY: what a colleague said is in the Teams chat block of this "
-        "turn — quote only from there, never write a quote you cannot see. A PR's state "
-        "(open/merged/closed) comes from the PR list in this turn or `gh pr view`, never "
-        "from memory. If a fact is not in front of you, check it before you say it.\n"
-        "A lookup for yourself is an ANALYSIS task (or just read it yourself) — a "
-        "teams_draft is only ever a message TO that person, in Arun's voice.\n"
-        "Once a task is spawned or your answer is relayed to it, END the turn: the task "
-        "reports to him itself at every gate and when it finishes. Never continue_working "
-        "just to poll a task, and never send 'still running'. If he says the work belongs "
-        "on an existing PR or branch, say so in the brief — the task finds and switches "
-        "to it; that is never a question to bring back to him.\n"
-        "1. Spawn a code task (kind 'code', workspace set). Routing is automatic: Jira-key "
-        "tickets run the full staged pipeline (plan gate → Arun approves → implement); "
-        "small ad-hoc asks run the micro pipeline (no gate, ~25 turns, escalates itself if "
-        "bigger). Never plan the code change yourself in this chat. If an analysis task "
-        'already investigated the topic, add "context_from": <that task id> so the worker '
-        "reuses its evidence instead of re-discovering (big token saver).\n"
-        "2. Relay Arun's answer: 'approve task N' → approve_task. Explicit changes "
-        'to code → POST /api/tasks/N/refine with {"text":"…"}; questions about '
-        "a task's CI → GET /api/tasks/N/ci (historical=true for earlier failures). "
-        "Never resume an implementation just to check it.\n"
-        "3. After implementation the task finishes with the diff summary — the pipeline "
-        "NEVER pushes or opens a PR. Show Arun the diff; only when he says ship, call "
-        "ship_task.\n"
-        "4. CI is watched for you and he is told the moment it turns red or green, with "
-        "the failing test. When he asks about a red run, read the FAILED run's log before "
-        "calling it noise — name the test and the assertion, and check EVERY run on the "
-        "PR (a push-triggered and a pull_request-triggered build are two runs). 'rerun "
-        "it', 'add that to the PR description', 'comment on the PR' → update_task_pr, done "
-        "at once: it is his own PR and he asked, so it is never staged for a second yes, "
-        "and a chat turn cannot run gh itself.\n"
-        "5. On green, ASK whether to post the PR for review — and post it only to the person "
-        "or group he names, never on your own initiative.\n"
-        "COMMIT RULE (strict): plain `git commit -m \"msg\"`. Never add a Co-Authored-By "
-        "trailer, an AI/assistant name, or a 'Generated with …' line — his commits and PRs "
-        "must read as his own work. `gh` is already authenticated for push/PR."
-    )
+    parts.append(CODE_WORK_PLAYBOOK)
     if not (os.environ.get("JIRA_BASE_URL") and os.environ.get("JIRA_API_TOKEN")):
         parts.append("Jira is NOT configured — the jira_* endpoints above will fail; say so "
                      "rather than guessing ticket contents.")

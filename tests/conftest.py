@@ -112,6 +112,7 @@ _MACHINE_PINNED_ENV = ("ASTA_CLAUDE_CLI_MODEL", "ASTA_TURN_IDLE", "ASTA_RESPOND"
                        "ASTA_FRONTDESK", "ASTA_CROSS_REVIEW", "ASTA_CLAUDE_CHAT_TOOLS",
                        "ASTA_CHAT_ALLOW", "ASTA_PUSH_BUDGET", "ASTA_ATTENTION_LEARN",
                        "ASTA_EVOLVE", "ASTA_EVOLVE_L3", "ASTA_COALESCE_SECONDS",
+                       "ASTA_ON_DEMAND",
                        # The tunable knobs (app/settings.py). His shell exports
                        # some of these, and a test that pins the module constant
                        # then loses to the environment — machine-dependent, and

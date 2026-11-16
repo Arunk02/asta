@@ -45,11 +45,40 @@ def _pending_key(task_id: int) -> str:
     return f"graph_answer:{task_id}"
 
 
+def _run_key(task_id: int) -> str:
+    return f"graph_run:{task_id}"
+
+
+def _begin_run(task_id: int) -> int:
+    """This run's number. Only the newest run of a task may settle its status."""
+    try:
+        n = int(store.kv_get(_run_key(task_id)) or 0) + 1
+    except ValueError:
+        n = 1
+    store.kv_set(_run_key(task_id), str(n))
+    return n
+
+
+def _superseded(task_id: int, run: int) -> bool:
+    """Has a later run of this task started since `run` did?
+
+    16 Nov, live: a follow-up sent the moment a build finished started a new run
+    while the finished one was still wrapping up. The finished one then found
+    the row back at "running" — set by the follow-up — and marked the task
+    failed with "nothing was left to run", and told him so, while the follow-up
+    went on to finish it."""
+    try:
+        return int(store.kv_get(_run_key(task_id)) or 0) != run
+    except ValueError:
+        return False
+
+
 async def _drive(task_id: int, inp) -> None:
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
     from app import notify, tasks
     from .code_graph import Stopped, build
     import contextlib
+    run = _begin_run(task_id)
     with contextlib.suppress(Exception):
         await tasks.ensure_checkout(task_id)
     try:
@@ -58,6 +87,8 @@ async def _drive(task_id: int, inp) -> None:
             if isinstance(inp, _Pending):
                 inp = await _resolve_pending(app, task_id)
             await app.ainvoke(inp, config(task_id))
+            if _superseded(task_id, run):
+                return                          # a later run owns the status now
             # The run stopped cleanly — at a gate or at the end — so whatever
             # answer it was handed has been applied, and a stop at a gate is
             # shown as one. Without the second half, a resume that found no
@@ -88,7 +119,7 @@ async def _drive(task_id: int, inp) -> None:
             await tasks._pause_task(task_id, t, exc)
     except Exception as exc:                    # noqa: BLE001
         t = store.get_task(task_id) or {}
-        if t.get("status") in tasks.FINAL:
+        if t.get("status") in tasks.FINAL or _superseded(task_id, run):
             return
         import time
         store.update_task(task_id, status="failed", error=str(exc)[:500],

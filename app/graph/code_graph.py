@@ -85,8 +85,9 @@ def _has_session(tid: int) -> bool:
 
 
 def _overrides(tid: int) -> str:
-    tasks = _tasks()
-    return tasks.CODE_OVERRIDES if tasks._pipeline_for(tid) == "full" else ""
+    """'' — the runtime rules ride with a leg's session now (tasks.code_rules,
+    added in _code_leg when the session starts), never re-sent per leg."""
+    return ""
 
 
 #: Said to a leg that starts fresh because its session grew too large.

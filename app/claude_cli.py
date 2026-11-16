@@ -129,6 +129,23 @@ def on_demand() -> bool:
     return bool(v) and v >= ON_DEMAND_FROM
 
 
+#: The system prompt a FRESH building leg gets on demand, in place of Claude
+#: Code's own (~4.5k, written for every kind of coding session). A/B on the
+#: real CLI, 16 Nov, three tasks (feature, bug fix, validation), same rules and
+#: model: tests passed 3/3 both ways with identical diffs; this prompt started
+#: each leg 4.5k lighter and took fewer steps. Planning legs keep Claude Code's
+#: (untested here, and the plan is the core), and a build that RESUMES the
+#: planning session keeps that session's prompt — changing it would rewrite the
+#: whole cached session. The repo's CLAUDE.md and his own still load.
+CODER_PROMPT = (
+    "You are a senior software engineer working in a git checkout through these tools: "
+    "Bash for shell commands, Read to open a file before editing it, Edit to change it, Write "
+    "for a new file; other tools are listed by name and load through ToolSearch. Work in "
+    "small verified steps: read the code, make the change, run the tests, fix what fails. "
+    "Keep changes surgical and in the existing style. Never push, never open a PR. "
+    "Finish with a short summary of what changed and the test result.")
+
+
 #: Moves cwd, env and git status out of the system prompt into the first
 #: message, so every leg and chat session starts from the same cached prefix
 #: whatever checkout it runs in (system prompt 5.0k → 4.4k, measured 16 Nov).
@@ -207,8 +224,15 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
         # Nothing cut: the build tools in front, every other built-in one
         # search away. Measured 16 Nov, live model: 23.0k restricted → 19.5k.
         cmd += ["--plugin-dir", str(ON_DEMAND_CODE_PLUGIN)]
+        if not plan_only and not resume:
+            cmd += ["--system-prompt", CODER_PROMPT]
     elif builtins and lean_flags():
         cmd += ["--tools", builtins]
+    elif on_demand():
+        # A background call (a review, a memory verdict, a context refresh)
+        # names no tools: every built-in waits behind ToolSearch, as in chat.
+        # It started at ~32k with all of them loaded (16 Nov).
+        cmd += ["--plugin-dir", str(ON_DEMAND_CHAT_PLUGIN)]
     if lean_flags():
         cmd.append(SAME_PREFIX)
     if mcp_config or tools_off or fence:
@@ -218,6 +242,12 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
             # Ambient user/project servers add unrelated tools, context and
             # credentials; disabling Asta MCP must not silently restore them.
             cmd += ["--strict-mcp-config"]
+    else:
+        # A call that attaches nothing gets nothing: his own Claude Code servers
+        # (Atlassian, Temporal, Grafana, Context7, Claude Docs) connected to
+        # every review and memory call, and none of them reads those. Asta
+        # reaches Jira, Grafana and Temporal through its own API tools.
+        cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
     if session_id:
         cmd += (["--resume", session_id] if resume else ["--session-id", session_id])
     if agent_file:
@@ -417,7 +447,8 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     umsg = f"{copilot_cli.now_line()}\n{user_text}"
     # Same block the Copilot path adds, from the same function: who he means, and
     # what his documents say about what he asked.
-    ctx = copilot_cli.turn_context(ranking_text, conv.get("id", ""))
+    ctx = copilot_cli.turn_context(ranking_text, conv.get("id", ""), fresh=is_new,
+                                   remember=not light)
     if ctx:
         umsg = f"{ctx}\n\n{umsg}"
     if prefetched:

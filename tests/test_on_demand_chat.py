@@ -155,8 +155,10 @@ def test_a_code_leg_on_demand_keeps_every_tool_reachable(monkeypatch):
     cmd = _leg(monkeypatch, on=True)
     assert "--tools" not in cmd
     assert _flag(cmd, "--plugin-dir") == str(claude_cli.ON_DEMAND_CODE_PLUGIN)
-    assert "--system-prompt" not in cmd and "--setting-sources" not in cmd, \
-        "a code leg keeps Claude Code's coding prompt and the repo's CLAUDE.md"
+    assert "--setting-sources" not in cmd, "a code leg keeps the repo's CLAUDE.md"
+    # A fresh building leg runs on Asta's coder prompt (claude_cli.CODER_PROMPT);
+    # planning and resumed legs keep Claude Code's — see test_rules_once_per_session.
+    assert _flag(cmd, "--system-prompt") == claude_cli.CODER_PROMPT
 
 
 def test_a_code_leg_off_or_on_an_old_cli_is_unchanged(monkeypatch):

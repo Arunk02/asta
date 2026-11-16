@@ -445,7 +445,27 @@ def _recent_asks(conv_id: str, current: str, within: float = 1800.0) -> str:
     return "\n".join(said[-2:])
 
 
-def turn_context(user_text: str, conv_id: str = "") -> str:
+def _on_change(conv_id: str, name: str, block: str, fresh: bool, remember: bool) -> str:
+    """`block`, unless this session was already sent exactly this.
+
+    His open work and his PR list rode on EVERY turn (~2k characters), unchanged
+    turn after turn; the session already held them. Now they go on a session's
+    first turn and whenever they change. `remember` is off for a side session
+    (a light read), whose copy never reaches the main session's history."""
+    if not block or not conv_id:
+        return block
+    import hashlib
+    key = f"turn_block:{conv_id}:{name}"
+    digest = hashlib.sha1(block.encode()).hexdigest()[:16]
+    if not fresh and store.kv_get(key) == digest:
+        return ""
+    if remember:
+        store.kv_set(key, digest)
+    return block
+
+
+def turn_context(user_text: str, conv_id: str = "", *, fresh: bool = True,
+                 remember: bool = False) -> str:
     """What a chat turn should know before it starts, besides the date.
 
     Two things, both learned on 29 Sep, and both built so they can only ever add:
@@ -486,7 +506,7 @@ def turn_context(user_text: str, conv_id: str = "") -> str:
         if convo:
             parts.append(convo)
     with contextlib.suppress(Exception):
-        prs = _his_prs()
+        prs = _on_change(conv_id, "prs", _his_prs(), fresh, remember)
         if prs:
             parts.append(prs)
     # His open work and what is already promised, every turn, whichever brain.
@@ -497,7 +517,7 @@ def turn_context(user_text: str, conv_id: str = "") -> str:
         state = conversation_state(conv_id)
         if state:
             parts.append(state)
-        work = open_work()
+        work = _on_change(conv_id, "open_work", open_work(), fresh, remember)
         if work:
             parts.append(work)
     # "merge task 166's PR": what task 166 was, and every link in it. Without
@@ -899,7 +919,7 @@ def _build_cmd(conv: dict, user_text: str, extra_context: str = "") -> list[str]
     user_text = f"{now_line()}\n{user_text}"
     # Who he means and what his documents say — judged on HIS sentence, never on
     # a handoff's wrapper (see resume.ranking_text).
-    ctx = turn_context(ranking_text, conv.get("id", ""))
+    ctx = turn_context(ranking_text, conv.get("id", ""), fresh=is_new, remember=True)
     if ctx:
         user_text = f"{ctx}\n\n{user_text}"
     if extra_context:

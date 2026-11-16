@@ -685,3 +685,58 @@ def test_a_run_that_ends_with_the_row_still_running_is_not_left_running(world, m
     asyncio.run(go())
     assert _status(tid) == "failed"
     assert "nothing was left to run" in store.get_task(tid)["error"]
+
+
+def test_a_follow_up_sent_as_the_build_ends_is_not_reported_failed(world, monkeypatch):
+    """16 Nov, live #632: the follow-up's run started while the finished run was
+    still wrapping up; the finished run saw "running" and marked it failed."""
+    from app.graph import runner
+    tid = store.create_task("bump the retention", "code", "bump it", WS)["id"]
+    store.update_task(tid, status="running")
+
+    class App:
+        async def ainvoke(self, inp, cfg):
+            runner._begin_run(tid)               # the follow-up's run starts now
+
+        async def aget_state(self, cfg):
+            class Snap:
+                next = ()
+                tasks = ()
+            return Snap()
+
+    class Graph:
+        def compile(self, checkpointer=None):
+            return App()
+
+    import app.graph.code_graph as cg
+    monkeypatch.setattr(cg, "build", lambda: Graph())
+    asyncio.run(runner._drive(tid, {"task_id": tid}))
+    t = store.get_task(tid)
+    assert t["status"] == "running", "the newer run owns the status"
+    assert "nothing was left to run" not in (t.get("error") or "")
+    assert not any("nothing left to run" in m for m in world)
+
+
+def test_a_run_that_is_still_the_newest_still_settles_a_stranded_row(world, monkeypatch):
+    from app.graph import runner
+    tid = store.create_task("bump the retention", "code", "bump it", WS)["id"]
+    store.update_task(tid, status="running")
+
+    class App:
+        async def ainvoke(self, inp, cfg):
+            return None
+
+        async def aget_state(self, cfg):
+            class Snap:
+                next = ()
+                tasks = ()
+            return Snap()
+
+    class Graph:
+        def compile(self, checkpointer=None):
+            return App()
+
+    import app.graph.code_graph as cg
+    monkeypatch.setattr(cg, "build", lambda: Graph())
+    asyncio.run(runner._drive(tid, {"task_id": tid}))
+    assert store.get_task(tid)["status"] == "failed"

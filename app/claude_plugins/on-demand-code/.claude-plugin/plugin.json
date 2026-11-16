@@ -1,0 +1,1 @@
+{ "name": "asta-on-demand-code", "version": "0.1.0", "description": "A code leg keeps the tools every build uses in front; every other built-in loads through ToolSearch when asked." }

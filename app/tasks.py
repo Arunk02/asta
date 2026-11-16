@@ -309,6 +309,31 @@ CODE_OVERRIDES = """
   question to bring back to him: find it yourself (`gh pr list --search`,
   `git branch -r`), `git fetch`, and `git switch` THIS worktree to that branch.
   Commit there, never on a new branch, and name the branch in your summary."""
+
+
+#: The parts of CODE_OVERRIDES only a PLANNING leg needs: the context check, the
+#: plan gate and the plan's phone format (~5.6k of its ~11k characters).
+_PLAN_ONLY_RULES = ("- Context-confidence gate FIRST", "- THE PLAN GATE IS UNCONDITIONAL",
+                    "- THE PLAN MUST BE READABLE")
+
+
+def _build_rules(full: str) -> str:
+    head, *bullets = re.split(r"\n(?=- )", full)
+    return "\n".join([head] + [b for b in bullets if not b.startswith(_PLAN_ONLY_RULES)]) + "\n"
+
+
+#: What a leg that BUILDS gets when its session starts: every rule but the
+#: planning ones. A build leg that resumes the planning session has them all
+#: already, in its history.
+CODE_BUILD_RULES = _build_rules(CODE_OVERRIDES)
+
+
+def code_rules(task_id: int, t: dict, *, planning: bool) -> str:
+    """The runtime rules a fresh code-leg session starts with — '' when this
+    task's pipeline carries its own (micro, or no workspace agent)."""
+    if not _agent_for(t) or _pipeline_for(task_id) != "full":
+        return ""
+    return CODE_OVERRIDES if planning else CODE_BUILD_RULES
 # How Arun expects the code to READ — the quality bar he reviews every diff
 # against — used to be a block here. It is now the `## Coding` section of his
 # guardrails.md, so he edits it himself, and every fresh code leg receives it
@@ -2325,10 +2350,18 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     if not sid:
         sid, resume = str(uuid.uuid4()), False
         store.kv_set(sid_key, sid)
+    from . import reproduction
+    reproducing = reproduction.active(task_id)
+    plan_only = not (plan_approved(task_id) or reproducing)
     if not resume:
         # His standing instructions ride ONCE, on the fresh session. A resumed
         # leg already carries them, and re-sending a rule the session holds is
-        # the token bleed the guardrails file exists to end.
+        # the token bleed the guardrails file exists to end. The runtime rules
+        # too — and a building leg is not sent the planning ones.
+        if not reproducing:
+            prompt += code_rules(task_id, store.get_task(task_id) or {"workspace": workspace,
+                                                                       "kind": "code"},
+                                 planning=plan_only)
         prompt += guardrails.block("code")
     prompt = context_boot_paths(prompt, cwd, workspace)
     watcher = _progress_watcher(task_id, (store.get_task(task_id) or {}).get("title", ""))
@@ -2339,13 +2372,10 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     # Before his approval, a code leg may read everything and change nothing.
     # The rule was a sentence in a prompt; the micro pipeline's own instructions
     # said "make the edit", and an instruction a model may ignore is not a gate.
-    from . import reproduction
-    reproducing = reproduction.active(task_id)
     reproduction_agent = str(ROOT / "agents" / "reproduce.md")
     if reproducing:
         # The later fix authorization in the task brief is not this leg's scope.
         prompt += "\n\n" + Path(reproduction_agent).read_text()
-    plan_only = not (plan_approved(task_id) or reproducing)
     # Which model at what effort: by the size of the work, not the stage alone.
     model = ""
     from . import routing
@@ -2634,7 +2664,7 @@ async def _escalate_brain_and_retry(task_id: int, t: dict, outcome, hops: int,
         f"⤴️ #{task_id} {t['title']} — stuck on the same failure, escalating to "
         f"{stronger} for a fresh attempt…", "task")
     result2 = await _run_code_leg(
-        task_id, t["prompt"] + verify.failure_feedback(outcome) + CODE_OVERRIDES, cwd,
+        task_id, t["prompt"] + verify.failure_feedback(outcome), cwd,
         resume=False, effort=_impl_effort(stronger), workspace=t["workspace"])
     if (store.get_task(task_id) or {}).get("status") in FINAL:
         return True
@@ -2727,7 +2757,7 @@ async def _verify_gate(task_id: int, t: dict, result: str, hops: int) -> bool:
             f"🔴 #{task_id} {t['title']} — its own check failed, fixing "
             f"(round {vr + 1}/{verify.max_rounds()})…", "task")
         result2 = await _run_code_leg(
-            task_id, verify.failure_feedback(outcome) + CODE_OVERRIDES, cwd,
+            task_id, verify.failure_feedback(outcome), cwd,
             resume=True, effort=_impl_effort(_resolve_executor(task_id)),
             workspace=t["workspace"])
         if (store.get_task(task_id) or {}).get("status") in FINAL:
@@ -2994,7 +3024,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
             f"⤴️ Task #{task_id}: bigger than micro ({reason}) — rerunning "
             f"through the full pipeline with plan gate.", "task")
         result2 = await _run_code_leg(
-            task_id, t["prompt"] + CODE_OVERRIDES, task_cwd(task_id, t["workspace"]),
+            task_id, t["prompt"], task_cwd(task_id, t["workspace"]),
             resume=False, effort=_effort_for("code", _resolve_executor(task_id)),
             workspace=t["workspace"])
         if (store.get_task(task_id) or {}).get("status") in FINAL:
@@ -3042,7 +3072,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
             + ", ".join(unfinished) +
             ". A checkout is now prepared for them on your branch — see THIS RUN "
             "below. Do NOT redo anything already committed; check `git log` first."
-            + CODE_OVERRIDES + _branch_note(task_id, t) + _done_note(task_id, t),
+            + _branch_note(task_id, t) + _done_note(task_id, t),
             task_cwd(task_id, t["workspace"]), resume=False,
             effort=_impl_effort(_resolve_executor(task_id)),
             workspace=t["workspace"])
@@ -3061,7 +3091,7 @@ async def _finish_code(task_id: int, t: dict, result: str, hops: int) -> None:
         result2 = await _run_code_leg(
             task_id,
             "Resume from .asta-context/todos.md + handoff.md — continue with the next "
-            "repo." + CODE_OVERRIDES,
+            "repo.",
             task_cwd(task_id, t["workspace"]), resume=False,
             effort=_impl_effort(_resolve_executor(task_id)),
             workspace=t["workspace"])
@@ -3907,9 +3937,10 @@ def first_code_prompt(task_id: int, t: dict) -> str:
                    "Ask only for missing information that materially changes scope or correctness. "
                    "Do not implement during this plan invocation; Asta dispatches implementation separately.")
     if _agent_for(t):
-        # micro's agent file is self-contained; the rider is solo-only.
-        if _pipeline_for(task_id) == "full":
-            prompt += CODE_OVERRIDES
+        # The runtime rules ride with the SESSION, not the prompt: _code_leg adds
+        # them once, when a leg's session starts (code_rules). Appended here they
+        # went into every resumed leg again — 11k characters re-sent per leg.
+        pass
     else:
         with contextlib.suppress(RuntimeError):
             prompt += repo_ops.playbook_block(Path(code_cwd(t["workspace"])))
@@ -4241,7 +4272,7 @@ async def _resume_worker(task_id: int, text: str, approved: bool = False) -> Non
     spec_preamble = task_spec.preamble(task_id) if approved else ""
     try:
         async with _ws_lock(t["workspace"]):
-            result = await _run_code_leg(task_id, spec_preamble + text + CODE_OVERRIDES,
+            result = await _run_code_leg(task_id, spec_preamble + text,
                                          task_cwd(task_id, t["workspace"]), resume=True,
                                          effort=effort, workspace=t["workspace"])
         if (store.get_task(task_id) or {}).get("status") in FINAL:

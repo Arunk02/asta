@@ -739,6 +739,16 @@ def on_demand_context(conv: dict, *, fresh: bool = False) -> str:
             "This is a parallel read-only answer. Use only read tools. Do not send, "
             "delegate, schedule, stage, or edit anything; the active implementation has "
             "its own separate session.")
+    # Always in front, never behind a playbook: 16 Nov, live, "add subtract to
+    # calc.py with a test" was answered by a chat brain that never loaded
+    # code-work, followed an unrelated playbook and tried to write the file
+    # itself (the chat lock refused every write) — no task, nothing done.
+    parts.append(
+        "CODE — any change to code (a fix, a feature, a test, a follow-up on a task) goes "
+        "to a code task: delegate_task with kind 'code', the workspace set and his words "
+        "verbatim. You never edit, write or commit files yourself — this chat cannot — and "
+        "you never plan the change here; the task plans it and he approves. Load code-work "
+        "for the rest of the flow (approvals, follow-ups, PRs, CI).")
     names = ["code-work"] + [s["name"] for s in skills.discover()]
     parts.append(
         "PLAYBOOKS — load_skill(name) once, before working in that area, then follow it: "

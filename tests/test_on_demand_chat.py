@@ -187,3 +187,11 @@ def test_the_code_plugin_keeps_the_build_tools_in_front(tmp_path):
     assert json.loads(out.stdout) == {"Bash": "front", "Read": "front", "Edit": "front",
                                       "Write": "front", "ToolSearch": "front", "WebFetch": "deferred",
                                       "Task": "deferred", "CronCreate": "deferred"}
+
+
+def test_the_delegate_rule_is_always_in_front(conv, monkeypatch):
+    """16 Nov, live: without it a chat brain tried to write the code itself."""
+    monkeypatch.setenv("ASTA_ON_DEMAND", "1")
+    system = _flag(claude_cli._build_cmd(conv, "add subtract to calc.py"), "--system-prompt")
+    assert "delegate_task with kind 'code'" in system
+    assert "You never edit, write or commit files yourself" in system

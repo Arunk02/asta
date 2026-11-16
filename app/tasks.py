@@ -3487,6 +3487,10 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         return
     attached = await _send_full_plan(task_id, t, result)
     full = attached + _missing_line(result)
+    stopped = go.stop_reason(task_id)
+    if stopped:
+        # He said go, and it still waits: say why, or the stop reads as a bug.
+        full = f"⏸ You said go ahead — this one waits for you: {stopped}.\n" + full
     await notify.notify(
         f"📋 *PLAN #{task_id}*\n{clip.clip(t['title'], 90)}\n\n"
         f"{_card_text(result, attached)}\n\n"
@@ -3930,12 +3934,17 @@ def first_code_prompt(task_id: int, t: dict) -> str:
     """The opening prompt of a code task — one definition for both engines."""
     prompt = t["prompt"]
     from . import reproduction
-    if reproduction.fix_authorized(task_id):
-        prompt += ("\n\nAsta has verified the reproduction and recorded the user's conditional fix authorization. "
-                   "Return the plan for Asta to dispatch; do not request another approval for this same fix. "
-                   "Resolve routine implementation and test-file choices yourself while preserving unrelated work. "
-                   "Ask only for missing information that materially changes scope or correctness. "
-                   "Do not implement during this plan invocation; Asta dispatches implementation separately.")
+    if reproduction.state(task_id).get("state") == "confirmed":
+        # 16 Nov, his rule: replicate, then a plan built on that evidence, then
+        # his approval (or his own go-ahead), then the fix.
+        ev = reproduction.state(task_id).get("evidence") or {}
+        prompt += ("\n\nAsta reproduced the bug with a failing test (in the job notes"
+                   + (f": `{ev.get('command')}` — expected {ev.get('expected')}, got {ev.get('actual')}"
+                      if ev.get("command") else "")
+                   + "). Plan the fix on that evidence: name the failing test, the cause it shows, "
+                   "the change, and that this test will pass after it. Resolve routine "
+                   "implementation and test-file choices yourself while preserving unrelated work. "
+                   "Do not implement during this plan invocation.")
     if _agent_for(t):
         # The runtime rules ride with the SESSION, not the prompt: _code_leg adds
         # them once, when a leg's session starts (code_rules). Appended here they
@@ -5871,8 +5880,13 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
     if after_merge:
         await _reopen_merged(task_id, t)
         t = store.get_task(task_id)
-    if not approved_plan and t["status"] in REFINABLE and _PLAN_FIRST.search(feedback or ""):
-        return await propose_change(task_id, feedback)
+    # Every follow-up that changes code shows a short change plan first (16 Nov,
+    # his rule) — unless his own words for it say to go ahead or raise the PR.
+    from . import go as _go
+    if not approved_plan and t["status"] in REFINABLE:
+        if not (_go.go_ahead(feedback) or _go.wants_pr(feedback)):
+            return await propose_change(task_id, feedback)
+        _go.grant(task_id, feedback, ship=_go.wants_pr(feedback))
     if t["status"] == "paused":
         # 11 Nov, #521: "cannot be continued (status=paused)" — his follow-up was
         # refused while the task waited out a usage limit. It is kept, and the

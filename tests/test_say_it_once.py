@@ -320,8 +320,16 @@ def _announce(t, plan, monkeypatch):
     return approved
 
 
-def test_a_small_plan_is_shown_and_goes_ahead(monkeypatch, quiet):
+def test_a_small_plan_waits_for_his_approval(monkeypatch, quiet):
+    """16 Nov: size no longer decides; a one-file plan waits like any other."""
     t = store.create_task("Enable MX", "code", "p", None)
+    assert _announce(t, PLAN_178, monkeypatch) == []
+    assert f"approve task {t['id']}" in quiet[0]
+
+
+def test_a_small_plan_he_said_go_on_is_shown_and_goes_ahead(monkeypatch, quiet):
+    t = store.create_task("Enable MX", "code", "p", None)
+    go.on_spawn(t["id"], "enable MX as single-click, just do it")
     assert _announce(t, PLAN_178, monkeypatch) == [t["id"]]
     assert "going ahead" in quiet[0] and "approve task" not in quiet[0]
     assert f"stop {t['id']}" in quiet[0], "he can still stop it"

@@ -131,11 +131,26 @@ def test_approving_marks_the_task_so_the_next_leg_may_write(monkeypatch):
     assert tasks.plan_approved(t["id"]) is True
 
 
-def test_feedback_on_a_finished_diff_counts_as_approval(monkeypatch):
+def test_feedback_on_a_finished_diff_is_planned_first(monkeypatch):
+    """16 Nov: a follow-up is a code change, and a code change waits for him."""
+    t = store.create_task("x", "code", "p", None)
+    store.update_task(t["id"], status="done", result="Implemented")
+    proposed = []
+
+    async def propose(task_id, feedback):
+        proposed.append(feedback)
+        return "planned"
+    monkeypatch.setattr(tasks, "propose_change", propose)
+    monkeypatch.setattr(tasks, "_resume_worker", _empty)
+    assert asyncio.run(tasks.refine(t["id"], "also cover the amend path")) == "planned"
+    assert proposed and tasks.plan_approved(t["id"]) is False
+
+
+def test_feedback_with_his_go_is_approval(monkeypatch):
     t = store.create_task("x", "code", "p", None)
     store.update_task(t["id"], status="done", result="Implemented")
     monkeypatch.setattr(tasks, "_resume_worker", _empty)
-    asyncio.run(tasks.refine(t["id"], "also cover the amend path"))
+    asyncio.run(tasks.refine(t["id"], "also cover the amend path and raise the PR"))
     assert tasks.plan_approved(t["id"]) is True
 
 

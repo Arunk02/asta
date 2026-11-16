@@ -199,7 +199,7 @@ async def test_feedback_resumes_the_same_task(monkeypatch):
         resumed.update(task_id=task_id, text=text, approved=approved)
 
     monkeypatch.setattr(tasks, "_resume_worker", spy)
-    out = await tasks.refine(tid, "also handle the EXECUTED status")
+    out = await tasks.refine(tid, "also handle the EXECUTED status, just do it")
     await asyncio.sleep(0)      # refine schedules the worker; let it start
 
     assert resumed["task_id"] == tid
@@ -220,7 +220,7 @@ async def test_feedback_on_shipped_work_commits_onto_the_open_branch(monkeypatch
         seen["text"] = text
 
     monkeypatch.setattr(tasks, "_resume_worker", spy)
-    out = await tasks.refine(tid, "rename the flag")
+    out = await tasks.refine(tid, "rename the flag and push it to the PR")
     await asyncio.sleep(0)
     assert "already pushed" in seen["text"]
     assert "open PR" in out
@@ -280,7 +280,8 @@ async def test_walkthrough_notes_resume_the_task_though_they_read_like_review(mo
             "1. A.java:5 — add a comment explaining the retry")
     with pytest.raises(ValueError, match="not resumed"):
         await tasks.refine(tid, spec)
-    out = await tasks.refine(tid, spec, code_change=True)
+    # The walkthrough sends them as approved (app/walkthrough.py): his review notes.
+    out = await tasks.refine(tid, spec, code_change=True, approved_plan=True)
     await asyncio.sleep(0)
     assert "add a comment explaining the retry" in resumed["text"]
     assert "same session" in out

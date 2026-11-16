@@ -164,19 +164,21 @@ def test_quota_preserves_scope_and_production_baseline(world, monkeypatch):
     assert 'Production files changed' in store.get_task(t['id'])['error']
 
 
-def test_conditional_fix_is_not_authorized_until_failing_evidence(world):
+def test_a_reproduced_fix_builds_only_on_his_own_go(world):
     from app import go
     t, root, _ = world
-    reproduction.request(t['id'], 'Try to reproduce the issue; if confirmed go ahead and fix it')
-    assert not reproduction.fix_authorized(t['id'])
+    words = 'Try to reproduce the issue; if confirmed go ahead and fix it'
+    reproduction.request(t['id'], words)
+    go.on_spawn(t['id'], words)                       # his own go-ahead
+    assert go.no_ask(t['id'], 'Change the failing predicate') == '', "not reproduced yet"
     saved = reproduction.state(t['id'])
     store.kv_set(f"reproduction:{t['id']}", json.dumps({**saved, 'state': 'confirmed'}))
-    assert reproduction.fix_authorized(t['id'])
-    assert 'reproduction test failed' in go.no_ask(t['id'], 'Change the failing predicate')
-    reproduction.request(t['id'], 'Reproduce the issue first. Do not fix it yet')
-    saved = reproduction.state(t['id'])
-    store.kv_set(f"reproduction:{t['id']}", json.dumps({**saved, 'state': 'confirmed'}))
-    assert not reproduction.fix_authorized(t['id'])
+    assert go.no_ask(t['id'], 'Change the failing predicate') == 'as you said'
+    other = store.create_task('Bug', 'code', 'p', None)
+    reproduction.request(other['id'], 'Replicate the issue and fix it')   # no go: waits
+    saved = reproduction.state(other['id'])
+    store.kv_set(f"reproduction:{other['id']}", json.dumps({**saved, 'state': 'confirmed'}))
+    assert go.no_ask(other['id'], 'Change the failing predicate') == ''
 
 
 def test_owner_endpoint_saves_paused_instruction_worker_cannot(world, monkeypatch):

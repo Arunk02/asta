@@ -345,6 +345,12 @@ async def implement(state: JobState) -> dict:
     if repos:
         await _prepare_repos(tid, t, repos)
     said = ((state.get("answer") or {}).get("text") or "PLAN APPROVED").strip()
+    from app import reproduction
+    ev = reproduction.state(tid).get("evidence") or {}
+    if reproduction.state(tid).get("state") == "confirmed" and ev.get("command"):
+        # The fix is done when the test that reproduced the bug passes.
+        said += (f"\n\nThe reproduction test must pass after the fix: run `{ev['command']}` "
+                 "and report its result, with the scoped tests around it.")
     body = task_spec.preamble(tid) + said
     ex = tasks._resolve_executor(tid)
     text, out = await _leg(

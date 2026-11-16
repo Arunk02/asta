@@ -13,7 +13,7 @@ categories:
     - {id: code-plan-gate, scenario: every-code-task-stops-for-approval, outcome: "A code task produces a plan and stops at the approval gate; no implementation leg runs."}
     - {id: code-rules-travel, scenario: his-coding-rules-reach-a-code-task, outcome: "His coding rules appear in the prompt of the code task's brain."}
     - {id: code-small-is-cheap, scenario: a-one-file-change-never-runs-at-max, outcome: "A one-line fix plans at T2 and implements at a cheap tier, never max effort."}
-    - {id: code-one-file-goes, scenario: a-one-file-plan-is-shown-and-goes-ahead, outcome: "A one-file plan is shown on his phone and starts without a second approval."}
+    - {id: code-one-file-goes, scenario: a-one-file-plan-is-shown-and-goes-ahead, outcome: "A one-file plan he said go on is shown on his phone and starts without a second approval."}
     - {id: code-two-repo-waits, scenario: a-two-repo-plan-still-waits-for-him, outcome: "A plan touching two repos waits for his approval."}
     - {id: code-plan-not-done, scenario: plan-announced-as-done, outcome: "A plan that says it needs his go-ahead is recorded as a plan, not as a finished task."}
     - {id: code-red-check-fixed, scenario: a-red-check-is-fixed-not-shipped, outcome: "A failing check loops back to a fix; the task is done only after it passes."}

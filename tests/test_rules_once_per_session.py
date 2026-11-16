@@ -72,3 +72,32 @@ def test_the_build_rules_are_the_full_rules_minus_the_planning_ones():
 
 def test_the_first_prompt_no_longer_carries_them(full_task):
     assert "Boot 0 efficiency" not in tasks.first_code_prompt(full_task, store.get_task(full_task))
+
+
+# --- open work and PRs: on a session's first turn, then only on change ---------
+
+def test_unchanged_open_work_is_not_resent_to_the_same_session(monkeypatch):
+    from app import claude_cli, copilot_cli
+    monkeypatch.setenv("ASTA_CLI_MCP", "1")
+    monkeypatch.setattr(copilot_cli, "open_work", lambda: "OPEN-WORK-BLOCK v1")
+    monkeypatch.setattr(copilot_cli, "_his_prs", lambda *a, **k: "PR-BLOCK v1")
+    conv = store.create_conversation(model="claude_cli", workspace=None)
+    msg = lambda cmd: cmd[cmd.index("-p") + 1]
+    first = msg(claude_cli._build_cmd(conv, "status of task 7 please, and fix it"))
+    assert "OPEN-WORK-BLOCK v1" in first and "PR-BLOCK v1" in first
+    second = msg(claude_cli._build_cmd(conv, "and the other one — fix it too"))
+    assert "OPEN-WORK-BLOCK" not in second and "PR-BLOCK" not in second
+    monkeypatch.setattr(copilot_cli, "open_work", lambda: "OPEN-WORK-BLOCK v2")
+    third = msg(claude_cli._build_cmd(conv, "anything new? fix it"))
+    assert "OPEN-WORK-BLOCK v2" in third and "PR-BLOCK" not in third
+    store.kv_set(f"claude_session:{conv['id']}", "")                 # session retired
+    fresh = msg(claude_cli._build_cmd(conv, "go on, fix it"))
+    assert "OPEN-WORK-BLOCK v2" in fresh and "PR-BLOCK v1" in fresh
+
+
+def test_a_side_read_never_marks_a_block_as_sent(monkeypatch):
+    from app import copilot_cli
+    monkeypatch.setattr(copilot_cli, "open_work", lambda: "OPEN-WORK-BLOCK v1")
+    cid = store.create_conversation(model="claude_cli", workspace=None)["id"]
+    assert "OPEN-WORK-BLOCK" in copilot_cli.turn_context("hi", cid, fresh=True, remember=False)
+    assert "OPEN-WORK-BLOCK" in copilot_cli.turn_context("hi", cid, fresh=False, remember=True)

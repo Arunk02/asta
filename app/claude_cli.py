@@ -417,7 +417,8 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     umsg = f"{copilot_cli.now_line()}\n{user_text}"
     # Same block the Copilot path adds, from the same function: who he means, and
     # what his documents say about what he asked.
-    ctx = copilot_cli.turn_context(ranking_text, conv.get("id", ""))
+    ctx = copilot_cli.turn_context(ranking_text, conv.get("id", ""), fresh=is_new,
+                                   remember=not light)
     if ctx:
         umsg = f"{ctx}\n\n{umsg}"
     if prefetched:

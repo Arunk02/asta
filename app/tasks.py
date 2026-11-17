@@ -1575,7 +1575,9 @@ def learn_from_stop(task_id: int, t: dict, status: str, why: str = "") -> None:
     Fire-and-forget, like every other extraction: he has already moved on, and a
     slow distillation must not hold up the cancel he just asked for.
     """
-    from . import learn
+    from . import learn, rehearsal
+    if rehearsal.is_rehearsal(task_id):
+        return
     if not learn.should_extract(_rounds(task_id), _escalated(task_id), status):
         return
     asked = (t.get("prompt") or "")[:2000]
@@ -1811,7 +1813,9 @@ def _audit_note(task_id: int) -> str:
     and, when a run was wasteful, appends a one-line flag to the notification so
     it's visible without asking. Never lets an audit failure break completion."""
     try:
-        from . import token_audit, skill_evolution
+        from . import rehearsal, token_audit, skill_evolution
+        if rehearsal.is_rehearsal(task_id):
+            return ""
         rep = token_audit.audit_task(task_id)
         if not rep:
             return ""
@@ -2608,7 +2612,9 @@ def _learn_from(task_id: int, title: str, result: str, status: str = "done") -> 
     Fire-and-forget on purpose: the task is finished and Arun has been told. A
     slow or failing extraction must never delay the result or fail the work.
     """
-    from . import learn
+    from . import learn, rehearsal
+    if rehearsal.is_rehearsal(task_id):
+        return
     # Recorded for every finished task, not just the ones worth distilling —
     # "did the work land" is the measurement, and it needs the boring runs too.
     store.record_outcome("task", status, subject=str(task_id),
@@ -3997,7 +4003,8 @@ async def _with_later_reports(task_id: int, t: dict, result: str) -> str:
 
 
 async def _worker(task_id: int) -> None:
-    from . import notify
+    from . import notify, rehearsal
+    rehearsal.enter(task_id)
     t = store.get_task(task_id)
     if not t:
         return
@@ -4266,7 +4273,8 @@ def record_answer(task_id: int, t: dict, text: str) -> tuple[bool, str]:
 
 
 async def _resume_worker(task_id: int, text: str, approved: bool = False) -> None:
-    from . import notify
+    from . import notify, rehearsal
+    rehearsal.enter(task_id)
     t = store.get_task(task_id)
     if not t:
         return
@@ -5689,7 +5697,8 @@ async def propose_change(task_id: int, feedback: str) -> str:
 
 
 async def _propose_worker(task_id: int, prompt: str) -> None:
-    from . import notify
+    from . import notify, rehearsal
+    rehearsal.enter(task_id)
     t = store.get_task(task_id) or {}
     try:
         async with _ws_lock(t.get("workspace")):

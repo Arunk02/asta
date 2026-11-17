@@ -21,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-ASTA = Path(__file__).resolve().parents[1]
+ASTA = Path(os.environ.get("ASTA_HOME") or Path(__file__).resolve().parents[1])
 SCRATCH = Path.home() / ".asta-rehearsal" / "ws"
 WORKSPACE = "e2e"
 
@@ -49,17 +49,28 @@ def traces(cid):
 
 
 def _scratch_repo() -> None:
+    """A tiny repo with a local bare `origin`, like every real workspace repo:
+    Asta measures a task's commits against origin/main, and without one a real
+    commit reads as "no changes" (17 Nov, rehearsal #647)."""
     repo = SCRATCH / "calc"
-    if (repo / ".git").exists():
-        return
-    repo.mkdir(parents=True, exist_ok=True)
-    (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
-    (repo / "test_calc.py").write_text(
-        "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n")
-    for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
-                ["git", "-c", "user.name=rehearsal", "-c", "user.email=rehearsal@localhost",
-                 "commit", "-qm", "calc"]):
-        subprocess.run(cmd, cwd=repo, check=True)
+    if not (repo / ".git").exists():
+        repo.mkdir(parents=True, exist_ok=True)
+        (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+        (repo / "test_calc.py").write_text(
+            "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n")
+        for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."],
+                    ["git", "-c", "user.name=rehearsal", "-c", "user.email=rehearsal@localhost",
+                     "commit", "-qm", "calc"]):
+            subprocess.run(cmd, cwd=repo, check=True)
+    has_origin = subprocess.run(["git", "remote", "get-url", "origin"], cwd=repo,
+                                capture_output=True).returncode == 0
+    if not has_origin:
+        bare = SCRATCH.parent / "origin" / "calc.git"
+        if not bare.exists():
+            subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
 
 
 async def _turn(ws, cid, text):

@@ -65,8 +65,33 @@ def _chat(since: float) -> dict:
         starts = [r[0] for r in c.execute(
             "SELECT context_tokens FROM traces t WHERE created_at >= ? AND context_tokens > 0 "
             "AND id = (SELECT MIN(id) FROM traces WHERE conv_id = t.conv_id)", (since,))]
-    return {"count": row[0] or 0, "new": row[1] or 0, "cached": row[2] or 0, "out": row[3] or 0,
+        out_rows = c.execute("SELECT SUM(output_tokens) FROM usage WHERE created_at >= ?",
+                             (max(since, OUTPUT_MEASURED_FROM),)).fetchone()
+        costs = c.execute("SELECT conv_id, cost_usd FROM traces WHERE created_at >= ? "
+                          "ORDER BY id", (since,)).fetchall()
+    return {"count": row[0] or 0, "new": row[1] or 0, "cached": row[2] or 0,
+            "out": out_rows[0] or 0, "out_partial": since < OUTPUT_MEASURED_FROM,
+            "usd": turn_costs(costs), "turns": len(costs),
             "start": int(statistics.median(starts)) if starts else 0}
+
+
+#: Chat output tokens are measured from here (asta PR: settled message copy);
+#: before it ~16 a turn were recorded whatever the answer's length.
+OUTPUT_MEASURED_FROM = 1794940200.0          # 2026-11-18 00:00 IST
+
+
+def turn_costs(rows) -> float:
+    """Total chat $ from (conv_id, cost_usd) rows in order. The CLI reports a
+    SESSION's running total on each turn, so a turn costs the difference from
+    the conversation's previous row; a drop means a new session began."""
+    last: dict[str, float] = {}
+    total = 0.0
+    for conv, usd in rows:
+        usd = float(usd or 0)
+        prev = last.get(conv)
+        total += usd - prev if prev is not None and usd >= prev else usd
+        last[conv] = usd
+    return total
 
 
 def _background(since: float) -> list[tuple[str, int, int]]:
@@ -97,10 +122,8 @@ def table(now: float | None = None) -> str:
     lines = [f"{'what':<14}{'runs':>6}{'new in':>9}{'cached':>9}{'out':>8}"]
     for kind, k in sorted(kinds.items(), key=lambda kv: -kv[1]["new"]):
         lines.append(f"{kind:<14}{k['n']:>6}{_k(k['new']):>9}{_k(k['cached']):>9}{_k(k['out']):>8}")
-    # Chat output is not measured: the CLI stream reports the opening count only
-    # (~16 tokens a turn in both usage and traces, 17 Nov). Shown as such.
     lines.append(f"{'chat':<14}{chat['count']:>6}{_k(chat['new']):>9}{_k(chat['cached']):>9}"
-                 f"{'n/a':>8}")
+                 f"{_k(chat['out']) + ('*' if chat['out_partial'] else ''):>8}")
     if bg:
         lines.append(f"{'background':<14}{sum(n for _, n, _ in bg):>6}"
                      f"{_k(sum(t for *_, t in bg)):>9}")
@@ -115,6 +138,10 @@ def table(now: float | None = None) -> str:
         out.append("Background: " + ", ".join(f"{p} {_k(t)} ({n})" for p, n, t in bg[:3]))
     out.append(f"Answers: {a.get('presented', 0)} shown · {a.get('he answered', 0)} you answered "
                f"first · {a.get('parked', 0)} parked · {a.get('retired', 0)} retired unsent")
+    if chat["turns"]:
+        out.append(f"Chat: {chat['turns']} turns, ${chat['usd']:.2f} at API prices "
+                   f"(${chat['usd'] / chat['turns']:.3f} a turn; your plan is a subscription)."
+                   + (" *output measured from 18 Nov." if chat["out_partial"] else ""))
     if chat["start"]:
         out.append(f"Chat starts at {_k(chat['start'])} context (median).")
     return "\n".join(out)

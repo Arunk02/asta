@@ -379,8 +379,17 @@ def _blocked(cid: str, now: float | None = None) -> bool:
     from . import loop, offers
     now = time.time() if now is None else now
     staged = loop.awaiting(cid)
+    if staged and staged.get("type") != "answer":
+        # A draft of HIS (a send he asked for) holds the line while it is fresh.
+        # 13 Nov: one he never answered held every colleague answer for 3 days —
+        # the check looked for "type" while his drafts carry "kind" only.
+        at = float(staged.get("_at") or 0) or loop.staged_at(cid)
+        if now - at < PARK_SECONDS or not _load_queue():
+            return True
+        _set_aside(cid, staged)
+        staged = None
     if staged:
-        if staged.get("type") != "answer" or now - float(staged.get("_shown") or 0) < PARK_SECONDS:
+        if now - float(staged.get("_shown") or 0) < PARK_SECONDS:
             return True
         if not _load_queue():
             # Nothing else is waiting: parking would only re-show the SAME
@@ -393,7 +402,52 @@ def _blocked(cid: str, now: float | None = None) -> bool:
     return o is not None and now - float(o.created or 0) < PARK_SECONDS
 
 
+def _set_aside(cid: str, draft: dict) -> None:
+    """His own unanswered draft makes room for a waiting answer. Nothing is
+    sent; the wording goes into his conversation so "send it to X" finds it."""
+    from . import loop
+    loop.clear_awaiting(cid)
+    to = draft.get("to") or "?"
+    what = (draft.get("what") or "").strip()
+    store.add_ui_message(cid, "assistant",
+                         f"Set aside, NOT sent — your draft to {to}:\n\n{what}\n\n"
+                         "Say \"send it to them\" if you still want it to go.",
+                         {"via": "answer", "channel": "whatsapp"})
+    store.record_outcome("answer", "draft set aside", subject=to[:80],
+                         detail=what[:200])
+
+
+#: The queue made no progress for this long while something waited: delivery is stuck.
+STUCK_SECONDS = 30 * 60
+_LAST_SHOWN = "answers_last_shown"
+
+
+def _note_shown() -> None:
+    store.kv_set(_LAST_SHOWN, str(time.time()))
+
+
+def stuck(now: float | None = None) -> str:
+    """Why waiting answers are not reaching him, or "" when the queue moves.
+
+    A staged draft held 13 answers from 13 to 17 Nov and nothing said so."""
+    q = _load_queue()
+    if not q:
+        return ""
+    now = time.time() if now is None else now
+    queued = min(float(it.get("_queued") or it.get("_at") or now) for it in q)
+    try:
+        shown = float(store.kv_get(_LAST_SHOWN) or 0)
+    except ValueError:
+        shown = 0.0
+    idle = now - max(queued, shown)
+    if idle < STUCK_SECONDS:
+        return ""
+    return (f"{len(q)} colleague answer(s) waiting, nothing shown for {int(idle // 60)} min "
+            "— the answer queue is not draining")
+
+
 def _park(item: dict, now: float) -> None:
+    item = {**item, "_queued": now}
     q = _load_queue()
     q.append(item)
     store.kv_set(_QUEUE, json.dumps(q))
@@ -403,6 +457,7 @@ def _park(item: dict, now: float) -> None:
 
 def _enqueue(item: dict) -> None:
     item.setdefault("_at", time.time())
+    item["_queued"] = time.time()
     q = _load_queue()
     q.append(item)
     store.kv_set(_QUEUE, json.dumps(q))
@@ -464,6 +519,7 @@ async def _show_plan(item: dict) -> None:
                            "who": item.get("who"), "source_text": item.get("source_text")}):
         _record_rejected_origin(item)
         return
+    _note_shown()
     who, need = item["who"], item["need"]
     offers.propose(
         subject=f"🛠 {who} asks for a code change",
@@ -495,6 +551,7 @@ async def _show(cid: str, intent: dict) -> None:
     intent = {**intent, "type": "answer", "_shown": time.time(),
               "_showings": int(intent.get("_showings") or 0) + 1}
     loop.stage(cid, intent)
+    _note_shown()
     waiting = len(_load_queue())
     note = intent.get("note", "")
     if intent["_showings"] > 1:

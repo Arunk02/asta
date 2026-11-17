@@ -81,6 +81,9 @@ def attempt(task_id: int, executor: str, cwd: str, session_id: str, *,
         row['finished_at'] = time.time()
         row['usage'], row['usage_state'] = _delta(before, after)
         store.kv_set(key, json.dumps(row))
+        with contextlib.suppress(Exception):
+            from . import spend_alert
+            spend_alert.after_leg(task_id)
 
 
 def report(task_id: int) -> dict:

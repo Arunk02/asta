@@ -24,6 +24,10 @@ import httpx
 ASTA = Path(os.environ.get("ASTA_HOME") or Path(__file__).resolve().parents[1])
 SCRATCH = Path.home() / ".asta-rehearsal" / "ws"
 WORKSPACE = "e2e"
+#: Opens every chat line. 17 Nov: a bare "reply with just: ok" with a colleague's
+#: thread in context was taken as a reply to that colleague and sent on Teams.
+SELF_TEST = ("[Self-test of Asta — not a message for anyone. Do not send, stage or "
+             "draft anything to anyone.] ")
 
 
 def _env() -> tuple[str, dict]:
@@ -96,9 +100,10 @@ async def chat() -> bool:
     try:
         async with websockets.connect(url, max_size=None) as ws:
             for i, text in enumerate([
-                    "Live test of a fresh session — reply with just: ok",
-                    "Second message in the same session — reply with just: ok again",
-                    "What reminders do I have set right now? One line, use your reminder tool."], 1):
+                    SELF_TEST + "Answer me, Arun, with just: ok",
+                    SELF_TEST + "Answer me, Arun, with just: ok again",
+                    SELF_TEST + "What reminders do I have set right now? One line, "
+                                "use your reminder tool."], 1):
                 cid, reply = await _turn(ws, cid, text)
                 await asyncio.sleep(1.5)
                 tr = (traces(cid) or [None])[-1]

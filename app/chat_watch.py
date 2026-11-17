@@ -1565,6 +1565,31 @@ STILL_WRITING = "still writing — waiting for the rest"
 #: However long they keep typing, this is the longest a conversation is held.
 MAX_HOLD_SECONDS = 3 * 60
 
+#: He wrote in this chat this recently: he is in the exchange himself, and a new
+#: ask there waits HE_HOLD_SECONDS for HIS reply before a run is spent on it.
+#: 3–17 Nov: 28 investigations were answered by him first (median 4.9 min after
+#: the ask, 18 of them while he was already writing in that chat).
+HE_ACTIVE_SECONDS = 10 * 60
+HE_HOLD_SECONDS = 5 * 60
+HE_IS_IN_IT = "he is in this conversation — waiting for his own reply"
+
+
+def his_turn_first(c: dict, now: float) -> bool:
+    """Should this ask wait for his own reply before a run is spent on it?"""
+    last = float(c.get("sent_at") or 0)
+    mins = c.get("arun_minutes_ago")
+    return bool(last and mins is not None and mins * 60 < HE_ACTIVE_SECONDS
+                and 0 <= now - last < HE_HOLD_SECONDS and not c.get("handled_by_him"))
+
+
+def hold_for_him(c: dict) -> None:
+    """Re-read HE_HOLD_SECONDS after their newest message: by then his own reply
+    settles it (handled_by_him), or it is worked."""
+    since = float(c["sent_at"]) + (HE_HOLD_SECONDS - HOLD_SECONDS)
+    hold(c["chat"], c["raw"], HE_IS_IN_IT, since, wanted=c.get("wanted", False))
+    store.record_outcome("chatwatch", "held", subject=c["chat"][:80],
+                         detail=f"{HE_IS_IN_IT} — {(c.get('last') or '')[:100]}")
+
 
 def _wait_reason(c: dict, now: float) -> str:
     """Why this conversation should wait for the next message, or ''."""
@@ -2165,6 +2190,11 @@ async def _sweep_threads(notify=None, only: list[str] | None = None) -> list[dic
         # 3. Everything else is worked — a call request too: if there is
         # something to check (the defect, the PR), it is checked first, and the
         # final message carries where it stands and the reply for them.
+        # …unless he is in this conversation right now: his own reply comes
+        # first more often than not, and then the run was for nothing.
+        if not corrected and state != "urgent" and his_turn_first(c, now):
+            hold_for_him(c)
+            continue
         exchange = (source_exchange[-8:] + c["conversation"][-5:]) \
             if corrected or reference else c["conversation"][-10:]
         recent = "\n".join(line[:300] for line in exchange)

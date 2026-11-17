@@ -630,7 +630,9 @@ def test_recent_exchange_reaches_worker_even_when_thread_summary_is_old(rail):
     chat = "Vinish Kumar"
     store.save_teams_messages([{"key": "recent-pr", "chat": chat, "sender": "Arunkumar K",
                                 "text": "https://github.com/org/booking/pull/1466",
-                                "sent_at": now - 90, "stamp": ""}])
+                                # Older than HE_ACTIVE_SECONDS: he is not mid-exchange,
+                                # so the ask is worked now rather than held for him.
+                                "sent_at": now - 11 * 60, "stamp": ""}])
     from app import threads
     threads.open("teams", chat, chat=chat, now=now - 3600)
     threads.update("teams:Vinish Kumar", summary="Previously discussed PR 1257")
@@ -857,3 +859,21 @@ def test_a_message_held_while_they_type_still_reaches_his_phone(rail, monkeypatc
     assert not chat_watch.held("Ravi Menon")
     assert rail.pushes and rail.pushes[0]["urgency"] == "direct"
     assert "PR 42" in rail.pushes[0]["text"]
+
+
+def test_an_ask_while_he_is_mid_exchange_waits_for_his_reply(rail):
+    """He wrote in this chat a minute ago: the ask is held for his own reply,
+    not investigated at once (17 Nov: 18 runs were answered by him first)."""
+    from app import chat_watch
+    now = time.time()
+    chat = "Vinish Kumar"
+    store.save_teams_messages([{"key": "his-line", "chat": chat, "sender": "Arunkumar K",
+                                "text": "checking the build now", "sent_at": now - 60,
+                                "stamp": ""}])
+    rail.rows[chat] = [_msg(chat, "Can you check the PR build?", now)]
+    rail.script["teams:Vinish Kumar"] = {
+        "state": "ask", "need": "Check the build", "closing_confidence": 0.1,
+        "summary": "Vinish asks about a build", "entities": [], "work": "check"}
+    rail.sweep()
+    assert rail.asked == []
+    assert chat_watch.held(chat).get("why") == chat_watch.HE_IS_IN_IT

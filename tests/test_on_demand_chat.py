@@ -219,3 +219,20 @@ def test_a_no_tools_call_carries_only_asta_s_short_prompt(monkeypatch):
     assert _flag(cmd, "--system-prompt") == claude_cli.READER_PROMPT
     assert _flag(cmd, "--setting-sources") == ""
     assert "--strict-mcp-config" in cmd
+
+
+# --- big outputs load later (17 Nov) ------------------------------------------
+
+def test_every_command_saves_big_bash_output_to_a_file(conv, monkeypatch):
+    """A Bash result over BASH_INLINE_CHARS becomes a preview plus a path."""
+    import json as _json
+    assert _flag(claude_cli._build_cmd(conv, "hi"), "--settings") == claude_cli.OUTPUT_SETTINGS
+    assert _json.loads(claude_cli.OUTPUT_SETTINGS) == {"bashOutputMaxChars": 8000}
+    assert _flag(_leg(monkeypatch, on=True), "--settings") == claude_cli.OUTPUT_SETTINGS
+
+
+def test_mcp_results_have_a_lower_ceiling_unless_he_set_one(monkeypatch):
+    monkeypatch.delenv("MAX_MCP_OUTPUT_TOKENS", raising=False)
+    assert claude_cli._subprocess_env()["MAX_MCP_OUTPUT_TOKENS"] == "8000"
+    monkeypatch.setenv("MAX_MCP_OUTPUT_TOKENS", "12000")
+    assert claude_cli._subprocess_env()["MAX_MCP_OUTPUT_TOKENS"] == "12000"

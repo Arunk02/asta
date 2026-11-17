@@ -68,6 +68,9 @@ def _subprocess_env() -> dict:
     # `remember` tool and his guardrails file; nothing else. Measured: with this
     # set, the session reports no memory directory; without it, it has one.
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    # A runaway MCP result (a wide log pull) stops at ~8k tokens instead of the
+    # CLI's 25k default. Asta's own tools already answer in a few thousand.
+    env.setdefault("MAX_MCP_OUTPUT_TOKENS", str(MCP_OUTPUT_TOKENS))
     # Tool search stays ON. Asta's own tools are kept in view per tool instead
     # (mcp_server.tool_meta marks them always-loaded), so the 14 Oct failure —
     # the debug kit hidden behind a search — cannot come back. Switching tool
@@ -144,6 +147,18 @@ CODER_PROMPT = (
     "small verified steps: read the code, make the change, run the tests, fix what fails. "
     "Keep changes surgical and in the existing style. Never push, never open a PR. "
     "Finish with a short summary of what changed and the test result.")
+
+
+#: Load later, not up front: a Bash result over this many characters is saved to
+#: a file and the model gets a short preview plus the path, which it opens only if
+#: it needs more (Claude Code's bashOutputMaxChars; default 30,000). 17 Nov:
+#: investigations carried 12–15k-character Bash results on every later call;
+#: one phone chat went 14k → 77k in seven turns on tool output. Measured with
+#: tools detached: a 22k result → a 2.3k preview.
+BASH_INLINE_CHARS = 8000
+OUTPUT_SETTINGS = '{"bashOutputMaxChars": %d}' % BASH_INLINE_CHARS
+#: An MCP result's ceiling in tokens (Claude Code's default is 25,000).
+MCP_OUTPUT_TOKENS = 8000
 
 
 #: The whole system prompt of a no-tools call (tools_off): a reader, a rubric, a
@@ -223,7 +238,7 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
     # copilot_cli.now_line for the Monday this is here to stop repeating.
     from . import copilot_cli
     prompt = f"{copilot_cli.now_line()}\n{prompt}"
-    cmd = ["claude", "-p", prompt, NO_SKILLS,
+    cmd = ["claude", "-p", prompt, NO_SKILLS, "--settings", OUTPUT_SETTINGS,
            # Parity with the copilot path's --allow-all-tools: the pipeline
            # must run builds/tests unattended. Workspace repos only.
            "--permission-mode", "default" if tools_off else "bypassPermissions"]
@@ -500,7 +515,8 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         # On demand, Asta's text IS the system prompt: Claude Code's own (~4.4k,
         # written for coding) and his CLAUDE.md files stay out of a chat.
         "--system-prompt" if od else "--append-system-prompt", system,
-        "-p", umsg, NO_SKILLS, *([SAME_PREFIX] if lean_flags() and not od else []),
+        "-p", umsg, NO_SKILLS, "--settings", OUTPUT_SETTINGS,
+        *([SAME_PREFIX] if lean_flags() and not od else []),
         *(["--setting-sources", "", "--plugin-dir", str(ON_DEMAND_CHAT_PLUGIN)] if od else []),
         "--output-format", "stream-json",
         "--include-partial-messages",

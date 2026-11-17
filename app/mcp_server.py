@@ -135,8 +135,10 @@ def tool_meta(name: str) -> dict | None:
         # ASTA_MCP_PIN, when the caller set it, names the few tools this kind
         # of task uses on most legs; the rest of its scope is found by search
         # (17 Nov: all 31 were pinned, ~5k tokens on every leg of every task).
-        pin = os.environ.get("ASTA_MCP_PIN")
-        if pin is not None and name not in {p for p in pin.split(",") if p}:
+        # Empty or unset = every tool pinned, as before (an empty value can be
+        # inherited from .env and must never unpin the debug kit).
+        pin = {p.strip() for p in os.environ.get("ASTA_MCP_PIN", "").split(",") if p.strip()}
+        if pin and name not in pin:
             return None
         return {"anthropic/alwaysLoad": True}
     if defer_tail() or name not in HOT:

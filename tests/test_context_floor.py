@@ -187,8 +187,8 @@ def test_a_task_pins_only_what_its_kind_uses_and_searches_the_rest(monkeypatch):
     monkeypatch.setenv("ASTA_MCP_PIN", "grafana_logs,log_lines")
     assert mcp_server.tool_meta("grafana_logs") == {"anthropic/alwaysLoad": True}
     assert mcp_server.tool_meta("teams_history") is None
-    monkeypatch.setenv("ASTA_MCP_PIN", "")
-    assert mcp_server.tool_meta("grafana_logs") is None
+    monkeypatch.setenv("ASTA_MCP_PIN", "")              # inherited empty from .env
+    assert mcp_server.tool_meta("teams_history") == {"anthropic/alwaysLoad": True}
     monkeypatch.delenv("ASTA_MCP_PIN")
     assert mcp_server.tool_meta("teams_history") == {"anthropic/alwaysLoad": True}
 

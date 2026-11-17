@@ -62,6 +62,10 @@ async def wa_done(ok: bool = True) -> bool:
 async def wa_document(path: str, caption: str = "") -> bool:
     """Send a FILE to his phone. False when the bridge is down or unpaired."""
     import httpx
+    from . import rehearsal
+    if rehearsal.active():
+        store.add_notification(f"(rehearsal, not sent to phone) file {path}: {caption}", "info")
+        return True
     try:
         async with httpx.AsyncClient(timeout=WA_SEND_TIMEOUT + 60) as c:
             r = await c.post(f"{bridge_url()}/send-document",
@@ -409,6 +413,11 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     no one was looking at.
     """
     store.add_notification(text, level)  # the bell always gets everything
+    from . import rehearsal
+    if rehearsal.active():
+        # A live test's pushes are the test's, not news for his phone.
+        return {"bell": True, "held": False, "rehearsal": True,
+                "whatsapp": False, "telegram": False}
     keys = tuple(keys or ()) + ((key,) if key else ())
     if not asked and already_on_phone(text):
         # A reminder he set may ring the same words again; nothing else may.

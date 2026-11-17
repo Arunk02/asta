@@ -75,9 +75,10 @@ def _superseded(task_id: int, run: int) -> bool:
 
 async def _drive(task_id: int, inp) -> None:
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-    from app import notify, tasks
+    from app import notify, rehearsal, tasks
     from .code_graph import Stopped, build
     import contextlib
+    rehearsal.enter(task_id)
     run = _begin_run(task_id)
     with contextlib.suppress(Exception):
         await tasks.ensure_checkout(task_id)

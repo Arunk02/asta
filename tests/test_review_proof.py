@@ -304,3 +304,32 @@ def test_a_light_pr_is_checked_on_the_t2_model_not_opus(monkeypatch):
     asyncio.run(review_proof.check([FINDINGS[0]], "request_changes", LIGHT, "ws", None))
     assert seen["model"] == "sonnet" and seen["effort"] == "medium" and seen["plan_only"] is True
     assert review_proof.verify_model("logic") == ("opus", "high")
+
+
+def test_without_a_checkout_the_check_answers_from_what_it_is_given(monkeypatch, tmp_path):
+    """12 Nov: with no clone, the check ran in Asta's folder and hunted for the code
+    with `ls ~` and `find` — 16 to 22 calls each. Now: no tools, judge from the code."""
+    from app import claude_cli
+    seen = []
+
+    async def one_shot(prompt, **kw):
+        seen.append(dict(kw, prompt=prompt))
+        return json.dumps([{"n": 1, "verdict": "proven", "proof": "x"}])
+
+    async def code(meta, findings, around=60):
+        return "### a/DomainHelper.java\n336: legs.stream().findFirst()"
+
+    async def nothing(meta):
+        return ""
+    monkeypatch.setattr(claude_cli, "one_shot", one_shot)
+    monkeypatch.setattr(review_proof, "_code_at_head", code)
+    monkeypatch.setattr(review_proof, "real_input", nothing)
+    monkeypatch.setattr(review_proof, "domain_docs", lambda *a, **k: "")
+    asyncio.run(review_proof.check([FINDINGS[0]], "comment", LOGIC, "ws", None))
+    assert seen[-1]["tools_off"] is True and seen[-1]["cwd"] is None
+    assert "No checkout of this repository" in seen[-1]["prompt"]
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    asyncio.run(review_proof.check([FINDINGS[0]], "comment", LOGIC, "ws", repo))
+    assert seen[-1]["tools_off"] is False and seen[-1]["cwd"] == str(repo)
+    assert "No checkout" not in seen[-1]["prompt"]

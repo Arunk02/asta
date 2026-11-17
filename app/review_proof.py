@@ -389,10 +389,18 @@ async def check(findings: list[dict], action: str, meta: dict, workspace: str,
         data=("REAL DATA (read-only, from Temporal):\n" + untrusted.wrap(data, "real data") + "\n\n")
         if data else "",
         diff=untrusted.wrap(review._prioritise_diff(meta.get("diff") or "")[:15000], "diff"))
+    checkout = repo_dir if repo_dir and repo_dir.exists() else None
+    if not checkout:
+        # No clone of this repo: the call ran in Asta's own folder and went looking
+        # for the code with `ls ~` and `find` — 16 to 22 calls, ~180k each (12 Nov).
+        prompt += ("\n\nNo checkout of this repository is available and you have no tools: "
+                   "judge only from the code and diff above. A point they cannot settle "
+                   "is unproven.")
     try:
         said = await claude_cli.one_shot(
-            prompt, cwd=str(repo_dir) if repo_dir and repo_dir.exists() else None, timeout=480,
-            effort=effort, plan_only=True, model=model, purpose="review-proof")
+            prompt, cwd=str(checkout) if checkout else None, timeout=480,
+            effort=effort, plan_only=True, model=model, purpose="review-proof",
+            tools_off=not checkout)
     except Exception:                                             # noqa: BLE001
         said = ""
     verdicts = _verdicts(said, len(findings))

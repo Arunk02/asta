@@ -221,6 +221,11 @@ async def checks() -> dict[str, str]:
     # himself next week without knowing why. Said here, not discovered there.
     problems.update(guardrails.problems())
 
+    # Colleague answers that never reach him look exactly like a quiet day.
+    from . import answers
+    if (why := answers.stuck()):
+        problems["answers"] = why
+
     if not copilot_cli.available():
         problems["copilot"] = "Copilot CLI missing/unauthenticated (run: copilot login)"
     if not memory.local_llm_model():

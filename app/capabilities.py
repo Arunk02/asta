@@ -79,7 +79,7 @@ class Capability:
 _TABLE: tuple[Capability, ...] = (
     # --- memory -------------------------------------------------------------
     Capability("remember", "memory",
-               http='POST /api/memory {"title":"…","fact":"…","kind":"fact","workspace":"","source":""}',
+               http='POST /api/memory {"title":"…","fact":"…","kind":"fact","workspace":"","source":"","distinct":false}',
                note="Durable memory across ALL conversations. kind: fact | preference "
                     "| gotcha | fix. Include workspace and evidence source for project facts."),
     Capability("search_memory", "memory", http="GET /api/memory/search?q={query}&workspace={workspace}"),

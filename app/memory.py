@@ -384,10 +384,61 @@ def learn_from_correction(conv_id: str, user_text: str) -> str | None:
 
 # --- write path --------------------------------------------------------------
 
+#: Kinds a note can clash with — the curated memory, not session digests.
+CURATED = ("fact", "preference", "gotcha", "fix")
+#: Similar enough to be the same note (local nomic embedder). Measured 17 Nov on
+#: his 110 notes: unrelated pairs median 0.60; ≥0.88 were the same topic — three
+#: copies of the group-chat rule, two places "topic refresh" lives.
+NEAR = 0.88
+
+
+def _plain(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def _curated() -> list[dict]:
+    return [m for m in list_memories() if m["type"] in CURATED and not m.get("superseded_by")]
+
+
+def same_note(title: str, fact: str) -> str:
+    """The path of a live note with this exact title and text, or "".
+
+    17 Nov: "Correction: why do you always stop?" was on file 12 times, "Arun did
+    NOT approve sending the draft" 11 — each a new file saying the same thing."""
+    want_t, want_f = _plain(title), _plain(fact)
+    for m in _curated():
+        if _plain(m["title"]) == want_t and \
+                _plain(_body(read_memory_file(m["path"]) or "")) == want_f:
+            return m["path"]
+    return ""
+
+
+def similar(title: str, fact: str, limit: int = 3) -> list[tuple[float, dict]]:
+    """Live notes at least NEAR in meaning to this one, closest first. Empty when
+    the local embedder is not running — nothing is guessed."""
+    notes = _curated()
+    if not notes:
+        return []
+    texts = [f"{title} {fact[:300]}"] + [
+        f"{m['title']} {_body(read_memory_file(m['path']) or '')[:300]}" for m in notes]
+    vecs = local_embed(texts)
+    if not vecs:
+        return []
+    scored = [(_cosine(vecs[0], v), m) for v, m in zip(vecs[1:], notes)]
+    return sorted([s for s in scored if s[0] >= NEAR], key=lambda s: -s[0])[:limit]
+
+
 def remember(title: str, fact: str, mtype: str = "fact", *, workspace: str = "",
              source: str = "", supersedes: str = "") -> str:
-    """Persist a durable fact. mtype: fact | preference | gotcha | fix."""
+    """Persist a durable fact. mtype: fact | preference | gotcha | fix.
+
+    The same title and text already on file is not written twice: its path is
+    returned instead."""
     ensure_dirs()
+    if not supersedes:
+        existing = same_note(title, fact)
+        if existing:
+            return existing
     slug = slugify(title)
     today = dt.date.today().isoformat()
     # Exclusive creation preserves earlier facts, including concurrent writers

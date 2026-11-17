@@ -63,6 +63,19 @@ def _isolated_db(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolated_memory(tmp_path, monkeypatch):
+    """Memory notes are files under the checkout. Unpatched, a test that saved
+    one wrote into the real memory folder of whichever checkout ran it — the
+    live one included (found 17 Nov). Tests that set their own still can."""
+    from app import memory
+    root = tmp_path / "memory"
+    for name, value in {"MEMORY_DIR": root, "FACTS_DIR": root / "facts",
+                        "EPISODES_DIR": root / "episodes", "INDEX_FILE": root / "MEMORY.md"}.items():
+        monkeypatch.setattr(memory, name, value)
+    yield
+
+
 #: Settings whose value depends on WHEN the suite runs, or on how this particular
 #: machine is configured. Same argument as the database above: a rule everybody has
 #: to remember is a rule that gets forgotten, and forgetting is silent.

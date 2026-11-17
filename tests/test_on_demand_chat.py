@@ -236,3 +236,27 @@ def test_mcp_results_have_a_lower_ceiling_unless_he_set_one(monkeypatch):
     assert claude_cli._subprocess_env()["MAX_MCP_OUTPUT_TOKENS"] == "8000"
     monkeypatch.setenv("MAX_MCP_OUTPUT_TOKENS", "12000")
     assert claude_cli._subprocess_env()["MAX_MCP_OUTPUT_TOKENS"] == "12000"
+def test_chat_lists_hand_written_playbooks_not_learned_lessons(conv, monkeypatch, tmp_path):
+    """17 Nov: 57 names rode every chat; chats loaded only code-work and debugging."""
+    monkeypatch.setenv("ASTA_ON_DEMAND", "1")
+    (tmp_path / "triage.md").write_text("---\nname: triage\ndescription: d\n---\nbody")
+    (tmp_path / "learned-lesson.md").write_text(
+        "---\nname: learned-lesson\ndescription: d\nsource: extracted\n---\nbody")
+    monkeypatch.setenv("ASTA_SKILL_PATHS", str(tmp_path))
+    system = _flag(claude_cli._build_cmd(conv, "hi"), "--system-prompt")
+    assert "triage" in system and "learned-lesson" not in system
+    from app import skills
+    assert skills.load("learned-lesson") == "body"       # still loadable by name
+
+
+def test_the_memory_index_keeps_facts_and_drops_session_digests():
+    from app import copilot_cli
+    index = ("# Asta Memory Index\n\n- [Grafana needs VPN](facts/g.md) — gotcha\n\n"
+             "## Recent sessions\n- [New chat](episodes/2026-07-23-new-chat.md) — 2026-07-23\n"
+             "- [Prefers short replies](facts/p.md) — preference\n")
+    out = copilot_cli.orientation(index)
+    assert "Grafana needs VPN" in out and "Prefers short replies" in out
+    assert "episodes/" not in out and "Recent sessions" not in out
+    long = "\n".join(f"- [fact {i}](facts/f{i}.md) — fact" for i in range(200))
+    cut = copilot_cli.orientation(long, limit=300)
+    assert len(cut) <= 300 and cut.splitlines()[-1].endswith("— fact")

@@ -209,3 +209,11 @@ def test_a_workspace_that_was_never_set_up_is_not_called_broken(monkeypatch):
     monkeypatch.setattr("app.workspace.available_workspaces", lambda: {"ghost": {}})
     monkeypatch.setattr("app.workspace.get", lambda n: None)
     assert health.stale_contexts() == {}
+
+
+def test_a_rehearsal_workspace_is_never_a_health_problem(monkeypatch):
+    """17 Nov: the live checker's "e2e" workspace was pushed as "never enriched"."""
+    monkeypatch.setattr("app.workspace.available_workspaces", lambda: {"e2e": {}})
+    monkeypatch.setattr("app.workspace.get",
+                        lambda n: type("W", (), {"exists": lambda self: True})())
+    assert health.stale_contexts() == {}

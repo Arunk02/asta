@@ -93,7 +93,10 @@ def stale_contexts(now: float | None = None) -> dict[str, float]:
         names = ws_mod.available_workspaces()
     except Exception:
         return out
+    from . import rehearsal
     for name in names:
+        if rehearsal.workspace_is(name):
+            continue        # a live test's scratch workspace has no context to keep
         days = refresh.stale_days(name, now)
         # "Never" is reported only once a workspace HAS context to be stale —
         # an unbootstrapped one is not broken, it is simply not set up yet.

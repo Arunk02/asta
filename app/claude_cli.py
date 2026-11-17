@@ -146,6 +146,17 @@ CODER_PROMPT = (
     "Finish with a short summary of what changed and the test result.")
 
 
+#: The whole system prompt of a no-tools call (tools_off): a reader, a rubric, a
+#: digest — every one carries its instructions in the message. Claude Code's own
+#: prompt and the CLAUDE.md/memory files were ~7k of every ~10k Teams read
+#: (17 Nov, live: 165 reads a week, 1.2M new tokens). Measured on haiku with a
+#: synthetic reader prompt: 10.8k → 4.3k, the same verdicts.
+READER_PROMPT = (
+    "You work inside Arun's assistant, Asta, reading and judging text it hands you. "
+    "You have no tools. Answer exactly in the format the message asks for, with nothing "
+    "before or after it.")
+
+
 #: Moves cwd, env and git status out of the system prompt into the first
 #: message, so every leg and chat session starts from the same cached prefix
 #: whatever checkout it runs in (system prompt 5.0k → 4.4k, measured 16 Nov).
@@ -219,7 +230,7 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
     from . import task_fence
     fence = task_fence.MODE.get()
     if tools_off:
-        cmd += ["--tools", ""]
+        cmd += ["--tools", "", "--system-prompt", READER_PROMPT, "--setting-sources", ""]
     elif builtins and on_demand():
         # Nothing cut: the build tools in front, every other built-in one
         # search away. Measured 16 Nov, live model: 23.0k restricted → 19.5k.

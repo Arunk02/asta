@@ -195,3 +195,27 @@ def test_the_delegate_rule_is_always_in_front(conv, monkeypatch):
     system = _flag(claude_cli._build_cmd(conv, "add subtract to calc.py"), "--system-prompt")
     assert "delegate_task with kind 'code'" in system
     assert "You never edit, write or commit files yourself" in system
+
+
+# --- no-tools calls (17 Nov) --------------------------------------------------
+
+def test_a_no_tools_call_carries_only_asta_s_short_prompt(monkeypatch):
+    """A Teams read was ~10k, ~7k of it Claude Code's prompt and his CLAUDE.md
+    files — for a call that only reads the text it is handed."""
+    import asyncio
+    seen = {}
+
+    async def _exec(*cmd, **_k):
+        seen["cmd"] = list(cmd)
+        raise RuntimeError("captured")
+
+    monkeypatch.setattr(claude_cli, "available", lambda: True)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+    with pytest.raises(RuntimeError, match="captured"):
+        asyncio.run(claude_cli._one_shot("read this", None, 60, "", "", "", False, None,
+                                         "", False, "haiku", True))
+    cmd = seen["cmd"]
+    assert _flag(cmd, "--tools") == ""
+    assert _flag(cmd, "--system-prompt") == claude_cli.READER_PROMPT
+    assert _flag(cmd, "--setting-sources") == ""
+    assert "--strict-mcp-config" in cmd

@@ -132,6 +132,14 @@ def tool_meta(name: str) -> dict | None:
     its scope grants — report_outcome and the like, called on most legs — so all
     of them are pinned: searching for one would cost a round trip per leg."""
     if os.environ.get("ASTA_MCP_SCOPED") == "1":
+        # ASTA_MCP_PIN, when the caller set it, names the few tools this kind
+        # of task uses on most legs; the rest of its scope is found by search
+        # (17 Nov: all 31 were pinned, ~5k tokens on every leg of every task).
+        # Empty or unset = every tool pinned, as before (an empty value can be
+        # inherited from .env and must never unpin the debug kit).
+        pin = {p.strip() for p in os.environ.get("ASTA_MCP_PIN", "").split(",") if p.strip()}
+        if pin and name not in pin:
+            return None
         return {"anthropic/alwaysLoad": True}
     if defer_tail() or name not in HOT:
         return None
@@ -173,7 +181,8 @@ def _describe(cap) -> str:
 
 def config_entry(tools: list[str] | None = None, conv_id: str = "",
                  task_id: str = "", read_only: bool = False,
-                 message_id: int | None = None, defer_all: bool = False) -> dict:
+                 message_id: int | None = None, defer_all: bool = False,
+                 pin: tuple[str, ...] | None = None) -> dict:
     """The mcpServers entry a CLI needs to spawn this server.
 
     The env is carried explicitly rather than left to inheritance: the spawned
@@ -216,6 +225,8 @@ def config_entry(tools: list[str] | None = None, conv_id: str = "",
         # a blanket flag here would hide the staging tools the scope grants.
         env['ASTA_MCP_SCOPED'] = '1'
         env["ASTA_MCP_TASK"] = str(task_id)
+        if pin is not None:
+            env["ASTA_MCP_PIN"] = ",".join(pin)
     if read_only:
         env["ASTA_MCP_READ_ONLY"] = "1"
     if defer_all:

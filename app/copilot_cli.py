@@ -445,6 +445,52 @@ def _recent_asks(conv_id: str, current: str, within: float = 1800.0) -> str:
     return "\n".join(said[-2:])
 
 
+#: "*Dana Rao* wants you to check …" — the colleague an item put in front of him.
+_PRESENTED = re.compile(r"^\*([^*\n]{2,60})\*")
+
+
+def colleague_ask(conv_id: str, within: float = 2700.0) -> str:
+    """What the colleague he is dealing with actually asked, in their words.
+
+    17 Nov: A colleague asked "for this booking, can you see from VTS? we got the
+    status as pending, but still it's processed". Arun answered Asta with an id,
+    then "sit", then "check on the request he asked" — and none of the turns that
+    did the work carried the colleague's sentence: `_recent_asks` reads only his own
+    messages. The newest colleague item Asta showed him in this conversation
+    names the chat; their last messages there are the question."""
+    if not conv_id:
+        return ""
+    import time as _t
+    from . import chat_watch, store
+    try:
+        rows = store.list_ui_messages(conv_id)[-12:]
+    except Exception:                                          # noqa: BLE001
+        return ""
+    who = ""
+    for r in reversed(rows):
+        if _t.time() - float(r.get("created_at") or 0) > within:
+            break
+        meta = r.get("meta") or {}
+        if isinstance(meta, str):
+            with contextlib.suppress(ValueError):
+                meta = json.loads(meta)
+        if r.get("role") == "assistant" and isinstance(meta, dict) and meta.get("via") == "answer":
+            m = _PRESENTED.match(r.get("content") or "")
+            if m:
+                who = m.group(1).strip()
+                break
+    if not who:
+        return ""
+    try:
+        said = store.teams_messages(chat=who, since=_t.time() - 6 * 3600, limit=200)
+    except Exception:                                          # noqa: BLE001
+        return ""
+    theirs = [" ".join(chat_watch.as_read(m.get("text") or "").split())
+              for m in said if (m.get("chat") or "").strip().lower() == who.lower()
+              and not chat_watch.is_from_him(m.get("sender") or "")]
+    return f"{who}: " + " / ".join(t for t in theirs[-3:] if t) if theirs else ""
+
+
 def _on_change(conv_id: str, name: str, block: str, fresh: bool, remember: bool) -> str:
     """`block`, unless this session was already sent exactly this.
 
@@ -557,10 +603,12 @@ def turn_context(user_text: str, conv_id: str = "", *, fresh: bool = True,
                 f"first (teams_read_chat \"{who}\") and work from what is there — a link, an "
                 f"id, a screenshot. A Temporal link goes straight into temporal_workflow. "
                 f"Never ask him to paste what {who} already sent.")
-    case = ""
+    case = asked = ""
     with contextlib.suppress(Exception):
         from . import booking_case
-        case = booking_case.for_turn(user_text, _recent_asks(conv_id, user_text)).strip()
+        asked = colleague_ask(conv_id)
+        case = booking_case.for_turn(user_text, _recent_asks(conv_id, user_text),
+                                     question=asked).strip()
         if case:
             parts.append(case)
     from . import project_knowledge as _pk
@@ -573,7 +621,11 @@ def turn_context(user_text: str, conv_id: str = "", *, fresh: bool = True,
             # summaries, misheard words corrected, ~500 tokens. Docs-only at 60%
             # word overlap answered on voice what WhatsApp could not (2 Oct).
             from . import project_knowledge
-            passages = project_knowledge.lookup(user_text, channel="chat")
+            # Ranked on what was ASKED: the colleague's question when there is
+            # one, never a wrapper ("Arun did NOT approve…") — 17 Nov it pulled
+            # persistence and Decision Hub notes for a VTS question.
+            passages = project_knowledge.lookup(
+                (asked + "\n" + user_text) if case and asked else user_text, channel="chat")
             if passages:
                 parts.append(
                     "From his project knowledge (his documents and the repo summaries). "

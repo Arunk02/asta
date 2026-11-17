@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
 from . import store
@@ -100,6 +101,9 @@ def age_minutes(point: dict) -> int:
 #: places read it: the prompt that states it and `ranking_text` that finds it
 #: again. Retyped in both, they drift, and the drift is silent.
 _REQUEST_MARKER = "HIS ORIGINAL REQUEST:\n"
+#: main.py's wrapper around his words when he edits a waiting draft.
+_FEEDBACK = re.compile(r"^Arun did NOT approve sending the draft as-is\. His feedback:\n"
+                       r"(.*?)\n\nRevise accordingly", re.S)
 
 
 def ranking_text(user_text: str) -> str:
@@ -114,6 +118,13 @@ def ranking_text(user_text: str) -> str:
     times. The wrapper is provenance. His sentence is the subject.
     """
     text = user_text or ""
+    feedback = _FEEDBACK.search(text)
+    if feedback:
+        # The draft-feedback wrapper is the same kind of provenance: 17 Nov a
+        # VTS question was ranked on "Arun did NOT approve sending the draft…
+        # Revise accordingly… 15 Oct: a reply to Sameer…" and pulled notes on
+        # persistence and Decision Hub. His feedback is the subject.
+        return feedback.group(1).strip() or text
     if _REQUEST_MARKER not in text:
         return text
     tail = text.split(_REQUEST_MARKER, 1)[1]

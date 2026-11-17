@@ -524,8 +524,11 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     # tools alike (17 Nov: Bash, Read, log_lines and grafana_logs were each one
     # search away, and every case turn paid for finding them).
     from . import booking_case
+    # The colleague's question counts: 17 Nov the turn that did the work said only
+    # "check on the request he asked" — the booking and the "why" were the colleague's.
     investigate = booking_case.investigating(
-        ranking_text, copilot_cli._recent_asks(conv.get("id", ""), ranking_text))
+        ranking_text, copilot_cli._recent_asks(conv.get("id", ""), ranking_text)
+        + "\n" + copilot_cli.colleague_ask(conv.get("id", "")))
     system = (copilot_cli.on_demand_context(conv, fresh=is_new and not light) if od else
               copilot_cli.stable_context(conv, via="Claude Code CLI", fresh=is_new and not light))
     hints = copilot_cli.turn_hints(conv, "Claude Code CLI", ranking_text,

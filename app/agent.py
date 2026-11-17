@@ -3757,6 +3757,30 @@ async def draft_teams_reply(chat: str, question: str = "") -> str:
     return f"✍️ Draft reply to {chat} (review, then say 'send' to post it):\n\n{draft}"
 
 
+#: His words that ask for a message to go out.
+_ASKS_TO_SEND = _re.compile(r"\b(?:send|sent|tell|inform|reply|respond|message|msg|ping|"
+                            r"forward|share|notify|update|post)\b", _re.I)
+
+
+def _unasked_cause(text: str) -> str:
+    """Refusal line when a root cause is about to reach a colleague unasked, else "".
+
+    17 Nov 16:56: he asked "did you understand or not?" and Asta answered by
+    sending the colleague a third root cause — confident, unproven, and wrong — because
+    that colleague's 1:1 needs no yes. A standing rule covers back-and-forth; it does not
+    cover telling a colleague WHY something broke on a guess. When his own words
+    this turn ask for a send, that is his yes, and it goes."""
+    from . import capabilities, resume, verdict
+    if not verdict.states_a_cause(text):
+        return ""
+    said = resume.ranking_text(capabilities.said_this_turn())
+    if _ASKS_TO_SEND.search(said or ""):
+        return ""
+    return ("Not sent: this tells them a root cause, and Arun did not ask for a send this "
+            "turn. Show him the analysis with its proof (the log line and Class:line) and "
+            "stage the message with prepare_to_send for his yes.")
+
+
 async def teams_send_message(chat: str, text: str, to_group: bool = False) -> str:
     """Send a Teams message as Arun, to a PERSON's 1:1 chat.
 
@@ -3773,6 +3797,9 @@ async def teams_send_message(chat: str, text: str, to_group: bool = False) -> st
     refused = loop.rejected_again(text)
     if refused:
         return refused
+    held = _unasked_cause(text)
+    if held:
+        return held
     try:
         where = await teams_bridge.send_message(chat, text, allow_group=to_group)
         return f"Sent — delivered to: {where}"

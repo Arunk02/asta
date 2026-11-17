@@ -97,8 +97,10 @@ def table(now: float | None = None) -> str:
     lines = [f"{'what':<14}{'runs':>6}{'new in':>9}{'cached':>9}{'out':>8}"]
     for kind, k in sorted(kinds.items(), key=lambda kv: -kv[1]["new"]):
         lines.append(f"{kind:<14}{k['n']:>6}{_k(k['new']):>9}{_k(k['cached']):>9}{_k(k['out']):>8}")
+    # Chat output is not measured: the CLI stream reports the opening count only
+    # (~16 tokens a turn in both usage and traces, 17 Nov). Shown as such.
     lines.append(f"{'chat':<14}{chat['count']:>6}{_k(chat['new']):>9}{_k(chat['cached']):>9}"
-                 f"{_k(chat['out']):>8}")
+                 f"{'n/a':>8}")
     if bg:
         lines.append(f"{'background':<14}{sum(n for _, n, _ in bg):>6}"
                      f"{_k(sum(t for *_, t in bg)):>9}")

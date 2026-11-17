@@ -115,6 +115,25 @@ def lean_flags() -> bool:
 #: this CLI or later; older ones get the classic command whatever the flag.
 ON_DEMAND_FROM = (2, 1, 293)
 ON_DEMAND_CHAT_PLUGIN = Path(__file__).resolve().parent / "claude_plugins" / "on-demand-chat"
+#: The same, for a turn that debugs a case: Read, Grep, Glob and Bash in front too.
+ON_DEMAND_INVESTIGATE_PLUGIN = (Path(__file__).resolve().parent / "claude_plugins"
+                                / "on-demand-investigate")
+
+
+def workspace_roots() -> list[str]:
+    """Every registered workspace that exists, for `--add-dir`.
+
+    A chat runs from Asta's own folder, and in dontAsk mode the CLI refuses any
+    shell command that reads a path outside it — measured 17 Nov: `ls`, `cat`
+    and `head` on the booking workspace were refused, and ran once the folder
+    was added. The brain then hunted for other clones (~/projects on a January
+    release branch) and read stale code. The registered checkout is the one."""
+    try:
+        from . import workspace
+        return [ws.root for ws in workspace.all_workspaces().values()
+                if ws.enabled and ws.exists()]
+    except Exception:                                          # noqa: BLE001
+        return []
 #: A code leg's: Bash, Read, Edit, Write and ToolSearch in front, the rest on
 #: demand. Claude Code's coding prompt and the repo's CLAUDE.md stay.
 ON_DEMAND_CODE_PLUGIN = Path(__file__).resolve().parent / "claude_plugins" / "on-demand-code"
@@ -501,6 +520,12 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
     # A light read is a side session: it reads the main session's memory
     # snapshot and never replaces it (that would rewrite the main cache).
     od = on_demand()
+    # A turn that debugs a case starts with its kit in front, built-ins and Asta
+    # tools alike (17 Nov: Bash, Read, log_lines and grafana_logs were each one
+    # search away, and every case turn paid for finding them).
+    from . import booking_case
+    investigate = booking_case.investigating(
+        ranking_text, copilot_cli._recent_asks(conv.get("id", ""), ranking_text))
     system = (copilot_cli.on_demand_context(conv, fresh=is_new and not light) if od else
               copilot_cli.stable_context(conv, via="Claude Code CLI", fresh=is_new and not light))
     hints = copilot_cli.turn_hints(conv, "Claude Code CLI", ranking_text,
@@ -517,7 +542,10 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         "--system-prompt" if od else "--append-system-prompt", system,
         "-p", umsg, NO_SKILLS, "--settings", OUTPUT_SETTINGS,
         *([SAME_PREFIX] if lean_flags() and not od else []),
-        *(["--setting-sources", "", "--plugin-dir", str(ON_DEMAND_CHAT_PLUGIN)] if od else []),
+        *(["--setting-sources", "", "--plugin-dir",
+           str(ON_DEMAND_INVESTIGATE_PLUGIN if investigate else ON_DEMAND_CHAT_PLUGIN)]
+          if od else []),
+        *[a for root in workspace_roots() for a in ("--add-dir", root)],
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",                       # required for stream-json
@@ -581,7 +609,8 @@ def _build_cmd(conv: dict, user_text: str, prefetched: str = "") -> list[str]:
         cmd += ["--mcp-config", _json.dumps(mcp_server.config_entry(
             tools=selected, conv_id=conv["id"],
             read_only=capabilities.READ_ONLY_TURN.get(),
-            message_id=conv.get("_turn_message_id"), defer_all=od)),
+            message_id=conv.get("_turn_message_id"), defer_all=od,
+            investigate=investigate)),
                 "--strict-mcp-config"]
     from . import agent as agent_mod
     model = (light.model if light else "") or agent_mod.tier_of("claude_cli")

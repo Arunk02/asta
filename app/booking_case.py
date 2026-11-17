@@ -102,6 +102,22 @@ def points_at_one(text: str) -> bool:
     return bool(_FORWARD.search(text or "") or _BACK.search(text or "") or ids(text))
 
 
+#: Words that make a turn an investigation even without an id in it.
+_INVESTIGATES = re.compile(
+    r"\b(?:why|root\s*cause|rca|debug\w*|stuck|fail\w*|error\w*|exception|npe|"
+    r"not\s+(?:received|sent|triggered|processed)|processed|pending|triggered|"
+    r"check\s+(?:the\s+)?(?:logs?|booking|code|defect|issue)|defect|bug|"
+    r"event\s*history|[A-Z][A-Z0-9]+-\d{2,6})\b", re.I)
+
+
+def investigating(text: str, context: str = "") -> bool:
+    """This turn reads logs and code: it names a booking, or asks why something
+    happened. Such a turn starts with its whole kit in front — 17 Nov, every log
+    and code tool was behind a search, and the brain spent turns finding them."""
+    whole = f"{context}\n{text}"
+    return bool(ids(whole) or _INVESTIGATES.search(whole))
+
+
 def asks(text: str) -> bool:
     return bool(_ASKS.search(ID.sub(" ", text or "")))
 

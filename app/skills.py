@@ -28,10 +28,13 @@ def _parse(path: Path) -> dict | None:
         text = path.read_text()
     except OSError:
         return None
-    name, desc = path.parent.name if path.name == "SKILL.md" else path.stem, ""
+    name, desc, source = path.parent.name if path.name == "SKILL.md" else path.stem, "", ""
     m = _FRONT_RE.match(text)
     if m:
         front = m.group(1)
+        sm = re.search(r"^source:\s*(\S+)", front, re.MULTILINE)
+        if sm:
+            source = sm.group(1).strip()
         nm = re.search(r"^name:\s*(.+)$", front, re.MULTILINE)
         if nm:
             name = nm.group(1).strip()
@@ -39,7 +42,10 @@ def _parse(path: Path) -> dict | None:
         if dm:
             desc = " ".join((dm.group(1) or dm.group(2) or "").split())
     body = _FRONT_RE.sub("", text).strip()
-    return {"name": name, "description": desc[:300], "body": body, "path": str(path)}
+    # `source` is set on what Asta learned (extracted, teacher, correction,
+    # evolution); a hand-written playbook has none.
+    return {"name": name, "description": desc[:300], "body": body, "path": str(path),
+            "source": source}
 
 
 def discover() -> list[dict]:

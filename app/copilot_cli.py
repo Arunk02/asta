@@ -687,6 +687,21 @@ def turn_hints(conv: dict, via: str, user_text: str = "", *, recap: bool = True)
     return "\n\n".join(parts)
 
 
+def orientation(index: str, limit: int = 1500) -> str:
+    """The memory index as orientation: the facts, gotchas and preferences, in
+    whole lines. Session digests stay behind search_memory — 17 Nov the prompt
+    carried five "New chat" sessions from July and a title cut mid-word."""
+    keep, size = [], 0
+    for line in (index or "").splitlines():
+        if "episodes/" in line or line.strip().lower() == "## recent sessions":
+            continue
+        if size + len(line) + 1 > limit:
+            break
+        keep.append(line)
+        size += len(line) + 1
+    return "\n".join(keep).strip()
+
+
 def _memory_index(cid: str, fresh: bool) -> str:
     """His memory index as this session first saw it. Read live, every `remember`
     changed the system prompt and so rewrote the session's whole cache; a later
@@ -696,7 +711,7 @@ def _memory_index(cid: str, fresh: bool) -> str:
         held = store.kv_get(key)
         if held:
             return held.strip()
-    idx = memory.index_text().strip()[:1500]
+    idx = orientation(memory.index_text())
     if cid:
         store.kv_set(key, idx or " ")
     return idx
@@ -749,7 +764,10 @@ def on_demand_context(conv: dict, *, fresh: bool = False) -> str:
         "verbatim. You never edit, write or commit files yourself — this chat cannot — and "
         "you never plan the change here; the task plans it and he approves. Load code-work "
         "for the rest of the flow (approvals, follow-ups, PRs, CI).")
-    names = ["code-work"] + [s["name"] for s in skills.discover()]
+    # Hand-written playbooks only. The lessons Asta learned from code tasks are for
+    # code tasks: 57 names rode every chat and, in 30 days to 17 Nov, chats loaded
+    # code-work and debugging only. load_skill still finds any of them by name.
+    names = ["code-work"] + [s["name"] for s in skills.discover() if not s.get("source")]
     parts.append(
         "PLAYBOOKS — load_skill(name) once, before working in that area, then follow it: "
         + ", ".join(names) + ". code-work covers any code change, task, PR or CI question.")

@@ -102,5 +102,5 @@ def test_task_finish_evolves_on_recurring_waste(sk, monkeypatch):
     monkeypatch.setattr(token_audit, "trend_series",
                         lambda: _hist("full_reads", "full_reads"))
     note = tasks._audit_note(1)
-    assert "token audit" in note
+    assert "token audit" not in note             # no per-task meter line (17 Nov)
     assert "🧬 learned a skill" in note          # the loop closed, end to end

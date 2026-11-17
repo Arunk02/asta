@@ -1809,29 +1809,16 @@ def _phone_text(result: str, limit: int = 1100, head_first: bool = False) -> str
 
 
 def _audit_note(task_id: int) -> str:
-    """Audit the finished worker's session for token waste — records the trend
-    and, when a run was wasteful, appends a one-line flag to the notification so
-    it's visible without asking. Never lets an audit failure break completion."""
+    """Audit the finished worker's session for token waste and record the trend.
+
+    Nothing per task reaches him any more: "49% avoidable, biggest = narration"
+    on every result was mostly the plan he asked for (17 Nov). The week's spend
+    comes as one table (app/usage_week.py); only a newly learned fix is said.
+    Never lets an audit failure break completion."""
     try:
         from . import rehearsal, token_audit, skill_evolution
-        if rehearsal.is_rehearsal(task_id):
+        if rehearsal.is_rehearsal(task_id) or not token_audit.audit_task(task_id):
             return ""
-        rep = token_audit.audit_task(task_id)
-        if not rep:
-            return ""
-        # Reported against this brain's OWN history rather than as a bare
-        # percentage with a fixed letter beside it. The old line said "7% waste,
-        # grade B (ok)" on a run that was among the worst ever measured — the
-        # bands were set before any data existed and no real run has ever left
-        # A or B, so the letter carried no information and the word "ok" was
-        # actively misleading.
-        verdict = rep.get("verdict") or f"{rep['waste_ratio']:.0%} avoidable"
-        worse = "WORSE" in verdict
-        icon = "⚠️" if worse or rep["waste_ratio"] >= 0.12 else "📉"
-        note = f"\n\n{icon} token audit: {verdict}"
-        if worse or rep["waste_ratio"] >= 0.12:
-            note += (f" · ~{rep['avoidable_tokens']:,} tok, "
-                     f"biggest = {rep['top_fix']}")
         # Close the loop: a waste category that RECURS across runs becomes a durable
         # fix-skill, so the next worker avoids it instead of the meter just noting it.
         try:
@@ -1839,8 +1826,9 @@ def _audit_note(task_id: int) -> str:
         except Exception:
             evolved = []
         if evolved:
-            note += "\n🧬 learned a skill to stop it: " + ", ".join(e["skill"] for e in evolved) + "."
-        return note
+            return "\n\n🧬 learned a skill to cut waste: " + \
+                ", ".join(e["skill"] for e in evolved) + "."
+        return ""
     except Exception:
         return ""
 

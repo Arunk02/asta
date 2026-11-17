@@ -165,3 +165,40 @@ def test_task_audit_finds_isolated_worktree_log_before_legacy_log(tmp_path, monk
     paths[0].unlink()
     assert ta._session_file(task['id']) == paths[1]
     assert ta._session_file(987654321) is None
+
+
+def _session(tmp_path, records):
+    import json as _json
+    p = tmp_path / "s.jsonl"
+    p.write_text("\n".join(_json.dumps(r) for r in records))
+    return p
+
+
+def _prompt(text):
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def _say(i, text):
+    return {"type": "assistant", "message": {"id": f"m{i}", "usage": {"output_tokens": 10},
+                                             "content": [{"type": "text", "text": text}]}}
+
+
+def _tool(i):
+    return {"type": "assistant", "message": {"id": f"t{i}", "usage": {"output_tokens": 5},
+            "content": [{"type": "tool_use", "id": f"u{i}", "name": "Bash",
+                         "input": {"command": "ls"}}]}}
+
+
+def test_the_plan_and_the_report_are_not_narration(tmp_path):
+    """17 Nov: every planned task was flagged 'narration' for the plan he asked for."""
+    plan, report = "P" * 6000, "R" * 6000
+    r = ta._parse_claude(_session(tmp_path, [
+        _prompt("plan it"), _tool(1), _say(2, plan),          # leg 1 ends on the plan
+        _prompt("PLAN APPROVED"), _tool(3), _say(4, report)]))  # leg 2 ends on the report
+    assert r["text_blocks"] == []
+
+
+def test_long_text_between_tool_calls_is_still_narration(tmp_path):
+    r = ta._parse_claude(_session(tmp_path, [
+        _prompt("do it"), _say(1, "N" * 6000), _tool(2), _say(3, "done")]))
+    assert r["text_blocks"] == [6000]

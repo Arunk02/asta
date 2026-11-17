@@ -179,3 +179,39 @@ def test_the_code_leg_asks_for_the_build_tools(monkeypatch):
 def test_a_task_worker_pins_every_tool_its_scope_grants(monkeypatch):
     monkeypatch.setenv("ASTA_MCP_SCOPED", "1")
     assert mcp_server.tool_meta("report_outcome") == {"anthropic/alwaysLoad": True}
+
+
+def test_a_task_pins_only_what_its_kind_uses_and_searches_the_rest(monkeypatch):
+    """17 Nov: every leg pinned all 31 scoped tools (~5k tokens)."""
+    monkeypatch.setenv("ASTA_MCP_SCOPED", "1")
+    monkeypatch.setenv("ASTA_MCP_PIN", "grafana_logs,log_lines")
+    assert mcp_server.tool_meta("grafana_logs") == {"anthropic/alwaysLoad": True}
+    assert mcp_server.tool_meta("teams_history") is None
+    monkeypatch.setenv("ASTA_MCP_PIN", "")
+    assert mcp_server.tool_meta("grafana_logs") is None
+    monkeypatch.delenv("ASTA_MCP_PIN")
+    assert mcp_server.tool_meta("teams_history") == {"anthropic/alwaysLoad": True}
+
+
+def test_investigations_keep_the_debug_kit_pinned():
+    from app import tasks, worker_auth
+    kit = set(tasks.PINNED_TOOLS["analysis"])
+    assert {"grafana_logs", "log_lines", "log_counts", "find_id", "temporal_workflow"} <= kit
+    for kind, names in tasks.PINNED_TOOLS.items():
+        assert set(names) <= worker_auth.READ_TOOLS | worker_auth.STAGE_TOOLS, kind
+
+
+def test_the_pin_reaches_the_worker_config(monkeypatch):
+    import json
+    from app import claude_cli, store, tasks, worker_auth
+    monkeypatch.setenv("ASTA_CLI_MCP", "1")
+    monkeypatch.setenv("ASTA_DEV_MCP", "")
+    monkeypatch.setattr(claude_cli, "on_demand", lambda: True)
+    t = store.create_task("check booking", "analysis", "p", None)
+    with worker_auth.session(t["id"]):
+        env = json.loads(tasks.task_tools(t["id"], "/tmp/ws", "analysis"))["mcpServers"]["asta"]["env"]
+    assert env["ASTA_MCP_PIN"].split(",") == list(tasks.PINNED_TOOLS["analysis"])
+    monkeypatch.setattr(claude_cli, "on_demand", lambda: False)
+    with worker_auth.session(t["id"]):
+        env = json.loads(tasks.task_tools(t["id"], "/tmp/ws", "analysis"))["mcpServers"]["asta"]["env"]
+    assert "ASTA_MCP_PIN" not in env

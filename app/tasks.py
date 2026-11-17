@@ -494,6 +494,20 @@ def conversation_of(task_id: int) -> str:
 #: docs servers earn their startup cost for. Asta's OWN tools go to every kind.
 _DEV_MCP_KINDS = ("analysis", "code")
 
+#: Asta tools pinned (full schema up front) per task kind; the rest of the
+#: worker's scope is listed by name and loads through ToolSearch when needed.
+#: 17 Nov: every leg of every task pinned all 31 (~5k tokens). The debug kit
+#: stays pinned for investigations — 14 Oct, 0 of 42 reached it behind a search.
+#: Chosen from what 144 legs actually called (to 17 Nov): analysis legs used
+#: propose_pr_review (reviews), resolve/read and the log and Temporal tools;
+#: code legs task_result and resolve_context. A kind not listed keeps all pinned.
+PINNED_TOOLS: dict[str, tuple[str, ...]] = {
+    "analysis": ("grafana_logs", "log_lines", "log_counts", "find_id", "log_gaps",
+                 "temporal_workflow", "temporal_workflows", "resolve_context",
+                 "read_workspace_file", "propose_pr_review"),
+    "code": ("resolve_context", "read_workspace_file", "task_result"),
+}
+
 
 def task_tools(task_id: int, cwd: str, kind: str = "") -> str:
     """The MCP servers a task run gets: Asta's own, plus the dev ones if enabled.
@@ -511,10 +525,12 @@ def task_tools(task_id: int, cwd: str, kind: str = "") -> str:
     Bound to the spawning conversation so an approval lands in the chat he asked
     from, rather than in no conversation at all.
     """
-    from . import copilot_cli, dev_mcp, mcp_server
+    from . import claude_cli, copilot_cli, dev_mcp, mcp_server
     base = None
     if copilot_cli.mcp_cli_enabled():
-        base = mcp_server.config_entry(conv_id=conversation_of(task_id), task_id=str(task_id))
+        pin = PINNED_TOOLS.get(kind) if claude_cli.on_demand() else None
+        base = mcp_server.config_entry(conv_id=conversation_of(task_id), task_id=str(task_id),
+                                       pin=pin)
     project = cwd if (not kind or kind in _DEV_MCP_KINDS) else ""
     return dev_mcp.config_json(project, base)
 

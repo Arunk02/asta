@@ -70,14 +70,16 @@ FIX_MAP: dict[str, dict] = {
         "confidence": 0.8,
     },
     "narration": {
-        "title": "Report in pointers, not prose",
-        "when": "Summarising work back at a gate or on completion.",
+        # Mid-run text only. The plan and the final report are the deliverable,
+        # in the format the task asks for — the auditor does not count them.
+        "title": "Do not narrate between steps",
+        "when": "Mid-run, between tool calls, while working a task.",
         "procedure": [
-            "Hand back findings as file:line pointers and a one-line verdict.",
-            "Do not paste diffs, logs, or long restatements the reader can open themselves.",
+            "Between tool calls write at most one short line, or nothing.",
+            "Keep the plan and the final report in the format the task asks for.",
         ],
-        "pitfalls": ["Large narration blocks are re-cached every subsequent turn."],
-        "verification": ["No multi-thousand-character text block in the transcript."],
+        "pitfalls": ["Long mid-run text is re-cached on every later turn."],
+        "verification": ["No multi-thousand-character text block except the plan or report."],
         "confidence": 0.75,
     },
     "replan_recache": {

@@ -1290,6 +1290,12 @@ def api_token_audit(hours: float = 24, task: int = 0):
     return {**token_audit.audit_recent(hours), "trend": token_audit.trend_series()}
 
 
+@app.get("/api/usage/week", dependencies=[Depends(require_auth)])
+def api_usage_week():
+    from . import usage_week
+    return {"text": usage_week.table()}
+
+
 @app.get("/api/meeting-prep", dependencies=[Depends(require_auth)])
 async def api_meeting_prep(title: str = ""):
     from . import agent as agent_mod

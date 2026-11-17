@@ -53,6 +53,17 @@ def _parse_claude(path: Path) -> dict:
     r = _norm(); r["executor"] = "claude"
     turn = 0
     usage_by_message = {}
+    # The last text of each leg is what the leg was FOR — the plan he reads, the
+    # final report — not narration. 17 Nov: counting them flagged every planned
+    # task as "narration" and evolved a lesson against his own plan format.
+    leg_last: int | None = None        # text_blocks index of the leg's latest text, if large
+
+    def end_leg() -> None:
+        nonlocal leg_last
+        if leg_last is not None:
+            r["text_blocks"][leg_last] = 0
+        leg_last = None
+
     for line_number, line in enumerate(_lines(path)):
         try:
             e = json.loads(line)
@@ -61,6 +72,8 @@ def _parse_claude(path: Path) -> dict:
         m = e.get("message") or {}
         u = m.get("usage") or {}
         typ = e.get("type")
+        if typ == "user" and _is_prompt(m):
+            end_leg()
         if typ == "assistant" and u:
             # Claude emits several content records with the same provider
             # message ID and usage snapshot. Later snapshots replace earlier
@@ -74,9 +87,14 @@ def _parse_claude(path: Path) -> dict:
             if not isinstance(b, dict):
                 continue
             t = b.get("type")
-            if t == "text" and len(b.get("text", "")) > 1500:
-                r["text_blocks"].append(len(b["text"]))
+            if t == "text" and b.get("text", "").strip():
+                if len(b["text"]) > 1500:
+                    r["text_blocks"].append(len(b["text"]))
+                    leg_last = len(r["text_blocks"]) - 1
+                else:
+                    leg_last = None
             elif t == "tool_use":
+                leg_last = None
                 n = b.get("name"); i = b.get("input", {})
                 if n in ("Read", "read_file"):
                     r["reads"].append((i.get("file_path", ""), bool(i.get("limit") or i.get("offset"))))
@@ -89,12 +107,23 @@ def _parse_claude(path: Path) -> dict:
                 tid = b.get("tool_use_id")
                 r["results"][tid] = len(txt)
                 r["result_turn"][tid] = turn
+    end_leg()
+    r["text_blocks"] = [n for n in r["text_blocks"] if n]
     r["calls"] = len(usage_by_message)
     for usage in usage_by_message.values():
         r["out_tokens"] += usage.get("output_tokens", 0)
         r["new_tokens"] += usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
         r["cache_read"] += usage.get("cache_read_input_tokens", 0)
     return r
+
+
+def _is_prompt(message: dict) -> bool:
+    """A user record that starts a leg (a prompt), not a tool result."""
+    c = message.get("content")
+    if isinstance(c, str):
+        return bool(c.strip())
+    return any(isinstance(b, dict) and b.get("type") == "text" for b in (c or [])) \
+        and not any(isinstance(b, dict) and b.get("type") == "tool_result" for b in (c or []))
 
 
 def _parse_copilot(path: Path) -> dict:

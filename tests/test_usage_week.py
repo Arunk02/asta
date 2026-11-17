@@ -29,3 +29,18 @@ def test_spend_by_kind_and_the_costliest_runs():
     assert f"#{c} code 1.3M in 2 leg(s)" in out
     assert "7.7M" not in out and "8.8M" not in out
     assert "1 shown · 1 you answered first" in out
+
+
+def test_a_turn_costs_the_difference_from_the_sessions_last_total():
+    """The CLI reports the session's running total on each turn."""
+    rows = [("a", 0.044), ("a", 0.071), ("a", 0.105), ("b", 0.05), ("a", 0.02), ("a", 0.03)]
+    assert round(usage_week.turn_costs(rows), 3) == round(0.105 + 0.05 + 0.03, 3)
+
+
+def test_the_week_shows_chat_dollars_per_turn():
+    conv = store.create_conversation(model="claude_cli", workspace=None)["id"]
+    for usd in (0.04, 0.06, 0.09):
+        store.add_trace(conv, "claude_cli", "web", 100, 900, 10, 100, 0, 1000, 50, [],
+                        cost_usd=usd, measured=True, context_tokens=11000)
+    out = usage_week.table()
+    assert "Chat: 3 turns, $0.09 at API prices ($0.030 a turn" in out

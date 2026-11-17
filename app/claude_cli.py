@@ -650,7 +650,11 @@ async def run_turn(conv: dict, user_text: str,
     # that looped, and a turn that only reported its last call would hide that.
     from . import llm_meter
     usage = llm_meter.Usage()
-    seen_usage: set[str] = set()
+    # message id -> its latest usage block. The stream emits each message more
+    # than once (partials, then the settled copy); the partial carries only the
+    # first few output tokens, so keeping the FIRST copy recorded ~16 output
+    # tokens a turn (17 Nov). The settled copy replaces it.
+    by_message: dict[str, dict] = {}
 
     async def _pump() -> None:
         nonlocal final, err_msg, limited, usage
@@ -701,9 +705,13 @@ async def run_turn(conv: dict, user_text: str,
                     # usage twice would roughly double every reported figure, so
                     # each message id contributes exactly once.
                     mid = message.get("id") or ""
-                    if mid not in seen_usage:
-                        seen_usage.add(mid)
-                        usage = usage + llm_meter.from_anthropic(message.get("usage"))
+                    if isinstance(message.get("usage"), dict):
+                        by_message[mid] = message["usage"]
+                        cost = usage.cost_usd
+                        usage = llm_meter.Usage()
+                        for block in by_message.values():
+                            usage = usage + llm_meter.from_anthropic(block)
+                        usage.cost_usd = cost
                     if on_tool:
                         for part in (message.get("content") or []):
                             if isinstance(part, dict) and part.get("type") == "tool_use":

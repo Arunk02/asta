@@ -203,6 +203,62 @@ def learned_line(since: float) -> str:
     return ("🧠 Learned since yesterday: " + " · ".join(bits)) if bits else ""
 
 
+#: Fresh enough to brief from: the watcher read this recently.
+READ_FRESH_SECONDS = 30 * 60
+#: How long past BRIEF_TIME the brief waits for that read after the laptop wakes.
+READ_WAIT_SECONDS = 2 * 3600
+
+
+def sources_caught_up(now: float | None = None) -> bool:
+    """Has every watcher that ran before read since the laptop woke?
+
+    17 Nov: the brief went at 08:59 saying "Teams read 577 min ago" — the
+    laptop slept through the night (his call: nights off), and the brief was
+    written from the view of 22:20 while the overnight messages sat unread."""
+    from . import attention
+    now = time.time() if now is None else now
+    return all(now - seen < READ_FRESH_SECONDS
+               for seen in (attention.last_scrape(s) for s in ("teams-chat", "outlook")) if seen)
+
+
+def _night_start(now: float) -> float:
+    """Last night's quiet-hours start (ASTA_QUIET_HOURS), or 20:00 yesterday."""
+    from . import delivery
+    start_min = (delivery.quiet_window() or (20 * 60, 0))[0]
+    today = dt.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = today + dt.timedelta(minutes=start_min)
+    if start.timestamp() > now - 3600:
+        start -= dt.timedelta(days=1)
+    return start.timestamp()
+
+
+def overnight_waiting(since: float) -> tuple[list[str], int]:
+    """1:1 chats and mentions since `since` still waiting on him, and how many
+    he has already answered himself."""
+    from . import chat_watch
+    by_chat: dict[str, list[dict]] = {}
+    for r in store.teams_messages(since=since, limit=2000):
+        by_chat.setdefault(r.get("chat") or "", []).append(r)
+    waiting, answered = [], 0
+    for chat, msgs in by_chat.items():
+        theirs = [m for m in msgs if not chat_watch.written_by_him(m, chat)
+                  and not store.is_automatic_teams_message(m.get("key") or "", chat)]
+        if not theirs:
+            continue
+        one_to_one = any((m.get("sender") or "").strip() == chat.strip() for m in theirs)
+        if not one_to_one and not any(chat_watch.mentions_him(m.get("text") or "") for m in theirs):
+            continue
+        last = max(float(m.get("sent_at") or 0) for m in theirs)
+        if any(chat_watch.written_by_him(m, chat) and float(m.get("sent_at") or 0) > last
+               for m in msgs):
+            answered += 1
+            continue
+        said = " ".join((theirs[-1].get("text") or "").split())[:90]
+        waiting.append(f"• {chat} ({len(theirs)}, last {time.strftime('%H:%M', time.localtime(last))})"
+                       f": {said}")
+    return waiting, answered
+
+
 async def morning_brief() -> str:
     day = dt.date.today().strftime("%a %d %b")
     cutoff = time.time() - 24 * 3600
@@ -217,6 +273,15 @@ async def morning_brief() -> str:
         learned = ""
     parts += [ready, learned, yesterday_line(cutoff)]
     parts = [p for p in parts if p]
+    try:
+        since = _night_start(time.time())
+        people, answered = overnight_waiting(since)
+    except Exception:                                          # noqa: BLE001
+        people, answered = [], 0
+    if people or answered:
+        head = (f"💬 Teams since {time.strftime('%a %H:%M', time.localtime(since))} — "
+                f"{len(people)} waiting on you" + (f", {answered} you answered" if answered else ""))
+        parts.append("\n".join([head, *people[:12]]))
 
     done_tasks = _finished_since(store.list_tasks(), "finished_at", cutoff)
     done_missions = [m for m in store.list_missions()
@@ -271,6 +336,11 @@ async def morning_brief() -> str:
 
     if len(parts) == 1 + bool(ready) + bool(learned):
         parts.append("Quiet night — nothing finished, nothing waiting, no reminders today.")
+    if dt.date.today().weekday() == 0:
+        # Monday: last week's spend, one table (replaces the per-task audit line).
+        with contextlib.suppress(Exception):
+            from . import usage_week
+            parts.append(usage_week.table())
     return "\n\n".join(parts)
 
 
@@ -515,6 +585,9 @@ async def scheduler_loop() -> None:
                     due = dt.datetime.combine(now.date(), t)
                     if now < due:
                         continue
+                    if label == "brief" and not sources_caught_up() \
+                            and now - due < dt.timedelta(seconds=READ_WAIT_SECONDS):
+                        continue        # the laptop just woke: let the watchers read first
                     store.kv_set(kv_key, now.date().isoformat())  # guard before the slow part
                     # Fire late (laptop was asleep) within a 3h grace window; past
                     # that it's not "morning" anymore — skip today silently.

@@ -607,7 +607,8 @@ def api_remember(body: dict):
         raise HTTPException(400, "title and fact are required")
     return {"result": agent_mod.remember(title, fact, (body or {}).get("kind", "fact"),
                                          workspace=str(body.get('workspace') or ''),
-                                         source=str(body.get('source') or ''))}
+                                         source=str(body.get('source') or ''),
+                                         distinct=bool(body.get('distinct')))}
 
 
 @app.post("/api/memory/correct", dependencies=[Depends(require_auth)])

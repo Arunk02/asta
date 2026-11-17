@@ -1027,13 +1027,27 @@ def forget_memory(path: str, purge: bool = False) -> str:
                else "; a copy stays in history and can be restored."))
 
 
-def remember(title: str, fact: str, kind: str = "fact", workspace: str = "", source: str = "") -> str:
+def remember(title: str, fact: str, kind: str = "fact", workspace: str = "", source: str = "",
+             distinct: bool = False) -> str:
     """Store a durable memory. kind: fact | preference | gotcha | fix.
     Use for corrections, preferences, root causes, environment quirks.
-    For project facts, include the workspace and an evidence/source reference."""
+    For project facts, include the workspace and an evidence/source reference.
+    distinct: true only after being told a close note exists and this one is a
+    different fact, not an update of it."""
     ruled = _a_rule_not_a_memory(fact)
     if ruled:
         return ruled
+    if not distinct and not memory.same_note(title, fact):
+        near = memory.similar(title, fact)
+        if near:
+            # Two notes on one subject that disagree is how recall hands back
+            # the wrong one (17 Nov: two different repos for "topic refresh").
+            sim, m = near[0]
+            said = " ".join(memory._body(memory.read_memory_file(m["path"]) or "").split())[:200]
+            return (f"Not saved yet: it is close to {m['path']} \"{m['title']}\" ({m.get('date', '')}): "
+                    f"{said}\nIf this updates or corrects that note, call correct_memory with "
+                    f"path={m['path']}. If it is a different fact, call remember again with "
+                    f"distinct=true.")
     path = memory.remember(title, fact, kind, workspace=workspace, source=source)
     # "Remember to check Komal's PR tomorrow morning" is a job with a time, not
     # only a note: a note is read when something recalls it, and nothing did.

@@ -92,7 +92,10 @@ _SAYS_CONFIRMED = re.compile(r"Confidence\**:\**\s*CONFIRMED\b", re.I)
 _NOT_CONFIRMED_PART = re.compile(
     r"Not confirmed\**:\**\s*(.+?)(?=\n\s*\n|\n\W*(?:Next step|Confidence|Timeline|Why)\b|\Z)",
     re.I | re.S)
-_NOTHING = re.compile(r"^\W*(?:nothing|none|n/?a|-)\W*$", re.I)
+#: "nothing", and "nothing — read both the test and the formatter this turn"
+#: (18 Nov, live: the reason after the dash was taken for a gap, a false alarm
+#: on an honest answer). "None of the payload was read" stays a gap.
+_NOTHING = re.compile(r"^\W*(?:(?:nothing|none|n/?a)\s*(?:$|[—–\-:;,.(])|-+\W*$)", re.I)
 
 
 def overclaims(answer: str) -> str:

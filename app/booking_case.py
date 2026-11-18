@@ -20,6 +20,7 @@ is or what checking one means.
 """
 from __future__ import annotations
 
+import contextlib
 import re
 
 from . import verdict
@@ -724,6 +725,38 @@ async def booking_for(identifier: str, env: str = "", budget: float = 6.0) -> tu
     return next((f for f in found if f), ("", ""))
 
 
+#: A line where the system wrote down what it DECIDED — not a request, a status
+#: field or a retry. 18 Nov, live: the answer took "status=PENDING" for "no
+#: dates", concluded FAILED, and skipped the line one millisecond later that
+#: said "Ready-for-planning resolved SUCCESS able to fetch VTS dates".
+_OUTCOME = re.compile(
+    r"\bresolved\s+(?:SUCCESS|FAILED)\b|\b(?:SUCCESS|FAILED|FAILURE)\b|"
+    r"published successfully|successfully (?:published|sent|consumed|saved)|"
+    r"\bstatus\s*[=:]\s*\w+|\bon hold\b|\bworkflow (?:completed|failed)\b|Exception\b")
+OUTCOME_LINES = 15
+
+
+async def outcome_lines(booking: str, env: str, hours: int = 72) -> str:
+    """The booking's own logged decisions in one environment, oldest first.
+
+    Read in code before the turn, so the brain starts from what the system said
+    it did, never from what a status field suggests it must have done."""
+    from datetime import datetime, timedelta, timezone
+    from . import debugkit
+    end = datetime.now(timezone.utc)
+    got = await debugkit.lines(env, "", (booking,), "", end - timedelta(hours=hours), end, 500)
+    rows = [r for r in got.get("rows") or [] if _OUTCOME.search(r.get("message") or "")]
+    if not rows:
+        return ""
+    shown = rows[:OUTCOME_LINES]
+    body = "\n".join(f"  {debugkit.stamp(r['ts'])} [{r.get('app') or ''}] "
+                     f"{r.get('logger') or ''} :: {' '.join((r.get('message') or '').split())[:300]}"
+                     for r in shown)
+    more = f"\n  … {len(rows) - len(shown)} more" if len(rows) > len(shown) else ""
+    return (f"What the system logged as DECIDED for {booking} in {env} (oldest first) — "
+            f"the outcome is what these say, not what a status field implies:\n{body}{more}")
+
+
 async def turn_evidence(text: str) -> str:
     """Where the ids in his message are logged, fetched in code — '' when the
     message names no id, is not about checking one, or the logs cannot answer in time."""
@@ -779,8 +812,26 @@ async def turn_evidence(text: str) -> str:
             except asyncio.TimeoutError:
                 return ""   # slow Loki keeps what Temporal found
 
-        counts, state = await asyncio.gather(counted(), state_of(booking))
-        return "\n".join([c for c in (counts, *state) if c])
+        async def decided() -> str:
+            # Where the run happened: the env he named, else where Temporal found it.
+            where = named if named and named != "lower" else ""
+            if not where:
+                with contextlib.suppress(Exception):
+                    found_in = await asyncio.wait_for(asyncio.shield(state_task),
+                                                      max(deadline - loop.time(), 0.1))
+                    moment = _newest_start("\n".join(found_in))
+                    where = moment[0] if moment else ""
+            if not where:
+                return ""
+            try:
+                return await asyncio.wait_for(outcome_lines(booking, where),
+                                              max(deadline - loop.time(), 0.1))
+            except Exception:                                  # noqa: BLE001
+                return ""
+
+        state_task = asyncio.ensure_future(state_of(booking))
+        counts, outcomes, state = await asyncio.gather(counted(), decided(), state_task)
+        return "\n".join([c for c in (outcomes, counts, *state) if c])
 
     # Any id is traced under its bookingNumber (his rule, 18 Nov). Resolving
     # spends part of the same cap; what is left goes to state and counts.

@@ -808,8 +808,8 @@ def case_so_far(chat: str, who: str, now: float | None = None,
         analysis, _ = answers.split(t["result"])
         if not mine and _about_other_bookings(analysis or t["result"], case_ids):
             # Only their NAME was in it — someone else's ask that tagged them. 18 Nov:
-            # a group ask that named Vinish carried its wrong-booking finding into
-            # his 1:1 about a different ticket, and was answered again as his case.
+            # a group ask that named a colleague carried its wrong-booking finding into
+            # their 1:1 about a different ticket, and was answered again as their case.
             continue
         body = " ".join((analysis or t["result"]).split())[:700]
         found.append(f"- #{t['id']} at {time.strftime('%H:%M', time.localtime(float(t['created_at'])))}"

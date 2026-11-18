@@ -3814,6 +3814,124 @@ _SAYS_NO = re.compile(r"^\s*(?:no|nope|nah|ignore|skip|drop|leave|cancel|stop|sc
                       r"don'?t|dont|not\s+now)\b|\b(?:don'?t|do\s+not|never)\s+send\b", re.I)
 
 
+def _plain_quotes(text: str) -> str:
+    """Phone keyboards type ’ and “ — "Don’t send" missed every \bdon'?t\b (18 Nov)."""
+    return (text or "").translate(str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'",
+                                                 "\u201c": '"', "\u201d": '"'}))
+
+
+#: Keep it, don't send it, don't ask again: "hold on it", "put on hold", "park it".
+_HOLD_WORDS = re.compile(r"\b(?:on\s+hold|hold\s+(?:on\s+)?(?:it|this|that|off|them)|hold\b(?!\s+on\s*,)"
+                         r"|park\s+(?:it|this|that)|keep\s+(?:it|this|that)\s+(?:aside|for\s+later|on\s+hold)"
+                         r"|not\s+now|later)\b", re.I)
+#: Throw it away: "ignore this", "drop the Ravi msg", "already merged and shared".
+_DROP_WORDS = re.compile(r"^\s*(?:no|nope|nah)\b|\b(?:ignore|drop|skip|cancel|scrap|discard"
+                         r"|forget\s+(?:it|this|that|about\s+it)|leave\s+(?:it|this|that)"
+                         r"|no\s+need|not\s+(?:needed|required)"
+                         r"|(?:don'?t|dont|do\s+not|never)\s+send"
+                         r"|already\s+(?:merged|shared|sent|done|answered|replied|told|fixed|handled|closed))\b",
+                         re.I)
+#: Words that change or redirect the draft — then it is feedback, not a verdict.
+_REVISES = re.compile(r"\b(?:shorter|longer|rephrase|reword|tone|change|replace|mention|include|"
+                      r"instead|rather|add|say|write|attach|link|use|tell\s+(?:him|her|them)|"
+                      r"ask\s+(?:him|her|them))\b", re.I)
+_SENDS = re.compile(r"\bsend\b", re.I)
+_NEGATION_BEFORE = re.compile(r"(?:don'?t|dont|do\s+not|never|not)\s*$", re.I)
+
+
+#: "Send", "send it", "ok send now" — a send that names no one.
+_BARE_SEND = re.compile(r"^\s*(?:(?:ok(?:ay)?|yes|yeah|pls|please)[,\s]+)*send"
+                        r"(?:\s+(?:it|this|that|the\s+(?:draft|msg|message|reply)|now|pls|please|bro))*\s*[.!]*$",
+                        re.I)
+#: How recently a draft must have left the line for a bare "send" to mean it.
+SHELF_BARE_SECONDS = 15 * 60
+
+
+def _send_from_shelf(text: str) -> tuple[dict | None, str]:
+    """Nothing staged, and he says send: the draft he was shown, or why not.
+
+    18 Nov: a draft reached his phone two minutes after it was shown — six
+    seconds after it had been dropped because he had replied in Teams himself.
+    His "Send" got "nothing is staged, both were put on hold" (not why), and his
+    "Send to Ravi" went to a brain that wrote and sent NEW words as him.
+    Returns (draft to stage and send as shown, "") — or (None, line to tell
+    him) — or (None, "") when this is not about a shelved draft at all."""
+    from . import answers as _answers
+    raw = _plain_quotes(text).strip()
+    m = _SEND_TO.match(raw)
+    name = m.group(1) if m and not _SEND_PREVIOUS.match(raw) else ""
+    if name and _answers.name_tokens(name):
+        queued = _answers.pick(name)
+        if queued:
+            return {**queued, "type": queued.get("type") or "answer"}, ""
+        found = _answers.shelved(name)
+        if not found:
+            return None, ""
+        entry = found[0]
+        # He named the person: that is his word to send it, whatever it was
+        # shelved for — dropped, held, retired, or answered by him already.
+        loop.unreject(entry)
+        return _answers.unshelve(entry), ""
+    if not _BARE_SEND.match(raw):
+        return None, ""
+    from . import offers
+    if offers.pending() is not None:
+        return None, ""             # an open offer (a review to post…) reads his bare "send"
+    since = time.time() - SHELF_BARE_SECONDS
+    recent = _answers.shelved(since=since)
+    shown = _answers.recently_shown_queued(since)
+    if not recent and not shown:
+        return None, ""
+    if len(recent) + len(shown) > 1:
+        names = [r.get("to") or r.get("who") or "?" for r in recent + shown]
+        return None, ("Nothing is in front of you right now, and more than one draft "
+                      "left recently — " + ", ".join(dict.fromkeys(names))
+                      + ". Say “send to <name>” for the one you mean.")
+    if shown:
+        item = _answers.take_queued(shown[0])
+        return ({**item, "type": item.get("type") or "answer"}, "") if item else (None, "")
+    entry = recent[0]
+    who = entry.get("to") or entry.get("who") or "them"
+    first = who.split()[0]
+    at = time.strftime("%H:%M", time.localtime(float(entry.get("_shelved") or 0)))
+    why = {
+        "answered_by_him": f"you replied to {who} yourself in Teams, so I dropped it at {at}",
+        "dropped": f"you said to drop it at {at}",
+        "held": f"you put it on hold at {at}",
+        "retired": f"it was retired unanswered at {at}",
+    }.get(entry.get("_reason"), f"it left the queue at {at}")
+    if entry.get("_reason") == "retired":
+        loop.unreject(entry)
+        return _answers.unshelve(entry), ""
+    return None, (f"Nothing was sent. The draft to {who} isn't waiting — {why}. "
+                  f"Say “send to {first}” to send it exactly as shown.")
+
+
+def _draft_verdict(text: str) -> str:
+    """"drop", "hold", or "" — his reply to a waiting draft, decided in code.
+
+    18 Nov: "Already merged and shared. Ignore this" and "Don’t send any msg,
+    hold on it now" went to a brain as revision feedback. The brain said "not
+    sending"; then `_SAYS_NO`, anchored to the first word and blind to ’, read
+    "not about it" and queued both drafts to be asked again. One reading, here,
+    before any brain runs. A message that also edits or redirects the draft
+    ("no, ask him to use develop") is not a verdict — it stays feedback."""
+    raw = _plain_quotes(text).strip()
+    if not raw or raw.endswith("?") or _ASKS_WHAT_HAPPENED.search(raw):
+        return ""
+    if _REVISES.search(raw):
+        return ""
+    for m in _SENDS.finditer(raw):
+        # "No send the previous msg" is a send, not a no; "don't send" is a no.
+        if not _NEGATION_BEFORE.search(raw[:m.start()].rstrip()):
+            return ""
+    if _HOLD_WORDS.search(raw):
+        return "hold"
+    if _DROP_WORDS.search(raw):
+        return "drop"
+    return ""
+
+
 def _same_chat(a: str, b: str) -> bool:
     """One recipient under the names a send and a draft give it ("Alex" / "Alex
     Kumar (You)", a group's member list with "+2" or "+3"). 13 Nov: a test send
@@ -3832,7 +3950,10 @@ def _settle_feedback(cid: str, intent: dict | None) -> None:
     if not held or (intent and intent.get("kind") == "send"):
         return
     staged, said, at = held
-    if _SAYS_NO.search(said or ""):
+    verdict = _draft_verdict(said) or ("drop" if _SAYS_NO.search(_plain_quotes(said)) else "")
+    if verdict:
+        from . import answers as _answers
+        _answers.shelve(staged, "held" if verdict == "hold" else "dropped", said)
         loop.end_reply(cid)
         return
     # A send the turn started (or tried) acted on the draft just as a staged
@@ -4856,12 +4977,43 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
         staged = None
     if skip_new_gates:
         staged = None
-    if staged and _DECLINE.match(user_text or ""):
-        # A plain no drops the draft. Handing "no" to a brain as revision feedback
-        # got the draft re-staged, and his next message eaten as feedback on it.
+    elif staged is None and loop.awaiting(cid) is None:
+        revived, line = _send_from_shelf(user_text)
+        if line:
+            store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
+            store.add_ui_message(cid, "assistant", line, {"via": "answer", "channel": channel})
+            await sink.send({"type": "note", "text": line})
+            if channel == "web":
+                await sink.send({"type": "done", "tools": []})
+            return None
+        if revived:
+            staged = revived
+            loop.stage(cid, staged)
+    verdict = (_draft_verdict(user_text) or ("drop" if _DECLINE.match(user_text or "") else "")) \
+        if staged else ""
+    if verdict:
+        # A plain no drops the draft; "hold it" parks it. Decided here, never by a
+        # brain: handing "no" to one as revision feedback got the draft re-staged,
+        # and "Ignore this" / "hold on it" were asked again minutes later (18 Nov).
+        from . import answers as _answers
         loop.clear_awaiting(cid)
         loop.end_reply(cid)
-        await sink.send({"type": "note", "text": "👍 Dropped the draft — nothing was sent."})
+        if verdict == "drop":
+            loop.note_rejected(staged)          # its words may not go out by another way
+        _answers.shelve(staged, "held" if verdict == "hold" else "dropped", user_text)
+        if staged.get("thread"):
+            with contextlib.suppress(Exception):
+                from . import threads
+                threads.update(staged["thread"], status="answered")
+        target = staged.get("to") or staged.get("who") or "them"
+        line = (f"⏸ On hold — the draft to {target} is parked and won't come up again. "
+                f"Say “send to {target.split()[0]}” when you want it to go."
+                if verdict == "hold" else
+                f"👍 Dropped the draft to {target} — nothing was sent, and it won't come up again.")
+        store.add_ui_message(cid, "user", user_text.strip(), {"channel": channel})
+        store.add_ui_message(cid, "assistant", line, {"via": "answer", "channel": channel})
+        await sink.send({"type": "note", "text": line})
+        await _answers.next_after(cid)
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None

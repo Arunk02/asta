@@ -3507,17 +3507,16 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
     from . import go
     why = go.no_ask(task_id, result)
     if why:
-        # His rule, 30 Sep: a plan for a big change is his to approve; being
-        # asked again for a one-line change, or for one he already said "do it"
-        # on, is drag. He still gets the plan — to read, and to stop.
-        full = await _send_full_plan(task_id, t, result)
-        await notify.notify(
-            f"📋 *PLAN #{task_id}* — going ahead ({why})\n{clip.clip(t['title'], 90)}\n\n"
-            f"{_card_text(result, full)}\n\n"
-            f"— — —\n{full}"
-            + ("I'll raise the PR when it's done. " if go.ships(task_id)
-               else "It stays local until you say *raise PR*. ")
-            + f"Say *stop {task_id}* if this is not what you meant.", "task")
+        # His rule, 18 Nov: "if I gave approve upfront it can do the
+        # implementation — it doesn't need my approval or a plan.md for me to
+        # review." His go was the approval, so no plan card and no plan file:
+        # sent "to read and stop", the card was batched and reached him after
+        # the PR it planned. The plan is kept as the task's approved spec (the event
+        # below records it); the result comes back as usual, and
+        # "stop N" still works while it builds. A plan that waits despite his
+        # go (go.stop_reason) is the other branch, below, and still comes to him.
+        store.add_task_event(task_id, "plan", f"not sent — going ahead ({why}); "
+                                              f"{len(result.splitlines())} lines kept on the task")
         born = float(t.get("created_at") or 0)
         if _graph().manages(task_id):
             # The workflow engine is still inside this step; its gate, next,
@@ -3543,7 +3542,7 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         f"— — —\n{full}"
         f"👍 *approve task {task_id}*\n"
         f"👎 *reject task {task_id}*\n"
-        f"✏️ …or just reply with the changes", "task")
+        f"✏️ …or just reply with the changes", "task", asks=True)
 
 
 #: The parts a plan must state, by the heading the brief asks for. Missing ones
@@ -3577,8 +3576,11 @@ async def _send_full_plan(task_id: int, t: dict, plan: str) -> str:
     above it is a summary; the file is what he reads. Sent with the card — a
     plan card already reaches his phone wherever he is. Returns the line that
     says it is attached, or where it is when the phone could not take it."""
-    from . import notify, task_spec
+    from . import notify, plan_pdf, task_spec
     path = task_spec.preview(task_id, plan, t.get("title", ""))
+    # 18 Nov: "the .md file … I don't feel it easy to read". The same plan as a
+    # phone-shaped PDF; the .md stays beside it, and goes instead if it fails.
+    path = plan_pdf.render(path, t.get("title", "")) or path
     store.add_task_event(task_id, "plan", f"full plan sent: {path.name} ({path.parent.name[:10]})")
     try:
         sent = await notify.wa_document(str(path), f"Plan #{task_id} — {clip.clip(t.get('title', ''), 60)}")

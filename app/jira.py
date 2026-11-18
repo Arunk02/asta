@@ -159,8 +159,23 @@ def _adf_to_text(node) -> str:
         return node
     out = []
     if isinstance(node, dict):
-        if node.get("type") == "text":
-            out.append(node.get("text", ""))
+        kind = node.get("type")
+        if kind == "text":
+            text = node.get("text", "")
+            out.append(text)
+            # A link written over words keeps its target: the words are a title,
+            # the URL is where the booking is.
+            for mark in node.get("marks") or []:
+                href = ((mark or {}).get("attrs") or {}).get("href") or ""
+                if (mark or {}).get("type") == "link" and href and href not in text:
+                    out.append(f" ({href})")
+        elif kind in ("inlineCard", "blockCard", "embedCard"):
+            # 18 Nov: "Booking Number: <smart link to Solar>" flattened to
+            # "Booking Number:" — the card has no text node, only its URL — and the
+            # ticket was reported as naming no booking.
+            url = (node.get("attrs") or {}).get("url") or ""
+            if url:
+                out.append(url)
         for child in node.get("content", []) or []:
             out.append(_adf_to_text(child))
         if node.get("type") in ("paragraph", "heading", "listItem"):

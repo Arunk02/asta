@@ -464,7 +464,9 @@ def test_the_check_looks_both_ways_at_every_hand_off_and_summarises():
     # confident guesses went to a colleague in one afternoon without it.
     # +300 (18 Nov) for the cause being THIS booking's and stopping at another
     # team's boundary — an unrelated NPE was "confirmed" for a TMS ack delay.
-    assert len(r) < 3100, "a brief, not a manual"
+    # +300 (18 Nov) for picking the flow from his end-to-end documents first and
+    # marking each step done or not — the walk a person does with the flow open.
+    assert len(r) < 3400, "a brief, not a manual"
 
 
 def test_whatever_they_ask_is_answered_simply_not_a_form_filled():

@@ -776,7 +776,15 @@ def _work_location(text: str) -> str:
     return ", ".join(parts)
 
 
-def case_so_far(chat: str, who: str, now: float | None = None) -> str:
+def _about_other_bookings(finding: str, case_ids: list[str] | None) -> bool:
+    """It names bookings, and none of them is this case's."""
+    from . import booking_case
+    theirs = {i for i in booking_case.ids(finding or "") if 11 <= len(i) <= 12}
+    return bool(theirs) and not (theirs & {i.upper() for i in case_ids or []})
+
+
+def case_so_far(chat: str, who: str, now: float | None = None,
+                case_ids: list[str] | None = None) -> str:
     """What earlier work on this person's case found, and what they were told.
 
     Each follow-up used to start cold: five tasks on one evening's case, none
@@ -798,6 +806,11 @@ def case_so_far(chat: str, who: str, now: float | None = None) -> str:
             continue
         from . import answers
         analysis, _ = answers.split(t["result"])
+        if not mine and _about_other_bookings(analysis or t["result"], case_ids):
+            # Only their NAME was in it — someone else's ask that tagged them. 18 Nov:
+            # a group ask that named Vinish carried its wrong-booking finding into
+            # his 1:1 about a different ticket, and was answered again as his case.
+            continue
         body = " ".join((analysis or t["result"]).split())[:700]
         found.append(f"- #{t['id']} at {time.strftime('%H:%M', time.localtime(float(t['created_at'])))}"
                      f" ({t.get('title') or ''}): {body}")
@@ -1392,7 +1405,9 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     shared_res = None
     if reply_to:
         brief += _waiting_brief(who, text, context, need=need, questions=questions or [])
-        brief += case_so_far(reply_to, who) + handed_rider(reply_to)
+        from . import booking_case
+        brief += case_so_far(reply_to, who, case_ids=booking_case.ids(text)
+                             or case_of(who, text, context)[0]) + handed_rider(reply_to)
         if not group and kind not in ("review_request", "pr_review", "port"):
             # What the two of them worked on: "that X thing" is resolved against
             # it before any title search (12 Nov, see app/shared_work.py).
@@ -1433,6 +1448,7 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
 
 
 _RUN_URL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/actions/runs/\d+")
+_JIRA_KEY = re.compile(r"\b(?:BEPTELIKOS|[A-Z][A-Z0-9]{2,})-\d{2,6}\b")
 _PR_URL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _HOW_WHY = re.compile(r"\b(why|how does|how do|how is|where is|which service|flow)\b", re.I)
 
@@ -1457,6 +1473,13 @@ def playbook(text: str, env: str = "") -> str:
         steps.append(
             f"Identifiers {', '.join(ids[:4])}: {where}. Then temporal_workflows in that "
             "environment for its workflow, and the error signatures around it.")
+    ticket = _JIRA_KEY.search(text or "")
+    if ticket and not ids:
+        # 18 Nov: a defect ticket whose booking was a Solar link in its description
+        # was answered "no booking on the ticket" — and from another case's finding.
+        steps.append(f"A Jira ticket ({ticket.group(0)}): read it first with jira_issue — "
+                     "description and comments. The booking and its environment are usually "
+                     "a Solar link in it (solar-cdt is sit). Then check THAT booking.")
     if _RUN_URL.search(text or ""):
         steps.append("A GitHub Actions run: `gh run view <id> --repo <owner/repo> --log-failed`; "
                      "name the failing job and step, quote the error line, and check whether a "
@@ -1499,11 +1522,15 @@ def case_of(who: str, text: str, context: str) -> tuple[list[str], str]:
     """(ids, env) an ask from `who` is about: its own ids, else theirs earlier in
     the exchange, else the newest line in the exchange that names one; the
     environment from a Solar link first, then the words."""
-    from . import booking_case
+    from . import booking_case, chat_watch
     if booking_case.ids(text):
         return [], booking_case.thread_env(text, context)
-    found = booking_case.ids(their_words(who, context)) or booking_case.thread_ids("", context)
-    return found, booking_case.thread_env(text, context)
+    # Arun's own lines are not their case: an id he checked is his, not what
+    # they are asking about now.
+    others = "\n".join(line for line in (context or "").splitlines()
+                       if not chat_watch.is_from_him(line.partition(":")[0].strip()))
+    found = booking_case.ids(their_words(who, context)) or booking_case.thread_ids("", others)
+    return found, booking_case.thread_env(text, others)
 
 
 def _waiting_brief(who: str, text: str, context: str, need: str = "",
@@ -1524,7 +1551,9 @@ def _waiting_brief(who: str, text: str, context: str, need: str = "",
     parts.append(_said_is_not_proof(who, f"{text}\n{context}"))
     try:
         from . import project_knowledge
-        passages = project_knowledge.lookup(text, channel="teams")
+        # Ranked on what they need, not on "could you check this": the flow
+        # documents are found by the flow's words (18 Nov).
+        passages = project_knowledge.lookup(f"{need} {text}".strip(), channel="teams")
     except Exception:                                          # noqa: BLE001
         passages = ""
     if passages:

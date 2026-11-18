@@ -142,3 +142,54 @@ def test_the_case_line_is_not_read_as_his_words():
               + main._case_anchor({"task_id": 9105, "who": "Lead"}))
     assert resume.ranking_text(prompt).strip() == "not billing"
     assert scorecard.his_words(prompt).strip() == "not billing"
+
+
+def test_the_case_starts_from_the_flow_documents():
+    from app import tasks
+    r = booking_case.rule(f"has {ASKED} reached TMS in preprod?")
+    assert "search_knowledge" in r and "NAM" in r and "TMS or non-TMS" in r
+    assert r.index("Pick its flow") < r.index("what DID happen")
+    assert "Mark each listed step done" in r
+    assert "search_knowledge" in tasks.PINNED_TOOLS["analysis"]
+
+
+def test_a_reply_that_promises_work_is_flagged():
+    assert answers.promises_work("nothing reached the containers. we'll fix that null case, will update u")
+    assert answers.promises_work("I'll raise a PR for it today")
+    assert answers.promises_work("sent fine, the ack from TMS came late — asked TMS for the reason") == ""
+    assert answers.promises_work("will update u once I hear back") == ""
+
+
+def test_a_jira_smart_link_keeps_its_booking():
+    from app import jira
+    adf = {"type": "doc", "content": [{"type": "paragraph", "content": [
+        {"type": "text", "text": "Booking Number: "},
+        {"type": "inlineCard", "attrs": {"url": f"https://solar-cdt.maersk.io/inland/booking/?ref={ASKED}"}}]},
+        {"type": "paragraph", "content": [
+            {"type": "text", "text": "the booking",
+             "marks": [{"type": "link", "attrs": {"href": "https://example.test/b/1"}}]}]}]}
+    text = jira._adf_to_text(adf)
+    assert booking_case.ids(text) == [ASKED]
+    assert "the booking (https://example.test/b/1)" in text
+
+
+def test_solar_cdt_is_sit():
+    assert booking_case.link_env(f"https://solar-cdt.maersk.io/inland/booking/?ref={ASKED}") == "sit"
+
+
+def test_an_earlier_finding_that_only_named_them_is_not_their_case():
+    t = store.create_task("Lead asked: Colleague A, could you check this", "analysis", "p", None)
+    store.update_task(t["id"], status="done", teams_chat="Deploy group",
+                      result=f"ANALYSIS: NPE on {OTHER}\nREPLY: x")
+    out = responder.case_so_far("Colleague A", "Colleague A", case_ids=[ASKED])
+    assert OTHER not in out
+    mine = store.create_task("Colleague A asked: check it", "analysis", "p", None)
+    store.update_task(mine["id"], status="done", teams_chat="Colleague A",
+                      result=f"ANALYSIS: {ASKED} sent fine\nREPLY: y")
+    assert ASKED in responder.case_so_far("Colleague A", "Colleague A", case_ids=[ASKED])
+
+
+def test_a_ticket_with_no_booking_in_the_ask_is_read_first():
+    out = responder.playbook("https://example.atlassian.net/browse/BEPTELIKOS-1234 it is a blocker")
+    assert "BEPTELIKOS-1234" in out and "jira_issue" in out and "solar-cdt is sit" in out
+    assert "jira_issue" not in responder.playbook(f"BEPTELIKOS-1234 for {ASKED} in sit")

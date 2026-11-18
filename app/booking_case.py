@@ -144,6 +144,11 @@ def case_for(task_id: int | None) -> dict:
 _SOLAR = re.compile(r"\bsolar(?:-([a-z]+))?\.maersk\.io\b", re.I)
 
 
+#: Solar hosts named after something other than the environment: solar-cdt is
+#: the SIT UI (18 Nov: a ticket's solar-cdt booking was logged only in SIT).
+_SOLAR_ALIASES = {"cdt": "sit"}
+
+
 def link_env(text: str) -> str:
     """The environment a Solar link in it points at, or ''.
 
@@ -156,6 +161,8 @@ def link_env(text: str) -> str:
     sub = (m.group(1) or "").lower()
     if not sub:
         return "prod"
+    if sub in _SOLAR_ALIASES:
+        return _SOLAR_ALIASES[sub]
     hit = _ENV.fullmatch(sub)
     return next((name for g, name in zip(hit.groups(), _ENV_NAMES) if g), "") if hit else ""
 
@@ -321,6 +328,15 @@ _NOT_BILLING = ("   Billing is out of scope unless they ask about it: its errors
                 "booking's problem — leave them out, or one 'Also noticed' line at most.\n")
 
 
+#: His end-to-end flow documents say what SHOULD happen, per kind of booking.
+#: Without picking the flow first, a NAM booking's VTS or CAMS hold reads as
+#: "stuck", and a non-TMS booking's missing TMS send reads as a failure.
+FLOW_FROM_THE_DOCS = (
+    "1. Pick its flow from the project knowledge (search_knowledge: telikos-system-flow, "
+    "TelikosE2EFlowV2, NAM_Inland_Booking_Documentation): normal or NAM (rail → CAMS, "
+    "non-rail → VTS), TMS or non-TMS, import or export — which one, from this booking's "
+    "own logs. List what SHOULD happen on it, step by step, up to their question; name the "
+    "document.\n")
 #: 18 Nov: a billing NPE under another booking, found by searching the
 #: environment for "TMS", was reported as the cause for the booking asked about.
 CAUSE_IS_THIS_BOOKING = (
@@ -355,8 +371,7 @@ def rule(text: str, context: str = "", heard: bool = False, question: str = "") 
     out += (f"\n\nThis is about a specific case — {', '.join(found[:3])}, in {where}. Answer "
            "WHATEVER they asked about it — a send, an ack, a status, a milestone, a failure, "
            "why something did or did not happen — never from documents alone:\n"
-           "1. From the project knowledge, what SHOULD happen for their question (name the "
-           "document).\n"
+           + FLOW_FROM_THE_DOCS +
            "2. From this booking's logs and Temporal history, what DID happen: "
            "grafana_logs(terms=[id]) with the id ALONE first — see which services touched it "
            "(filters are case-sensitive, and 'custom' matches 'customer': never conclude 'not "
@@ -375,6 +390,7 @@ def rule(text: str, context: str = "", heard: bool = False, question: str = "") 
            "   outbound only (sent or not): booking→IOM; →event history; AP→email and "
            "documents (SEND_DOCUMENTS).\n"
            + (_BILLING if _ABOUT_BILLING.search(whole) else _NOT_BILLING) +
+           "Mark each listed step done (its log line) or not. "
            "Root cause = the FIRST step of the flow that did not complete, with its exact "
            "message (a FAILED status at INFO counts). 'Fine' only if the flow reached its end.\n"
            + CAUSE_IS_THIS_BOOKING + OUR_BOUNDARY +

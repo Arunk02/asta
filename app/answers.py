@@ -187,6 +187,19 @@ def unconfirmed(analysis: str) -> str:
     return ""
 
 
+#: A reply that commits him to work: "we'll fix that null case" (18 Nov) went
+#: into a colleague's draft from an analysis, on work he had not agreed to.
+_PROMISE = re.compile(r"\b(?:we'?ll|we\s+will|i'?ll|i\s+will|will)\s+(?:get\s+(?:it|this|that)\s+)?"
+                      r"(?:fix|fixed|raise|deploy|push|patch|change|add|create|merge|release|"
+                      r"hotfix|implement)\b[^.\n]{0,40}", re.I)
+
+
+def promises_work(reply: str) -> str:
+    """The words in a reply that promise work he has not agreed to, or ""."""
+    m = _PROMISE.search(reply or "")
+    return m.group(0).strip() if m else ""
+
+
 def off_case_note(task_id: int | None, analysis: str, reply: str = "") -> str:
     """A warning when the answer is about other bookings than the one asked about."""
     from . import booking_case, verdict
@@ -370,6 +383,10 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
     wrong = await _with_its_pair(task_id, analysis, reply)
     if wrong:
         note = ((note + "\n") if note else "") + wrong
+    promised = promises_work(reply)
+    if promised:
+        note = ((note + "\n") if note else "") + (
+            f"⚠️ It promises “{promised}” — work you haven't agreed to. Edit it before you send.")
     reply = writing.as_him(reply)
     intent = {"kind": "send", "what": reply.strip(), "to": chat, "channel": "teams",
               "to_group": bool(group), "task_id": task_id, "thread": thread,

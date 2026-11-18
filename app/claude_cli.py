@@ -698,14 +698,27 @@ async def run_turn(conv: dict, user_text: str,
     # that looped, and a turn that only reported its last call would hide that.
     from . import llm_meter
     usage = llm_meter.Usage()
-    # message id -> its latest usage block. The stream emits each message more
-    # than once (partials, then the settled copy); the partial carries only the
-    # first few output tokens, so keeping the FIRST copy recorded ~16 output
-    # tokens a turn (17 Nov). The settled copy replaces it.
+    # message id -> its usage block, counted once per message. The assistant
+    # record is written at message_start and carries only the first few output
+    # tokens; the message's real output count arrives afterwards in the
+    # stream's message_delta (measured 18 Nov: assistant 4, message_delta 199,
+    # result 199). Without it, ~16 output tokens a turn were recorded.
     by_message: dict[str, dict] = {}
+    final_out: dict[str, int] = {}
+    current = ""
+
+    def _retally() -> None:
+        nonlocal usage
+        cost = usage.cost_usd
+        usage = llm_meter.Usage()
+        for mid_, block in by_message.items():
+            if mid_ in final_out:
+                block = {**block, "output_tokens": final_out[mid_]}
+            usage = usage + llm_meter.from_anthropic(block)
+        usage.cost_usd = cost
 
     async def _pump() -> None:
-        nonlocal final, err_msg, limited, usage
+        nonlocal final, err_msg, limited, usage, current
         assert proc.stdout
         buf = b""
         while True:
@@ -727,6 +740,12 @@ async def run_turn(conv: dict, user_text: str,
                 t = e.get("type")
                 if t == "stream_event":
                     ev = e.get("event") or {}
+                    if ev.get("type") == "message_start":
+                        current = (ev.get("message") or {}).get("id") or current
+                    elif ev.get("type") == "message_delta" and current \
+                            and isinstance((ev.get("usage") or {}).get("output_tokens"), int):
+                        final_out[current] = ev["usage"]["output_tokens"]
+                        _retally()
                     if (ev.get("type") == "content_block_start" and chunks
                             and (ev.get("content_block") or {}).get("type") == "text"
                             and not "".join(chunks[-2:]).endswith((" ", "\n"))):
@@ -748,18 +767,12 @@ async def run_turn(conv: dict, user_text: str,
                                     await on_delta(text)
                 elif t == "assistant":
                     message = e.get("message") or {}
-                    # The same assistant message is emitted more than once in a
-                    # stream (partials, then the settled copy). Counting its
-                    # usage twice would roughly double every reported figure, so
-                    # each message id contributes exactly once.
+                    # Each message id contributes exactly once, whatever number
+                    # of records carry it; its output count is final_out's.
                     mid = message.get("id") or ""
                     if isinstance(message.get("usage"), dict):
                         by_message[mid] = message["usage"]
-                        cost = usage.cost_usd
-                        usage = llm_meter.Usage()
-                        for block in by_message.values():
-                            usage = usage + llm_meter.from_anthropic(block)
-                        usage.cost_usd = cost
+                        _retally()
                     if on_tool:
                         for part in (message.get("content") or []):
                             if isinstance(part, dict) and part.get("type") == "tool_use":

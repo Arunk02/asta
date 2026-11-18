@@ -454,7 +454,9 @@ def test_the_check_looks_both_ways_at_every_hand_off_and_summarises():
     assert "with the id ALONE first" in r, "never 'not sent' from one keyword filter"
     # +200 for the one rule a missed failure taught (11 Nov): the root cause is the
     # first step that did not complete. The full walk rides with the flow documents.
-    assert len(r) < 2600, "a brief, not a manual"
+    # +200 again (17 Nov) for one cause with its proof, never "likely" — five
+    # confident guesses went to a colleague in one afternoon without it.
+    assert len(r) < 2800, "a brief, not a manual"
 
 
 def test_whatever_they_ask_is_answered_simply_not_a_form_filled():

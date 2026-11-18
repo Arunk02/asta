@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import re
 
+from . import verdict
+
 #: Booking refs (H65ZMWX52B2, MH65W8JZNVNT), CBK/job numbers, transport orders
 #: (TO2934106728115 — 15 characters, past the ref rule's 14), long numeric ids.
 #: Typed in any case; a word never has two digits in it, so case-insensitive is
@@ -232,10 +234,15 @@ _NOT_BILLING = ("   Billing is out of scope unless they ask about it: its errors
                 "booking's problem — leave them out, or one 'Also noticed' line at most.\n")
 
 
-def rule(text: str, context: str = "", heard: bool = False) -> str:
+def rule(text: str, context: str = "", heard: bool = False, question: str = "") -> str:
     """How to answer a question about one booking: the documents give the rule,
-    the logs say what happened to THIS one. '' when no id is in hand."""
-    whole = f"{context}\n{text}"
+    the logs say what happened to THIS one. '' when no id is in hand.
+
+    `question` is what the COLLEAGUE asked, in their words. 17 Nov: A colleague asked
+    why a booking went to TMS while VTS said pending; the turn that answered held
+    only Arun's "check on the request he asked", and the answer was about whether
+    the booking completed — a question nobody asked."""
+    whole = f"{context}\n{question}\n{text}"
     found = ids(whole)
     if not found:
         return ""
@@ -244,7 +251,9 @@ def rule(text: str, context: str = "", heard: bool = False) -> str:
              "the lower environments (sit, uat, preprod)" if env == "lower" else
              "an environment nobody named — search every one (namespace=\"all\") and say which "
              "it was found in; never assume prod")
-    out = (f"\n\nThis is about a specific case — {', '.join(found[:3])}, in {where}. Answer "
+    asked = " ".join((question or "").split())[:600]
+    out = (f"\n\nTHEIR QUESTION — answer exactly this, nothing wider: «{asked}»" if asked else "")
+    out += (f"\n\nThis is about a specific case — {', '.join(found[:3])}, in {where}. Answer "
            "WHATEVER they asked about it — a send, an ack, a status, a milestone, a failure, "
            "why something did or did not happen — never from documents alone:\n"
            "1. From the project knowledge, what SHOULD happen for their question (name the "
@@ -273,30 +282,28 @@ def rule(text: str, context: str = "", heard: bool = False) -> str:
            "a later downstream failure. State separately what failed, what later succeeded, "
            "and what remains unverified. Where the logs and the document disagree, the logs "
            "win — and that the document may need correcting.\n"
-           "Summarise SIMPLY, in the ANALYSIS: the answer to their question first, in one or "
-           "two plain lines; then only the few facts that prove it (time, service, event, "
-           "milestone — a log line or class:line where it matters); then what is missing or "
-           "could not be checked. No table or per-flow list unless they asked what happened "
-           "overall. At most one 'Also noticed'.\n"
+           "Code: the registered workspace only; history via code_history.\n"
+           + verdict.SHAPE +
+           "No table or per-flow list unless they asked what happened overall. At most one "
+           "'Also noticed'.\n"
            "If the logs or Temporal cannot be read, say 'from the documents only — not "
            "confirmed in the logs' and what failed. Never present a document's answer as checked.")
     if WHY.search(whole):
         from . import roles
-        out += ("\nThey are asking WHY — this replaces the summary shape above.\n"
-                + roles.CASE_METHOD)
+        out += "\n" + verdict.WHY_METHOD + roles.CASE_METHOD
     if heard:
         out += ("\nThe id was HEARD on a call and may be misheard: if it is not found, try the "
                 "nearest spellings (one character off) before saying it does not exist.")
     return out
 
 
-def for_turn(text: str, context: str = "") -> str:
+def for_turn(text: str, context: str = "", question: str = "") -> str:
     """What a chat brain (Claude or Copilot, WhatsApp or a voice job) carries for
     a turn about one booking: how to check it, or what to ask first. ''
     otherwise — a general question carries nothing extra."""
-    lacking = missing(text, context)
+    lacking = missing(text, f"{context}\n{question}")
     if lacking:
-        found = ids(f"{context}\n{text}")
+        found = ids(f"{context}\n{question}\n{text}")
         ask = question_for(lacking, found)
         what = " and ".join({"booking": "the booking number",
                              "environment": "the environment"}[x] for x in lacking)
@@ -305,7 +312,7 @@ def for_turn(text: str, context: str = "") -> str:
                 f"the conversation first; if it is not there, ask for it in one short line "
                 f"(\"{ask}\") and stop — do not answer as if the documents confirmed this "
                 f"booking, and never assume prod.")
-    return rule(text, context)
+    return rule(text, context, question=question)
 
 
 # --- ids said out loud --------------------------------------------------------

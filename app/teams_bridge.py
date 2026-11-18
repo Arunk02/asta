@@ -1535,6 +1535,20 @@ _MESSAGE_JS = """
         links.forEach(a => { a.textContent = a.getAttribute('href'); });
         src = clone;
       }
+      // A link CARD shows a page title, not the address,
+      // and the address carried the booking (17 Nov: a colleague's booking-UI link — Asta
+      // read the title and the favicon, and asked him which booking). Keep the
+      // title and add the address after it.
+      const cards = Array.from(clone.querySelectorAll('a[href]')).filter(a => {
+        const h = a.getAttribute('href') || '', t = (a.innerText || a.textContent || '').trim();
+        return /^https?:/i.test(h) && t && t !== h && !links.includes(a) && !t.includes(h);
+      });
+      if (cards.length) {
+        cards.forEach(a => {
+          a.textContent = (a.innerText || a.textContent || '').trim() + ' ' + a.getAttribute('href');
+        });
+        src = clone;
+      }
     } catch (e) { src = body; }
     const text = (src.innerText || '').trim();
     // Screenshots and pasted images: tagged so the reader can photograph each

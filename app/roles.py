@@ -54,7 +54,7 @@ CASE_METHOD = """How to debug it — in this order, each step a small query buil
    start's input; downstream services' lines) and log_gaps for that pod and minute
    (dropped lines, restarts).
 6. Answer as: Timeline · Why (the mechanism, with Class:line) · Not confirmed, and why
-   · Next step. Quote the exact lines with their link — never turn a log line into a
+   · Next step. ONE cause — never "either … or", "likely", "looks like". Quote the exact lines with their link — never turn a log line into a
    claim it does not make ("exceptionCode 400" in a line is not "billing returned
    400"). One answer per question: if it differs from an earlier one, say which was
    wrong and why."""

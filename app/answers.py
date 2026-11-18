@@ -165,8 +165,22 @@ def unconfirmed(analysis: str) -> str:
     5 Nov: "dropped in AP's payload builder" went to a colleague on an analysis
     whose own reasoning said "most likely". The analysis says when it is
     guessing; the draft must say so too, and never go out on its own."""
+    from . import verdict
+    if verdict.confirmed(analysis):
+        return ""       # the proven shape: its "Not confirmed: nothing." is not a doubt
     m = _UNPROVEN.search(analysis or "")
-    return f"the analysis calls part of this unconfirmed (“{m.group(0)}”)" if m else ""
+    if m:
+        return f"the analysis calls part of this unconfirmed (“{m.group(0)}”)"
+    hedge = verdict.HEDGE.search(analysis or "")
+    if hedge:
+        return f"the analysis guesses (“{hedge.group(0)}”)"
+    # A cause stated with no proof is a guess too, however sure it sounds
+    # (17 Nov: "display lag on their side" went to the colleague). See app/verdict.py.
+    if verdict.states_a_cause(analysis):
+        gaps = verdict.problems(analysis, why=True)
+        if gaps:
+            return "the cause it gives is not proven: " + "; ".join(gaps)
+    return ""
 
 
 def render(who: str, need: str, analysis: str, reply: str, note: str = "",

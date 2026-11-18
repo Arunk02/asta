@@ -317,7 +317,7 @@ def _payloads(attrs: dict) -> str:
 _EVENT_KEYS = ("eventName", "eventType", "bookingStatus", "status", "workOrderStatus",
                "executionStarted", "transportOrderNumber", "version", "isCancellation",
                "workProcessName", "workProcessStatus")
-BOOKING_RUNS = 40
+BOOKING_RUNS = 60
 
 
 def _facts(obj, depth: int = 0, found: dict | None = None) -> dict:
@@ -339,6 +339,27 @@ def _facts(obj, depth: int = 0, found: dict | None = None) -> dict:
     return found
 
 
+def _booking_refs(obj, depth: int = 0) -> list[str] | None:
+    """The booking-level reference types in an input (`…/booking/references`), or None."""
+    if depth > 4:
+        return None
+    if isinstance(obj, dict):
+        booking = obj.get("booking")
+        if isinstance(booking, dict) and isinstance(booking.get("references"), list):
+            return sorted({str(r.get("referenceType") or r.get("referenceTypeEnum") or "")
+                           for r in booking["references"] if isinstance(r, dict)} - {""})
+        for v in obj.values():
+            found = _booking_refs(v, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for v in obj[:3]:
+            found = _booking_refs(v, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
 def _start_facts(events: list[dict]) -> dict:
     import base64
     first = events[0] if events else {}
@@ -354,7 +375,29 @@ def _start_facts(events: list[dict]) -> dict:
             facts.setdefault("eventName", value)
         else:
             facts = _facts(value, found=facts)
+            refs = _booking_refs(value)
+            if refs is not None and "_refs" not in facts:
+                facts["_refs"] = refs
     return facts
+
+
+#: The runs that ARE the booking's story: what it received, and what billing made
+#: of it. Activity-plan and reporting runs follow from these, so they go first
+#: when there are more runs than can be read.
+_STORY_TYPES = ("bookingEventsWorkflow", "BillingWorkflow")
+
+
+def _pick_runs(rows: list[dict], limit: int) -> list[dict]:
+    if len(rows) <= limit:
+        return rows
+    kind = lambda r: _of(r, "type", "name") or _of(r, "workflowType", "name")
+    story = [r for r in rows if kind(r) in _STORY_TYPES]
+    if len(story) > limit:
+        story = story[:10] + story[-(limit - 10):]
+    rest = [r for r in rows if kind(r) not in _STORY_TYPES]
+    chosen = story + rest[-max(0, limit - len(story)):] if len(story) < limit else story
+    when = lambda r: _of(r, "startTime") or _of(r, "workflowExecutionInfo", "startTime")
+    return sorted(chosen, key=when)
 
 
 async def booking_events(env: str, booking: str, limit: int = BOOKING_RUNS) -> dict:
@@ -368,7 +411,7 @@ async def booking_events(env: str, booking: str, limit: int = BOOKING_RUNS) -> d
     rows = await workflows(env, query, limit=100)
     total = await count(env, query) if len(rows) >= 100 else len(rows)
     rows = sorted(rows, key=lambda r: _of(r, "startTime") or _of(r, "workflowExecutionInfo", "startTime"))
-    picked = rows if len(rows) <= limit else rows[:10] + rows[-(limit - 10):]
+    picked = _pick_runs(rows, limit)
     gate = asyncio.Semaphore(6)
 
     async def one(row: dict) -> dict:
@@ -395,14 +438,27 @@ def render_booking_events(found: dict) -> str:
     from collections import Counter
     seen = Counter(str(r["facts"].get("eventName") or r["type"] or "?") for r in runs)
     head = (f"{found['total']} workflow run(s) for {found['booking']} in {found['env']}"
-            + (f" — {len(runs)} shown (first 10 and the newest)" if len(runs) < found["total"] else "")
+            + (f" — {len(runs)} shown (the booking's events and billing runs first)"
+               if len(runs) < found["total"] else "")
             + ", oldest first, times UTC:")
     out = [head]
+    before: dict[str, set[str]] = {}
     for r in runs:
-        f = {k: v for k, v in r["facts"].items() if k != "eventName"}
+        f = {k: v for k, v in r["facts"].items() if k not in ("eventName", "_refs")}
         detail = " ".join(f"{k}={v}" for k, v in f.items())
+        refs = r["facts"].get("_refs")
+        change = ""
+        if refs is not None:
+            # 18 Nov: an upstream update carried an older copy of the booking's
+            # references; what it dropped is what billing then failed on.
+            now, prev = set(refs), before.get(r["type"])
+            if prev is not None and now != prev:
+                change = " · refs " + " ".join([f"+{x}" for x in sorted(now - prev)]
+                                               + [f"−{x}" for x in sorted(prev - now)])
+            before[r["type"]] = now
         out.append(f"  {r['started'].replace('T', ' ')} [{r['status'] or '?'}] {r['type']} · "
-                   f"{r['facts'].get('eventName') or '-'}" + (f" · {detail}" if detail else ""))
+                   f"{r['facts'].get('eventName') or '-'}" + (f" · {detail}" if detail else "")
+                   + change)
     out.append("Events received: " + ", ".join(f"{k} ×{n}" for k, n in seen.most_common()))
     out.append("An event not in this list did not reach this booking's workflows in this "
                "environment. Before saying the sender never sent it, show the consumer took "

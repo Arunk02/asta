@@ -299,3 +299,31 @@ def test_analysis_evidence_carries_decisions_and_received_events(monkeypatch):
     monkeypatch.setattr(temporal, "booking_events", events)
     got = asyncio.run(booking_case._decided_and_received(OTHER, "sit", 4320))
     assert any("DECIDED" in g for g in got) and any("PRICING_UPDATE" in g for g in got)
+
+
+def test_booking_events_shows_what_each_run_added_and_dropped():
+    from app import temporal
+
+    def run(t, kind, refs, name="SERVICE_DELIVERY_EXECUTION"):
+        return {"started": t, "type": kind, "status": "COMPLETED",
+                "facts": {"eventName": name, "_refs": refs}}
+    out = temporal.render_booking_events({"env": "sit", "booking": OTHER, "total": 4, "runs": [
+        run("2026-11-17T17:37:57", "BillingWorkflow", ["ATD", "LAST_LEG_DATE"]),
+        run("2026-11-18T12:26:39", "bookingEventsWorkflow", ["ATD"], "PRICING_UPDATE"),
+        run("2026-11-18T12:26:41", "BillingWorkflow", ["ATD"], "BOOKING_UPDATED"),
+    ]})
+    lines = out.splitlines()
+    assert "−LAST_LEG_DATE" in lines[3], "billing's run lost what the update did not carry"
+    assert "refs" not in lines[2], "a different workflow type is not compared"
+
+
+def test_the_booking_story_runs_are_kept_first():
+    from app import temporal
+    rows = ([{"type": {"name": "ActivityPlanWorkflow"}, "startTime": f"2026-11-18T10:{i:02d}:00Z"}
+             for i in range(50)]
+            + [{"type": {"name": "bookingEventsWorkflow"}, "startTime": "2026-11-18T12:26:39Z"},
+               {"type": {"name": "BillingWorkflow"}, "startTime": "2026-11-18T12:26:41Z"}])
+    picked = temporal._pick_runs(sorted(rows, key=lambda r: r["startTime"]), 10)
+    kinds = [temporal._of(r, "type", "name") for r in picked]
+    assert len(picked) == 10 and "bookingEventsWorkflow" in kinds and "BillingWorkflow" in kinds
+    assert picked == sorted(picked, key=lambda r: r["startTime"])

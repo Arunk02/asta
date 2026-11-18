@@ -191,7 +191,10 @@ def unconfirmed(analysis: str) -> str:
 #: into a colleague's draft from an analysis, on work he had not agreed to.
 _PROMISE = re.compile(r"\b(?:we'?ll|we\s+will|i'?ll|i\s+will|will)\s+(?:get\s+(?:it|this|that)\s+)?"
                       r"(?:fix|fixed|raise|deploy|push|patch|change|add|create|merge|release|"
-                      r"hotfix|implement)\b[^.\n]{0,40}", re.I)
+                      r"hotfix|implement)\b[^.\n]{0,40}"
+                      # His Tanglish: "fix pannittu ping panren" — "I'll fix it and ping you".
+                      r"|\b(?:fix|deploy|push|change|raise)\s+pann?(?:it+u|ren|rom|uren|uvom|alam)\b"
+                      r"[^.\n]{0,40}", re.I)
 
 
 def promises_work(reply: str) -> str:

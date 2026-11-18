@@ -193,3 +193,9 @@ def test_a_ticket_with_no_booking_in_the_ask_is_read_first():
     out = responder.playbook("https://example.atlassian.net/browse/BEPTELIKOS-1234 it is a blocker")
     assert "BEPTELIKOS-1234" in out and "jira_issue" in out and "solar-cdt is sit" in out
     assert "jira_issue" not in responder.playbook(f"BEPTELIKOS-1234 for {ASKED} in sit")
+
+
+def test_a_tanglish_promise_is_flagged_too():
+    assert answers.promises_work("idhu code bug, fix pannittu ungaluku ping panren")
+    assert answers.promises_work("naan deploy panren evening")
+    assert answers.promises_work("check panren, update panren") == ""

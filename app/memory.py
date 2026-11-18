@@ -344,6 +344,14 @@ def learn_from_correction(conv_id: str, user_text: str) -> str | None:
     Phrased by the LOCAL model (free); falls back to storing the pair verbatim
     when LM Studio is down, because a slightly clumsy memory beats no memory.
     """
+    # His words, not the wrapper a turn carries. 17 Nov: every draft he said no
+    # to arrived here as "Arun did NOT approve sending the draft as-is. His
+    # feedback: …" and was filed as a lesson — 11 copies. Feedback on a waiting
+    # draft revises that draft; it is not a rule for next time.
+    from . import scorecard
+    if (user_text or "").strip().lower().startswith("arun did not approve sending the draft"):
+        return None
+    user_text = scorecard.his_words(user_text)
     if not looks_like_correction(user_text):
         return None
     prior = ""
@@ -375,6 +383,9 @@ def learn_from_correction(conv_id: str, user_text: str) -> str | None:
             title = line.split(":", 1)[1].strip()[:60]
         elif line.upper().startswith("LESSON:"):
             lesson = line.split(":", 1)[1].strip()
+    if lesson.startswith("<") or title.startswith("<"):
+        # The local model echoed the template ("<6 words max>"), twice on file.
+        title, lesson = "", ""
     if not lesson:
         title = f"Correction: {user_text.strip()[:40]}"
         lesson = (f"Arun corrected this. He said: “{user_text.strip()[:200]}”\n\n"

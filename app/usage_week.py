@@ -44,8 +44,12 @@ def task_spend(since: float) -> dict[int, dict]:
         tid = int(row.get("task_id") or 0)
         if not tid or rehearsal.is_rehearsal(tid):
             continue
-        t = per.setdefault(tid, {"new": 0, "cached": 0, "out": 0, "legs": 0})
+        t = per.setdefault(tid, {"new": 0, "cached": 0, "out": 0, "legs": 0,
+                                 "usd": 0.0, "priced": 0})
         t["legs"] += 1
+        if isinstance(row.get("cost_usd"), (int, float)):
+            t["usd"] += float(row["cost_usd"])
+            t["priced"] += 1
         u = row.get("usage") or {}
         t["new"] += int(u.get("new_tokens") or 0)
         t["cached"] += int(u.get("cache_read") or 0)
@@ -94,6 +98,15 @@ def turn_costs(rows) -> float:
     return total
 
 
+def _background_cost(since: float) -> tuple[float, int, int]:
+    """($, runs with a figure, runs) for background calls."""
+    with store._connect() as c:
+        usd, priced, n = c.execute(
+            "SELECT SUM(cost_usd), COUNT(cost_usd), COUNT(*) FROM call_usage WHERE started_at >= ?",
+            (since,)).fetchone()
+    return float(usd or 0), int(priced or 0), int(n or 0)
+
+
 def _background(since: float) -> list[tuple[str, int, int]]:
     with store._connect() as c:
         return [(p, n, int(t or 0)) for p, n, t in c.execute(
@@ -111,29 +124,51 @@ def table(now: float | None = None) -> str:
     now = time.time() if now is None else now
     since = now - WEEK
     tasks = task_spend(since)
-    kinds: dict[str, dict] = defaultdict(lambda: {"n": 0, "new": 0, "cached": 0, "out": 0})
+    kinds: dict[str, dict] = defaultdict(lambda: {"n": 0, "new": 0, "cached": 0, "out": 0,
+                                                  "usd": 0.0, "priced": 0, "legs": 0})
     for t in tasks.values():
         k = kinds[t["kind"]]
         k["n"] += 1
-        for f in ("new", "cached", "out"):
+        for f in ("new", "cached", "out", "usd", "priced", "legs"):
             k[f] += t[f]
     chat = _chat(since)
     bg = _background(since)
-    lines = [f"{'what':<14}{'runs':>6}{'new in':>9}{'cached':>9}{'out':>8}"]
+    bg_usd, bg_priced, bg_n = _background_cost(since)
+    partial = False
+
+    def usd(amount: float, priced: int, runs: int) -> str:
+        nonlocal partial
+        if not priced:
+            partial = partial or runs > 0
+            return "—"
+        partial = partial or priced < runs
+        return f"${amount:.2f}" + ("+" if priced < runs else "")
+
+    lines = [f"{'what':<12}{'runs':>5}{'new in':>8}{'cached':>8}{'out':>7}{'$':>8}"]
     for kind, k in sorted(kinds.items(), key=lambda kv: -kv[1]["new"]):
-        lines.append(f"{kind:<14}{k['n']:>6}{_k(k['new']):>9}{_k(k['cached']):>9}{_k(k['out']):>8}")
-    lines.append(f"{'chat':<14}{chat['count']:>6}{_k(chat['new']):>9}{_k(chat['cached']):>9}"
-                 f"{_k(chat['out']) + ('*' if chat['out_partial'] else ''):>8}")
+        label = {"code": "coding", "analysis": "debugging"}.get(kind, kind)
+        lines.append(f"{label:<12}{k['n']:>5}{_k(k['new']):>8}{_k(k['cached']):>8}{_k(k['out']):>7}"
+                     f"{usd(k['usd'], k['priced'], k['legs']):>8}")
+    lines.append(f"{'chat':<12}{chat['count']:>5}{_k(chat['new']):>8}{_k(chat['cached']):>8}"
+                 f"{_k(chat['out']) + ('*' if chat['out_partial'] else ''):>7}"
+                 f"{usd(chat['usd'], chat['turns'], chat['turns']):>8}")
     if bg:
-        lines.append(f"{'background':<14}{sum(n for _, n, _ in bg):>6}"
-                     f"{_k(sum(t for *_, t in bg)):>9}")
+        lines.append(f"{'background':<12}{sum(n for _, n, _ in bg):>5}"
+                     f"{_k(sum(t for *_, t in bg)):>8}{'':>8}{'':>7}"
+                     f"{usd(bg_usd, bg_priced, bg_n):>8}")
+    total = sum(k["usd"] for k in kinds.values()) + chat["usd"] + bg_usd
     a = _answers(since)
     day = time.strftime("%d %b", time.localtime(since)) + "–" + time.strftime("%d %b", time.localtime(now))
-    out = [f"📊 Asta's week ({day})", "```", *lines, "```"]
+    out = [f"📊 Asta's week ({day})", "```", *lines, "```",
+           f"All of it: ${total:.2f} at API prices — Claude Code's own figure per run; "
+           "your plan is a subscription."
+           + (" — / + : runs before 18 Nov carry no figure." if partial else "")]
     top = sorted(tasks.items(), key=lambda kv: -kv[1]["new"])[:3]
     if top:
         out.append("Costliest: " + "; ".join(
-            f"#{tid} {t['kind']} {_k(t['new'])} in {t['legs']} leg(s)" for tid, t in top))
+            f"#{tid} {t['kind']} {_k(t['new'])}"
+            + (f" (${t['usd']:.2f})" if t["priced"] else "") + f" in {t['legs']} leg(s)"
+            for tid, t in top))
     if bg:
         out.append("Background: " + ", ".join(f"{p} {_k(t)} ({n})" for p, n, t in bg[:3]))
     out.append(f"Answers: {a.get('presented', 0)} shown · {a.get('he answered', 0)} you answered "

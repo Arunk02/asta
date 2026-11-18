@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
 import time
@@ -258,6 +259,8 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
     from . import copilot_cli
     prompt = f"{copilot_cli.now_line()}\n{prompt}"
     cmd = ["claude", "-p", prompt, NO_SKILLS, "--settings", OUTPUT_SETTINGS,
+           # JSON, so the run's own cost comes back with its text (see _parse_run).
+           "--output-format", "json",
            # Parity with the copilot path's --allow-all-tools: the pipeline
            # must run builds/tests unattended. Workspace repos only.
            "--permission-mode", "default" if tools_off else "bypassPermissions"]
@@ -332,11 +335,7 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
             chunk = await proc.stdout.read(512)
             if not chunk:
                 break
-            text = chunk.decode(errors="replace")
-            parts.append(text)
-            if on_progress:
-                with contextlib.suppress(Exception):
-                    await on_progress(text)
+            parts.append(chunk.decode(errors="replace"))
         await proc.wait()
         return "".join(parts)
 
@@ -351,12 +350,52 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
         with contextlib.suppress(Exception):
             await proc.wait()
         raise
+    out = _parse_run(out, session_id)
+    if on_progress:
+        # Plain-text -p printed everything at the end too (measured 18 Nov: one
+        # burst at 5.8 s), so the milestone watcher sees exactly what it saw.
+        with contextlib.suppress(Exception):
+            await on_progress(out)
     if proc.returncode != 0:
         if out.strip() == "Not logged in · Please run /login":
             raise AuthenticationRequired(out.strip())
         note_limit(out)
         raise RuntimeError(f"claude exited {proc.returncode}: {out[-300:]}")
     return out.strip()
+
+
+#: What the last one-shot in this task cost, as Claude Code reported it, for the
+#: ledger around it (worker_usage.attempt, call_ledger.call) to record. None
+#: when no figure came back. A ContextVar: an awaited call shares its caller's.
+LAST_COST: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "claude_last_cost", default=None)
+_COST_TOTAL = "cli_cost_total:"
+
+
+def _parse_run(raw: str, session_id: str = "") -> str:
+    """The run's text from --output-format json, and its cost into LAST_COST.
+
+    Claude Code reports a resumed session's RUNNING total (measured 18 Nov:
+    0.000539 → 0.000818 → 0.000987 over three runs), so a run costs the
+    difference from the session's previous total. Anything that is not the
+    JSON object comes back untouched — an error or a login prompt reads as
+    before."""
+    LAST_COST.set(None)
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return raw
+    if not isinstance(data, dict) or "result" not in data:
+        return raw
+    total = data.get("total_cost_usd")
+    sid = data.get("session_id") or session_id
+    if isinstance(total, (int, float)):
+        with contextlib.suppress(Exception):
+            prev = float(store.kv_get(_COST_TOTAL + sid) or 0) if sid else 0.0
+            LAST_COST.set(float(total) - prev if 0 < prev <= total else float(total))
+            if sid:
+                store.kv_set(_COST_TOTAL + sid, str(total))
+    return str(data.get("result") or "")
 
 
 #: When the subscription's session window says it lifts. Every call before then

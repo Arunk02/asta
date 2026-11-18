@@ -1153,7 +1153,10 @@ async def code_history(workspace: str, repo: str, path: str = "", what: str = "l
     except ValueError as exc:
         return str(exc)
     if not (root / ".git").exists():
-        known = ", ".join(workspace_tools.list_services(workspace)) or "none"
+        try:
+            known = ", ".join(workspace_tools.list_services(workspace)) or "none"
+        except (ValueError, OSError):
+            known = "none readable"
         return f"No repo '{repo}' in workspace '{workspace}'. Repos: {known}"
     if what not in ("log", "blame", "show"):
         return 'what must be "log", "blame" or "show".'
@@ -2727,6 +2730,11 @@ async def log_counts(term: str = "", env: str = "", by: str = "app", hours: floa
     return debugkit.render_counts(found)
 
 
+def _local_offset() -> "_dt.timedelta":
+    """This machine's offset from UTC (IST on his laptop)."""
+    return _dt.datetime.now().astimezone().utcoffset() or _dt.timedelta(0)
+
+
 async def log_lines(env: str, service: str = "", contains=(), logger: str = "", at: str = "",
                     minutes: int = 0, start: str = "", end: str = "", limit: int = 40,
                     newest_first: bool = False, pod: str = "", full: bool = False) -> str:
@@ -2770,7 +2778,7 @@ async def log_lines(env: str, service: str = "", contains=(), logger: str = "", 
     if at and not found.get("rows") and not found.get("error") and s and e:
         # 17 Nov: "14:12:41+00:00" was a local (IST) time written as UTC — three
         # empty searches. The same clock read as local is one more query.
-        shift = _dt.datetime.now().astimezone().utcoffset() or _dt.timedelta(0)
+        shift = _local_offset()
         if shift:
             with contextlib.suppress(grafana.GrafanaError):
                 local = await debugkit.lines(env, service, _terms(contains), logger,

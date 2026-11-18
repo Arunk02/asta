@@ -79,3 +79,25 @@ def confirmed(analysis: str) -> bool:
 
 def states_a_cause(text: str) -> bool:
     return bool(CAUSAL.search(text or ""))
+
+
+_SAYS_CONFIRMED = re.compile(r"Confidence:\**\s*CONFIRMED\b", re.I)
+_NOT_CONFIRMED_PART = re.compile(
+    r"Not confirmed:\**\s*(.+?)(?=\n\s*\n|\n\W*(?:Next step|Confidence|Timeline|Why)\b|\Z)",
+    re.I | re.S)
+_NOTHING = re.compile(r"^\W*(?:nothing|none|n/?a|-)\W*$", re.I)
+
+
+def overclaims(answer: str) -> str:
+    """What the answer itself says it did not check, when it still ends CONFIRMED.
+
+    18 Nov, live: "Not confirmed: I didn't pull booking-service's status line"
+    and then "Confidence: CONFIRMED" — the line it skipped was the one that
+    decided the case, and the mechanism it confirmed was wrong."""
+    if not _SAYS_CONFIRMED.search(answer or ""):
+        return ""
+    m = _NOT_CONFIRMED_PART.search(answer or "")
+    if not m:
+        return ""
+    gap = " ".join(m.group(1).replace("*", "").split())
+    return "" if _NOTHING.match(gap) else gap[:220]

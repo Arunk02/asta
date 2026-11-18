@@ -239,3 +239,15 @@ def test_booking_events_is_a_read_tool_every_investigation_has():
     assert "booking_events" in worker_auth.READ_TOOLS and "booking_events" in mcp_server.INVESTIGATION
     assert "booking_events" in tasks.PINNED_TOOLS["analysis"]
     assert "booking_events(env, booking)" in booking_case.rule(f"did {ASKED} get the TMS ack in sit?")
+
+
+def test_worked_then_failed_points_at_the_event_in_between():
+    r = booking_case.rule(f"why is billing failing for {ASKED} in sit? it worked yesterday")
+    assert "Worked, then failed?" in r and "between the last success and the first failure" in r
+    assert "the logs win" in r and len(booking_case.rule(
+        "have we sent TMS for H65ZMWX52B2 in sit? and customs UNITED?")) < 3400
+    from app import temporal
+    out = temporal.render_booking_events({"env": "sit", "booking": ASKED, "total": 1, "runs": [
+        {"started": "2026-11-18T12:26:39", "type": "bookingEventsWorkflow", "status": "COMPLETED",
+         "facts": {"eventName": "PRICING_UPDATE"}}]})
+    assert "PRICING_UPDATE" in out and "runs between the last success and the failure" in out

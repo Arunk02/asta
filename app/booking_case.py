@@ -336,6 +336,13 @@ FLOW_FROM_THE_DOCS = (
     "TelikosE2EFlowV2, the NAM booking doc): normal or NAM (rail → CAMS, "
     "non-rail → VTS), TMS or non-TMS, import or export, from its own logs. List what "
     "SHOULD happen, step by step, up to their question; name the document.\n")
+#: 18 Nov: billing passed at 17:37 and failed at 12:26 the next day; the answer
+#: blamed the step that had worked all along and never read the pricing update
+#: that arrived in between and overwrote the references billing needed.
+WORKED_THEN_FAILED = (
+    "3. Worked, then failed? The cause is the event between the last success and the "
+    "first failure (booking_events): compare what it carried with what was stored, "
+    "field by field. ")
 #: 18 Nov: a billing NPE under another booking, found by searching the
 #: environment for "TMS", was reported as the cause for the booking asked about.
 CAUSE_IS_THIS_BOOKING = (
@@ -394,10 +401,9 @@ def rule(text: str, context: str = "", heard: bool = False, question: str = "") 
            "Root cause = the FIRST step of the flow that did not complete, with its exact "
            "message (a FAILED status at INFO counts). 'Fine' only if the flow reached its end.\n"
            + CAUSE_IS_THIS_BOOKING + OUR_BOUNDARY +
-           "3. A completed upstream milestone never rules out an earlier failed attempt or "
-           "a later downstream failure. State separately what failed, what later succeeded, "
-           "and what remains unverified. Where the logs and the document disagree, the logs "
-           "win — and that the document may need correcting.\n"
+           WORKED_THEN_FAILED +
+           "State separately what failed, what succeeded, what is unverified. Where logs "
+           "and the document disagree, the logs win.\n"
            "Code: the registered workspace only; history via code_history.\n"
            + verdict.SHAPE +
            "No table or per-flow list unless they asked what happened overall. At most one "

@@ -407,6 +407,9 @@ def render_booking_events(found: dict) -> str:
     out.append("An event not in this list did not reach this booking's workflows in this "
                "environment. Before saying the sender never sent it, show the consumer took "
                "the same message for other bookings in the window (log_counts).")
+    out.append("If it worked once and failed later, the cause is in the runs between the last "
+               "success and the failure: read those runs' input (temporal_workflow "
+               "history=true) and compare what they carried with what was stored before.")
     return "\n".join(out)
 
 

@@ -71,9 +71,13 @@ state, the document and heading). At most one "Also noticed:" line, only if it
 bears on their question.
 
 REPLY:
-The message to send to {who}, in Arun's voice: short, plain and polite, no
+The message to send to {who}, in Arun's voice: one or two plain lines, polite, no
 greeting ceremony, no sign-off. Answer what they asked, in the order they asked
-it; nothing they did not ask about. If you could not find it, or a term or
+it; nothing they did not ask about. Say what our side did and where it stuck or
+was slow; no timestamps, class names or reasoning unless they asked. What is not
+proven is said as "exact cause not sure yet" — never as a cause. Stuck or slow
+inside another team's system (TMS, IOM, SAP)? Say so and that it is with them:
+"we sent it fine, the ack from TMS came late — asked TMS for the reason". If you could not find it, or a term or
 reference is unclear ("topic refresh", "the prod PR"), the REPLY is the one short
 question to {who} that gets you what you need — ALWAYS write a REPLY; never end
 by asking Arun whether to ask them. Never promise work Arun has not agreed to.
@@ -181,6 +185,81 @@ def unconfirmed(analysis: str) -> str:
         if gaps:
             return "the cause it gives is not proven: " + "; ".join(gaps)
     return ""
+
+
+#: A reply that commits him to work: "we'll fix that null case" (18 Nov) went
+#: into a colleague's draft from an analysis, on work he had not agreed to.
+_PROMISE = re.compile(r"\b(?:we'?ll|we\s+will|i'?ll|i\s+will|will)\s+(?:get\s+(?:it|this|that)\s+)?"
+                      r"(?:fix|fixed|raise|deploy|push|patch|change|add|create|merge|release|"
+                      r"hotfix|implement)\b[^.\n]{0,40}"
+                      # His Tanglish: "fix pannittu ping panren" — "I'll fix it and ping you".
+                      r"|\b(?:fix|deploy|push|change|raise)\s+pann?(?:it+u|ren|rom|uren|uvom|alam)\b"
+                      r"[^.\n]{0,40}", re.I)
+
+
+def promises_work(reply: str) -> str:
+    """The words in a reply that promise work he has not agreed to, or ""."""
+    m = _PROMISE.search(reply or "")
+    return m.group(0).strip() if m else ""
+
+
+def off_case_note(task_id: int | None, analysis: str, reply: str = "") -> str:
+    """A warning when the answer is about other bookings than the one asked about."""
+    from . import booking_case, verdict
+    case = booking_case.case_for(task_id)
+    others = verdict.off_case(f"{analysis}\n{reply}", case.get("ids") or [])
+    if not others:
+        return ""
+    return (f"⚠️ Wrong booking? This is about {', '.join(others)}, but they asked about "
+            f"{', '.join(case['ids'][:2])} — check it before this goes.")
+
+
+async def _with_its_pair(task_id: int | None, analysis: str, reply: str) -> str:
+    """off_case_note, after pairing the asked id with its bookingNumber: an answer
+    naming only JBX… for an asked MJBX… is the same case, not another one."""
+    from . import booking_case
+    note = off_case_note(task_id, analysis, reply)
+    case = booking_case.case_for(task_id)
+    if not note or not case.get("ids"):
+        return note
+    try:
+        pair, _where = await booking_case.booking_for(case["ids"][0], case.get("env") or "", 8)
+    except Exception:                                          # noqa: BLE001
+        pair = ""
+    if pair and pair.upper() not in case["ids"]:
+        booking_case.remember_case(task_id, case["ids"] + [pair.upper()], case.get("env") or "",
+                                   case.get("question") or "")
+        note = off_case_note(task_id, analysis, reply)
+    return note
+
+
+def answered_since(chat: str, since: float | None, asked_text: str, who: str) -> str:
+    """Who else in the chat answered after the ask, in their words, or "".
+
+    18 Nov: the answer was made, then shown to him 24 minutes later — after the
+    colleague the ask was addressed to had already told the chat it was fixed. Read when it is
+    SHOWN, from what the sweep has already read — no extra look at Teams."""
+    if not chat or not since:
+        return ""
+    from . import chat_watch
+    try:
+        rows = store.teams_messages(chat=chat, since=float(since), limit=200)
+    except Exception:                                          # noqa: BLE001
+        return ""
+    asked = (asked_text or "").lower()
+    asker = (who or "").strip().lower()
+    said = []
+    for r in rows:
+        sender = (r.get("sender") or "").strip()
+        first = sender.split()[0].lower() if sender else ""
+        if (not first or sender.lower() == asker or chat_watch.is_from_him(sender)
+                or first not in asked or float(r.get("sent_at") or 0) <= float(since)):
+            continue
+        line = " ".join((r.get("text") or "").split())[:160]
+        if line and line not in said:
+            said.append(f"{sender.split()[0]}: “{line}”")
+    return ("💬 Since they asked — " + "; ".join(said[-2:]) + ". Check this is still needed."
+            if said else "")
 
 
 def render(who: str, need: str, analysis: str, reply: str, note: str = "",
@@ -304,6 +383,13 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
         store.record_outcome("answer", "he answered", subject=str(task_id or ""),
                              detail=f"{who}: {need}"[:200])
         return True
+    wrong = await _with_its_pair(task_id, analysis, reply)
+    if wrong:
+        note = ((note + "\n") if note else "") + wrong
+    promised = promises_work(reply)
+    if promised:
+        note = ((note + "\n") if note else "") + (
+            f"⚠️ It promises “{promised}” — work you haven't agreed to. Edit it before you send.")
     reply = writing.as_him(reply)
     intent = {"kind": "send", "what": reply.strip(), "to": chat, "channel": "teams",
               "to_group": bool(group), "task_id": task_id, "thread": thread,
@@ -568,6 +654,11 @@ async def _show(cid: str, intent: dict) -> None:
     _note_shown()
     waiting = len(_load_queue())
     note = intent.get("note", "")
+    task = store.get_task(intent["task_id"]) if intent.get("task_id") else None
+    fresh = answered_since(intent.get("to") or "", (task or {}).get("created_at"),
+                           intent.get("source_text") or "", intent.get("who") or "")
+    if fresh:
+        note = (note + "\n" if note else "") + fresh
     if intent["_showings"] > 1:
         note = (note + "\n" if note else "") + "(Asking again — this one is still unanswered.)"
     from . import senior

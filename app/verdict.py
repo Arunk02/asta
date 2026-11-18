@@ -111,3 +111,26 @@ def overclaims(answer: str) -> str:
         return ""
     gap = " ".join(m.group(1).replace("*", "").split())
     return "" if _NOTHING.match(gap) else gap[:220]
+
+
+def off_case(answer: str, asked: list[str]) -> list[str]:
+    """The bookings an answer is about when none of them is the one asked about.
+
+    18 Nov: asked about one preprod booking, the analysis searched UAT for any
+    error mentioning TMS and "confirmed" a billing NPE logged eight hours earlier
+    under another booking. An answer naming only other bookings is about another
+    case, however sure it sounds. Empty when the asked booking is in it, or when
+    it names no booking at all."""
+    from . import booking_case
+    wanted = {i.upper() for i in asked or []}
+    if not wanted:
+        return []
+    named = [i for i in booking_case.ids(answer or "") if _A_BOOKING.match(i)]
+    if not named or wanted & set(named):
+        return []
+    return [i for i in named if i not in wanted][:3]
+
+
+#: A bookingNumber (11) or servicePlanNumber (12) — not a transport order, a
+#: container or a plain number, which an answer may name beside the right booking.
+_A_BOOKING = re.compile(r"^(?=.*[A-Z])[A-Z0-9]{11,12}$")

@@ -123,7 +123,7 @@ HOT = frozenset(capabilities.ALWAYS) | frozenset({
 #: on-demand chat where everything else waits behind a search: the debug kit,
 #: code history, the ticket, the colleague's chat and the way to answer them.
 INVESTIGATION = HOT | frozenset({
-    "code_history", "jira_issue", "teams_read_chat", "teams_send_message",
+    "code_history", "jira_issue", "booking_events", "teams_read_chat", "teams_send_message",
 })
 
 

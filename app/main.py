@@ -3770,6 +3770,23 @@ def _judge_staged(cid: str, staged: dict, user_text: str) -> None:
             {"id": row, "before": staged.get("what") or "", "to": target}))
 
 
+def _case_anchor(staged: dict) -> str:
+    """The case a corrected draft is about, restated for the revision.
+
+    18 Nov: "check whether we sent to TMS and got the ack" was applied to the
+    booking the rejected answer had wandered to, not the one the colleague asked
+    about — a second wrong answer on the same wrong booking."""
+    from . import booking_case
+    case = booking_case.case_for(staged.get("task_id"))
+    if not case.get("ids"):
+        return ""
+    where = f" in {case['env']}" if case.get("env") else ""
+    asked = f" Their question: «{case['question']}»." if case.get("question") else ""
+    return (f"\n\nThe draft answers {staged.get('who') or 'them'} about "
+            f"{', '.join(case['ids'][:3])}{where}.{asked} Check his point against THAT "
+            f"booking's own logs; a booking the earlier answer found is not this case.")
+
+
 def _set_aside(cid: str, staged: dict, said: str, outcome: str) -> bool:
     """Put a waiting draft back in the queue, to come up again. False when it is
     not one that is owed (no words, or neither an answer nor addressed)."""
@@ -4976,7 +4993,8 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                       f"someone else). When it's ready to send "
                       f"again, stage it with prepare_to_send; otherwise just continue the work. "
                       f"If what he typed is a new instruction rather than a change to the "
-                      f"draft, do that instead and do NOT stage the draft again.")
+                      f"draft, do that instead and do NOT stage the draft again."
+                      + _case_anchor(staged))
         return _start_turn(conv, prompt, sink, channel)
 
     # Asta offered to go do something ("CI failed — want me to analyse?"). His yes

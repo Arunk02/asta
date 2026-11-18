@@ -342,6 +342,18 @@ def _plain(text: str) -> str:
     return " ".join((text or "").lower().split())
 
 
+def last_rejected_to(now: float | None = None) -> str:
+    """Where the draft he last turned down was going, while that is recent."""
+    from . import store
+    now = time.time() if now is None else now
+    try:
+        rows = json.loads(store.kv_get(_REJECTED) or "[]")
+    except ValueError:
+        return ""
+    rows = [r for r in rows if r.get("to") and now - float(r.get("at") or 0) < REJECTED_SECONDS]
+    return rows[-1]["to"] if rows else ""
+
+
 def note_rejected(intent: dict) -> None:
     """He answered this draft with anything but a yes: its words are refused."""
     from . import store

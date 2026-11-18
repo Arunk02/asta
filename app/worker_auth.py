@@ -21,7 +21,7 @@ CURRENT: contextvars.ContextVar[tuple[str, dict] | None] = contextvars.ContextVa
 READ_TOOLS = frozenset({
     'search_memory', 'load_skill', 'search_knowledge', 'resolve_context',
     'read_workspace_file', 'list_services', 'facts_about',
-    'grafana_logs', 'temporal_workflows', 'temporal_workflow', 'log_counts',
+    'grafana_logs', 'temporal_workflows', 'temporal_workflow', 'booking_events', 'log_counts',
     'log_lines', 'find_id', 'log_gaps', 'debug_stack_health',
     'jira_search', 'jira_my_issues', 'jira_issue', 'jira_sprint',
     'teams_read_chat', 'teams_history', 'teams_resolve', 'conversation_status',

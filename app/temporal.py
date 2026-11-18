@@ -313,6 +313,103 @@ def _payloads(attrs: dict) -> str:
     return " | ".join(out)
 
 
+#: What an event's input says happened — the rest of the payload is detail.
+_EVENT_KEYS = ("eventName", "eventType", "bookingStatus", "status", "workOrderStatus",
+               "executionStarted", "transportOrderNumber", "version", "isCancellation",
+               "workProcessName", "workProcessStatus")
+BOOKING_RUNS = 40
+
+
+def _facts(obj, depth: int = 0, found: dict | None = None) -> dict:
+    """The first value of each _EVENT_KEYS key, searched a few levels deep."""
+    found = {} if found is None else found
+    if depth > 3:
+        return found
+    if isinstance(obj, dict):
+        for k in _EVENT_KEYS:
+            v = obj.get(k)
+            if k not in found and v not in (None, "", [], {}):
+                found[k] = v if isinstance(v, (str, int, float, bool)) else str(v)[:60]
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                _facts(v, depth + 1, found)
+    elif isinstance(obj, list):
+        for v in obj[:5]:
+            _facts(v, depth + 1, found)
+    return found
+
+
+def _start_facts(events: list[dict]) -> dict:
+    import base64
+    first = events[0] if events else {}
+    attrs = first.get("workflowExecutionStartedEventAttributes") or {}
+    facts: dict = {}
+    for p in ((attrs.get("input") or {}).get("payloads") or [])[:3]:
+        try:
+            value = json.loads(base64.b64decode(p.get("data", "")).decode("utf-8", "replace"))
+        except Exception:                                      # noqa: BLE001
+            continue
+        # bookingEventsWorkflow's first argument IS the event: "SAP_TMS_ACK_FEEDBACK".
+        if isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{3,60}", value):
+            facts.setdefault("eventName", value)
+        else:
+            facts = _facts(value, found=facts)
+    return facts
+
+
+async def booking_events(env: str, booking: str, limit: int = BOOKING_RUNS) -> dict:
+    """Every workflow run for one booking, oldest first, each with what its start
+    input says happened — the event, the status, the TO and its version.
+
+    18 Nov: "did TMS send the execution status?" was answered precisely only by
+    listing EVERY event the booking received, decoded — two ACKs, no execution
+    status. One workflow at a time, an answer sampled 6 of 287 runs and guessed."""
+    query = f'WorkflowId STARTS_WITH "{booking}"'
+    rows = await workflows(env, query, limit=100)
+    total = await count(env, query) if len(rows) >= 100 else len(rows)
+    rows = sorted(rows, key=lambda r: _of(r, "startTime") or _of(r, "workflowExecutionInfo", "startTime"))
+    picked = rows if len(rows) <= limit else rows[:10] + rows[-(limit - 10):]
+    gate = asyncio.Semaphore(6)
+
+    async def one(row: dict) -> dict:
+        wid = _of(row, "execution", "workflowId") or _of(row, "workflowId")
+        run = _of(row, "execution", "runId") or _of(row, "runId")
+        async with gate:
+            try:
+                facts = _start_facts(await history(env, wid, run))
+            except TemporalError as exc:
+                facts = {"error": str(exc)[:80]}
+        return {"started": (_of(row, "startTime") or "")[:19], "id": wid,
+                "type": _of(row, "type", "name") or _of(row, "workflowType", "name"),
+                "status": (_of(row, "status") or "").replace("WORKFLOW_EXECUTION_STATUS_", ""),
+                "facts": facts}
+
+    runs = await asyncio.gather(*(one(r) for r in picked))
+    return {"env": env, "booking": booking, "total": total, "listed": len(rows), "runs": runs}
+
+
+def render_booking_events(found: dict) -> str:
+    runs = found.get("runs") or []
+    if not runs:
+        return f"No workflows for {found.get('booking')} in {found.get('env')}."
+    from collections import Counter
+    seen = Counter(str(r["facts"].get("eventName") or r["type"] or "?") for r in runs)
+    head = (f"{found['total']} workflow run(s) for {found['booking']} in {found['env']}"
+            + (f" — {len(runs)} shown (first 10 and the newest)" if len(runs) < found["total"] else "")
+            + ", oldest first, times UTC:")
+    out = [head]
+    for r in runs:
+        f = {k: v for k, v in r["facts"].items() if k != "eventName"}
+        detail = " ".join(f"{k}={v}" for k, v in f.items())
+        out.append(f"  {r['started'].replace('T', ' ')} [{r['status'] or '?'}] {r['type']} · "
+                   f"{r['facts'].get('eventName') or '-'}" + (f" · {detail}" if detail else ""))
+    out.append("Events received: " + ", ".join(f"{k} ×{n}" for k, n in seen.most_common()))
+    out.append("An event not in this list did not reach this booking's workflows in this "
+               "environment. Before saying the sender never sent it, show the consumer took "
+               "the same message for other bookings in the window (log_counts).")
+    return "\n".join(out)
+
+
 def render_history(events: list[dict], env: str, workflow_id: str, limit: int = 40) -> str:
     """Every step in order — when, what, and for starts and signals, with what."""
     if not events:

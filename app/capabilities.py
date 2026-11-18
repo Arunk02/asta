@@ -134,6 +134,10 @@ _TABLE: tuple[Capability, ...] = (
                http='POST /api/temporal/workflow {"env":"prod","workflow_id":"…","history":false}',
                note="One workflow: status, what it waits on, why it failed. "
                     "history=true for the events that ended it."),
+    Capability("booking_events", "observe",
+               http='POST /api/_invoke {"tool":"booking_events","args":{"env":"sit","booking":"…"}}',
+               note="Booking Temporal workflows: each run's decoded event, TO and status, "
+                    "oldest first, with a tally per event type."),
     Capability("log_counts", "observe",
                http='POST /api/debug/counts {"term":"H7Y5BWNBNX9","env":"all","by":"app","hours":24}',
                note="WHERE first: counts per env and service (or pod). env all when "
@@ -587,7 +591,7 @@ def names() -> tuple[str, ...]:
 READ_ONLY_TURN: ContextVar[bool] = ContextVar("asta_read_only_turn", default=False)
 SIDE_READS = frozenset({
     "search_memory", "read_data_file", "search_knowledge", "conversation_status",
-    "grafana_logs", "temporal_workflows", "temporal_workflow", "app_recipes",
+    "grafana_logs", "temporal_workflows", "temporal_workflow", "booking_events", "app_recipes",
     "log_counts", "log_lines", "find_id", "log_gaps", "self_audit",
     "facts_about", "resolve_context", "read_workspace_file", "list_services", "code_history",
     "jira_search", "jira_my_issues", "jira_issue", "jira_sprint",

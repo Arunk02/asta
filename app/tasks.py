@@ -503,8 +503,8 @@ _DEV_MCP_KINDS = ("analysis", "code")
 #: code legs task_result and resolve_context. A kind not listed keeps all pinned.
 PINNED_TOOLS: dict[str, tuple[str, ...]] = {
     "analysis": ("grafana_logs", "log_lines", "log_counts", "find_id", "log_gaps",
-                 "temporal_workflow", "temporal_workflows", "resolve_context",
-                 "read_workspace_file", "propose_pr_review"),
+                 "temporal_workflow", "temporal_workflows", "booking_events", "resolve_context",
+                 "read_workspace_file", "search_knowledge", "jira_issue", "propose_pr_review"),
     "code": ("resolve_context", "read_workspace_file", "task_result"),
 }
 

@@ -105,14 +105,22 @@ def hints(cid: str, his_text: str, full_text: str, roots: list[Path] | None = No
     classes = list(dict.fromkeys(_CLASS.findall(his_text or "") + _CLASS.findall(full_text or "")))[:10]
     if not (refs or classes or _DEBUGGY.search(his_text or "")):
         return ""
-    env, when = pinned_env(cid, his_text, now) if cid else (_env_of(his_text), "now")
+    from . import booking_case
+    # A Solar link says where the booking lives; words only say what someone
+    # called it (18 Nov: "UAT" in the words, a solar-preprod link).
+    env, when = booking_case.link_env(full_text), "the Solar link"
+    if not env:
+        env, when = pinned_env(cid, his_text, now) if cid else (_env_of(his_text), "now")
     if not env:
         env = next((_env_of(ns) for ns, _ in refs if _env_of(ns)), "")
         when = "the Temporal link" if env else ""
     if env:
-        said = "he named it this message" if when == "now" else f"named at {when}"
-        lines.append(f"Environment: {env.upper()} ({said}). Every log and Temporal read "
-                     f"stays in {env.upper()}; another environment only if he names it.")
+        said = ("he named it this message" if when == "now" else
+                f"from {when}" if when.startswith("the ") else f"named at {when}")
+        lines.append(f"Environment: {env.upper()} ({said}). Start every log and Temporal "
+                     f"read there. If the id is not logged in {env.upper()} but is in "
+                     f"another environment, follow the id there and say so — where the "
+                     f"booking is logged decides, not what it was called.")
     for ns, wid in refs:
         lines.append(f"Temporal link: namespace {ns}, workflow {wid or '(open the link)'}"
                      f" — read its history with temporal_workflow before the logs.")

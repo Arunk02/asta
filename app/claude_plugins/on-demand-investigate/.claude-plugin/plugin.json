@@ -1,0 +1,1 @@
+{ "name": "asta-on-demand-investigate", "version": "0.1.0", "description": "On-demand chat for a turn that debugs a case: Read, Grep, Glob and Bash stay in front, the rest waits behind ToolSearch." }

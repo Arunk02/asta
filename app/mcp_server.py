@@ -119,6 +119,19 @@ HOT = frozenset(capabilities.ALWAYS) | frozenset({
 })
 
 
+#: What an investigation turn has in front from its first call, even in the
+#: on-demand chat where everything else waits behind a search: the debug kit,
+#: code history, the ticket, the colleague's chat and the way to answer them.
+INVESTIGATION = HOT | frozenset({
+    "code_history", "jira_issue", "teams_read_chat", "teams_send_message",
+})
+
+
+def investigating_turn() -> bool:
+    """Set per turn by the chat (config_entry(investigate=True))."""
+    return os.environ.get("ASTA_CHAT_INVESTIGATE") == "1"
+
+
 def defer_tail() -> bool:
     """ASTA_TOOL_SEARCH: 0 (default) = the HOT set is pinned and the rest is
     found by tool search; 1 = every Asta tool waits behind the search."""
@@ -140,6 +153,8 @@ def tool_meta(name: str) -> dict | None:
         pin = {p.strip() for p in os.environ.get("ASTA_MCP_PIN", "").split(",") if p.strip()}
         if pin and name not in pin:
             return None
+        return {"anthropic/alwaysLoad": True}
+    if investigating_turn() and name in INVESTIGATION:
         return {"anthropic/alwaysLoad": True}
     if defer_tail() or name not in HOT:
         return None
@@ -182,7 +197,7 @@ def _describe(cap) -> str:
 def config_entry(tools: list[str] | None = None, conv_id: str = "",
                  task_id: str = "", read_only: bool = False,
                  message_id: int | None = None, defer_all: bool = False,
-                 pin: tuple[str, ...] | None = None) -> dict:
+                 pin: tuple[str, ...] | None = None, investigate: bool = False) -> dict:
     """The mcpServers entry a CLI needs to spawn this server.
 
     The env is carried explicitly rather than left to inheritance: the spawned
@@ -232,6 +247,9 @@ def config_entry(tools: list[str] | None = None, conv_id: str = "",
     if defer_all:
         # The on-demand chat: no Asta tool pinned, every one found by search.
         env["ASTA_TOOL_SEARCH"] = "1"
+    if investigate:
+        # …except on a turn that debugs a case: its kit is in front (INVESTIGATION).
+        env["ASTA_CHAT_INVESTIGATE"] = "1"
     if message_id is not None:
         env["ASTA_MCP_MESSAGE_ID"] = str(message_id)
     return {

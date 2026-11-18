@@ -1131,6 +1131,72 @@ def list_services(workspace: str) -> str:
     return "\n".join(workspace_tools.list_services(workspace))
 
 
+#: When each repo was last fetched for code_history, so a debugging turn that
+#: asks five questions fetches once.
+_FETCHED: dict[str, float] = {}
+
+
+async def code_history(workspace: str, repo: str, path: str = "", what: str = "log",
+                       n: int = 10, line_from: int = 0, line_to: int = 0,
+                       ref: str = "") -> str:
+    """Git history of the REGISTERED checkout — when code changed, who changed it.
+
+    what: "log" (commits touching `path`, newest first, `n` of them), "blame"
+    (who last changed `line_from`..`line_to` of `path`), or "show" (one commit
+    `ref`: its message and files). Every answer starts with which branch and
+    commit was read and how far it is behind origin, so a stale checkout is
+    never mistaken for what is deployed. Use this, never `git -C` or `cd … &&
+    git` in the shell (the chat refuses both) and never another clone on disk."""
+    from . import repo_ops, workspace as _ws
+    try:
+        root = _ws._root(workspace) / repo
+    except ValueError as exc:
+        return str(exc)
+    if not (root / ".git").exists():
+        try:
+            known = ", ".join(workspace_tools.list_services(workspace)) or "none"
+        except (ValueError, OSError):
+            known = "none readable"
+        return f"No repo '{repo}' in workspace '{workspace}'. Repos: {known}"
+    if what not in ("log", "blame", "show"):
+        return 'what must be "log", "blame" or "show".'
+    if what == "blame" and not (path and line_from):
+        return "blame needs path and line_from (and line_to)."
+    if what == "show" and not ref:
+        return "show needs ref (a commit sha)."
+
+    if time.time() - _FETCHED.get(str(root), 0) > 600:
+        rc, _ = await repo_ops.git(root, "git", "fetch", "--quiet", "origin", timeout=30)
+        if rc == 0:
+            _FETCHED[str(root)] = time.time()
+    _, branch = await repo_ops.git(root, "git", "rev-parse", "--abbrev-ref", "HEAD")
+    _, head = await repo_ops.git(root, "git", "log", "-1", "--format=%h %ad", "--date=short")
+    _, base = await repo_ops.git(root, "git", "rev-parse", "--abbrev-ref", "origin/HEAD")
+    base = base.strip() or "origin/develop"
+    rc, behind = await repo_ops.git(root, "git", "rev-list", "--count", f"HEAD..{base}")
+    stamp = (f"{repo} @ {branch.strip()} {head.strip()}"
+             + (f", {behind.strip()} commit(s) behind {base}" if rc == 0 else
+                f", could not compare with {base}"))
+
+    if what == "log":
+        args = ["git", "log", f"-n{max(1, min(int(n or 10), 50))}",
+                "--format=%h %ad %an — %s", "--date=short"]
+        if ref:
+            args.append(ref)
+        if path:
+            args += ["--", path]
+    elif what == "blame":
+        end = line_to or line_from
+        args = ["git", "blame", "--date=short", f"-L{int(line_from)},{int(end)}",
+                *([ref] if ref else []), "--", path]
+    else:
+        args = ["git", "show", "--stat", "--format=%h %ad %an%n%s%n%n%b", "--date=short", ref]
+    rc, out = await repo_ops.git(root, *args)
+    if rc != 0:
+        return f"{stamp}\ngit {what} failed: {out.strip()[:400]}"
+    return f"{stamp}\n{out.strip()[:6000] or '(nothing)'}"
+
+
 async def jira_search(jql: str) -> str:
     """Search Jira with a JQL query. Returns key, summary, status, assignee per issue."""
     from . import jira
@@ -2664,9 +2730,14 @@ async def log_counts(term: str = "", env: str = "", by: str = "app", hours: floa
     return debugkit.render_counts(found)
 
 
+def _local_offset() -> "_dt.timedelta":
+    """This machine's offset from UTC (IST on his laptop)."""
+    return _dt.datetime.now().astimezone().utcoffset() or _dt.timedelta(0)
+
+
 async def log_lines(env: str, service: str = "", contains=(), logger: str = "", at: str = "",
                     minutes: int = 0, start: str = "", end: str = "", limit: int = 40,
-                    newest_first: bool = False, pod: str = "") -> str:
+                    newest_first: bool = False, pod: str = "", full: bool = False) -> str:
     """The EXACT log lines — quote them, never paraphrase them — with a Grafana
     link to the same query a colleague can open.
 
@@ -2678,7 +2749,11 @@ async def log_lines(env: str, service: str = "", contains=(), logger: str = "", 
     Every line shows UTC and local time — logs here are written in UTC.
 
     Use it for "share the logs" and for reading what one class logged around a
-    moment. When someone asks for the log link, the link printed here IS the link."""
+    moment. When someone asks for the log link, the link printed here IS the link.
+
+    Each line is cut at 320 characters. full=True prints whole lines (at most 5)
+    — use it for a payload: an Event History message, a Kafka body, a request.
+    17 Nov: the categories that answered the question sat past the cut."""
     from . import debugkit, grafana
     s, e = _when(start), _when(end)
     if at:
@@ -2692,12 +2767,29 @@ async def log_lines(env: str, service: str = "", contains=(), logger: str = "", 
         # read the last 30 minutes, three times over (13 Nov).
         e = e or _dt.datetime.now(_dt.timezone.utc)
         s = e - _dt.timedelta(minutes=minutes)
+    if full:
+        limit = min(limit, 5)
     try:
         found = await debugkit.lines(env, service, _terms(contains), logger, s, e, limit,
                                      "backward" if newest_first else "forward", pod)
     except grafana.GrafanaError as exc:
         return f"Grafana — {exc}"
-    return debugkit.render_lines(found)
+    out = debugkit.render_lines(found, width=20000) if full else debugkit.render_lines(found)
+    if at and not found.get("rows") and not found.get("error") and s and e:
+        # 17 Nov: "14:12:41+00:00" was a local (IST) time written as UTC — three
+        # empty searches. The same clock read as local is one more query.
+        shift = _local_offset()
+        if shift:
+            with contextlib.suppress(grafana.GrafanaError):
+                local = await debugkit.lines(env, service, _terms(contains), logger,
+                                             s - shift, e - shift, 1, "forward", pod)
+                if local.get("rows"):
+                    out += (f"\nThat time read as LOCAL (UTC{'+' if shift.total_seconds() > 0 else '-'}"
+                            f"{abs(int(shift.total_seconds() // 3600))}:"
+                            f"{abs(int(shift.total_seconds() % 3600 // 60)):02d}) has lines — "
+                            f"you likely passed a local time as UTC. Search at "
+                            f"{(s - shift + (e - s) / 2):%Y-%m-%dT%H:%M:%S}Z instead.")
+    return out
 
 
 async def find_id(id: str, env: str = "", hours: float = 24,

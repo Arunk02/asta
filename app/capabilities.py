@@ -222,6 +222,11 @@ _TABLE: tuple[Capability, ...] = (
                     "avoidable token sink (the auditor flags it as BLIND_READ)."),
     Capability("list_services", "workspace",
                http="GET /api/workspaces/{workspace}/services"),
+    Capability("code_history", "workspace",
+               http='POST /api/_invoke {"tool":"code_history","args":{"workspace":"…",'
+                    '"repo":"…","path":"…","what":"log"}}',
+               note="Git log/blame/show of the registered checkout, stamped with its branch "
+                    "and how far behind origin it is. Never git -C or cd && git in the shell."),
     Capability("refresh_context", "workspace", http="POST /api/refresh/{workspace}"),
     # --- jira ----------------------------------------------------------------
     Capability("jira_search", "jira", http="GET /api/jira/search?jql={urlencoded}"),
@@ -584,7 +589,7 @@ SIDE_READS = frozenset({
     "search_memory", "read_data_file", "search_knowledge", "conversation_status",
     "grafana_logs", "temporal_workflows", "temporal_workflow", "app_recipes",
     "log_counts", "log_lines", "find_id", "log_gaps", "self_audit",
-    "facts_about", "resolve_context", "read_workspace_file", "list_services",
+    "facts_about", "resolve_context", "read_workspace_file", "list_services", "code_history",
     "jira_search", "jira_my_issues", "jira_issue", "jira_sprint",
     "teams_activity", "teams_read_chat", "teams_search", "teams_history",
     "teams_unread", "teams_resolve", "voice_check", "meeting_notes",

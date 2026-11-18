@@ -2687,6 +2687,20 @@ async def temporal_workflows(env: str = "", query: str = "", limit: int = 10) ->
     return (temporal.render(rows, env, query) + ("\n  " + head if head else "")).strip()
 
 
+async def booking_events(env: str = "", booking: str = "") -> str:
+    """Every event one booking received in an environment, oldest first: each
+    workflow run with what its decoded input says (event, status, TO, version),
+    and a tally of the events seen. Use it before saying something never arrived.
+    booking: the bookingNumber (or the servicePlanNumber its workflows are keyed by)."""
+    from . import temporal
+    if not env or not booking:
+        return "Which environment and which booking?"
+    try:
+        return temporal.render_booking_events(await temporal.booking_events(env, booking.strip()))
+    except temporal.TemporalError as exc:
+        return f"Temporal — {exc}"
+
+
 async def temporal_workflow(env: str = "", workflow_id: str = "", run_id: str = "",
                             history: bool = False) -> str:
     """One Temporal workflow: its status, what it is waiting on, and why it failed.

@@ -332,11 +332,10 @@ _NOT_BILLING = ("   Billing is out of scope unless they ask about it: its errors
 #: Without picking the flow first, a NAM booking's VTS or CAMS hold reads as
 #: "stuck", and a non-TMS booking's missing TMS send reads as a failure.
 FLOW_FROM_THE_DOCS = (
-    "1. Pick its flow from the project knowledge (search_knowledge: telikos-system-flow, "
-    "TelikosE2EFlowV2, NAM_Inland_Booking_Documentation): normal or NAM (rail → CAMS, "
-    "non-rail → VTS), TMS or non-TMS, import or export — which one, from this booking's "
-    "own logs. List what SHOULD happen on it, step by step, up to their question; name the "
-    "document.\n")
+    "1. Pick its flow from his docs (search_knowledge: telikos-system-flow, "
+    "TelikosE2EFlowV2, the NAM booking doc): normal or NAM (rail → CAMS, "
+    "non-rail → VTS), TMS or non-TMS, import or export, from its own logs. List what "
+    "SHOULD happen, step by step, up to their question; name the document.\n")
 #: 18 Nov: a billing NPE under another booking, found by searching the
 #: environment for "TMS", was reported as the cause for the booking asked about.
 CAUSE_IS_THIS_BOOKING = (
@@ -346,7 +345,7 @@ CAUSE_IS_THIS_BOOKING = (
 #: what TMS must have done. Their system is theirs to explain.
 OUR_BOUNDARY = (
     "Slow or stuck inside another team's system (TMS, IOM, SAP)? Stop at our boundary: "
-    "what we sent, what came back, when; the reason inside is theirs to give.\n")
+    "what we sent, what came back, when; the why is theirs.\n")
 
 
 def rule(text: str, context: str = "", heard: bool = False, question: str = "") -> str:
@@ -390,7 +389,8 @@ def rule(text: str, context: str = "", heard: bool = False, question: str = "") 
            "   outbound only (sent or not): booking→IOM; →event history; AP→email and "
            "documents (SEND_DOCUMENTS).\n"
            + (_BILLING if _ABOUT_BILLING.search(whole) else _NOT_BILLING) +
-           "Mark each listed step done (its log line) or not. "
+           "booking_events(env, booking): every event it received, decoded — a step not "
+           "in it never arrived. Mark each step done or not. "
            "Root cause = the FIRST step of the flow that did not complete, with its exact "
            "message (a FAILED status at INFO counts). 'Fine' only if the flow reached its end.\n"
            + CAUSE_IS_THIS_BOOKING + OUR_BOUNDARY +

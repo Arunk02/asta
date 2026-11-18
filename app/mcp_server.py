@@ -113,7 +113,7 @@ def _allowed_tools() -> set[str] | None:
 HOT = frozenset(capabilities.ALWAYS) | frozenset({
     # the debug kit
     "log_lines", "log_counts", "find_id", "log_gaps", "grafana_logs",
-    "temporal_workflow", "temporal_workflows", "resolve_context",
+    "temporal_workflow", "temporal_workflows", "booking_events", "resolve_context",
     # the most-called beyond those
     "task_result", "propose_pr_review", "read_workspace_file",
 })

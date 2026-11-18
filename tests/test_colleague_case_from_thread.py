@@ -149,7 +149,7 @@ def test_the_case_starts_from_the_flow_documents():
     r = booking_case.rule(f"has {ASKED} reached TMS in preprod?")
     assert "search_knowledge" in r and "NAM" in r and "TMS or non-TMS" in r
     assert r.index("Pick its flow") < r.index("what DID happen")
-    assert "Mark each listed step done" in r
+    assert "Mark each step done" in r
     assert "search_knowledge" in tasks.PINNED_TOOLS["analysis"]
 
 
@@ -199,3 +199,43 @@ def test_a_tanglish_promise_is_flagged_too():
     assert answers.promises_work("idhu code bug, fix pannittu ungaluku ping panren")
     assert answers.promises_work("naan deploy panren evening")
     assert answers.promises_work("check panren, update panren") == ""
+
+
+def test_booking_events_lists_every_event_decoded(monkeypatch):
+    import base64
+    from app import temporal
+
+    def b64(v):
+        return base64.b64encode(json.dumps(v).encode()).decode()
+    rows = [{"execution": {"workflowId": f"{OTHER}_BOOKINGEVENTS", "runId": f"r{i}"},
+             "type": {"name": "bookingEventsWorkflow"}, "status": "WORKFLOW_EXECUTION_STATUS_COMPLETED",
+             "startTime": f"2026-11-18T10:4{i}:00Z"} for i in range(3)]
+    inputs = {"r0": ["READY_FOR_PLANNING", {"booking": {"bookingStatus": "BOOKED"}}],
+              "r1": ["SAP_TMS_ACK_FEEDBACK", {"to": {"workOrderStatus": "ACCEPTED",
+                                                     "executionStarted": False,
+                                                     "transportOrderNumber": "TO1234567890123"}}],
+              "r2": ["SAP_TMS_ACK_FEEDBACK", {"to": {"workOrderStatus": "ACCEPTED", "version": "002"}}]}
+
+    async def workflows(env, query="", limit=20):
+        assert f'STARTS_WITH "{OTHER}"' in query
+        return list(reversed(rows))
+
+    async def history(env, wid, run=""):
+        return [{"workflowExecutionStartedEventAttributes": {"input": {"payloads": [
+            {"data": b64(v)} for v in inputs[run]]}}}]
+    monkeypatch.setattr(temporal, "workflows", workflows)
+    monkeypatch.setattr(temporal, "history", history)
+    out = temporal.render_booking_events(asyncio.run(temporal.booking_events("sit", OTHER)))
+    lines = out.splitlines()
+    assert "3 workflow run(s)" in lines[0] and "READY_FOR_PLANNING" in lines[1], "oldest first"
+    assert "workOrderStatus=ACCEPTED executionStarted=False transportOrderNumber=TO1234567890123" in out
+    assert "SAP_TMS_ACK_FEEDBACK ×2" in out and "SAP_TMS_EXECUTION_STATUS" not in out
+    assert "consumer took the same message for other bookings" in out
+
+
+def test_booking_events_is_a_read_tool_every_investigation_has():
+    from app import capabilities, mcp_server, tasks, worker_auth
+    assert capabilities.get("booking_events") is not None
+    assert "booking_events" in worker_auth.READ_TOOLS and "booking_events" in mcp_server.HOT
+    assert "booking_events" in tasks.PINNED_TOOLS["analysis"]
+    assert "booking_events(env, booking)" in booking_case.rule(f"did {ASKED} get the TMS ack in sit?")

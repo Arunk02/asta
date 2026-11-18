@@ -2614,7 +2614,17 @@ def denied_send(reply: str, hours: float = 24.0) -> dict | None:
 async def _correct_claims(out, conv: dict, reply: str, since: float) -> None:
     """"Already staged and ready — … is sent now with your confirm" (1 Oct, 14:40):
     nothing had been sent. Whatever the brain, a claim that something went out
-    is checked against the record of what did, and corrected in the same breath."""
+    is checked against the record of what did, and corrected in the same breath.
+    So is an answer that ends CONFIRMED while saying itself what it did not check."""
+    from . import verdict
+    gap = verdict.overclaims(reply)
+    if gap:
+        line = ("⚠️ Confidence check: the answer above says CONFIRMED, but it lists what it "
+                f"did not check — “{gap}”. Treat the cause as a lead until that is read.")
+        store.record_outcome("turn", "overclaimed_confidence", subject=conv["id"],
+                             detail=gap[:200])
+        store.add_ui_message(conv["id"], "assistant", line, {"via": "claim-check"})
+        await out.send({"type": "note", "text": line})
     planned = unproven_schedule(reply, since)
     if planned:
         line = ("⚠️ Correction: nothing was actually scheduled — no reminder or "

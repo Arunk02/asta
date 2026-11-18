@@ -670,6 +670,60 @@ _CHECKING = re.compile(
     r"billing|temporal|workflow|kafka|ack|in\s+progress)\b", re.I)
 
 
+def is_booking_number(identifier: str) -> bool:
+    """11 characters, made in our own system. A servicePlanNumber (12, upstream),
+    a transport order (TO…) or a container number is not one — it maps to one."""
+    i = (identifier or "").upper()
+    return len(i) == 11 and not i.isdigit() and not i.startswith(("TO", "CBK"))
+
+
+async def booking_for(identifier: str, env: str = "", budget: float = 6.0) -> tuple[str, str]:
+    """(bookingNumber, where the pairing was read) for any identifier — the id itself
+    when it already is a booking number, ("", "") when the logs do not pair it.
+
+    18 Nov, live: a question naming the 12-character servicePlanNumber had its
+    evidence fetched under that number, so booking-service's deciding line
+    ("Ready-for-planning resolved SUCCESS able to fetch VTS dates"), written under
+    the 11-character bookingNumber, was never read — and the answer named the
+    wrong mechanism, CONFIRMED. His rule: whatever id they give, find the
+    bookingNumber, then trace that booking's flow."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from . import debugkit, grafana, temporal
+    if is_booking_number(identifier):
+        return identifier.upper(), ""
+    if env and env not in ("all", "lower"):
+        envs = [env]
+    else:
+        try:
+            envs = list(temporal.envs())
+        except Exception:                                      # noqa: BLE001
+            envs = []
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=72)
+
+    async def scan(e: str) -> tuple[str, str] | None:
+        try:
+            got = await debugkit.lines(e, "", (identifier,), "", start, end, 60)
+        except Exception:                                      # noqa: BLE001
+            return None
+        for r in got.get("rows") or []:
+            for m in grafana._LINKED_ID.finditer(r.get("message") or ""):
+                other = m.group(1).upper()
+                if other != identifier.upper() and is_booking_number(other):
+                    return other, (f"{e}, {r.get('logger') or r.get('app') or 'a log line'} "
+                                   f"at {debugkit.stamp(r['ts'])}")
+        return None
+
+    if not envs:
+        return "", ""
+    try:
+        found = await asyncio.wait_for(asyncio.gather(*(scan(e) for e in envs)), budget)
+    except asyncio.TimeoutError:
+        return "", ""
+    return next((f for f in found if f), ("", ""))
+
+
 async def turn_evidence(text: str) -> str:
     """Where the ids in his message are logged, fetched in code — '' when the
     message names no id, is not about checking one, or the logs cannot answer in time."""
@@ -727,12 +781,29 @@ async def turn_evidence(text: str) -> str:
         counts, state = await asyncio.gather(counted(), state_of(booking))
         return "\n".join([c for c in (counts, *state) if c])
 
+    # Any id is traced under its bookingNumber (his rule, 18 Nov). Resolving
+    # spends part of the same cap; what is left goes to state and counts.
+    mapped = await asyncio.gather(*(booking_for(i, named, TURN_EVIDENCE_SECONDS / 3)
+                                    for i in found))
+    notes, targets = [], []
+    for given, (booking, where) in zip(found, mapped):
+        if booking and booking != given.upper():
+            notes.append(f"{given} is not a booking number; its booking is {booking} (paired in "
+                         f"{where}). Trace the whole flow under {booking} — booking-service "
+                         f"and the workflows log under the bookingNumber.")
+        elif not booking:
+            notes.append(f"{given}: no bookingNumber paired with it in the last 72 h of logs; "
+                         f"traced under {given} itself — find the booking before concluding.")
+        target = booking or given
+        if target not in targets:
+            targets.append(target)
     try:
-        outs = await asyncio.wait_for(asyncio.gather(*(one(i) for i in found), return_exceptions=True),
-                                      TURN_EVIDENCE_SECONDS)
+        outs = await asyncio.wait_for(asyncio.gather(*(one(i) for i in targets),
+                                                     return_exceptions=True),
+                                      max(deadline - loop.time(), 1.0))
     except asyncio.TimeoutError:
-        return ""
-    lines = [o for o in outs if isinstance(o, str) and o.strip()]
+        outs = []
+    lines = notes + [o for o in outs if isinstance(o, str) and o.strip()]
     if not lines:
         return ""
     return ("[Evidence fetched in code before this turn — where these ids are logged, and their "

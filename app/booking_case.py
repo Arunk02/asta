@@ -70,9 +70,17 @@ WHY = re.compile(r"\b(?:why|stuck|still|remains?|instead\s+of|fail(?:ed|ing|s)?|
                   r"marked|reflected|triggered|created))\b", re.I)
 
 
+#: The id in a Solar booking link. Teams glues the preview title onto the URL
+#: ("…/booking/<id>Maersk :: Inland Booking"), so the id has no word
+#: boundary after it; ids are capitals and digits, the title is not.
+_SOLAR_ID = re.compile(r"solar[\w.-]*\.maersk\.io/\S*?/booking/(?:\?ref=)?"
+                       r"(?-i:([A-Z0-9]{11,12})(?=Maersk|[^A-Za-z0-9]|$))", re.I)
+
+
 def ids(text: str) -> list[str]:
-    """The ids in it, upper-cased, in order, once each."""
-    out: list[str] = []
+    """The ids in it, upper-cased, in order, once each — a Solar link's first."""
+    out: list[str] = [m.group(1) for m in _SOLAR_ID.finditer(text or "")]
+    out = list(dict.fromkeys(out))
     # "H22TCMNTBTW_BOOKINGEVENTS" — a workflow id is the booking id and a suffix,
     # and '_' joins words, so the id had no boundary to match on.
     for m in ID.finditer((text or "").replace("_", " ")):
@@ -82,8 +90,82 @@ def ids(text: str) -> list[str]:
     return out
 
 
+def thread_ids(asked: str, thread: str) -> list[str]:
+    """The ids an ask is about: its own, else the newest line in the thread that
+    names one.
+
+    18 Nov: an ask to check, quoting a report that a flow was still stuck — the
+    booking was in the reporter's message twenty minutes earlier, from someone else.
+    Read from the ask alone there was no case: no recipe, no question, no verdict,
+    and the analysis hunted the environment for any error instead."""
+    own = ids(asked)
+    if own:
+        return own
+    for line in reversed((thread or "").splitlines()):
+        found = ids(line)
+        if found:
+            return found
+    return []
+
+
+def thread_env(asked: str, thread: str) -> str:
+    """Where the case lives: a link in the ask or the thread, else the words."""
+    return link_env(asked) or link_env(thread) or env_of(asked) or env_of(thread)
+
+
+_CASE_KEY = "case_of_task:"
+
+
+def remember_case(task_id: int | None, found: list[str], env: str, question: str) -> None:
+    """What a colleague's ask is about, kept beside its task — so his correction of the
+    draft, and the check on the finished answer, hold to THIS case."""
+    if not task_id or not found:
+        return
+    import json
+    from . import store
+    store.kv_set(_CASE_KEY + str(task_id), json.dumps(
+        {"ids": found[:4], "env": env or "", "question": (question or "")[:400]}))
+
+
+def case_for(task_id: int | None) -> dict:
+    """{"ids", "env", "question"} for a task's case, or {}."""
+    if not task_id:
+        return {}
+    import json
+    from . import store
+    try:
+        return json.loads(store.kv_get(_CASE_KEY + str(task_id)) or "{}")
+    except ValueError:
+        return {}
+
+
+#: A Solar booking link names its environment in the host: solar-preprod.maersk.io,
+#: solar-uat.maersk.io; plain solar.maersk.io is prod.
+_SOLAR = re.compile(r"\bsolar(?:-([a-z]+))?\.maersk\.io\b", re.I)
+
+
+def link_env(text: str) -> str:
+    """The environment a Solar link in it points at, or ''.
+
+    18 Nov: a message calling it a UAT order came with a solar-preprod link. The words were
+    believed, every read stayed in UAT, and the booking — logged only in preprod —
+    was never looked at. Where the booking IS beats what someone called it."""
+    m = _SOLAR.search(text or "")
+    if not m:
+        return ""
+    sub = (m.group(1) or "").lower()
+    if not sub:
+        return "prod"
+    hit = _ENV.fullmatch(sub)
+    return next((name for g, name in zip(hit.groups(), _ENV_NAMES) if g), "") if hit else ""
+
+
 def env_of(text: str) -> str:
-    """The environment named in it — 'preprod', 'prod', 'sit'… — or ''."""
+    """The environment it names — 'preprod', 'prod', 'sit'… — or ''. A Solar link's
+    host comes first: it is where the booking lives, whatever the words say."""
+    linked = link_env(text)
+    if linked:
+        return linked
     for m in _ENV.finditer(text or ""):
         for name, g in zip(_ENV_NAMES, m.groups()):
             if g:
@@ -239,6 +321,18 @@ _NOT_BILLING = ("   Billing is out of scope unless they ask about it: its errors
                 "booking's problem — leave them out, or one 'Also noticed' line at most.\n")
 
 
+#: 18 Nov: a billing NPE under another booking, found by searching the
+#: environment for "TMS", was reported as the cause for the booking asked about.
+CAUSE_IS_THIS_BOOKING = (
+    "The cause is logged under THIS booking (its bookingNumber, servicePlanNumber, TO or "
+    "container); an error under another booking is not its cause.\n")
+#: 18 Nov: the ack from TMS came 42 minutes late; the answer went on to explain
+#: what TMS must have done. Their system is theirs to explain.
+OUR_BOUNDARY = (
+    "Slow or stuck inside another team's system (TMS, IOM, SAP)? Stop at our boundary: "
+    "what we sent, what came back, when; the reason inside is theirs to give.\n")
+
+
 def rule(text: str, context: str = "", heard: bool = False, question: str = "") -> str:
     """How to answer a question about one booking: the documents give the rule,
     the logs say what happened to THIS one. '' when no id is in hand.
@@ -283,6 +377,7 @@ def rule(text: str, context: str = "", heard: bool = False, question: str = "") 
            + (_BILLING if _ABOUT_BILLING.search(whole) else _NOT_BILLING) +
            "Root cause = the FIRST step of the flow that did not complete, with its exact "
            "message (a FAILED status at INFO counts). 'Fine' only if the flow reached its end.\n"
+           + CAUSE_IS_THIS_BOOKING + OUR_BOUNDARY +
            "3. A completed upstream milestone never rules out an earlier failed attempt or "
            "a later downstream failure. State separately what failed, what later succeeded, "
            "and what remains unverified. Where the logs and the document disagree, the logs "

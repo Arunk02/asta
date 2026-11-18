@@ -2285,6 +2285,11 @@ def _route_recipient(cid: str, said: str, to: str, to_group: bool,
             return chat, True, (f"Staged to the group {chat}, not to {to} 1:1 — the ask came "
                                 f"from that group and Arun did not ask for 1:1. Tell him in "
                                 f"one line where it is going.")
+    # The draft he is correcting, not whichever was shown last: 18 Nov, a second
+    # colleague's draft was put in front of him while the revision ran, and the
+    # corrected reply was refused for "revising" that one.
+    if said.strip().lower().startswith("arun did not approve"):
+        chat = loop.last_rejected_to() or chat
     if said.strip().lower().startswith("arun did not approve") and not _same_recipient(chat, to):
         return to, to_group, (f"Not staged — this revises the draft to {chat}, and Arun did not "
                               f"name {to}. A revision keeps its recipient: stage it to {chat}, "

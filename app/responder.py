@@ -1409,7 +1409,10 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     store.kv_set(f"responder_task:{t['id']}",
                  f"{source}|{who}|{kind}|{why}")
     if reply_to:
-        from . import answers
+        from . import answers, booking_case
+        own, env = case_of(who, text, context)
+        booking_case.remember_case(t["id"], booking_case.ids(text) or own, env,
+                                   need or message_of(text)[:300])
         answers.remember_meta(t["id"], who=who, need=need or message_of(text)[:160],
                               chat=reply_to, group=group, thread=thread,
                               source_text=source_text or text, kind=kind)
@@ -1434,7 +1437,7 @@ _PR_URL = re.compile(r"github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 _HOW_WHY = re.compile(r"\b(why|how does|how do|how is|where is|which service|flow)\b", re.I)
 
 
-def playbook(text: str) -> str:
+def playbook(text: str, env: str = "") -> str:
     """How a good engineer would check THIS kind of ask — steps, not a hint.
 
     29 Sep: "check booking H65ZMWX52B2" was searched in two namespaces, one of
@@ -1444,7 +1447,7 @@ def playbook(text: str) -> str:
     from . import booking_case
     steps: list[str] = []
     ids = booking_case.ids(text)
-    env = booking_case.env_of(text)
+    env = env or booking_case.env_of(text)
     if ids:
         where = (f"in {env} — grafana_logs(terms=[id], namespace=\"{env}\", errors_only=false, "
                  "minutes=4320)" if env and env != "lower" else
@@ -1492,6 +1495,17 @@ def _their_questions(who: str, need: str, questions: list) -> str:
     return "\n".join(lines)
 
 
+def case_of(who: str, text: str, context: str) -> tuple[list[str], str]:
+    """(ids, env) an ask from `who` is about: its own ids, else theirs earlier in
+    the exchange, else the newest line in the exchange that names one; the
+    environment from a Solar link first, then the words."""
+    from . import booking_case
+    if booking_case.ids(text):
+        return [], booking_case.thread_env(text, context)
+    found = booking_case.ids(their_words(who, context)) or booking_case.thread_ids("", context)
+    return found, booking_case.thread_env(text, context)
+
+
 def _waiting_brief(who: str, text: str, context: str, need: str = "",
                    questions: list | None = None) -> str:
     """What an investigation needs when a colleague is waiting on the answer.
@@ -1502,7 +1516,7 @@ def _waiting_brief(who: str, text: str, context: str, need: str = "",
     the two-section ending that lets the finished answer reach him as one
     "send?" — see app/answers.py.
     """
-    from . import answers
+    from . import answers, booking_case as _bc
     parts = [_their_questions(who, need, questions or [])]
     if context.strip():
         parts.append("\n\nWhat has already been said with them (continue from it, do not "
@@ -1518,11 +1532,14 @@ def _waiting_brief(who: str, text: str, context: str, need: str = "",
                      "summaries) — use them and name the source when you do:\n" + passages)
     # "Check X, Y" … "merged" … "Fine na??": the ask names no booking, their
     # earlier line in the same exchange does (11 Nov) — it is the same case.
-    from . import booking_case as _bc
-    earlier = [] if _bc.ids(text) else _bc.ids(their_words(who, context))
+    # And when they did not give it at all, the person they are asking about did:
+    # an ask to check, quoting a report that a flow was still stuck — the booking
+    # was in the reporter's own message twenty minutes before (18 Nov).
+    earlier, env = case_of(who, text, context)
+    linked = env if _bc.link_env(f"{text}\n{context}") else ""
     parts.append(playbook(f"{text}\n(the {'bookings' if len(earlier) > 1 else 'booking'} "
-                          f"they gave earlier in this exchange: {', '.join(earlier[:3])})"
-                          if earlier else text))
+                          f"this is about, given earlier in this exchange: "
+                          f"{', '.join(earlier[:3])})" if earlier else text, env=linked))
     from . import chat_watch
     shots = chat_watch.image_paths(f"{context}\n{text}")
     if shots:

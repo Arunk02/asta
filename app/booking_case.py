@@ -33,6 +33,10 @@ from . import verdict
 ID = re.compile(r"\b(?=[A-Za-z0-9]*\d[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*[A-Za-z])"
                 r"[A-Za-z0-9]{9,14}\b"
                 r"|(?-i:\b(?=[A-Z0-9]*\d)(?=(?:[A-Z0-9]*[A-Z]){2})[A-Z0-9]{9,14}\b)"
+                # Booking numbers draw from an alphabet with no vowels and may carry no
+                # digit at all: 17 Nov, "JBFDYTSFVSW" was not seen as a booking, so a
+                # question about it got no case recipe, no evidence and no verdict.
+                r"|\b(?=(?:[0-9]*[B-DF-HJ-NP-TV-Z]){6})[B-DF-HJ-NP-TV-Z0-9]{11,12}\b"
                 r"|\bCBK\d{5,}\b|\bTO\d{10,16}\b|\b\d{8,10}\b", re.I)
 
 #: The environments, as people say them → the name the tools take.

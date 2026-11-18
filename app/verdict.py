@@ -34,7 +34,10 @@ WHY_METHOD = (
     "3. Fetch the values it saw for THIS case — the payload or request line whole "
     "(log_lines full=True), and the stored state before it.\n"
     "4. Compare them field by field. The field that differs, or the value the condition "
-    "read, is the root cause. A field nobody displays still counts.\n")
+    "read, is the root cause. A field nobody displays still counts.\n"
+    "5. Say which it is: BY DESIGN (the condition did what it says, quote it) or A BUG "
+    "(it did not). Once you have read the condition, 'intended or not' is never left "
+    "open as 'not confirmed'.\n")
 
 HEDGE = re.compile(
     r"\b(?:most\s+)?likely\b|\bprobably\b|\bpossibly\b|\bcould\s+be\b|\bmight\s+be\b|"

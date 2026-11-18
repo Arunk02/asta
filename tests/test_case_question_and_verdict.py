@@ -54,6 +54,7 @@ def test_the_recipe_carries_their_question_and_the_one_cause_shape():
     assert "why is MXAAAA1111BB processed while VTS is pending?" in out
     assert "Confidence: CONFIRMED" in out and "Never two causes" in out
     assert "find the code that decides it" in out.lower()      # a WHY question
+    assert "BY DESIGN" in out and "A BUG" in out                # never left open
     assert "code_history" in out
 
 

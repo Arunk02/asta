@@ -314,8 +314,11 @@ def _payloads(attrs: dict) -> str:
 
 
 #: What an event's input says happened — the rest of the payload is detail.
+#: Not `executionStarted`: the transport order inside the service plan keeps it
+#: false even after TMS reported EXECUTED (18 Nov — an answer said "TMS never
+#: started" from it). TMS's own word is the EXECUTION work processes, below.
 _EVENT_KEYS = ("eventName", "eventType", "bookingStatus", "status", "workOrderStatus",
-               "executionStarted", "transportOrderNumber", "version", "isCancellation",
+               "transportOrderNumber", "version", "isCancellation",
                "workProcessName", "workProcessStatus")
 BOOKING_RUNS = 60
 
@@ -328,8 +331,8 @@ def _facts(obj, depth: int = 0, found: dict | None = None) -> dict:
     if isinstance(obj, dict):
         for k in _EVENT_KEYS:
             v = obj.get(k)
-            if k not in found and v not in (None, "", [], {}):
-                found[k] = v if isinstance(v, (str, int, float, bool)) else str(v)[:60]
+            if k not in found and isinstance(v, (str, int, float, bool)) and v != "":
+                found[k] = v
         for v in obj.values():
             if isinstance(v, (dict, list)):
                 _facts(v, depth + 1, found)
@@ -360,6 +363,25 @@ def _booking_refs(obj, depth: int = 0) -> list[str] | None:
     return None
 
 
+def _executions(obj, out: dict | None = None, depth: int = 0) -> dict:
+    """{work process: status} for the EXECUTION work processes TMS reported —
+    CONTAINER_DELIVERY_EXECUTION=EXECUTED — read from the new service plan."""
+    out = {} if out is None else out
+    if depth > 8:
+        return out
+    if isinstance(obj, dict):
+        name, status = obj.get("workProcessName"), obj.get("workProcessStatus")
+        if isinstance(name, str) and "EXECUTION" in name and isinstance(status, str):
+            out.setdefault(name, status)
+        for k, v in obj.items():
+            if k != "oldServicePlan" and isinstance(v, (dict, list)):
+                _executions(v, out, depth + 1)
+    elif isinstance(obj, list):
+        for v in obj[:20]:
+            _executions(v, out, depth + 1)
+    return out
+
+
 def _start_facts(events: list[dict]) -> dict:
     import base64
     first = events[0] if events else {}
@@ -378,6 +400,10 @@ def _start_facts(events: list[dict]) -> dict:
             refs = _booking_refs(value)
             if refs is not None and "_refs" not in facts:
                 facts["_refs"] = refs
+            done = _executions(value.get("newServicePlan") if isinstance(value, dict)
+                               and "newServicePlan" in value else value)
+            if done and "_executions" not in facts:
+                facts["_executions"] = done
     return facts
 
 
@@ -444,8 +470,12 @@ def render_booking_events(found: dict) -> str:
     out = [head]
     before: dict[str, set[str]] = {}
     for r in runs:
-        f = {k: v for k, v in r["facts"].items() if k not in ("eventName", "_refs")}
+        f = {k: v for k, v in r["facts"].items() if k not in ("eventName", "_refs", "_executions")}
         detail = " ".join(f"{k}={v}" for k, v in f.items())
+        done = r["facts"].get("_executions") or {}
+        if done:
+            detail += (" · " if detail else "") + "TMS: " + " ".join(
+                f"{k.replace('_EXECUTION', '')}={v}" for k, v in list(done.items())[:4])
         refs = r["facts"].get("_refs")
         change = ""
         if refs is not None:

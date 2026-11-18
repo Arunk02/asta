@@ -228,7 +228,8 @@ def test_booking_events_lists_every_event_decoded(monkeypatch):
     out = temporal.render_booking_events(asyncio.run(temporal.booking_events("sit", OTHER)))
     lines = out.splitlines()
     assert "3 workflow run(s)" in lines[0] and "READY_FOR_PLANNING" in lines[1], "oldest first"
-    assert "workOrderStatus=ACCEPTED executionStarted=False transportOrderNumber=TO1234567890123" in out
+    assert "workOrderStatus=ACCEPTED transportOrderNumber=TO1234567890123" in out
+    assert "executionStarted" not in out, "a stale flag on the TO copy, not TMS's word"
     assert "SAP_TMS_ACK_FEEDBACK ×2" in out and "SAP_TMS_EXECUTION_STATUS" not in out
     assert "consumer took the same message for other bookings" in out
 
@@ -327,3 +328,20 @@ def test_the_booking_story_runs_are_kept_first():
     kinds = [temporal._of(r, "type", "name") for r in picked]
     assert len(picked) == 10 and "bookingEventsWorkflow" in kinds and "BillingWorkflow" in kinds
     assert picked == sorted(picked, key=lambda r: r["startTime"])
+
+
+def test_booking_events_reads_tms_execution_from_the_work_processes():
+    from app import temporal
+    body = {"newServicePlan": {"transportOrders": [{"executionStarted": False}],
+                               "workProcesses": [{"workProcessStatus": {
+                                   "workProcessName": "CONTAINER_DELIVERY_EXECUTION",
+                                   "workProcessStatus": "EXECUTED"}}]},
+            "oldServicePlan": {"workProcesses": [{"workProcessStatus": {
+                "workProcessName": "CONTAINER_DELIVERY_EXECUTION", "workProcessStatus": "NOT_STARTED"}}]}}
+    import base64
+    ev = [{"workflowExecutionStartedEventAttributes": {"input": {"payloads": [
+        {"data": base64.b64encode(json.dumps("SAP_TMS_EXECUTION_STATUS").encode()).decode()},
+        {"data": base64.b64encode(json.dumps(body).encode()).decode()}]}}}]
+    facts = temporal._start_facts(ev)
+    assert facts["_executions"] == {"CONTAINER_DELIVERY_EXECUTION": "EXECUTED"}
+    assert "executionStarted" not in facts

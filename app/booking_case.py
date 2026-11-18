@@ -737,7 +737,8 @@ async def turn_evidence(text: str) -> str:
     from . import temporal
     loop = asyncio.get_running_loop()
     # Each step stops on its own just inside the cap, so what was found is kept.
-    deadline = loop.time() + TURN_EVIDENCE_SECONDS - 0.5
+    cap_end = loop.time() + TURN_EVIDENCE_SECONDS
+    deadline = cap_end - 0.5
 
     async def state_of(booking: str) -> list[str]:
         # STATE, beside the counts and not after them — his order
@@ -800,7 +801,7 @@ async def turn_evidence(text: str) -> str:
     try:
         outs = await asyncio.wait_for(asyncio.gather(*(one(i) for i in targets),
                                                      return_exceptions=True),
-                                      max(deadline - loop.time(), 1.0))
+                                      max(cap_end - loop.time(), 0.5))
     except asyncio.TimeoutError:
         outs = []
     lines = notes + [o for o in outs if isinstance(o, str) and o.strip()]

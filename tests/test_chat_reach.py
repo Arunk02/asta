@@ -144,14 +144,7 @@ def test_a_local_time_given_as_utc_is_pointed_out(monkeypatch):
                 "start": s.timestamp(), "end": e.timestamp(), "query": "q"}
 
     monkeypatch.setattr(debugkit, "lines", lines)
-    monkeypatch.setattr(agent._dt, "datetime", _FixedOffset)
+    monkeypatch.setattr(agent, "_local_offset", lambda: dt.timedelta(hours=5, minutes=30))
     out = asyncio.run(agent.log_lines("sit", contains=["X"], at="2026-11-17T14:12:41+00:00"))
     assert "No lines" in out and "local time as UTC" in out and "08:42:41Z" in out
 
-
-class _FixedOffset(dt.datetime):
-    """IST, whatever zone the test machine runs in."""
-
-    @classmethod
-    def now(cls, tz=None):
-        return dt.datetime(2026, 11, 17, 15, 0, tzinfo=dt.timezone(dt.timedelta(hours=5, minutes=30)))

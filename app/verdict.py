@@ -22,7 +22,8 @@ SHAPE = (
     "Summarise SIMPLY, the answer to their question first: Why — ONE cause, with the "
     "Class.java:line and condition that decided it · Timeline — the log lines that "
     "prove it (UTC, service, exact words) · Not confirmed · Next step. End "
-    "'Confidence: CONFIRMED' only if you read both this turn, else NOT CONFIRMED with "
+    "'Confidence: CONFIRMED' only if you read both this turn — the log line being the "
+    "one where the system logged its decision — else NOT CONFIRMED with "
     "the one check that settles it. Never two causes or 'likely'.\n")
 
 #: A question about why something happened although something else said it should not.
@@ -32,7 +33,10 @@ WHY_METHOD = (
     "(resolve_context, then Read/Grep in the registered workspace).\n"
     "2. Read the condition exactly: which fields or values does it compare?\n"
     "3. Fetch the values it saw for THIS case — the payload or request line whole "
-    "(log_lines full=True), and the stored state before it.\n"
+    "(log_lines full=True), the stored state before it, and the line where the system "
+    "logged what it DECIDED ('resolved SUCCESS/FAILED', 'published', 'on hold'). A status "
+    "field is not the outcome. You may read any code in the registered workspace and any "
+    "log or workflow you need — keep going until that decision line is read.\n"
     "4. Compare them field by field. The field that differs, or the value the condition "
     "read, is the root cause. A field nobody displays still counts.\n"
     "5. Say which it is: BY DESIGN (the condition did what it says, quote it) or A BUG "
@@ -81,9 +85,12 @@ def states_a_cause(text: str) -> bool:
     return bool(CAUSAL.search(text or ""))
 
 
-_SAYS_CONFIRMED = re.compile(r"Confidence:\**\s*CONFIRMED\b", re.I)
+#: "Confidence: CONFIRMED", "**Confidence:** CONFIRMED", "**Confidence**: CONFIRMED".
+_SAYS_CONFIRMED = re.compile(r"Confidence\**:\**\s*CONFIRMED\b", re.I)
+#: The same three ways of writing the "Not confirmed" label (18 Nov, live:
+#: "**Not confirmed**:" slipped past a pattern that knew only the other two).
 _NOT_CONFIRMED_PART = re.compile(
-    r"Not confirmed:\**\s*(.+?)(?=\n\s*\n|\n\W*(?:Next step|Confidence|Timeline|Why)\b|\Z)",
+    r"Not confirmed\**:\**\s*(.+?)(?=\n\s*\n|\n\W*(?:Next step|Confidence|Timeline|Why)\b|\Z)",
     re.I | re.S)
 _NOTHING = re.compile(r"^\W*(?:nothing|none|n/?a|-)\W*$", re.I)
 

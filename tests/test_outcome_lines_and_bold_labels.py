@@ -111,3 +111,14 @@ def test_a_why_turn_is_told_to_read_the_decision_and_may_go_through_everything()
     rule = booking_case.rule(f"why did {BOOKING} go to TMS while VTS was pending in sit?")
     assert "logged what it DECIDED" in rule and "A status field is not the outcome" in rule
     assert "You may read any code in the registered workspace" in rule
+
+
+@pytest.mark.parametrize("gap, flagged", [
+    ("nothing — read both the test and the formatter this turn.", False),
+    ("Nothing.", False), ("none", False), ("n/a", False), ("-", False),
+    ("None of the payload was read.", True),
+    ("nothing about the callback was checked", True),
+])
+def test_nothing_with_a_reason_is_not_a_gap(gap, flagged):
+    answer = f"Why: X.java:3\n\nNot confirmed: {gap}\n\nConfidence: CONFIRMED"
+    assert bool(verdict.overclaims(answer)) is flagged

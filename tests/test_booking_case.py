@@ -30,6 +30,12 @@ def test_ids_are_found_in_any_case_and_words_never_are():
     assert booking_case.ids(f"check {ID.lower()} pls") == [ID]
     assert booking_case.ids("H65ZMWX52B2 and CBK123456") == ["H65ZMWX52B2", "CBK123456"]
     assert booking_case.ids("provides the reconciliation implementation") == []
+    # A booking number need not carry a digit; the alphabet has no vowels (17 Nov).
+    assert booking_case.ids("why did JXBBBBQQRRZ get an ocean EH entry in sit?") == ["JXBBBBQQRRZ"]
+    assert booking_case.ids("check jxbbbbqqrrz") == ["JXBBBBQQRRZ"]
+    for words in ("TRANSPORTATION details", "STRENGTHS", "call 917904013353 now",
+                  "RECONCILIATION", "rhythms and lymphs"):
+        assert booking_case.ids(words) == [], words
 
 
 @pytest.mark.parametrize("said,env", [

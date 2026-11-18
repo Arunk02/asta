@@ -36,6 +36,19 @@ implement during the plan invocation: its write access remains disabled.
   `<cmd> > /tmp/build.log 2>&1; tail -5 /tmp/build.log`.
 - Report what changed plus the verbatim test result. Nothing else.
 
+## Before you commit — what a reviewer must never be the one to find
+- Every value from a request, a payload, the database or another service can be
+  missing. Guard every lookup on it (some collection types throw on a missing key
+  or a null lookup), and add a test that passes the missing value.
+- Never remove or rename a public method, a field in a message or schema, an enum
+  value, a topic or a stored field without keeping the old one working: callers
+  you cannot see still use it. A change to a durable workflow needs versioning so
+  running instances still replay.
+- Say in one line what behaviour changes and for whom, and keep a test proving
+  the behaviour you did NOT mean to change is unchanged.
+- Build, and run the tests you touched, before committing. Zero tests run is a
+  failure, not a pass.
+
 ## Escalate — do not push through
 Print `ESCALATE: <one-line reason>` and STOP the moment any of these holds:
 - more than ~2 files or ~30 lines

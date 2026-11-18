@@ -2980,6 +2980,42 @@ async def _self_review(task_id: int, t: dict, result: str) -> str:
     return f"\n\n🔍 {who} ({stat}):\n{clip.clip(notes, 900)}"
 
 
+async def _head_sha(task_id: int, t: dict) -> str:
+    with contextlib.suppress(Exception):
+        for repo in _repos_under(Path(task_cwd(task_id, t.get("workspace")))):
+            rc, out = await repo_ops.git(repo, "git", "rev-parse", "HEAD")
+            if rc == 0:
+                return out.strip()
+    return ""
+
+
+async def _hazard_scan(task_id: int, t: dict) -> str:
+    """The plain scan of this task's own diff for null pointers, broken
+    compatibility and workflow changes (app/hazards.py). What it finds is kept
+    for the PR watcher, which fixes it on the PR before a person reviews it —
+    17 Nov, a booking-service PR's Set.of null lookup was found by the reviewer instead."""
+    from . import hazards
+    if store.kv_get(f"hazard_round:{task_id}"):
+        return ""                      # one round: a second is his to call
+    try:
+        root = Path(task_cwd(task_id, t.get("workspace")))
+    except RuntimeError:
+        return ""
+    found: list[str] = []
+    for repo in _repos_under(root):
+        base = await _task_base(repo, t, task_id)
+        if not base:
+            continue
+        rc, full = await repo_ops.git(repo, "git", "diff", base, "HEAD")
+        if rc == 0:
+            found += hazards.scan(full)
+    if not found:
+        return ""
+    store.kv_set(f"task_hazards:{task_id}", _json.dumps(found[:12]))
+    return ("\n\n⚠️ Found in my own diff — fixing on the PR before anyone reviews it:\n"
+            + "\n".join(f"• {h}" for h in found[:6]))
+
+
 def _second_reviewer(task_id: int) -> str:
     """A brain other than the one that wrote the change, if one is up — else ''.
 
@@ -3717,12 +3753,16 @@ async def complete(task_id: int, t: dict, result: str) -> None:
     store.update_task(task_id, status="done", result=result, finished_at=time.time())
     _learn_from(task_id, t["title"], result)
     waste = _audit_note(task_id)
-    own = await _self_review(task_id, t, result)
+    own = await _self_review(task_id, t, result) + await _hazard_scan(task_id, t)
     from . import prname
     multi_base = bool(_BOTH.search(f"{t['title']}\n{t['prompt']}\n{go.words(task_id)}") and
                       _RELEASE.search(f"{t['title']}\n{t['prompt']}\n{go.words(task_id)}"))
     pushed = [] if multi_base else await _already_pushed(task_id, t)
     if pushed:
+        from . import review_autofix
+        if review_autofix.pending(task_id):
+            replied = await review_autofix.after_push(task_id, await _head_sha(task_id, t))
+            own += f"\n\n💬 Replied on {replied} review thread(s)." if replied else ""
         # It is on origin and its PR exists: say that, not "nothing pushed — say
         # raise PR" underneath a report that opens "Pushed." (#185, 30 Sep).
         store.update_task(task_id, status="shipped", pr_urls="\n".join(pushed),
@@ -3748,6 +3788,22 @@ async def complete(task_id: int, t: dict, result: str) -> None:
         await ship_as_told(task_id)
         return
     open_prs = _pr_links(store.get_task(task_id) or t)
+    from . import review_autofix
+    if open_prs and review_autofix.pending(task_id):
+        # A review round: his standing rule is the yes to push it onto the same
+        # PR and answer the reviewers (app/review_autofix.py).
+        try:
+            await ship(task_id)
+        except (ValueError, RuntimeError) as exc:
+            await notify.notify(f"❌ #{task_id}: review fix built but not pushed — "
+                                f"{str(exc)[:400]}", "task", urgency="direct")
+            return
+        replied = await review_autofix.after_push(task_id, await _head_sha(task_id, t))
+        await notify.notify(
+            f"🛠 Review fix pushed — #{task_id} {t['title']}\n\n{_phone_text(result, 500)}{own}\n\n"
+            f"On " + ", ".join(prname.name_links(u) for u in open_prs)
+            + f"; replied on {replied} review thread(s).{waste}", "task")
+        return
     if open_prs:
         # Feedback on work that already has its PR: the new commits are on that
         # PR's branch, and "ship" pushes them onto it. 7 Oct, #257: booking PR
@@ -4947,7 +5003,7 @@ async def ship(task_id: int) -> str:
 PR_POLL_SECONDS = int(os.environ.get("ASTA_PR_POLL", "300"))
 
 _PR_FIELDS = ("state,mergedAt,statusCheckRollup,reviewDecision,url,title,reviews,comments,"
-              "headRefName,headRefOid,createdAt")
+              "headRefName,headRefOid,createdAt,author")
 
 #: Review noise that is not a request for a change. Approvals with no body and
 #: bot chatter would otherwise arrive as "someone wants something from you".
@@ -4975,6 +5031,19 @@ def _review_notes(pr: dict, me: str = "") -> list[str]:
             continue                    # "lgtm" is not a change request
         out.append(f"{author}: {body[:400]}")
     return out
+
+
+async def _all_review_notes(pr: dict, url: str) -> list[str]:
+    """Reviews, conversation comments AND line comments on the diff — the last
+    kind never reached _review_notes, and it is where review findings live."""
+    from . import ci_watch, review_autofix
+    me = ""
+    with contextlib.suppress(Exception):
+        me = await ci_watch.my_login()
+    inline = []
+    with contextlib.suppress(Exception):
+        inline = await review_autofix.inline_notes(url, me)
+    return _review_notes(pr, me) + inline
 
 
 def _new_review_notes(task_id: int, notes: list[str]) -> list[str]:
@@ -5385,6 +5454,9 @@ async def check_pr(task_id: int) -> str | None:
             return (f"🔔 {prname.from_url(url)} (#{task_id} {title}) is now {checks}"
                     + (f", review {decision.lower().replace('_', ' ')}" if decision else "")
                     + f"\n{url}\nThe fix plan is still waiting on you.")
+        from . import review_autofix
+        if store.kv_get(f"task_hazards:{task_id}") and await review_autofix.his_change(pr):
+            return await review_autofix.fix_hazards(task_id, url)
         from . import go
         if checks == 'green' and go.merges(task_id):
             result = await _merge_as_asked(task_id, url, t)
@@ -5410,8 +5482,11 @@ async def check_pr(task_id: int) -> str | None:
             # Nothing moved — but someone may still have left a plain comment,
             # which changes no field on the PR and is exactly the kind of ask
             # that gets missed until somebody follows up in Teams.
-            asks = _new_review_notes(task_id, _review_notes(pr))
+            asks = _new_review_notes(task_id, await _all_review_notes(pr, url))
             if asks:
+                from . import review_autofix
+                if await review_autofix.his_change(pr):
+                    return await review_autofix.handle(task_id, url, asks)
                 return (f"💬 New comment on the PR for #{task_id} {title}\n{url}\n\n"
                         + "\n".join(f"• {a}" for a in asks[:4])
                         + f"\n\nSay 'fix #{task_id}' to address it in the same task.")
@@ -5466,7 +5541,10 @@ async def check_pr(task_id: int) -> str | None:
             store.update_task(task_id, status="pr_changes_requested")
             # Carry what they actually said. "Changes requested" on its own is
             # not something he can act on from his phone.
-            asks = _new_review_notes(task_id, _review_notes(pr))
+            asks = _new_review_notes(task_id, await _all_review_notes(pr, url))
+            from . import review_autofix
+            if asks and await review_autofix.his_change(pr):
+                return await review_autofix.handle(task_id, url, asks)
             detail = ("\n\n" + "\n".join(f"• {a}" for a in asks[:4])) if asks else ""
             return (f"📝 Changes requested on {prname.from_url(url)} (#{task_id} {title})\n{url}{detail}\n\n"
                     f"Say 'fix #{task_id}' and I'll address these in the same task.")

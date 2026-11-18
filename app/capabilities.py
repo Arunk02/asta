@@ -136,8 +136,8 @@ _TABLE: tuple[Capability, ...] = (
                     "history=true for the events that ended it."),
     Capability("booking_events", "observe",
                http='POST /api/_invoke {"tool":"booking_events","args":{"env":"sit","booking":"…"}}',
-               note="Every event one booking's workflows received, decoded and in order, with "
-                    "a tally — what arrived and what never did. Before 'X never came'."),
+               note="Booking Temporal workflows: each run's decoded event, TO and status, "
+                    "oldest first, with a tally per event type."),
     Capability("log_counts", "observe",
                http='POST /api/debug/counts {"term":"H7Y5BWNBNX9","env":"all","by":"app","hours":24}',
                note="WHERE first: counts per env and service (or pod). env all when "

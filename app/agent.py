@@ -2688,9 +2688,9 @@ async def temporal_workflows(env: str = "", query: str = "", limit: int = 10) ->
 
 
 async def booking_events(env: str = "", booking: str = "") -> str:
-    """Every event one booking received in an environment, oldest first: each
-    workflow run with what its decoded input says (event, status, TO, version),
-    and a tally of the events seen. Use it before saying something never arrived.
+    """Every Temporal event one booking received in an environment, oldest first:
+    each workflow run with its decoded event, status, TO and version, and a tally
+    per event type. Read it before concluding an event never arrived.
     booking: the bookingNumber (or the servicePlanNumber its workflows are keyed by)."""
     from . import temporal
     if not env or not booking:

@@ -236,6 +236,6 @@ def test_booking_events_lists_every_event_decoded(monkeypatch):
 def test_booking_events_is_a_read_tool_every_investigation_has():
     from app import capabilities, mcp_server, tasks, worker_auth
     assert capabilities.get("booking_events") is not None
-    assert "booking_events" in worker_auth.READ_TOOLS and "booking_events" in mcp_server.HOT
+    assert "booking_events" in worker_auth.READ_TOOLS and "booking_events" in mcp_server.INVESTIGATION
     assert "booking_events" in tasks.PINNED_TOOLS["analysis"]
     assert "booking_events(env, booking)" in booking_case.rule(f"did {ASKED} get the TMS ack in sit?")

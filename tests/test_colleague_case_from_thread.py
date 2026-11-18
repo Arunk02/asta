@@ -251,3 +251,51 @@ def test_worked_then_failed_points_at_the_event_in_between():
         {"started": "2026-11-18T12:26:39", "type": "bookingEventsWorkflow", "status": "COMPLETED",
          "facts": {"eventName": "PRICING_UPDATE"}}]})
     assert "PRICING_UPDATE" in out and "runs between the last success and the failure" in out
+
+
+def _row(ts, app, msg):
+    return {"ts": ts, "app": app, "logger": "", "message": msg, "pod": ""}
+
+
+def test_decisions_reach_a_pass_then_fail_in_the_middle_of_a_busy_booking(monkeypatch):
+    from app import debugkit
+    early = [_row(1000 + i, "telikos-billing-service", f"Trying to publishBillingEvent {i}") for i in range(30)]
+    late = [_row(9000 + i, "telikos-activityplanworkflow-service",
+                 f"Returning activityPlan: ActivityPlanDomain(status=PENDING {i})") for i in range(30)]
+    verdict = [_row(5000, "telikos-billing-service",
+                    f"RevalidationServiceImpl - TMS milestone is not executed for jobLineNumber: {OTHER}X")]
+    calls = []
+
+    async def lines(env, service="", terms=(), logger="", start=None, end=None, limit=40,
+                    direction="forward", pod="", matching=""):
+        calls.append((direction, matching))
+        if matching == booking_case._VERDICT_LOKI:
+            return {"rows": verdict}
+        return {"rows": late if direction == "backward" else early}
+    monkeypatch.setattr(debugkit, "lines", lines)
+    out = asyncio.run(booking_case.outcome_lines(OTHER, "sit", hours=40))
+    assert "TMS milestone is not executed" in out, "the first failure, wherever it falls"
+    assert "Returning activityPlan" not in out, "a read echo is not a decision"
+    assert {c[1] for c in calls} == {booking_case._OUTCOME_LOKI, booking_case._VERDICT_LOKI}
+    assert ("backward", booking_case._OUTCOME_LOKI) in calls, "the newest end is read too"
+
+
+def test_the_echo_filter_tolerates_double_spaces():
+    assert booking_case._ECHO.search("ActivityPlan data  to build EventHistory :x")
+    assert not booking_case._ECHO.search("Invoice trigger event is missing for jobLineNumber: X")
+
+
+def test_analysis_evidence_carries_decisions_and_received_events(monkeypatch):
+    from app import temporal
+
+    async def outcome(booking, env, hours=72):
+        return f"What the system logged as DECIDED for {booking} in {env}"
+
+    async def events(env, booking, limit=40):
+        return {"env": env, "booking": booking, "total": 1, "runs": [
+            {"started": "2026-11-18T12:26:39", "type": "bookingEventsWorkflow",
+             "status": "COMPLETED", "facts": {"eventName": "PRICING_UPDATE"}}]}
+    monkeypatch.setattr(booking_case, "outcome_lines", outcome)
+    monkeypatch.setattr(temporal, "booking_events", events)
+    got = asyncio.run(booking_case._decided_and_received(OTHER, "sit", 4320))
+    assert any("DECIDED" in g for g in got) and any("PRICING_UPDATE" in g for g in got)

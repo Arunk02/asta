@@ -187,12 +187,17 @@ def _row(rec: dict) -> dict:
 
 async def lines(env: str, service: str = "", terms=(), logger: str = "",
                 start: datetime | None = None, end: datetime | None = None,
-                limit: int = 40, direction: str = "forward", pod: str = "") -> dict:
-    """The exact lines — oldest first unless asked otherwise — and a link to them."""
+                limit: int = 40, direction: str = "forward", pod: str = "",
+                matching: str = "") -> dict:
+    """The exact lines — oldest first unless asked otherwise — and a link to them.
+    `matching` is an RE2 regex Loki applies on its side, so only those lines count
+    against the limit."""
     ns = namespace(env)
     end = end or datetime.now(timezone.utc)
     start = start or end - timedelta(minutes=30)
     q = selector(ns, service, pod) + filters(terms) + filters(logger)
+    if matching:
+        q += f' |~ "{grafana.escape_label(matching)}"'
     params = grafana.query_params(q, start, end, max(1, min(int(limit), 200)))
     params["direction"] = "backward" if direction == "backward" else "forward"
     try:

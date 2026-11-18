@@ -4089,7 +4089,7 @@ async def _worker(task_id: int) -> None:
         with contextlib.suppress(Exception):
             from . import booking_case
             prompt += await asyncio.wait_for(
-                booking_case.evidence(prompt, workspace=t.get("workspace") or ""), 60)
+                booking_case.evidence(prompt, workspace=t.get("workspace") or ""), 110)
     elif t["kind"] == "code":
         prompt = first_code_prompt(task_id, t)
     try:

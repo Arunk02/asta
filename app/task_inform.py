@@ -27,12 +27,21 @@ from . import store
 PREFIX = "task_inform:"
 RECEIPT = "task_inform_receipt:"
 STAGES = ("pr", "merged")
+_NAME = r"([A-Za-z][\w'.-]*(?-i:\s+[A-Z][\w'.-]*)?)"
 #: The verb, then one name — a surname only when he capitalised it.
-_VERB = re.compile(r"\b(?:inform|tell|ping|message|msg|notify|update|let)\s+"
-                   r"([A-Za-z][\w'.-]*(?-i:\s+[A-Z][\w'.-]*)?)", re.I)
-#: Not a person: himself, or more than one person.
+_VERB = re.compile(r"\b(?:inform|tell|ping|message|msg|notify|update|let|send)\s+" + _NAME,
+                   re.I)
+#: "send the PR to Dana", "send it to Dana Rao": the person after "to".
+_SEND_TO = re.compile(r"\bsend\b[^.?!\n]{0,40}?\bto\s+" + _NAME, re.I)
+#: Not a person: himself, more than one person, or a word that only sits where a
+#: name could. 17 Nov: "correct ur msg and send dana this PR" made "and" the
+#: recipient — "msg" is a noun there — and the draft opened "Hi and,".
 _NOT_A_PERSON = {"me", "him", "her", "them", "us", "everyone", "everybody", "all",
-                 "team", "the", "channel", "group", "it", "know", "people"}
+                 "team", "the", "channel", "group", "it", "know", "people",
+                 "and", "or", "to", "this", "that", "these", "those", "a", "an", "ur",
+                 "your", "my", "his", "msg", "message", "pr", "prs", "so", "then", "also",
+                 "back", "again", "now", "once", "after", "when", "fix", "push", "raise",
+                 "merge", "with", "on", "in", "for", "of", "about", "what", "how", "why"}
 _GROUPISH = re.compile(r"\b(?:team|channel|group|everyone|everybody|all\s+of)\b", re.I)
 _STOP = re.compile(r"^\s*(?:don'?t|do\s+not|no\s+need\s+to|stop|never)\s+"
                    r"(?:inform|tell|ping|message|msg|notify|update)\b\s*([\w .'-]*?)"
@@ -40,21 +49,46 @@ _STOP = re.compile(r"^\s*(?:don'?t|do\s+not|no\s+need\s+to|stop|never)\s+"
 _DEAD = ("cancelled", "rejected", "failed", "pr_closed")
 
 
+def _a_person_he_talks_to(name: str) -> bool:
+    """True when the name's first word names one of his 1:1 chats.
+
+    With no chats read yet (a fresh install, a test) there is nothing to check
+    against, and the word filter alone decides — as before. A word that appears
+    only inside a group's title ("Team Planning and Delivery") is not a person.
+    """
+    from . import contacts
+    threads = contacts.known_threads()
+    if not threads:
+        return True
+    first = re.escape(name.split()[0].lower())
+    return any(contacts._one_person(t) and re.search(rf"(?<!\w){first}(?!\w)", t.lower())
+               for t in threads)
+
+
 def parse(words: str) -> tuple[str, str] | None:
-    """(person, stage) when his words ask to tell exactly one named person."""
+    """(person, stage) when his words ask to tell exactly one named person.
+
+    Every place a name could be is tried in order, and the first that is a real
+    person wins — so a noun read as a verb ("ur msg and send dana") moves on
+    to the next candidate instead of naming "and".
+    """
     from . import consent, go
-    for m in _VERB.finditer(words or ""):
-        if consent._negated(words, m.start()):
+    text = words or ""
+    found = sorted([*_VERB.finditer(text), *_SEND_TO.finditer(text)], key=lambda m: m.start(1))
+    for m in found:
+        if consent._negated(text, m.start()):
             continue
-        name = re.sub(r"\s+(?:know|about|once|when|after|that|on|in)\b.*$", "",
+        name = re.sub(r"\s+(?:know|about|once|when|after|that|on|in|this|the)\b.*$", "",
                       m.group(1).strip(), flags=re.I).strip(" .,'")
         if not name or name.split()[0].lower() in _NOT_A_PERSON:
             continue
-        clause = (words or "")[m.start():m.start() + 80]
-        after = (words or "")[m.start(1) + len(name):]
+        clause = text[m.start():m.start() + 80]
+        after = text[m.start(1) + len(name):]
         if _GROUPISH.search(clause) or re.match(r"\s*(?:,|&|\band\b|\bor\b)\s*\w", after, re.I):
             return None       # more than one person: his yes, as before
-        return name, ("merged" if go.wants_merge(words) else "pr")
+        if not _a_person_he_talks_to(name):
+            continue
+        return name, ("merged" if go.wants_merge(text) else "pr")
     return None
 
 

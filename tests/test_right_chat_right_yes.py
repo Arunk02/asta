@@ -1305,3 +1305,12 @@ def test_a_draft_he_asked_for_is_set_aside_too_not_dropped(monkeypatch, told):
     back = [i for i in answers._load_queue() if i.get("to") == "Fake Colleague"]
     assert back and back[0]["what"] == "which one bro, A or B?" and back[0]["his_draft"]
     assert answers.origin_allowed({**back[0], "to_group": True}), "his ask is its origin"
+
+
+def test_a_function_word_is_never_searched_as_a_chat():
+    """17 Nov: a draft "for and" searched Teams for "and" — every group with
+    "and" in its title matched. A function word names nobody: nothing opens."""
+    for word in ("and", " And ", "msg", "PR"):
+        with pytest.raises(tb.NotFound):
+            tb._refuse_blank(word)
+    tb._refuse_blank("Dana Rao")          # a real name still goes through

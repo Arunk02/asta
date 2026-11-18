@@ -1258,10 +1258,16 @@ def one_to_one(chat: str, rows: list[dict] | None = None) -> bool:
     return chat_watch._looks_one_to_one(n)
 
 
+#: Words that sit where a name could but name nobody. 17 Nov: a draft "for and"
+#: searched Teams for "and", which matched the group "Team Planning and Delivery".
+_NOT_A_NAME = {"and", "or", "to", "the", "this", "that", "it", "msg", "pr", "ur", "a", "an"}
+
+
 def _refuse_blank(chat: str) -> None:
-    """No name, no search: an empty search matches Teams' own filter buttons.
+    """No name, no search: an empty search matches Teams' own filter buttons,
+    and a bare function word matches every chat whose title contains it.
     Who asked is recorded, so a caller passing '' is found, not guessed at."""
-    if re.search(r"\w", chat or ""):
+    if re.search(r"\w", chat or "") and (chat or "").strip().lower() not in _NOT_A_NAME:
         return
     import traceback
     caller = " < ".join(f"{f.name}" for f in traceback.extract_stack(limit=8)[:-2][::-1])

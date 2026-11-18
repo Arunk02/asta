@@ -201,3 +201,28 @@ def test_a_tell_with_no_task_still_goes_to_the_brain(monkeypatch, quiet):
     monkeypatch.setattr(go_mod, "rerun", rerun)
     asyncio.run(main._dispatch(_conv(), "rerun it and inform Vinish", _Sink(), "whatsapp"))
     assert turns and turns[0].startswith("inform Vinish")
+
+
+# 17 Nov: "fix it and raise PR and correct ur msg and send dana this PR" was
+# read as "tell AND" — "msg" taken for a verb, "and" for a name, and "send" not
+# known at all. The draft opened "Hi and," and Teams matched "and" inside the
+# group "Team Planning and Delivery"; only the group guard stopped it.
+@pytest.mark.parametrize("words, expected", [
+    ("fix it and raise PR and correct ur msg and send dana this PR", ("dana", "pr")),
+    ("raise PR and send the PR to Dana", ("Dana", "pr")),
+    ("merge after CI and send it to Dana Rao", ("Dana Rao", "merged")),
+    ("correct ur msg and fix it", None),
+    ("update and push the PR", None),
+])
+def test_a_conjunction_is_never_a_person_and_send_names_one(words, expected):
+    assert task_inform.parse(words) == expected
+
+
+def test_with_his_chats_known_only_a_1to1_name_is_kept(monkeypatch):
+    from app import contacts
+    monkeypatch.setattr(contacts, "known_threads", lambda limit=800: [
+        "Dana Rao", "Team Planning and Delivery\n\nSam, Lee, +26"])
+    assert task_inform.parse("raise PR and send dana this PR") == ("dana", "pr")
+    # A word that only appears inside a group's title is not a person he talks to.
+    assert task_inform.parse("raise PR and tell Execution") is None
+    assert task_inform.parse("raise PR and inform Robin") is None

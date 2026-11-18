@@ -67,6 +67,9 @@ def attempt(task_id: int, executor: str, cwd: str, session_id: str, *,
            'status': 'running', 'usage': None, 'usage_state': 'pending'}
     store.kv_set(key, json.dumps(row))
     token = ACTIVE.set(True)
+    with contextlib.suppress(Exception):
+        from . import claude_cli
+        claude_cli.LAST_COST.set(None)     # a crashed run must not inherit the last figure
     try:
         yield run_id
     except BaseException as exc:
@@ -80,6 +83,9 @@ def attempt(task_id: int, executor: str, cwd: str, session_id: str, *,
         after = _snapshot(executor, cwd, session_id)
         row['finished_at'] = time.time()
         row['usage'], row['usage_state'] = _delta(before, after)
+        with contextlib.suppress(Exception):
+            from . import claude_cli
+            row['cost_usd'] = claude_cli.LAST_COST.get() if executor == 'claude' else None
         store.kv_set(key, json.dumps(row))
         with contextlib.suppress(Exception):
             from . import spend_alert

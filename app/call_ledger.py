@@ -48,6 +48,9 @@ def call(executor: str, cwd: str, session_id: str, *, purpose: str, model: str =
         store.add_call_usage(run_id, purpose=purpose, executor=executor,
                              model=model or "default", session_id=session_id)
     status, error_type = "returned", ""
+    with contextlib.suppress(Exception):
+        from . import claude_cli
+        claude_cli.LAST_COST.set(None)         # a crashed run must not inherit the last figure
     try:
         yield run_id
     except BaseException as exc:
@@ -58,8 +61,10 @@ def call(executor: str, cwd: str, session_id: str, *, purpose: str, model: str =
         after = worker_usage._snapshot(executor, cwd, session_id)
         usage, state = worker_usage._delta(before, after)
         with contextlib.suppress(Exception):
+            from . import claude_cli
             store.finish_call_usage(run_id, status=status, error_type=error_type,
-                                    usage_state=state, usage=usage)
+                                    usage_state=state, usage=usage,
+                                    cost_usd=claude_cli.LAST_COST.get())
 
 
 def report(hours: float = 24) -> dict:

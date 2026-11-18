@@ -392,6 +392,8 @@ _ADDED_COLUMNS = {
     # once has the table without it, and CREATE TABLE IF NOT EXISTS would leave
     # that machine behind — which is the only one with real history on it.
     "attention": (("chased_at", "REAL"),),
+    # What Claude Code itself says a background call cost (18 Nov), beside its tokens.
+    "call_usage": (("cost_usd", "REAL"),),
     # Added when tasks stopped ending at the diff. The machine that matters is
     # the one with real task history on it, and CREATE TABLE IF NOT EXISTS would
     # be exactly the one to skip it.
@@ -706,14 +708,14 @@ def add_call_usage(run_id: str, *, purpose: str, executor: str, model: str,
 
 
 def finish_call_usage(run_id: str, *, status: str, error_type: str, usage_state: str,
-                      usage: dict | None) -> None:
+                      usage: dict | None, cost_usd: float | None = None) -> None:
     u = usage or {}
     with _connect() as conn:
         conn.execute(
             "UPDATE call_usage SET status=?, error_type=?, usage_state=?, calls=?, new_tokens=?, "
-            "cache_read=?, out_tokens=?, finished_at=? WHERE run_id=?",
+            "cache_read=?, out_tokens=?, cost_usd=?, finished_at=? WHERE run_id=?",
             (status, error_type, usage_state, u.get("calls"), u.get("new_tokens"),
-             u.get("cache_read"), u.get("out_tokens"), time.time(), run_id))
+             u.get("cache_read"), u.get("out_tokens"), cost_usd, time.time(), run_id))
 
 
 def call_usage_since(cutoff: float) -> list[dict]:

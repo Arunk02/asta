@@ -421,6 +421,12 @@ async def verify_node(state: JobState) -> dict:
     tasks = _tasks()
     tid = state["task_id"]
     t = _task(tid)
+    # What the build actually changed, against the tier it ran at: work bigger
+    # than planned moves the fix rounds below up a tier (routing.fit).
+    try:
+        await tasks.route_fit(tid, t)
+    except Exception:                                       # noqa: BLE001
+        pass
     if not verify.enabled():
         return {"verdict": "skip"}
     # Where the change is — the task's own tree — never the shared checkout.

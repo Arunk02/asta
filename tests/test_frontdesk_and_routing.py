@@ -39,7 +39,10 @@ def test_the_plan_decides_the_implementation_tier():
              "  BookingService  wires it\n  EtaValidatorTest  +3 cases\n\nPLAN READY")
     assert routing.plan_tier(small)[0] == routing.T1
     assert routing.plan_tier(three) == (routing.T2, "3 classes/files")   # └─ belongs to its parent
-    assert routing.plan_tier(small, {"repos": ["a", "b"]})[0] == routing.T3
+    # 19 Nov: two repos is big only when CODE changes in them; a value in each is T1.
+    assert routing.plan_tier(small, {"repos": ["a", "b"]})[0] == routing.T1
+    code = "STRUCTURE\n  src/main/java/x/A.java    change\n\nPLAN READY"
+    assert routing.plan_tier(code, {"repos": ["a", "b"]})[0] == routing.T3
     assert routing.plan_tier("STRUCTURE\n  X   y\n\nRISK: high\nPLAN READY")[0] == routing.T3
 
 
@@ -55,29 +58,27 @@ def test_his_words_override(text, want):
     assert routing.overrides(text) == want
 
 
-def test_the_best_model_plans_and_sonnet_builds_unless_it_is_big(monkeypatch):
-    """His words, 15 Nov: "plan leg is the core … use the best model there; for
-    coding sonnet high, opus if required"."""
+def test_his_19_nov_table_picks_model_and_effort_per_tier(monkeypatch):
+    """His words, 19 Nov: T2 plans on sonnet high too; T3 plans on opus — medium
+    for a modification, high for a big feature; builds run on sonnet high; one
+    file, a helm value or a known fix goes to haiku."""
     t = store.create_task("x", "code", "p", None)
+
+    def cell(stage):
+        c = routing.choose(t["id"], "claude", stage)
+        return c.model, c.effort
+    routing.set_tier(t["id"], routing.T1, "a config value", "signals", "config")
+    assert cell("plan") == ("haiku", "low") and cell("implement") == ("haiku", "low")
+    routing.set_tier(t["id"], routing.T1, "1 file", "signals")
+    assert cell("plan") == ("haiku", "medium") and cell("implement") == ("haiku", "medium")
     routing.set_tier(t["id"], routing.T2, "a ticket", "signals")
-    plan = routing.choose(t["id"], "claude", "plan")
-    assert (plan.model, plan.effort) == ("opus", "high")
-    routing.set_tier(t["id"], routing.T3, "a contract", "signals")
-    assert (routing.choose(t["id"], "claude", "plan").model,
-            routing.choose(t["id"], "claude", "plan").effort) == ("opus", "xhigh")
-    routing.set_tier(t["id"], routing.T1, "small", "signals")
-    assert routing.choose(t["id"], "claude", "plan").model == "sonnet"
-    assert routing.choose(t["id"], "claude", "implement").model == "sonnet"
-    routing.set_tier(t["id"], routing.T2, "5 files", "plan")
-    build = routing.choose(t["id"], "claude", "implement")
-    assert (build.model, build.effort) == ("sonnet", "high")
-    routing.set_tier(t["id"], routing.T3, "2 repos", "plan")
-    build = routing.choose(t["id"], "claude", "implement")
-    assert (build.model, build.effort) == ("opus", "high")
-    routing.set_tier(t["id"], routing.T1, "small", "signals")
-    assert routing.choose(t["id"], "copilot", "implement").model == ""   # account-specific list
-    monkeypatch.setenv("ASTA_ROUTE_CLAUDE_T1", "haiku:low")
-    assert routing.choose(t["id"], "claude", "implement").model == "haiku"
+    assert cell("plan") == ("sonnet", "high") and cell("implement") == ("sonnet", "high")
+    routing.set_tier(t["id"], routing.T3, "risky path", "plan", "modification")
+    assert cell("plan") == ("opus", "medium") and cell("implement") == ("sonnet", "high")
+    routing.set_tier(t["id"], routing.T3, "a contract", "signals", "big")
+    assert cell("plan") == ("opus", "high") and cell("implement") == ("sonnet", "high")
+    monkeypatch.setenv("ASTA_ROUTE_CLAUDE_T3", "opus:high")
+    assert cell("implement") == ("opus", "high"), "his env override still wins"
 
 
 def test_escalation_is_one_tier_and_stops_at_the_top():

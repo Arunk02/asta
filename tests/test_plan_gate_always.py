@@ -61,18 +61,21 @@ def test_a_colleague_s_ask_never_counts():
     ("STRUCTURE\n" + "\n".join(f"  C{i}.java  x" for i in range(12)) + "\n\nPLAN READY", "big or risky"),
     ("STRUCTURE\n  BookingWorkflowImpl.java  add Workflow.getVersion\n\nPLAN READY", "big or risky"),
 ])
-def test_his_go_still_stops_on_questions_and_risk(plan, why):
+def test_his_go_goes_ahead_and_says_the_question_or_risk(plan, why):
+    """19 Nov, his rule: approval given up front = no stop at the plan gate. What
+    used to stop it (questions, size, risk words) rides along as a heads-up."""
     tid = _task()
     go.on_spawn(tid, "fix the mapper and raise the PR")
-    assert go.no_ask(tid, plan) == ""
-    assert why in go.stop_reason(tid)
+    out = go.no_ask(tid, plan)
+    assert out.startswith("as you said — heads-up:")
+    assert why.split()[-1] in out
+    assert go.stop_reason(tid) == ""
 
 
-def test_his_go_stops_when_the_plan_is_about_another_ticket():
+def test_his_go_on_a_plan_about_another_ticket_goes_ahead_with_a_heads_up():
     tid = store.create_task("ABC-12 fix the mapper", "code", "ABC-12: fix the mapper", None)["id"]
     go.on_spawn(tid, "ABC-12 fix the mapper and raise the PR")
-    assert go.no_ask(tid, "ABC-99: change the router\n\nPLAN READY") == ""
-    assert "ABC-99" in go.stop_reason(tid)
+    assert "ABC-99" in go.no_ask(tid, "ABC-99: change the router\n\nPLAN READY")
     assert go.no_ask(tid, "ABC-12: map the size\n\nPLAN READY") == "as you said"
 
 
@@ -97,8 +100,8 @@ def test_the_card_says_why_a_go_ahead_still_waits(monkeypatch):
     monkeypatch.setattr(notify, "notify", push)
     monkeypatch.setattr(notify, "wa_document", doc)
     tid = _task()
-    go.on_spawn(tid, "fix the mapper and raise the PR")
-    plan = "STRUCTURE\n  A.java\n\nOpen questions: keep the old field?\n\nPLAN READY"
-    asyncio.run(tasks.announce_plan(tid, store.get_task(tid), plan))
-    assert "You said go ahead — this one waits for you: the plan asks you something" in pushed[-1]
+    go.on_spawn(tid, "share the plan with a colleague, get an approval and raise the PR")
+    asyncio.run(tasks.announce_plan(tid, store.get_task(tid), SMALL))
+    assert ("You said go ahead — this one waits for you: "
+            "you asked for someone else's approval first") in pushed[-1]
     assert f"approve task {tid}" in pushed[-1]

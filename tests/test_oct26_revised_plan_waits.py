@@ -42,7 +42,9 @@ def test_a_small_plan_waits_unless_his_words_said_go(monkeypatch):
     assert go.no_ask(t["id"], SMALL) == "as you said"
 
 
-def test_his_go_after_a_reproduction_still_stops_on_options_and_outside_approval():
+def test_his_go_after_a_reproduction_goes_ahead_on_options_and_stops_on_outside_approval():
+    """19 Nov, his rule: approval up front = no stop at the plan gate. Options in
+    the plan go along as a heads-up; someone else's approval he asked for still waits."""
     import json
     from app import reproduction
     t = _task()
@@ -51,12 +53,13 @@ def test_his_go_after_a_reproduction_still_stops_on_options_and_outside_approval
     saved = reproduction.state(t['id'])
     store.kv_set(f"reproduction:{t['id']}", json.dumps({**saved, 'state': 'confirmed'}))
     plan = 'Reproduced: (A) line 355 accepts skipped checks; (B) promotion changes content. Awaiting your approval.'
-    assert go.no_ask(t['id'], plan) == '', "lettered findings read as options: it waits"
+    assert "heads-up" in go.no_ask(t['id'], plan), "options go along as a heads-up"
     assert go.no_ask(t['id'], 'Reproduced: line 355 accepts skipped checks. Awaiting your approval.') == 'as you said'
-    assert go.no_ask(t['id'], 'Open questions: choose (A) return false, (B) fail the workflow.') == ''
-    assert go.no_ask(t['id'], '(a) return false, (b) fail the workflow.') == ''
-    assert go.no_ask(t['id'], 'Reproduced; choose (A) return false, (B) fail.') == ''
-    go.note_his_words(t['id'], 'Get approval from Vinish before coding')
+    for options in ('Open questions: choose (A) return false, (B) fail the workflow.',
+                    '(a) return false, (b) fail the workflow.',
+                    'Reproduced; choose (A) return false, (B) fail.'):
+        assert go.no_ask(t['id'], options).startswith('as you said — heads-up')
+    go.note_his_words(t['id'], 'Get approval from a colleague before coding')
     assert go.no_ask(t['id'], plan) == ''
 
 

@@ -119,6 +119,8 @@ _GO_AHEAD = re.compile(
     r"\bjust\s+do\s+it\b"
     r"|\bno\s+need\s+(?:to\s+)?(?:show|ask|wait|check\s+with|approv\w*|for\s+(?:my\s+)?(?:approval|plan))\b"
     r"|\b(?:don'?t|do\s+not)\s+wait\s+for\s+(?:my\s+)?(?:approval|yes|go|ok)\b"
+    # "go ahead and create PR, don't need my approval" (19 Nov)
+    r"|\b(?:don'?t|do\s+not|doesn'?t)\s+need\s+(?:my\s+|any\s+)?(?:approval|yes|go-?ahead|ok)\b"
     r"|\bwithout\s+(?:waiting\s+for\s+)?(?:my\s+)?approval\b"
     r"|\bno\s+approval\s+(?:needed|required)\b"
     r"|\bskip\s+(?:the\s+)?(?:plan\s+)?approval\b"
@@ -251,11 +253,20 @@ def grant(task_id: int, words: str = "", *, ship: bool = True) -> None:
         merge = True
     # "…don't push / no PR" said now outranks a ship granted earlier.
     keep_local = bool(_NO_PR.search(words or "")) and not ship
+    local = keep_local or (bool(prior.get("local")) and not ship)
     store.kv_set(f"task_go:{task_id}", json.dumps(
-        {"ship": False if keep_local else bool(ship or prior.get("ship")), "words": (words or "")[:300],
+        {"ship": False if local else bool(ship or prior.get("ship")), "local": local,
+         "words": (words or "")[:300],
          "merge": merge, "merge_words": words if wants_merge(words) else prior.get('merge_words', ''),
          "at": time.time()}))
     store.add_task_event(task_id, "go", f"he said go{' + PR' if ship else ''}: {(words or '')[:160]}")
+
+
+def his_plan_yes(task_id: int, words: str) -> None:
+    """His own yes to this task's plan — the one approval it needs (his rule,
+    19 Nov): the PR follows without another ask, unless he kept it local.
+    Called only where HIS words arrive (main), never from Asta's own approvals."""
+    grant(task_id, words, ship=not approves_locally(words)[0])
 
 
 def granted(task_id: int) -> dict | None:
@@ -267,7 +278,14 @@ def granted(task_id: int) -> dict | None:
 
 
 def ships(task_id: int) -> bool:
-    return bool((granted(task_id) or {}).get("ship"))
+    """Does the finished work go up as a PR without another ask?
+
+    His rule, 19 Nov: one approval per code task. Said up front ("…and raise
+    the PR", "just do it"), or given at the plan gate — either way the PR follows
+    without a second yes (`tasks.record_answer` grants it where his yes lands).
+    Only his "don't push / no PR" keeps it local."""
+    g = granted(task_id) or {}
+    return bool(g.get("ship")) and not g.get("local")
 
 
 def wants_merge(text: str) -> bool:
@@ -392,6 +410,14 @@ def no_ask(task_id: int, plan: str) -> str:
         store.kv_set(_stop_key(task_id), reason)
         store.add_task_event(task_id, "go", f"waits despite his go-ahead: {reason}")
         return ""
+    # His rule, 19 Nov: approval given up front means no stop at the plan gate.
+    # Size, risk words, open questions and scope used to stop it anyway — a helm
+    # list named "…_TO_BILLING" was "high impact (billing)" and waited, twice.
+    # What would have stopped it rides along as a heads-up he can act on.
+    note = _heads_up(task_id, plan)
+    if note:
+        store.add_task_event(task_id, "go", f"going ahead as he said; heads-up: {note}")
+        return f"as you said — heads-up: {note}"
     return "as you said"
 
 
@@ -405,26 +431,31 @@ def stop_reason(task_id: int) -> str:
 
 
 def _stop(task_id: int, plan: str) -> str:
+    """What still stops a plan he said go on: only what HE asked for — someone
+    else's approval first, or the bug reproduced first. Nothing Asta infers."""
     who = waits_for_someone(task_id)
     if who:
         return "you asked for someone else's approval first"
-    if reviewed_by_him(task_id):
-        return "you are reviewing this plan"
-    # A model repeating the approval ceremony is not a question.
-    asks = re.sub(r"\bawaiting\s+(?:your|arun'?s|his)\s+approval\b", "", plan or "", flags=re.I)
-    if _PLAN_ASKS.search(asks):
-        return "the plan asks you something"
     from . import reproduction
     st = reproduction.state(task_id).get("state")
     if st and st != "confirmed":
         return "the bug was not reproduced"
+    return ""
+
+
+def _heads_up(task_id: int, plan: str) -> str:
+    """What used to stop a go-ahead plan, now said without stopping it."""
+    # A model repeating the approval ceremony is not a question.
+    asks = re.sub(r"\bawaiting\s+(?:your|arun'?s|his)\s+approval\b", "", plan or "", flags=re.I)
+    if _PLAN_ASKS.search(asks):
+        return "the plan has an open question — it goes ahead on its own reading"
     from . import routing
     from .graph import outcome as _outcome
     reported = _outcome.reported(task_id, 0)
     try:
         tier, why = routing.plan_tier(plan, reported)
     except Exception:                                       # noqa: BLE001
-        return "the plan's size could not be read"
+        tier, why = 0, ""
     if tier >= routing.T3:
         return f"a big or risky change — {why}"
     off = _off_scope(task_id, plan, reported or {})
@@ -554,7 +585,10 @@ async def act(text: str, wanted: int | None) -> str:
     store.record_outcome("command", "go", subject=str(tid), detail=(text or "")[:120])
     status = t["status"]
     if status == "awaiting_approval":
-        grant(tid, text, ship=pr)
+        if pr:
+            grant(tid, text, ship=True)
+        else:
+            his_plan_yes(tid, text)
         try:
             await tasks.approve(tid)
         except ValueError as exc:

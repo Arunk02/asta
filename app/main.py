@@ -4879,8 +4879,12 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     # "check") and got #263's status card; the task asked the same again.
     waiting = _task_awaiting_answer(cid, user_text)
     if waiting is not None:
+        answer = _strip_task_ref(user_text)
+        from . import go as _go
+        if store.kv_get(f"task_gate:{waiting}") != "context" and tasks.plan_yes(answer):
+            _go.his_plan_yes(waiting, answer)
         try:
-            note = tasks.reply(waiting, _strip_task_ref(user_text))
+            note = tasks.reply(waiting, answer)
         except ValueError as exc:
             note = str(exc)
         frontdesk.record("job", f"answer #{waiting}")
@@ -5746,6 +5750,10 @@ async def _run_task_command(verb: str, wanted: int | None, cid: str) -> str:
             new = tasks.redo(tid)
             return f"↻ Doing #{tid} again as task #{new['id']} — {new['title'][:60]}."
         if verb == "approve":
+            from . import go as _go
+            if (store.get_task(tid) or {}).get("kind") == "code" \
+                    and store.kv_get(f"task_gate:{tid}") != "context":
+                _go.his_plan_yes(tid, "approve")
             return "👍 " + await tasks.approve(tid)
         if verb == "reject":
             return "👎 " + await tasks.reject(tid)

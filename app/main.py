@@ -3969,9 +3969,9 @@ def _settle_feedback(cid: str, intent: dict | None) -> None:
         # He answered the colleague's ask with an act ("Just approve all the PR"):
         # the turn staged or posted reviews of those PRs. 19 Nov: the reply draft
         # was "kept — not about it" and came back as "Asking again".
+        from . import answers as _answers
+        _answers.shelve(staged, "answered_by_him", said)
         loop.end_reply(cid)
-        store.record_outcome("turn", "draft answered by his instruction", subject=cid,
-                             detail=(said or "")[:200])
         return
     loop.unreject(staged)
     store.kv_set(f"amending:{cid}", "")
@@ -5911,7 +5911,9 @@ async def _post_reviews(picks: list, cid: str, user_text: str, sink, channel: st
     # must not come back as "Asking again".
     staged = loop.awaiting(cid)
     if staged and staged.get("type") == "answer" and _about_these_prs(staged, picks):
+        from . import answers as _answers
         loop.clear_awaiting(cid, answered_by=user_text)
+        _answers.shelve(staged, "answered_by_him", user_text)
         loop.end_reply(cid)
         lines.append(f"(The reply draft to {staged.get('to') or 'them'} is dropped — "
                      "the reviews answer it. Say so if you still want it sent.)")

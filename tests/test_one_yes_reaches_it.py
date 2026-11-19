@@ -225,3 +225,18 @@ def test_a_plan_shown_after_the_reviews_takes_the_go_ahead(monkeypatch, github):
     store.add_task_event(t["id"], "plan", "full plan sent")
     assert main._reviews_his_word_approves("yes go ahead and approve", "c-plan") == []
     assert len(offers.waiting_reviews()) == 4, "nothing consumed"
+
+
+# --- a refused approval says the real reason ---------------------------------------
+
+def test_an_approval_on_a_merged_pr_says_it_is_merged(monkeypatch):
+    from app import review
+
+    async def revision(pr):
+        review._STATES["acme/svc-a#4101"] = "MERGED"
+        return "acme/svc-a#4101@" + "a" * 40 + ":fp", False
+    monkeypatch.setattr(review, "revision", revision)
+    with pytest.raises(RuntimeError, match="already merged"):
+        asyncio.run(ops.run({"name": "pr_review_inline", "args": {
+            "pr": A, "action": "approve", "body": "", "comments": [],
+            "review_origin": {"ref": "acme/svc-a#4101", "revision": "acme/svc-a#4101@" + "a" * 40 + ":fp"}}}))

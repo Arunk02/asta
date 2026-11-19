@@ -336,6 +336,13 @@ FLOW_FROM_THE_DOCS = (
     "TelikosE2EFlowV2, the NAM booking doc): normal or NAM (rail → CAMS, "
     "non-rail → VTS), TMS or non-TMS, import or export, from its own logs. List what "
     "SHOULD happen, step by step, up to their question; name the document.\n")
+#: 18 Nov: billing passed at 17:37 and failed at 12:26 the next day; the answer
+#: blamed the step that had worked all along and never read the pricing update
+#: that arrived in between and overwrote the references billing needed.
+WORKED_THEN_FAILED = (
+    "3. Worked, then failed? The cause is the event between the last success and the "
+    "first failure (booking_events): compare what it carried with what was stored, "
+    "field by field. ")
 #: 18 Nov: a billing NPE under another booking, found by searching the
 #: environment for "TMS", was reported as the cause for the booking asked about.
 CAUSE_IS_THIS_BOOKING = (
@@ -394,10 +401,9 @@ def rule(text: str, context: str = "", heard: bool = False, question: str = "") 
            "Root cause = the FIRST step of the flow that did not complete, with its exact "
            "message (a FAILED status at INFO counts). 'Fine' only if the flow reached its end.\n"
            + CAUSE_IS_THIS_BOOKING + OUR_BOUNDARY +
-           "3. A completed upstream milestone never rules out an earlier failed attempt or "
-           "a later downstream failure. State separately what failed, what later succeeded, "
-           "and what remains unverified. Where the logs and the document disagree, the logs "
-           "win — and that the document may need correcting.\n"
+           WORKED_THEN_FAILED +
+           "State separately what failed, what succeeded, what is unverified. Where logs "
+           "and the document disagree, the logs win.\n"
            "Code: the registered workspace only; history via code_history.\n"
            + verdict.SHAPE +
            "No table or per-flow list unless they asked what happened overall. At most one "
@@ -703,6 +709,27 @@ _CASE = re.compile(r"This is about a specific case — ([A-Z0-9, ]+?), in (?:the
                    r"the lower environments|an environment nobody named)")
 
 
+async def _decided_and_received(booking: str, env: str, minutes: int) -> list[str]:
+    """What each service logged as decided, and every event the booking's workflows
+    received — the two reads a precise answer was built from (18 Nov). Without them
+    a busy booking's trail stopped at the row cap and a pass-then-fail read as fine."""
+    import asyncio
+    from . import temporal
+
+    async def received() -> str:
+        try:
+            return temporal.render_booking_events(await temporal.booking_events(env, booking))
+        except Exception:                                      # noqa: BLE001
+            return ""
+    try:
+        got = await asyncio.wait_for(asyncio.gather(
+            outcome_lines(booking, env, hours=max(1, minutes // 60)), received(),
+            return_exceptions=True), 40)
+    except asyncio.TimeoutError:
+        return []
+    return [g for g in got if isinstance(g, str) and g]
+
+
 async def evidence(prompt: str, minutes: int = 4320, workspace: str = "") -> str:
     """What the logs say about the booking a brief is about — per flow, and its
     trail — fetched before the investigation starts. '' when the brief is not
@@ -751,6 +778,8 @@ async def evidence(prompt: str, minutes: int = 4320, workspace: str = "") -> str
                                                 30 if len(hit) == 1 else 12))
         if failures:
             parts.append(f"Other environment queries failed: {'; '.join(failures)}")
+        if hit:
+            parts += await _decided_and_received(booking, hit[0][0], minutes)
     if not parts:
         return ""
     try:
@@ -843,8 +872,46 @@ async def booking_for(identifier: str, env: str = "", budget: float = 6.0) -> tu
 _OUTCOME = re.compile(
     r"\bresolved\s+(?:SUCCESS|FAILED)\b|\b(?:SUCCESS|FAILED|FAILURE)\b|"
     r"published successfully|successfully (?:published|sent|consumed|saved)|"
-    r"\bstatus\s*[=:]\s*\w+|\bon hold\b|\bworkflow (?:completed|failed)\b|Exception\b")
-OUTCOME_LINES = 15
+    r"\bstatus\s*[=:]\s*\w+|\bon hold\b|\bworkflow (?:completed|failed)\b|Exception\b|"
+    # Billing's own verdicts: 18 Nov, "Ready for Invoicing … PENDING, exceptionCode 400,
+    # TMS milestone is not executed" was the decision, and it carries none of the above.
+    r"\bPENDING\b|exceptionCode|not executed|is missing|No changes found|\bREJECTED\b")
+_VERDICT_LOKI = ("(?i)(not executed|is missing for|exceptioncode|mandatory precondition|"
+                 "revalidation[a-z]* (passed|failed|success)|status pending|resolved failed)")
+_VERDICT = re.compile(r"not executed|is missing for|exceptionCode|mandatory precondition|"
+                      r"[Rr]evalidation\w* (?:passed|failed|success)|status PENDING|"
+                      r"resolved FAILED|\bREJECTED\b")
+
+
+def _decisions_to_show(rows: list[dict]) -> list[dict]:
+    """The first decisions, every verdict's first appearance, and the newest — in
+    time order. A pass followed by a fail shows as both, with its time."""
+    if len(rows) <= OUTCOME_LINES:
+        return rows
+    keep = set(range(min(4, len(rows))))
+    keep |= {i for i, r in enumerate(rows) if _VERDICT.search(r.get("message") or "")}
+    for i in range(len(rows) - 1, -1, -1):
+        if len(keep) >= OUTCOME_LINES:
+            break
+        keep.add(i)
+    return [rows[i] for i in sorted(keep)][:OUTCOME_LINES + 6]
+
+
+#: A service answering a read with the whole record — every status in it, nothing
+#: decided. 18 Nov: "Returning activityPlan" filled the newest slots of a booking
+#: whose billing verdict was the line that mattered.
+_ECHO = re.compile(
+    r"Returning\s+activityPlan|Request\s+received\s+for\s+get|data\s+to\s+build\s+attribute|"
+    r"Deserializing\s+data|Sending\s+booking\s+data\s+to\s+IOM|ActivityPlan\s+data\s+to|"
+    r"ActivityPlan\s*:\s*\{|Starting\s+workflow\s+with\s+new\s+version|"
+    r"Successfully\s+sent\s+the\s+booking\s+events|Updating\s+database\s+and\s+publish|"
+    r"Event\s+history\s+data\s+for|billing\s+object\s+created|BillingDataExchange", re.I)
+#: The same decisions, for Loki to match on its side (RE2, case-insensitive), so a
+#: busy booking's later verdicts are not cut off by the row limit.
+_OUTCOME_LOKI = ("(?i)(resolved (success|failed)|published successfully|successfully "
+                 "(published|sent|consumed|saved)|status ?[=:]|on hold|workflow (completed|failed)|"
+                 "exception|pending|not executed|is missing|no changes found|rejected|failed)")
+OUTCOME_LINES = 18
 
 
 async def outcome_lines(booking: str, env: str, hours: int = 72) -> str:
@@ -852,18 +919,37 @@ async def outcome_lines(booking: str, env: str, hours: int = 72) -> str:
 
     Read in code before the turn, so the brain starts from what the system said
     it did, never from what a status field suggests it must have done."""
+    import asyncio
     from datetime import datetime, timedelta, timezone
     from . import debugkit
     end = datetime.now(timezone.utc)
-    got = await debugkit.lines(env, "", (booking,), "", end - timedelta(hours=hours), end, 500)
-    rows = [r for r in got.get("rows") or [] if _OUTCOME.search(r.get("message") or "")]
+    start = end - timedelta(hours=hours)
+    # Both ends of the window. Oldest-first alone stopped at Loki's row cap on a
+    # busy booking (18 Nov: 200 lines reached 07:21; billing's 12:26 verdict, the
+    # one that mattered, was never read).
+    # And the verdicts alone, oldest first, wherever they fall: the FIRST failure is
+    # what "it worked, then it failed" turns on, and it is usually in the middle.
+    first, last, verdicts = await asyncio.gather(
+        debugkit.lines(env, "", (booking,), "", start, end, 200, matching=_OUTCOME_LOKI),
+        debugkit.lines(env, "", (booking,), "", start, end, 200, direction="backward",
+                       matching=_OUTCOME_LOKI),
+        debugkit.lines(env, "", (booking,), "", start, end, 200, matching=_VERDICT_LOKI))
+    seen, rows = set(), []
+    pool = (first.get("rows") or []) + (last.get("rows") or []) + (verdicts.get("rows") or [])
+    for r in sorted(pool, key=lambda r: r["ts"]):
+        msg = r.get("message") or ""
+        key = (r.get("app"), re.sub(r"\d", "", msg)[:120])
+        if _OUTCOME.search(msg) and not _ECHO.search(msg) and key not in seen:
+            seen.add(key)
+            rows.append(r)
     if not rows:
         return ""
-    shown = rows[:OUTCOME_LINES]
+    shown = _decisions_to_show(rows)
     body = "\n".join(f"  {debugkit.stamp(r['ts'])} [{r.get('app') or ''}] "
                      f"{r.get('logger') or ''} :: {' '.join((r.get('message') or '').split())[:300]}"
                      for r in shown)
-    more = f"\n  … {len(rows) - len(shown)} more" if len(rows) > len(shown) else ""
+    more = (f"\n  … {len(rows) - len(shown)} more between the first and the newest"
+            if len(rows) > len(shown) else "")
     return (f"What the system logged as DECIDED for {booking} in {env} (oldest first) — "
             f"the outcome is what these say, not what a status field implies:\n{body}{more}")
 

@@ -228,7 +228,8 @@ def test_booking_events_lists_every_event_decoded(monkeypatch):
     out = temporal.render_booking_events(asyncio.run(temporal.booking_events("sit", OTHER)))
     lines = out.splitlines()
     assert "3 workflow run(s)" in lines[0] and "READY_FOR_PLANNING" in lines[1], "oldest first"
-    assert "workOrderStatus=ACCEPTED executionStarted=False transportOrderNumber=TO1234567890123" in out
+    assert "workOrderStatus=ACCEPTED transportOrderNumber=TO1234567890123" in out
+    assert "executionStarted" not in out, "a stale flag on the TO copy, not TMS's word"
     assert "SAP_TMS_ACK_FEEDBACK ×2" in out and "SAP_TMS_EXECUTION_STATUS" not in out
     assert "consumer took the same message for other bookings" in out
 
@@ -239,3 +240,108 @@ def test_booking_events_is_a_read_tool_every_investigation_has():
     assert "booking_events" in worker_auth.READ_TOOLS and "booking_events" in mcp_server.INVESTIGATION
     assert "booking_events" in tasks.PINNED_TOOLS["analysis"]
     assert "booking_events(env, booking)" in booking_case.rule(f"did {ASKED} get the TMS ack in sit?")
+
+
+def test_worked_then_failed_points_at_the_event_in_between():
+    r = booking_case.rule(f"why is billing failing for {ASKED} in sit? it worked yesterday")
+    assert "Worked, then failed?" in r and "between the last success and the first failure" in r
+    assert "the logs win" in r and len(booking_case.rule(
+        "have we sent TMS for H65ZMWX52B2 in sit? and customs UNITED?")) < 3400
+    from app import temporal
+    out = temporal.render_booking_events({"env": "sit", "booking": ASKED, "total": 1, "runs": [
+        {"started": "2026-11-18T12:26:39", "type": "bookingEventsWorkflow", "status": "COMPLETED",
+         "facts": {"eventName": "PRICING_UPDATE"}}]})
+    assert "PRICING_UPDATE" in out and "runs between the last success and the failure" in out
+
+
+def _row(ts, app, msg):
+    return {"ts": ts, "app": app, "logger": "", "message": msg, "pod": ""}
+
+
+def test_decisions_reach_a_pass_then_fail_in_the_middle_of_a_busy_booking(monkeypatch):
+    from app import debugkit
+    early = [_row(1000 + i, "telikos-billing-service", f"Trying to publishBillingEvent {i}") for i in range(30)]
+    late = [_row(9000 + i, "telikos-activityplanworkflow-service",
+                 f"Returning activityPlan: ActivityPlanDomain(status=PENDING {i})") for i in range(30)]
+    verdict = [_row(5000, "telikos-billing-service",
+                    f"RevalidationServiceImpl - TMS milestone is not executed for jobLineNumber: {OTHER}X")]
+    calls = []
+
+    async def lines(env, service="", terms=(), logger="", start=None, end=None, limit=40,
+                    direction="forward", pod="", matching=""):
+        calls.append((direction, matching))
+        if matching == booking_case._VERDICT_LOKI:
+            return {"rows": verdict}
+        return {"rows": late if direction == "backward" else early}
+    monkeypatch.setattr(debugkit, "lines", lines)
+    out = asyncio.run(booking_case.outcome_lines(OTHER, "sit", hours=40))
+    assert "TMS milestone is not executed" in out, "the first failure, wherever it falls"
+    assert "Returning activityPlan" not in out, "a read echo is not a decision"
+    assert {c[1] for c in calls} == {booking_case._OUTCOME_LOKI, booking_case._VERDICT_LOKI}
+    assert ("backward", booking_case._OUTCOME_LOKI) in calls, "the newest end is read too"
+
+
+def test_the_echo_filter_tolerates_double_spaces():
+    assert booking_case._ECHO.search("ActivityPlan data  to build EventHistory :x")
+    assert not booking_case._ECHO.search("Invoice trigger event is missing for jobLineNumber: X")
+
+
+def test_analysis_evidence_carries_decisions_and_received_events(monkeypatch):
+    from app import temporal
+
+    async def outcome(booking, env, hours=72):
+        return f"What the system logged as DECIDED for {booking} in {env}"
+
+    async def events(env, booking, limit=40):
+        return {"env": env, "booking": booking, "total": 1, "runs": [
+            {"started": "2026-11-18T12:26:39", "type": "bookingEventsWorkflow",
+             "status": "COMPLETED", "facts": {"eventName": "PRICING_UPDATE"}}]}
+    monkeypatch.setattr(booking_case, "outcome_lines", outcome)
+    monkeypatch.setattr(temporal, "booking_events", events)
+    got = asyncio.run(booking_case._decided_and_received(OTHER, "sit", 4320))
+    assert any("DECIDED" in g for g in got) and any("PRICING_UPDATE" in g for g in got)
+
+
+def test_booking_events_shows_what_each_run_added_and_dropped():
+    from app import temporal
+
+    def run(t, kind, refs, name="SERVICE_DELIVERY_EXECUTION"):
+        return {"started": t, "type": kind, "status": "COMPLETED",
+                "facts": {"eventName": name, "_refs": refs}}
+    out = temporal.render_booking_events({"env": "sit", "booking": OTHER, "total": 4, "runs": [
+        run("2026-11-17T17:37:57", "BillingWorkflow", ["ATD", "LAST_LEG_DATE"]),
+        run("2026-11-18T12:26:39", "bookingEventsWorkflow", ["ATD"], "PRICING_UPDATE"),
+        run("2026-11-18T12:26:41", "BillingWorkflow", ["ATD"], "BOOKING_UPDATED"),
+    ]})
+    lines = out.splitlines()
+    assert "−LAST_LEG_DATE" in lines[3], "billing's run lost what the update did not carry"
+    assert "refs" not in lines[2], "a different workflow type is not compared"
+
+
+def test_the_booking_story_runs_are_kept_first():
+    from app import temporal
+    rows = ([{"type": {"name": "ActivityPlanWorkflow"}, "startTime": f"2026-11-18T10:{i:02d}:00Z"}
+             for i in range(50)]
+            + [{"type": {"name": "bookingEventsWorkflow"}, "startTime": "2026-11-18T12:26:39Z"},
+               {"type": {"name": "BillingWorkflow"}, "startTime": "2026-11-18T12:26:41Z"}])
+    picked = temporal._pick_runs(sorted(rows, key=lambda r: r["startTime"]), 10)
+    kinds = [temporal._of(r, "type", "name") for r in picked]
+    assert len(picked) == 10 and "bookingEventsWorkflow" in kinds and "BillingWorkflow" in kinds
+    assert picked == sorted(picked, key=lambda r: r["startTime"])
+
+
+def test_booking_events_reads_tms_execution_from_the_work_processes():
+    from app import temporal
+    body = {"newServicePlan": {"transportOrders": [{"executionStarted": False}],
+                               "workProcesses": [{"workProcessStatus": {
+                                   "workProcessName": "CONTAINER_DELIVERY_EXECUTION",
+                                   "workProcessStatus": "EXECUTED"}}]},
+            "oldServicePlan": {"workProcesses": [{"workProcessStatus": {
+                "workProcessName": "CONTAINER_DELIVERY_EXECUTION", "workProcessStatus": "NOT_STARTED"}}]}}
+    import base64
+    ev = [{"workflowExecutionStartedEventAttributes": {"input": {"payloads": [
+        {"data": base64.b64encode(json.dumps("SAP_TMS_EXECUTION_STATUS").encode()).decode()},
+        {"data": base64.b64encode(json.dumps(body).encode()).decode()}]}}}]
+    facts = temporal._start_facts(ev)
+    assert facts["_executions"] == {"CONTAINER_DELIVERY_EXECUTION": "EXECUTED"}
+    assert "executionStarted" not in facts

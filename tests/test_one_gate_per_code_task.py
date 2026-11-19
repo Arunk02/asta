@@ -45,9 +45,16 @@ def test_a_change_or_a_question_is_not_a_yes(said):
     assert not tasks.plan_yes(said), said
 
 
+def _his_answer(t: dict, said: str):
+    """His answer at the gate, as main hands it on: his yes grants the PR first."""
+    if tasks.plan_yes(said):
+        go.his_plan_yes(t["id"], said)
+    return tasks.record_answer(t["id"], t, said)
+
+
 def test_ship_at_the_gate_approves_the_plan_once_and_ships_it():
     t = _at_gate()
-    approved, text = tasks.record_answer(t["id"], t, "ship")
+    approved, text = _his_answer(t, "ship")
     assert approved and text.startswith("PLAN APPROVED")
     assert "ship" not in text.lower().replace("plan approved", ""), "no garbage amendment"
     assert tasks.plan_approved(t["id"]) and go.ships(t["id"])
@@ -69,14 +76,13 @@ def test_a_yes_at_the_context_gate_approves_no_plan():
 
 def test_his_plan_approval_without_pr_words_still_ships_the_pr():
     t = _at_gate()
-    tasks.record_answer(t["id"], t, "approve task")
+    _his_answer(t, "approve task")
     assert go.ships(t["id"])
 
 
 def test_his_approval_that_keeps_it_local_does_not_ship():
     t = _at_gate()
-    go.grant(t["id"], "approve, don't push yet", ship=False)
-    tasks.record_answer(t["id"], t, "approve, don't push yet")
+    _his_answer(t, "approve, don't push yet")
     assert not go.ships(t["id"])
 
 
@@ -99,3 +105,24 @@ def test_his_go_still_waits_when_he_asked_for_someone_elses_approval():
 def test_without_his_go_the_plan_waits_for_one_yes():
     t = store.create_task("Enable XX", "code", "enable XX", None)
     assert go.no_ask(t["id"], PLAN) == ""
+
+
+def test_his_yes_through_the_chat_path_ships_the_pr(monkeypatch):
+    """main hands his gate answer on: "ship" for the task it names."""
+    import asyncio
+
+    from app import main
+    from tests.test_say_it_once import _Sink, _conv
+    t = _at_gate()
+    seen = []
+    monkeypatch.setattr(tasks, "reply", lambda tid, text: seen.append((tid, text)) or "ok")
+    asyncio.run(main._dispatch(_conv(), f"{t['id']} ship", _Sink(), "whatsapp"))
+    assert seen and seen[0][0] == t["id"]
+    assert go.ships(t["id"])
+
+
+def test_asta_approving_on_its_own_does_not_grant_a_pr():
+    """Only his words grant the PR; an internal "PLAN APPROVED" does not."""
+    t = _at_gate()
+    tasks.record_answer(t["id"], t, "PLAN APPROVED")
+    assert not go.ships(t["id"])

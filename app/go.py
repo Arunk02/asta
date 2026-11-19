@@ -262,6 +262,13 @@ def grant(task_id: int, words: str = "", *, ship: bool = True) -> None:
     store.add_task_event(task_id, "go", f"he said go{' + PR' if ship else ''}: {(words or '')[:160]}")
 
 
+def his_plan_yes(task_id: int, words: str) -> None:
+    """His own yes to this task's plan — the one approval it needs (his rule,
+    19 Nov): the PR follows without another ask, unless he kept it local.
+    Called only where HIS words arrive (main), never from Asta's own approvals."""
+    grant(task_id, words, ship=not approves_locally(words)[0])
+
+
 def granted(task_id: int) -> dict | None:
     try:
         d = json.loads(store.kv_get(f"task_go:{task_id}") or "null")
@@ -275,14 +282,10 @@ def ships(task_id: int) -> bool:
 
     His rule, 19 Nov: one approval per code task. Said up front ("…and raise
     the PR", "just do it"), or given at the plan gate — either way the PR follows
-    without a second yes. Only his "don't push / no PR" keeps it local."""
+    without a second yes (`tasks.record_answer` grants it where his yes lands).
+    Only his "don't push / no PR" keeps it local."""
     g = granted(task_id) or {}
-    if g.get("local"):
-        return False
-    if g.get("ship"):
-        return True
-    from . import tasks
-    return tasks.plan_approved(task_id)
+    return bool(g.get("ship")) and not g.get("local")
 
 
 def wants_merge(text: str) -> bool:
@@ -555,7 +558,10 @@ async def act(text: str, wanted: int | None) -> str:
     store.record_outcome("command", "go", subject=str(tid), detail=(text or "")[:120])
     status = t["status"]
     if status == "awaiting_approval":
-        grant(tid, text, ship=pr)
+        if pr:
+            grant(tid, text, ship=True)
+        else:
+            his_plan_yes(tid, text)
         try:
             await tasks.approve(tid)
         except ValueError as exc:

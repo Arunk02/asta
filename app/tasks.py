@@ -4328,14 +4328,6 @@ def reply(task_id: int, text: str) -> str:
     # planning effort, and sent back for a whole extra planning round before it
     # would write a line. Narrowing scope at the gate is the normal case.
     approved, full_text = record_answer(task_id, t, text)
-    if approved:
-        # His yes at the plan gate is the one approval this task needs: the PR
-        # follows without another ask, unless he said to keep it local.
-        from . import go as _go
-        if _go.approves_locally(text)[0]:
-            _go.grant(task_id, text, ship=False)
-        elif _go.wants_pr(text):
-            _go.grant(task_id, text, ship=True)
     store.update_task(task_id, status="running")
     if _graph().manages(task_id):
         _graph().answer(task_id, {"approved": approved, "text": full_text})

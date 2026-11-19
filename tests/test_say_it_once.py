@@ -327,13 +327,18 @@ def test_a_small_plan_waits_for_his_approval(monkeypatch, quiet):
     assert f"approve task {t['id']}" in quiet[0]
 
 
-def test_a_small_plan_he_said_go_on_is_shown_and_goes_ahead(monkeypatch, quiet):
+def _plan_events(tid):
+    return [e["detail"] for e in store.task_events(tid) if e["kind"] == "plan"]
+
+
+def test_a_small_plan_he_said_go_on_goes_ahead_without_a_card(monkeypatch, quiet):
+    """18 Nov: "if I gave approve upfront it can do the implementation — it
+    doesn't need my approval or a plan.md for me to review." No card, no file."""
     t = store.create_task("Enable MX", "code", "p", None)
     go.on_spawn(t["id"], "enable MX as single-click, just do it")
     assert _announce(t, PLAN_178, monkeypatch) == [t["id"]]
-    assert "going ahead" in quiet[0] and "approve task" not in quiet[0]
-    assert f"stop {t['id']}" in quiet[0], "he can still stop it"
-    assert "stays local until you say" in quiet[0], "and nothing is pushed unasked"
+    assert quiet == [], "his go was the approval: nothing to read or approve"
+    assert any("not sent — going ahead (as you said)" in d for d in _plan_events(t["id"]))
 
 
 def test_a_big_plan_still_waits_for_him(monkeypatch, quiet):
@@ -346,7 +351,7 @@ def test_a_big_plan_he_already_said_go_on_does_not_wait(monkeypatch, quiet):
     t = store.create_task("ETA validation", "code", "p", None)
     go.grant(t["id"], "do it and raise the PR", ship=True)
     assert _announce(t, BIG_PLAN, monkeypatch) == [t["id"]]
-    assert "as you said" in quiet[0] and "I'll raise the PR" in quiet[0]
+    assert quiet == [] and any("as you said" in d for d in _plan_events(t["id"]))
 
 
 def test_every_plan_can_be_made_to_wait_again(monkeypatch, quiet):

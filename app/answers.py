@@ -547,6 +547,8 @@ def stuck(now: float | None = None) -> str:
 
 
 def _park(item: dict, now: float) -> None:
+    if decided(item):
+        return
     item = {**item, "_queued": now}
     q = _load_queue()
     q.append(item)
@@ -555,7 +557,84 @@ def _park(item: dict, now: float) -> None:
                          detail=f"{item.get('who')}: {item.get('need', '')}"[:200])
 
 
+#: Drafts that left the front of the line, and why: he dropped it, put it on
+#: hold, answered the person himself, or it was retired. 18 Nov: "Ignore this"
+#: and "Don’t send, hold on it" were each shown again minutes later, and his
+#: "Send" to a draft that had just been dropped got "nothing is staged — both
+#: were put on hold", which was not why. The shelf is what "send to X" and a
+#: bare "send" read when nothing is in front of him, and what keeps a draft he
+#: decided on from being queued again.
+_SHELF = "answers_shelf"
+SHELF_SECONDS = 24 * 3600
+SHELF_MAX = 30
+#: Decided by him: never shown again unless he names it.
+HIS_DECISIONS = ("dropped", "held")
+
+
+def _draft_key(item: dict) -> str:
+    what = " ".join((item.get("what") or "").lower().split())
+    return hashlib.sha256(f"{(item.get('to') or '').lower()}\n{what}".encode()).hexdigest()[:16]
+
+
+def _load_shelf(now: float | None = None) -> list[dict]:
+    now = time.time() if now is None else now
+    try:
+        rows = json.loads(store.kv_get(_SHELF) or "[]")
+    except ValueError:
+        return []
+    return [r for r in rows if isinstance(r, dict)
+            and now - float(r.get("_shelved") or 0) < SHELF_SECONDS]
+
+
+def shelve(item: dict, reason: str, said: str = "") -> None:
+    """Keep a draft that left the line, with why. Never sent from here."""
+    if not item.get("what"):
+        return
+    now = time.time()
+    key = _draft_key(item)
+    rows = [r for r in _load_shelf(now) if r.get("_key") != key]
+    entry = {k: v for k, v in item.items() if k not in ("_shown", "_queued")}
+    entry.update(_key=key, _shelved=now, _reason=reason, _said=(said or "")[:200])
+    rows.append(entry)
+    store.kv_set(_SHELF, json.dumps(rows[-SHELF_MAX:]))
+    store.record_outcome("answer", f"shelved: {reason}", subject=str(item.get("task_id") or ""),
+                         detail=f"{item.get('who') or item.get('to')}: {(said or '')[:120]}"[:200])
+
+
+def decided(item: dict) -> str:
+    """"dropped"/"held" when he already decided on this draft, else ""."""
+    key = _draft_key(item)
+    for r in reversed(_load_shelf()):
+        if r.get("_key") == key and r.get("_reason") in HIS_DECISIONS:
+            return r["_reason"]
+    return ""
+
+
+def shelved(name: str = "", since: float = 0.0) -> list[dict]:
+    """Newest first: shelved drafts for the person he named (any of their names),
+    or all of them, shelved at or after `since`."""
+    rows = [r for r in _load_shelf() if float(r.get("_shelved") or 0) >= since]
+    if name:
+        rows = [r for r in rows if is_for(r, name)]
+    return list(reversed(rows))
+
+
+def unshelve(entry: dict) -> dict:
+    """Take a shelved draft back to stage it. Returns it without shelf fields."""
+    key = entry.get("_key")
+    store.kv_set(_SHELF, json.dumps([r for r in _load_shelf() if r.get("_key") != key]))
+    return {k: v for k, v in entry.items() if not k.startswith("_") or k in ("_at",)}
+
+
 def _enqueue(item: dict) -> None:
+    gone = decided(item)
+    if gone:
+        # He said drop / hold on this exact draft: queuing it again is the
+        # "asking again" he complained about (18 Nov).
+        store.record_outcome("answer", f"not queued — he {gone} it",
+                             subject=str(item.get("task_id") or ""),
+                             detail=f"{item.get('who')}: {item.get('need', '')}"[:200])
+        return
     item.setdefault("_at", time.time())
     item["_queued"] = time.time()
     q = _load_queue()
@@ -640,7 +719,7 @@ async def _show_plan(item: dict) -> None:
                                    "words": (item.get("words") or "")[:1500]})
     await notify.notify(f"🛠 *{who}* asks for a code change: {need}\n\n"
                         f"Reply *yes* and I'll plan it — the plan comes to you before any code.",
-                        "answer", urgency="direct", considered=True)
+                        "answer", urgency="direct", considered=True, asks=True)
 
 
 async def _show(cid: str, intent: dict) -> None:
@@ -673,7 +752,7 @@ async def _show(cid: str, intent: dict) -> None:
     store.add_ui_message(cid, "assistant", text, {"via": "answer", "channel": "whatsapp"})
     store.record_outcome("answer", "presented", subject=str(intent.get("task_id") or ""),
                          detail=f"{intent['who']}: {intent.get('need', '')}"[:200])
-    await notify.notify(text, "answer", urgency="direct", considered=True)
+    await notify.notify(text, "answer", urgency="direct", considered=True, asks=True)
 
 
 #: Words that are not a person: "send it", "send the previous one".
@@ -713,6 +792,29 @@ def pick(name: str, current: dict | None = None) -> dict | None:
             store.record_outcome("answer", "picked", subject=str(item.get("task_id") or ""),
                                  detail=f"{item.get('who')}: by name '{name}'"[:200])
             return item
+    return None
+
+
+def recently_shown_queued(since: float) -> list[dict]:
+    """Queued drafts he has already been shown, put back at or after `since`
+    (set aside for his next ask, or parked unanswered) — newest first."""
+    rows = [it for it in _load_queue()
+            if it.get("type") in ("answer", None) and it.get("what")
+            and int(it.get("_showings") or 0) >= 1
+            and max(float(it.get("_shown") or 0), float(it.get("_queued") or 0)) >= since]
+    return sorted(rows, key=lambda it: -max(float(it.get("_shown") or 0), float(it.get("_queued") or 0)))
+
+
+def take_queued(item: dict) -> dict | None:
+    """Take this exact item out of the queue."""
+    q = _load_queue()
+    for i, it in enumerate(q):
+        if it == item:
+            q.pop(i)
+            store.kv_set(_QUEUE, json.dumps(q))
+            store.record_outcome("answer", "picked", subject=str(it.get("task_id") or ""),
+                                 detail=f"{it.get('who')}: bare send"[:200])
+            return it
     return None
 
 
@@ -830,7 +932,7 @@ async def announce_offer() -> bool:
     if o is None or not store.kv_get(f"offer_unasked:{o.id}"):
         return False
     store.kv_set(f"offer_unasked:{o.id}", "")
-    await notify.notify(o.render(), "offer", urgency="direct", considered=True)
+    await notify.notify(o.render(), "offer", urgency="direct", considered=True, asks=True)
     return True
 
 
@@ -848,6 +950,7 @@ def _retire(now: float) -> list[dict]:
     if keep != queue:
         store.kv_set(_QUEUE, json.dumps(keep))
     for it in gone:
+        shelve(it, "retired")
         store.record_outcome("answer", "retired", subject=str(it.get("task_id") or ""),
                              detail=f"{it.get('who')}: {it.get('need', '')}"[:200])
     return gone
@@ -961,6 +1064,7 @@ async def _answered_while_queued(item: dict) -> bool:
                       or await chat_watch.he_replied_since(chat, since)):
             store.record_outcome("answer", "he answered", subject=str(item.get("task_id") or ""),
                                  detail=f"{item.get('who')}: queued draft dropped"[:200])
+            shelve(item, "answered_by_him")
             if item.get("thread"):
                 from . import threads
                 threads.update(item["thread"], status="answered")

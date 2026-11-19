@@ -397,7 +397,7 @@ def _ledger_priority(urgency: str, priority: int | None) -> int:
 async def notify(text: str, level: str = "info", urgency: str = "direct",
                  priority: int | None = None, *, source: str = "",
                  key: str = "", considered: bool = False, asked: bool = False,
-                 keys: tuple | list = ()) -> dict:
+                 keys: tuple | list = (), asks: bool = False) -> dict:
     """Record for the UI bell and fan out to WhatsApp + Telegram.
 
     urgency="direct"  — someone is actually addressing Arun (1:1 message, @mention,
@@ -406,6 +406,9 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
         traffic). Delivered only when he's AWAY from the laptop; while he's sitting
         there it is held, because he'd rather ask than be pinged. Held items are
         released the moment he steps away, and are always in the UI bell meanwhile.
+
+    asks=True — the push asks him something (a draft, a plan, an offer): it goes
+        out now, never held back to ride along with a later batch.
 
     Returns which channels actually took it. This used to return None, so a fire
     that reached NOBODY (both channels down) looked identical to one delivered —
@@ -529,7 +532,11 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
             return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
     # Something went out moments ago and this is not breakage: let it ride along
     # with the next flush. One buzz carrying four items beats four buzzes.
-    if delivery.should_batch(priority):
+    # Never for something that ASKS him (a draft to send, a plan to approve, an
+    # offer): his answer must land on what he sees. 18 Nov: a draft batched for
+    # two minutes reached his phone six seconds after it had been dropped, and
+    # a go-ahead plan card arrived after the PR it planned.
+    if not asks and delivery.should_batch(priority):
         delivery.buffer(text)
         return {"bell": True, "held": True, "batched": True,
                 "whatsapp": False, "telegram": False}

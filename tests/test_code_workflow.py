@@ -46,7 +46,7 @@ async def test_a_plan_leg_stops_and_asks_rather_than_implementing(monkeypatch):
     tid = store.create_task("BEPTELIKOS-1: thing", "code", "do it", None)["id"]
     sent = {}
 
-    async def spy(text, level="info", urgency="direct", priority=None):
+    async def spy(text, level="info", urgency="direct", priority=None, **_kw):
         sent["text"] = text
 
     from app import notify

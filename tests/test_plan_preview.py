@@ -3,7 +3,9 @@ import asyncio
 
 import pytest
 
-from app import go, notify, presence, store, task_spec, tasks
+from pathlib import Path
+
+from app import go, notify, plan_pdf, presence, store, task_spec, tasks
 
 STEPS = "\n".join(f"{i}. In Service{i}.java change step {i} so the retry is capped and logged"
                   for i in range(1, 80))
@@ -20,7 +22,8 @@ def phone(monkeypatch):
         return {}
 
     async def document(path, caption=""):
-        out["documents"].append((path, open(path).read()))
+        # The .md beside what was sent is the plan's text; the PDF is its rendering.
+        out["documents"].append((path, Path(path).with_suffix(".md").read_text()))
         return True
 
     async def at_laptop():
@@ -41,7 +44,8 @@ def test_a_plan_too_long_for_the_phone_arrives_in_full_as_a_file(phone):
     tid = _code()
     asyncio.run(tasks.announce_plan(tid, store.get_task(tid), LONG))
     (path, body), = phone["documents"]
-    assert path.endswith(f"plan-{tid}.md") and body.startswith(f"# Plan for task #{tid} — Cap the retry")
+    assert path.endswith(f"plan-{tid}.pdf") and body.startswith(f"# Plan for task #{tid} — Cap the retry")
+    assert Path(path).read_bytes().startswith(b"%PDF")
     assert "79. In Service79.java" in body and "1. In Service1.java" in body
     assert "whole plan is attached" in phone["messages"][-1]
     assert f"approve task {tid}" in phone["messages"][-1]
@@ -54,7 +58,7 @@ def test_every_plan_arrives_as_a_file_even_a_short_one(phone):
     tid = _code()
     asyncio.run(tasks.announce_plan(tid, store.get_task(tid), SHORT))
     (path, body), = phone["documents"]
-    assert path.endswith(f"plan-{tid}.md") and "Change the validator" in body
+    assert path.endswith(f"plan-{tid}.pdf") and "Change the validator" in body
 
 
 def test_at_the_laptop_the_plan_file_still_goes_with_its_card(phone):
@@ -72,7 +76,29 @@ def test_when_the_phone_cannot_take_the_file_the_path_is_given(phone, monkeypatc
     monkeypatch.setattr(notify, "wa_document", down)
     tid = _code()
     asyncio.run(tasks.announce_plan(tid, store.get_task(tid), LONG))
-    assert f"plan-{tid}.md" in phone["messages"][-1]
+    assert f"plan-{tid}.pdf" in phone["messages"][-1]
+
+
+def test_the_plan_reads_as_a_pdf_not_raw_markdown(phone):
+    """18 Nov: "the .md file … I don't feel it easy to read". What he opens is a
+    PDF with the machine noise taken out."""
+    tid = _code()
+    plan = ("STRUCTURE\n  A.java  validates\n\n**Steps**\n1. Change `A.check`\n\n"
+            "RISK: low\n\nPLAN READY\n\n```outcome\n{\"kind\": \"plan_ready\"}\n```\n")
+    asyncio.run(tasks.announce_plan(tid, store.get_task(tid), plan))
+    (path, _), = phone["documents"]
+    cleaned = plan_pdf.clean(plan)
+    assert "### Structure" in cleaned and "**Risk:** low" in cleaned
+    assert "outcome" not in cleaned and "PLAN READY" not in cleaned
+    assert Path(path).suffix == ".pdf"
+
+
+def test_when_the_pdf_cannot_be_made_the_md_goes(phone, monkeypatch):
+    monkeypatch.setattr(plan_pdf, "render", lambda *a, **k: None)
+    tid = _code()
+    asyncio.run(tasks.announce_plan(tid, store.get_task(tid), LONG))
+    (path, body), = phone["documents"]
+    assert path.endswith(f"plan-{tid}.md") and "79. In Service79.java" in body
 
 
 def test_a_big_change_is_asked_for_a_plain_text_diagram():

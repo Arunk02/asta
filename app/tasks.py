@@ -4202,6 +4202,58 @@ def approves_proposal(text: str) -> bool:
                                          (text or "")[lead.end():lead.end() + 60], re.I)
 
 
+#: Short words that approve a plan on their own: "ship", "raise the PR", "lgtm".
+_PLAN_YES_WORD = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|yes|yep|yeah|pls|please|just|then|so|fine)[\s,.!]*)*"
+    r"(?:ship(?:\s+it)?|lgtm|looks\s+good|proceed|go(?:\s+on)?|do\s+it|ok(?:ay)?|yes|"
+    r"(?:raise|create|open)\s+(?:the\s+|a\s+)?prs?|promote(?:\s+it)?)"
+    r"(?:\s+(?:and|&|,)\s+(?:raise|create|open|ship|promote)[\w\s]{0,20})?[\s.!]*$", re.I)
+#: Words that make an answer at the gate a change, not a yes.
+_PLAN_CHANGE = re.compile(r"\b(?:but|except|instead|change|don'?t|do\s+not|not|wrong|"
+                          r"incorrect|remove|rather|why|wait|hold)\b|\?", re.I)
+
+
+def plan_yes(text: str) -> bool:
+    """Is his answer at the plan gate a yes? One reader for every phrasing.
+
+    19 Nov: "ship" and "Approve Tak 12" (a typo) at the gate were taken as
+    feedback, the plans were made again from scratch, and the re-plans then
+    waited for him a third time as "you are reviewing this plan". Only text
+    starting "PLAN APPROVED" had counted."""
+    t = (text or "").strip()
+    if t.upper().startswith("PLAN APPROVED"):
+        return True
+    if approves_proposal(t) or _PLAN_YES_WORD.match(t):
+        return True
+    from . import go
+    if go.approves_locally(t)[0] or go.go_ahead(t):
+        return True
+    if _PLAN_CHANGE.search(t):
+        return False
+    is_go, _ = go.command(t)
+    if is_go and not go._STOP_MERGE.match(t):
+        from . import task_inform
+        return not task_inform.stop_command(t)[0]
+    return go.go_ahead(t) or (go.wants_pr(t) and len(t) <= 120)
+
+
+def _approval_note(text: str) -> str:
+    """What he added beyond the yes itself ("approve — but keep the old name"),
+    or "" when the words were only the yes."""
+    from . import go
+    t = (text or "").strip()
+    if t.upper().startswith("PLAN APPROVED"):
+        return t[len("PLAN APPROVED"):].strip(" —-,.:")
+    rest = _APPROVE_LEAD.sub("", t)
+    rest = go._PR.sub(" ", rest)
+    rest = go._GO_AHEAD.sub(" ", rest)
+    rest = re.sub(r"\b(?:task|tak|tsk|and|then|please|pls|now|it|the|my|approval|approve[ds]?|"
+                  r"need|don'?t|update|ship|proceed|go|ahead|yes|ok(?:ay)?|promote|lgtm)\b|#?\d+",
+                  " ", rest, flags=re.I)
+    words = re.findall(r"[A-Za-z]{2,}", rest)
+    return t if len(words) >= 3 else ""
+
+
 async def reproduce_first(task_id: int, text: str) -> str:
     """Trusted user direction: local test work, without approving a production plan."""
     from . import reproduction
@@ -4236,7 +4288,7 @@ def reply(task_id: int, text: str) -> str:
     if not t:
         raise ValueError(f"no task #{task_id}")
     if t["status"] == "awaiting_approval" and store.kv_get(f"task_gate:{task_id}") == "change" \
-            and approves_proposal(text):
+            and plan_yes(text):
         # 26 Oct, #419: "approve task 419 — implement it, then push and update PR
         # 1505" was taken as changes to the plan and started a whole re-plan.
         # A yes with words after it is still a yes; the words ride with the plan.
@@ -4276,6 +4328,14 @@ def reply(task_id: int, text: str) -> str:
     # planning effort, and sent back for a whole extra planning round before it
     # would write a line. Narrowing scope at the gate is the normal case.
     approved, full_text = record_answer(task_id, t, text)
+    if approved:
+        # His yes at the plan gate is the one approval this task needs: the PR
+        # follows without another ask, unless he said to keep it local.
+        from . import go as _go
+        if _go.approves_locally(text)[0]:
+            _go.grant(task_id, text, ship=False)
+        elif _go.wants_pr(text):
+            _go.grant(task_id, text, ship=True)
     store.update_task(task_id, status="running")
     if _graph().manages(task_id):
         _graph().answer(task_id, {"approved": approved, "text": full_text})
@@ -4291,7 +4351,17 @@ def reply(task_id: int, text: str) -> str:
 def record_answer(task_id: int, t: dict, text: str) -> tuple[bool, str]:
     """Everything an answer at the plan gate records — whoever gives it: him,
     or the go-ahead rules. Returns (approved, the text the next leg receives)."""
-    approved = text.strip().upper().startswith("PLAN APPROVED")
+    if store.kv_get(f"task_gate:{task_id}") == "context":
+        # No plan exists yet at the context gate: a "yes" there confirms the
+        # reading, it cannot approve a plan nobody has written.
+        approved = text.strip().upper().startswith("PLAN APPROVED")
+    else:
+        approved = plan_yes(text)
+    if approved:
+        # Every phrasing of his yes reaches the pipeline as the one it reads:
+        # "PLAN APPROVED", plus whatever he added beyond the yes.
+        extra = _approval_note(text)
+        text = "PLAN APPROVED" + (f" — {extra}" if extra else "")
     # Did the plan hold? The cheapest honest measure of planning quality: a plan
     # Arun approves as-is versus one he sends back.
     # Three states, not two. "Approved" and "approved but cut in half" are both

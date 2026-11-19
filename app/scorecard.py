@@ -294,6 +294,35 @@ def task_tiers(since: float, until: float) -> dict:
     return {"counts": counts, "max_on_small": int(max_on_small)}
 
 
+#: A code task is finished when its work went up (or was kept, by his word).
+_FINISHED = ("shipped", "merged", "done")
+
+
+def cost_by_tier(since: float, until: float) -> dict:
+    """Cost per FINISHED code task, by the tier it ended at — every leg, retries
+    and re-plans included (a cheap leg that needs a second round is not cheaper).
+    From the per-task cost Asta already records (usage_week.task_spend)."""
+    from . import routing, usage_week
+    per: dict[str, list[float]] = {}
+    for tid, spend in usage_week.task_spend(since).items():
+        task = store.get_task(tid) or {}
+        if task.get("kind") != "code" or task.get("status") not in _FINISHED:
+            continue
+        if not spend.get("priced") or float(task.get("created_at") or 0) >= until:
+            continue
+        tier = routing.NAMES.get(routing.tier_of(tid), "T?")
+        per.setdefault(tier, []).append(float(spend["usd"]))
+    avg = {k: sum(v) / len(v) for k, v in per.items()}
+    return {"avg": avg, "n": {k: len(v) for k, v in per.items()}}
+
+
+def tier_fit(since: float, until: float) -> dict:
+    """How often the tier matched the change actually made (routing.fit)."""
+    rows = _rows("SELECT outcome, COUNT(*) n FROM outcomes WHERE kind='route_fit' "
+                 "AND created_at >= ? AND created_at < ? GROUP BY outcome", (since, until))
+    return {r["outcome"]: r["n"] for r in rows}
+
+
 def interruptions(since: float, until: float) -> dict:
     """Buzzes a day — what actually reached his phone, not what the bell recorded.
 
@@ -475,6 +504,8 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
     health = health_now()
     fd = front_desk(since, until)
     tt = task_tiers(since, until)
+    ct = cost_by_tier(since, until)
+    tf_fit = tier_fit(since, until)
     rh = rules_holding()
     sc = self_changes(since, until)
     it = interruptions(since, until)
@@ -507,6 +538,16 @@ def compute(days: int = WINDOW_DAYS, now: float | None = None) -> dict:
             " · ".join(f"{k} {n}" for k, n in sorted(tt["counts"].items())) or "—",
             "0 small changes at max effort", "good" if tt["max_on_small"] == 0 else "bad",
             "recorded while ASTA_ROUTING is on"),
+        Row("cost_by_tier", "Cost per finished code task, by tier (all legs)",
+            ct["avg"].get("T1"),
+            " · ".join(f"{k} ${v:.2f} ({ct['n'][k]})" for k, v in sorted(ct["avg"].items())) or "—",
+            "T1 well under T2", "good" if not ct["avg"] or ct["avg"].get("T1", 0) <= 0.15 else "warn",
+            "from the per-task cost already recorded; rehearsals excluded"),
+        Row("tier_fit", "Tier matched the change actually made",
+            tf_fit.get("under", 0),
+            " · ".join(f"{k} {n}" for k, n in sorted(tf_fit.items())) or "—",
+            "0 built under their size", "good" if not tf_fit.get("under") else "warn",
+            "under = the build was bigger than its tier; its fix legs moved up"),
         Row("tokens_per_turn", "Tokens read per chat turn (all its calls)", r["tokens_per_turn_avg"],
             _fmt_k(r["tokens_per_turn_avg"]), "≤ 120k", _judge(r["tokens_per_turn_avg"], 120_000, 250_000),
             f"{r['measured_turns']} measured turns; fresh input + cache reads + cache writes. "

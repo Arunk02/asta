@@ -281,7 +281,7 @@ def test_a_code_task_may_push_its_branch_but_never_merge(tmp_path):
 def test_a_small_change_to_a_workflow_is_still_t3():
     tier, why = routing.plan_tier("STRUCTURE\nBookingWorkflowImpl.java\n"
                                   "Add Workflow.getVersion around the new signal.")
-    assert tier == routing.T3 and "impact" in why
+    assert tier == routing.T3 and "risky path" in why
 
 
 def test_a_small_ordinary_change_stays_small():
@@ -290,11 +290,12 @@ def test_a_small_ordinary_change_stays_small():
 
 def test_a_big_feature_is_t3_by_its_size():
     plan = "STRUCTURE\n" + "\n".join(f"  Class{i}.java  changes" for i in range(11))
-    assert routing.plan_tier(plan) == (routing.T3, "a big feature (11 classes/files)")
+    assert routing.plan_tier(plan) == (routing.T3, "a big feature (11 code files)")
 
 
 def test_pi_builds_on_the_same_claude_models():
-    assert routing._cell("pi", routing.T3) == routing._cell("claude", routing.T3) == ("opus", "high")
+    # 19 Nov, his table: every build runs on sonnet at high — the plan carries the thinking.
+    assert routing._cell("pi", routing.T3) == routing._cell("claude", routing.T3) == ("sonnet", "high")
     assert pi_cli.model_id("sonnet") == "anthropic/claude-sonnet-5"
 
 

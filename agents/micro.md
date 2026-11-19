@@ -51,8 +51,10 @@ implement during the plan invocation: its write access remains disabled.
 
 ## Escalate — do not push through
 Print `ESCALATE: <one-line reason>` and STOP the moment any of these holds:
-- more than ~2 files or ~30 lines
-- schema, migration, config, API-contract or cross-repo impact
+- more than ~2 code files or ~30 lines of code
+- schema, migration, API-contract change, or CODE in more than one repo
+  (a config value — helm values, application yml — in one or several repos is
+  NOT a reason to escalate: up to ~10 config files, one value each, stays micro)
 - the resolver's answer disagrees with the task description
 - a test fails for a reason you did not expect
 - you would have to guess intent

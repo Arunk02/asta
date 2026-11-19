@@ -80,7 +80,7 @@ scenarios:
       - brain_calls: {kind: intent, count: 0}
 
   - id: a-one-file-change-never-runs-at-max
-    title: A one-line fix plans and builds on sonnet at medium — never at max effort
+    title: A one-line fix plans and builds on haiku at medium — never at max effort
     why: >
       A one-line change and a three-repo schema change ran on the same model at
       the same effort. Effort is the biggest lever on a leg's cost and time.
@@ -105,7 +105,7 @@ scenarios:
       - task_status: {task: job, is: done}
       - brain_flags: {kind: task, effort_not: [max, xhigh]}
       - brain_flags: {kind: task, leg: 0, effort: medium, plan_only: true}
-      - brain_flags: {kind: task, leg: 1, model: sonnet, effort: medium, plan_only: false}
+      - brain_flags: {kind: task, leg: 1, model: haiku, effort: medium, plan_only: false}
 
   - id: a-one-file-plan-is-shown-and-goes-ahead
     title: A one-file plan he said go on reaches his phone and starts — no second ask
@@ -181,8 +181,9 @@ scenarios:
     title: A plan that names two repos is implemented at T3 without anyone asking
     why: >
       Two-stage routing: before the plan only cheap signals exist; the plan says
-      how big the change really is, and the build runs at that size. T3 builds on
-      opus at high (15 Nov: xhigh is kept for the plan, where it pays).
+      how big the change really is, and the build runs at that size. Code in two
+      repos is a big feature: T3, which builds on sonnet at high (his table, 19 Nov:
+      the plan carries the hard thinking).
     setup:
       env: {ASTA_ROUTING: "1"}
     brains:
@@ -201,7 +202,7 @@ scenarios:
     checks:
       - task_status: {task: job, is: done}
       - brain_flags: {kind: task, leg: 0, effort: medium}
-      - brain_flags: {kind: task, leg: 1, model: opus, effort: high}
+      - brain_flags: {kind: task, leg: 1, model: sonnet, effort: high}
       - outcome: {kind: route, outcome: T3}
 
   - id: his-words-pick-the-brain-and-the-tier
@@ -217,4 +218,4 @@ scenarios:
       - spawn: {title: "null check in BookingMapper", prompt: "fix the null check in BookingMapper, use claude, max", kind: code, workspace: booking, as: job}
     checks:
       - kv: {key: "task_executor:1", equals: claude}
-      - brain_flags: {kind: task, leg: 0, model: opus, effort: xhigh, plan_only: true}
+      - brain_flags: {kind: task, leg: 0, model: opus, effort: high, plan_only: true}

@@ -89,9 +89,11 @@ def test_his_approval_that_keeps_it_local_does_not_ship():
 def test_his_go_up_front_skips_the_gate_even_for_a_risky_word():
     t = store.create_task("Enable XX", "code", "enable XX", None)
     go.on_spawn(t["id"], "enable XX in svc-a and raise PR, don't need my approval")
-    why = go.no_ask(t["id"], PLAN)
+    assert go.no_ask(t["id"], PLAN) == "as you said", "a config value is no risk at all"
+    risky = "STRUCTURE\n  src/main/java/x/billing/RateMapper.java  adds XX\n\nPLAN READY"
+    why = go.no_ask(t["id"], risky)
     assert why.startswith("as you said"), why
-    assert "billing" in why, "the risk is still said — as a heads-up, not a stop"
+    assert "billing" in why, "risky code is still said — as a heads-up, not a stop"
     assert go.stop_reason(t["id"]) == ""
 
 

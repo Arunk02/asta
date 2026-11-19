@@ -532,6 +532,9 @@ def task_tools(task_id: int, cwd: str, kind: str = "") -> str:
         base = mcp_server.config_entry(conv_id=conversation_of(task_id), task_id=str(task_id),
                                        pin=pin)
     project = cwd if (not kind or kind in _DEV_MCP_KINDS) else ""
+    from . import routing
+    if kind == "code" and routing.enabled() and routing.tier_of(task_id) == routing.T1:
+        project = ""          # a one-file change needs no code-search servers
     return dev_mcp.config_json(project, base)
 
 
@@ -2545,15 +2548,25 @@ async def _simple_leg(task_id: int, t: dict, prompt: str) -> str:
     # One rule for every kind of task, not one per call site.
     order = [ex] + [b for b in _SIMPLE_BRAINS if b != ex]
     limited: list[tuple[str, float | None, str]] = []
+    from . import routing
     for i, brain in enumerate(order):
         if i and not _can_take_over(brain):
             continue
         effort = eff if brain == ex else _effort_for(t["kind"], brain)
+        # Debugging a booking or an incident: his table (19 Nov) — sonnet at
+        # medium, a second pass at high. Other analyses keep their settings.
+        debug = routing.debug_choice(brain, t.get("prompt") or prompt) \
+            if t["kind"] == "analysis" and routing.enabled() else None
+        model = ""
+        if debug:
+            model, effort = debug.model, debug.effort
+            routing.record(task_id, "analysis", brain, debug)
         try:
             if brain == "claude":
                 result = await _observed_cli(task_id, "claude", prompt, cwd=cwd, timeout=tout,
                                                    agent_file=agent_file, effort=effort,
-                                                   mcp_config=dev_cfg)
+                                                   mcp_config=dev_cfg,
+                                                   **({"model": model} if model else {}))
             else:
                 result = await _observed_cli(task_id, "copilot", _with_pipeline(pipeline, prompt),
                                                     cwd=cwd, timeout=tout, effort=effort,
@@ -2904,6 +2917,38 @@ async def _task_base(repo: Path, t: dict, task_id: int = 0) -> str:
 
 
 _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+async def route_fit(task_id: int, t: dict | None = None) -> str:
+    """Measure what the build actually changed, by kind, and check it against the
+    tier it ran at (routing.fit). "" when nothing could be measured."""
+    from . import routing
+    t = t or store.get_task(task_id) or {}
+    if not routing.enabled() or not t:
+        return ""
+    try:
+        root = Path(task_cwd(task_id, t.get("workspace")))
+    except RuntimeError:
+        return ""
+    counts = {"code": 0, "test": 0, "config": 0}
+    lines = 0
+    for repo in _repos_under(root):
+        base = await _task_base(repo, t, task_id)
+        if not base:
+            continue
+        rc, out = await repo_ops.git(repo, "git", "diff", "--numstat", base)
+        if rc != 0:
+            continue
+        for row in out.splitlines():
+            parts = row.split("\t")
+            if len(parts) != 3:
+                continue
+            added, removed, path = parts
+            counts[routing.kind_of(path)] += 1
+            lines += (int(added) if added.isdigit() else 0) + (int(removed) if removed.isdigit() else 0)
+    if not any(counts.values()):
+        return ""
+    return routing.fit(task_id, counts, lines)
 
 
 async def _already_pushed(task_id: int, t: dict) -> list[str]:
@@ -3517,6 +3562,16 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         # go (go.stop_reason) is the other branch, below, and still comes to him.
         store.add_task_event(task_id, "plan", f"not sent — going ahead ({why}); "
                                               f"{len(result.splitlines())} lines kept on the task")
+        question = open_question(result)
+        if question:
+            # His go means no stop — but a question the plan left open must not
+            # first reach him in the DONE message (19 Nov: "dev only, or
+            # sit/qa/prod too?" was answered by the default). One line, no gate.
+            await notify.notify(
+                f"ℹ️ #{task_id} {clip.clip(t['title'], 70)} — going ahead as you said. "
+                f"The plan left one question open and builds on its own default:\n"
+                f"{question}\nReply *task {task_id} <your answer>* to change it while it builds.",
+                "task")
         born = float(t.get("created_at") or 0)
         if _graph().manages(task_id):
             # The workflow engine is still inside this step; its gate, next,
@@ -3543,6 +3598,19 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
         f"👍 *approve task {task_id}*\n"
         f"👎 *reject task {task_id}*\n"
         f"✏️ …or just reply with the changes", "task", asks=True)
+
+
+def open_question(plan: str) -> str:
+    """The question a plan leaves open, in one or two lines — "" when it asks none."""
+    for line in (plan or "").splitlines():
+        text = line.strip().lstrip("-*• ").replace("**", "")
+        if re.match(r"(?:open\s+)?questions?\s*:", text, re.I) and len(text) > 12:
+            return clip.clip(text, 300)
+    for line in (plan or "").splitlines():
+        text = line.strip().lstrip("-*• ").replace("**", "")
+        if text.endswith("?") and 15 < len(text) < 300 and not text.startswith(("#", ">")):
+            return text
+    return ""
 
 
 #: The parts a plan must state, by the heading the brief asks for. Missing ones

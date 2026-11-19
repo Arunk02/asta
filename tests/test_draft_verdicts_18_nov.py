@@ -219,3 +219,29 @@ def test_an_asking_push_goes_out_now_and_news_still_batches(monkeypatch):
     asyncio.run(notify.notify("CI went green on develop", "ci", considered=True))
     assert sent == ["Here's what I'd send Ravi — send it?"]
     assert buffered == ["CI went green on develop"]
+
+
+def test_an_open_plan_offer_does_not_take_a_bare_send(phone, monkeypatch):
+    """Live replay, 19 Nov: an old "want me to plan it?" offer answered "Send"."""
+    from app import offers
+    monkeypatch.setattr(offers, "pending", lambda: offers.Offer(
+        id="o1", kind="plan_code", subject="s", context="c", prompt="p", created=time.time()))
+    answers.shelve(_draft(), "answered_by_him")
+    sink = _say(phone, "Send")
+    assert "you replied to Ravi Menon yourself" in sink.notes()
+
+
+def test_an_open_review_offer_keeps_its_bare_send(phone, monkeypatch):
+    from app import offers
+    monkeypatch.setattr(offers, "pending", lambda: offers.Offer(
+        id="o2", kind="pr_write", subject="s", context="c", prompt="p", created=time.time(),
+        op={"name": "pr_review", "args": {}}))
+    answers.shelve(_draft(), "answered_by_him")
+    assert main._send_from_shelf("Send") == (None, "")
+
+
+def test_a_dropped_draft_is_not_a_bare_send_candidate(phone):
+    answers.shelve(_draft(what=OTHER, to="Asha Rao", task_id=902), "dropped")
+    answers.shelve(_draft(), "answered_by_him")
+    sink = _say(phone, "Send")
+    assert "Asha Rao" not in sink.notes() and "you replied to Ravi Menon yourself" in sink.notes()

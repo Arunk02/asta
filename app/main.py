@@ -3875,10 +3875,15 @@ def _send_from_shelf(text: str) -> tuple[dict | None, str]:
     if not _BARE_SEND.match(raw):
         return None, ""
     from . import offers
-    if offers.pending() is not None:
-        return None, ""             # an open offer (a review to post…) reads his bare "send"
+    open_offer = offers.pending()
+    if open_offer is not None and open_offer.op:
+        # An offer that posts something (a recorded review…) reads his bare
+        # "send". One that only asks "want me to plan it?" does not: on the
+        # live data an old plan offer was re-asked in answer to "Send".
+        return None, ""
     since = time.time() - SHELF_BARE_SECONDS
-    recent = _answers.shelved(since=since)
+    # One he dropped is not what a bare "send" means; naming the person still is.
+    recent = [r for r in _answers.shelved(since=since) if r.get("_reason") != "dropped"]
     shown = _answers.recently_shown_queued(since)
     if not recent and not shown:
         return None, ""

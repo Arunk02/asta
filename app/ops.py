@@ -196,6 +196,15 @@ async def _posted(pr: str, action: str, *, revision: str = "", workspace: str = 
         pass
 
 
+def _why_no_approval(state: str) -> str:
+    """Why an approval cannot go on this PR, in its real terms."""
+    if state == "MERGED":
+        return "the PR is already merged — there is nothing left to approve"
+    if state == "CLOSED":
+        return "the PR is closed"
+    return "approval needs successful CI on this commit, and it is not green now (or the PR is a draft)"
+
+
 @op("pr_review_inline", lambda a: f"{a.get('action', 'comment').replace('_', ' ').title()} "
                                   f"PR #{str(a.get('pr', '?')).lstrip('#')} with "
                                   f"{len(a.get('comments') or [])} inline comment(s)")
@@ -211,7 +220,9 @@ async def _pr_review_inline(pr: str = "", workspace: str = "", repo: str = "",
         if not review.same_commit(current, review_origin["revision"]):
             raise RuntimeError("the PR head changed since this review (a new commit); review it again")
         if action == "approve" and not good:
-            raise RuntimeError("approval needs successful CI on this commit, and it is not green now")
+            # Say the real reason. 19 Nov: approvals on merged PRs were refused as
+            # "CI is not green" while every check had passed.
+            raise RuntimeError(_why_no_approval(review.last_state(review_origin["ref"])))
     out = "✅ " + await review.post_inline_review(pr, workspace, repo, action,
                                                  body, comments or [])
     await _posted(pr, action, revision=(review_origin or {}).get("revision", ""),

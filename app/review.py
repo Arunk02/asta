@@ -183,6 +183,15 @@ async def revision(pr: str) -> tuple[str, bool]:
     return rev, good
 
 
+#: The last PR state read for each "owner/repo#n" — so a refusal can say why.
+_STATES: dict[str, str] = {}
+
+
+def last_state(ref: str) -> str:
+    """OPEN / MERGED / CLOSED as last read for this PR, or ""."""
+    return _STATES.get((ref or "").lower(), "")
+
+
 async def revision_and_state(pr: str) -> tuple[str, bool, str]:
     """`revision`, plus the PR's state (OPEN / MERGED / CLOSED) from the same call."""
     number, target = pr_target(pr)
@@ -202,6 +211,7 @@ async def revision_and_state(pr: str) -> tuple[str, bool, str]:
     fingerprint = hashlib.sha256(json.dumps(checks).encode()).hexdigest()[:16]
     good = (data.get("state") == "OPEN" and not data.get("isDraft") and bool(checks)
             and all(state in ("SUCCESS", "NEUTRAL", "SKIPPED") for _, state in checks))
+    _STATES[f"{target.lower()}#{number}"] = str(data.get("state") or "").upper()
     return (f"{target.lower()}#{number}@{head.lower()}:{fingerprint}", good,
             str(data.get("state") or "").upper())
 

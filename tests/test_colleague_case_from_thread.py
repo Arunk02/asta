@@ -313,9 +313,10 @@ def test_booking_events_shows_what_each_run_added_and_dropped():
         run("2026-11-18T12:26:39", "bookingEventsWorkflow", ["ATD"], "PRICING_UPDATE"),
         run("2026-11-18T12:26:41", "BillingWorkflow", ["ATD"], "BOOKING_UPDATED"),
     ]})
-    lines = out.splitlines()
-    assert "−LAST_LEG_DATE" in lines[3], "billing's run lost what the update did not carry"
-    assert "refs" not in lines[2], "a different workflow type is not compared"
+    billing = next(l for l in out.splitlines() if "12:26:41 [COMPLETED] BillingWorkflow" in l)
+    update = next(l for l in out.splitlines() if "[COMPLETED] bookingEventsWorkflow" in l)
+    assert "−LAST_LEG_DATE" in billing, "billing's run lost what the update did not carry"
+    assert "refs" not in update, "a different workflow type is not compared"
 
 
 def test_the_booking_story_runs_are_kept_first():
@@ -345,3 +346,50 @@ def test_booking_events_reads_tms_execution_from_the_work_processes():
     facts = temporal._start_facts(ev)
     assert facts["_executions"] == {"CONTAINER_DELIVERY_EXECUTION": "EXECUTED"}
     assert "executionStarted" not in facts
+
+
+def test_anything_that_got_worse_is_summarised_first_with_the_event_before():
+    from app import temporal
+
+    def run(t, kind, name, refs=None, status="COMPLETED", **facts):
+        f = {"eventName": name, **facts}
+        if refs is not None:
+            f["_refs"] = refs
+        return {"started": t, "type": kind, "status": status, "facts": f}
+    out = temporal.render_booking_events({"env": "sit", "booking": OTHER, "total": 6, "runs": [
+        run("2026-11-17T17:37:57", "BillingWorkflow", "SERVICE_DELIVERY_EXECUTION", ["ATA", "LAST_LEG_DATE"]),
+        run("2026-11-18T12:26:39", "bookingEventsWorkflow", "PRICING_UPDATE", ["ATD"]),
+        run("2026-11-18T12:26:39", "ActivityPlanWorkflow", "BOOKING_UPDATED"),
+        run("2026-11-18T12:26:41", "BillingWorkflow", "BOOKING_UPDATED", ["ATD"]),
+        run("2026-11-18T13:00:00", "ActivityPlanWorkflow", "SEND_TO_TMS", status="COMPLETED", feedback="SUCCESS"),
+        run("2026-11-18T13:05:00", "bookingEventsWorkflow", "CUSTOMS_UPDATE"),
+        run("2026-11-18T13:05:02", "ActivityPlanWorkflow", "SEND_TO_TMS", status="FAILED", feedback="REJECTED"),
+    ]})
+    lines = out.splitlines()
+    assert lines[1].startswith("What got worse between runs")
+    assert "lost ref ATA; lost ref LAST_LEG_DATE — 2s after PRICING_UPDATE (12:26:39)" in out
+    assert "feedback SUCCESS→REJECTED" in out and "run COMPLETED→FAILED" in out, "not only references"
+    assert "2s after CUSTOMS_UPDATE" in out
+
+
+def test_tms_moving_backward_counts_as_worse():
+    from app import temporal
+    ex = lambda t, v: {"started": t, "type": "bookingEventsWorkflow", "status": "COMPLETED",
+                       "facts": {"eventName": "SAP_TMS_EXECUTION_STATUS",
+                                 "_executions": {"CONTAINER_DELIVERY_EXECUTION": v}}}
+    out = temporal.render_booking_events({"env": "sit", "booking": OTHER, "total": 2, "runs": [
+        ex("2026-11-18T10:00:00", "EXECUTED"), ex("2026-11-18T11:00:00", "IN_EXECUTION")]})
+    assert "TMS CONTAINER_DELIVERY EXECUTED→IN_EXECUTION" in out
+    calm = temporal.render_booking_events({"env": "sit", "booking": OTHER, "total": 2, "runs": [
+        ex("2026-11-18T10:00:00", "IN_EXECUTION"), ex("2026-11-18T11:00:00", "EXECUTED")]})
+    assert "What got worse" not in calm, "progress is not a regression"
+
+
+def test_an_event_that_carries_no_references_is_not_losing_them():
+    from app import temporal
+    runs = [{"started": "2026-11-18T12:00:00", "type": "bookingEventsWorkflow", "status": "COMPLETED",
+             "facts": {"eventName": "PRICING_UPDATE", "_refs": ["ATA", "ATD"]}},
+            {"started": "2026-11-18T12:01:00", "type": "bookingEventsWorkflow", "status": "COMPLETED",
+             "facts": {"eventName": "ACTIVITYPLAN_FEEDBACK", "workProcessStatus": "COMPLETED"}}]
+    out = temporal.render_booking_events({"env": "sit", "booking": OTHER, "total": 2, "runs": runs})
+    assert "What got worse" not in out

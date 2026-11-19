@@ -457,6 +457,102 @@ async def booking_events(env: str, booking: str, limit: int = BOOKING_RUNS) -> d
     return {"env": env, "booking": booking, "total": total, "listed": len(rows), "runs": runs}
 
 
+def _seconds(stamp: str) -> float:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat((stamp or "")[:19]).timestamp()
+    except ValueError:
+        return 0.0
+
+
+#: Values that mean something failed or is waiting — a field moving INTO one of
+#: these is a step backward, whatever the field is.
+_BAD = re.compile(r"FAIL|REJECT|PENDING|ERROR|CANCEL|TERMINATED|TIMED_OUT", re.I)
+#: TMS's execution progress; moving left is going backward.
+_PROGRESS = ("NOT_STARTED", "IN_EXECUTION", "EXECUTED")
+#: Fields that change from run to run by nature, not because something broke.
+_VOLATILE = {"eventName", "eventType", "version", "transportOrderNumber"}
+
+
+def _state(r: dict) -> dict:
+    """What a run says the booking IS: its references, TMS's execution statuses,
+    its run status and its scalar fields — one flat map to compare runs by."""
+    f = r["facts"]
+    state = {f"ref {x}": "present" for x in f.get("_refs") or []}
+    state.update({f"TMS {k.replace('_EXECUTION', '')}": v
+                  for k, v in (f.get("_executions") or {}).items()})
+    state.update({k: str(v) for k, v in f.items()
+                  if not k.startswith("_") and k not in _VOLATILE})
+    if r.get("status"):
+        state["run"] = r["status"]
+    return state
+
+
+def _got_worse(old: dict, new: dict, same_event: bool) -> list[str]:
+    """What the newer run lost or moved backward on, against the older run."""
+    out = []
+    # A run that says nothing about a kind of state (no references at all, no TMS
+    # status at all) is not losing it — it is another kind of event. Only a run
+    # that carries the kind, and carries less of it, lost something.
+    speaks = {kind for kind in ("ref ", "TMS ") if any(k.startswith(kind) for k in new)}
+    for k, was in old.items():
+        now = new.get(k)
+        kind = next((x for x in ("ref ", "TMS ") if k.startswith(x)), "")
+        if now is None:
+            if (kind and kind in speaks) or (not kind and same_event and k != "run"):
+                out.append(f"lost {k}")
+        elif now != was:
+            backward = (was in _PROGRESS and now in _PROGRESS
+                        and _PROGRESS.index(now) < _PROGRESS.index(was))
+            if backward or (_BAD.search(now) and not _BAD.search(was)):
+                out.append(f"{k} {was}→{now}")
+    return out
+
+
+def _worse_summary(runs: list[dict]) -> list[str]:
+    """One line per run that is worse than the run of the same workflow before it —
+    anything it lost or moved backward on — with the event received just before.
+
+    Any kind of regression, not one kind: 19 Nov it was booking references a
+    pricing update did not carry (the line was in the list and one of two answers
+    still missed it); next time it may be a status, a date or a TMS milestone."""
+    last: dict[str, dict] = {}
+    found: list[tuple[int, list[str]]] = []
+    for i, r in enumerate(runs):
+        state, prev = _state(r), last.get(r["type"])
+        if prev is not None:
+            worse = _got_worse(prev["state"], state,
+                               prev["event"] == r["facts"].get("eventName"))
+            if worse:
+                found.append((i, worse))
+        last[r["type"]] = {"state": state, "event": r["facts"].get("eventName")}
+    if not found:
+        return []
+    lines = ["What got worse between runs — where a pass can turn into a fail; compare what "
+             "the event before it carried with what was there before:"]
+    for i, worse in found[-5:]:
+        r = runs[i]
+        before = ""
+        nearest = None
+        for j in range(i - 1, -1, -1):
+            e = runs[j]
+            gap = _seconds(r["started"]) - _seconds(e["started"])
+            if gap > 600 or (nearest and gap > nearest[0] + 1):
+                break
+            if e["type"] != r["type"] and e["facts"].get("eventName"):
+                # What the booking itself received wins over a run it set off in
+                # the same second (the activity plan echoing the update).
+                if nearest is None or (e["type"] == "bookingEventsWorkflow"
+                                       and nearest[1]["type"] != "bookingEventsWorkflow"):
+                    nearest = (gap, e)
+        if nearest:
+            gap, e = nearest
+            before = f" — {int(gap)}s after {e['facts']['eventName']} ({e['started'][11:19]})"
+        lines.append(f"  ⚠ {r['started'].replace('T', ' ')} {r['type']} · "
+                     f"{r['facts'].get('eventName') or '-'}: {'; '.join(worse[:8])}{before}")
+    return lines
+
+
 def render_booking_events(found: dict) -> str:
     runs = found.get("runs") or []
     if not runs:
@@ -489,6 +585,9 @@ def render_booking_events(found: dict) -> str:
         out.append(f"  {r['started'].replace('T', ' ')} [{r['status'] or '?'}] {r['type']} · "
                    f"{r['facts'].get('eventName') or '-'}" + (f" · {detail}" if detail else "")
                    + change)
+    summary = _worse_summary(runs)
+    if summary:
+        out[1:1] = summary
     out.append("Events received: " + ", ".join(f"{k} ×{n}" for k, n in seen.most_common()))
     out.append("An event not in this list did not reach this booking's workflows in this "
                "environment. Before saying the sender never sent it, show the consumer took "

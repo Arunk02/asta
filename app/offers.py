@@ -87,6 +87,9 @@ class Offer:
     shown: bool = True
     #: Set aside when he moved on without answering — still open, re-shown first.
     aside: bool = False
+    #: Offers staged in one of his turns ("approve all four") share a batch: one
+    #: yes to "send the three?" is a yes to all three, not to whichever is in front.
+    batch: str = ""
 
     def expired(self, now: float | None = None) -> bool:
         age = (time.time() if now is None else now) - self.created
@@ -179,7 +182,7 @@ def offer(kind: str, subject: str, context: str, prompt: str,
     """
     o = Offer(id=uuid.uuid4().hex[:12], kind=kind, subject=subject, context=context,
               prompt=prompt, created=time.time(), payload=payload or {},
-              action=action, op=op or {}, shown=not _from_task())
+              action=action, op=op or {}, shown=not _from_task(), batch=_turn_batch())
     head = pending()
     if head is None:
         store.kv_set(KEY, json.dumps(asdict(o)))
@@ -224,6 +227,21 @@ def offer(kind: str, subject: str, context: str, prompt: str,
     # stale anyway, and dropping the newest would hide what is happening NOW.
     store.kv_set(QUEUE_KEY, json.dumps(queued[-QUEUE_MAX:]))
     return o
+
+
+def _turn_batch() -> str:
+    """One id for everything staged in the same turn of his (not from a task)."""
+    if _from_task():
+        return ""
+    try:
+        from . import capabilities
+        said = capabilities.said_this_turn()
+    except Exception:                                          # noqa: BLE001
+        said = ""
+    if not said:
+        return ""
+    import hashlib
+    return hashlib.sha1(f"{said}|{int(time.time() // 900)}".encode()).hexdigest()[:10]
 
 
 def _from_task() -> bool:
@@ -418,9 +436,32 @@ def _pr_of(value) -> str:
     return m.group(1) if m else str(value or "")
 
 
+def _review_key(args: dict) -> str:
+    """"owner/repo#n" when the PR is named that fully, else "#n"."""
+    pr = str((args or {}).get("pr") or "")
+    m = re.search(r"github[.]com/([\w.-]+)/([\w.-]+)/pull/(\d+)", pr) \
+        or re.search(r"^([\w.-]+)/([\w.-]+)#(\d+)$", pr.strip())
+    if m:
+        return f"{m.group(1)}/{m.group(2)}#{m.group(3)}".lower()
+    return f"#{_pr_of(pr)}"
+
+
+def _same_review_pr(ra: dict, na: dict) -> bool:
+    a, b = _review_key(ra), _review_key(na)
+    if "/" in a and "/" in b:
+        return a == b
+    return a.rsplit("#", 1)[-1] == b.rsplit("#", 1)[-1]
+
+
 def _same_target(row: dict, o: Offer) -> bool:
     """The same act on the same thing — one PR, one kind of review — whatever its words."""
     row_op, new_op = row.get("op") or {}, o.op or {}
+    if row_op.get("name") in _REVIEW_OPS and new_op.get("name") in _REVIEW_OPS:
+        # A newer review of the same PR replaces the older one, whatever its
+        # verdict. 19 Nov: a COMMENT and an APPROVE for one PR both waited,
+        # and his "yes approve" posted the older comment.
+        ra, na = row_op.get("args") or {}, new_op.get("args") or {}
+        return bool(ra.get("pr") and na.get("pr")) and _same_review_pr(ra, na)
     if row.get("kind") != o.kind or not new_op.get("name") or row_op.get("name") != new_op.get("name"):
         return False
     ra, na = row_op.get("args") or {}, new_op.get("args") or {}
@@ -577,3 +618,35 @@ def after_pr(o: Offer, pr_url: str) -> Offer:
         f"{pr_url}\nCI will run on it; I'll report back.",
         "Where should I share the build for approval? (name a person or channel)",
         {**o.payload, "pr_url": pr_url})
+
+
+def take_approved_reviews(*, approve_only: bool) -> list[Offer]:
+    """The recorded reviews his one word answers, consumed exactly once.
+
+    approve_only (he said "approve"): every waiting APPROVE review he was shown —
+    "Approve all four" is one instruction, not four questions.
+    Otherwise (a bare yes): the newest batch staged in one of his turns, when it
+    is newer than the offer in front — the question he was asked last. [] when
+    neither applies: the ordinary one-offer path answers it.
+    """
+    waiting = [o for o in waiting_reviews() if o.shown]
+    if approve_only:
+        picks = [o for o in waiting if ((o.op or {}).get("args") or {}).get("action") == "approve"]
+    else:
+        head = pending()
+        batches = [o for o in waiting if o.batch]
+        if not batches:
+            return []
+        newest = max(batches, key=lambda o: o.created)
+        picks = [o for o in waiting if o.batch == newest.batch]
+        if head is not None and head.batch != newest.batch and head.created >= newest.created:
+            return []           # the offer in front is the newer question
+        if len(picks) == 1 and head is not None and head.id == picks[0].id:
+            return []           # one offer, in front: the ordinary path is exact
+    for o in picks:
+        drop_offer(o.id)
+    if picks:
+        with contextlib.suppress(Exception):
+            store.kv_set(ACCEPTED_KEY, json.dumps(
+                {"at": time.time(), "said": "\n".join(o.context for o in picks)[:2000]}))
+    return picks

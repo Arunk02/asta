@@ -3965,9 +3965,29 @@ def _settle_feedback(cid: str, intent: dict | None) -> None:
     if any(t >= at and any(_same_chat(c, m) for m in mine) for t, c in teams_bridge.STARTED_TO) \
             or any(t >= at and any(_same_chat(c, m) for m in mine) for t, c in teams_bridge.SENT):
         return
+    if _acted_on_instead(staged, said, at):
+        # He answered the colleague's ask with an act ("Just approve all the PR"):
+        # the turn staged or posted reviews of those PRs. 19 Nov: the reply draft
+        # was "kept — not about it" and came back as "Asking again".
+        from . import answers as _answers
+        _answers.shelve(staged, "answered_by_him", said)
+        loop.end_reply(cid)
+        return
     loop.unreject(staged)
     store.kv_set(f"amending:{cid}", "")
     _set_aside(cid, staged, said, "draft kept — his message was not about it")
+
+
+def _acted_on_instead(staged: dict, said: str, at: float) -> bool:
+    """The turn acted on the PRs this draft is about, at his word: a review of one
+    of them was staged during the turn, or his words were an approval of them."""
+    from . import pr_authority
+    reviewed = [o for o in offers.waiting_reviews() if o.created >= at]
+    if reviewed and _about_these_prs(staged, reviewed):
+        return True
+    text = " ".join(str(staged.get(k) or "") for k in ("what", "need", "analysis", "source_text"))
+    return pr_authority.wants_approve(said or "") and bool(
+        re.search(r"\bPRs?\b|/pull/\d+|#\d{2,}", text, re.I))
 
 
 def _revision_staged(cid: str, intent: dict) -> None:
@@ -4898,6 +4918,15 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                 await sink.send({"type": "done", "tools": []})
             return None
 
+    # His word on the PR reviews he was shown: "yes approve", "just approve all",
+    # or a yes to "send the three?". Before the go-ahead below, which read "Yes go
+    # ahead and approve" as a code task — 19 Nov it answered about an old finished task,
+    # and none of the three approvals was ever posted.
+    picks = [] if skip_new_gates else _reviews_his_word_approves(own, cid)
+    if picks:
+        await _post_reviews(picks, cid, user_text, sink, channel)
+        return None
+
     # His go-ahead on a code task — "do the change and create PR", "push and
     # raise PR", "approval" — acted on from the task table, before a waiting
     # draft can read it as feedback and before any brain is asked to find an
@@ -5825,6 +5854,81 @@ def _remember_if_asked(feedback: str, task: dict) -> str:
 #: A number that is something else's: "PR 676", "pull/676", "build 251".
 _NOT_A_TASK_NUMBER = re.compile(
     r"(?:\b(?:pr|pull|mr|build|run|version|v|release|line|port|ticket|jira)\s*[#/:-]?\s*|/)$", re.I)
+
+
+#: Words that hold a review back, or point at code work rather than a review.
+_REVIEW_HOLD = re.compile(r"\b(?:don'?t|do\s+not|not\s+yet|hold|wait|ignore|cancel|drop)\b", re.I)
+_CODE_WORK = re.compile(r"\b(?:plan|task|ship|push|implement|code|fix|raise|merge)\b", re.I)
+
+
+def _reviews_his_word_approves(text: str, cid: str) -> list:
+    """The recorded PR reviews this message answers, consumed — or [].
+
+    "approve" (any phrasing) takes every APPROVE review he was shown; a bare yes
+    takes the batch he was asked about last, when that is not the offer in front.
+    A held, questioning, or code-work message takes none."""
+    from . import go, pr_authority
+    t = (text or "").strip()
+    if not t or len(t) > 200 or "?" in t or _REVIEW_HOLD.search(t) or _DECLINE.match(t):
+        return []
+    if _CODE_WORK.search(t) or go.wants_pr(t) or go.wants_merge(t):
+        return []
+    if _explicit_task(t) is not None or _named_recent_task(t, cid) is not None:
+        return []
+    waiting = offers.waiting_reviews()
+    if not waiting or _plan_shown_since(max(o.created for o in waiting)):
+        return []
+    if pr_authority.wants_approve(t):
+        return offers.take_approved_reviews(approve_only=True)
+    if _affirmation(t)[0] and not loop.awaiting(cid):
+        return offers.take_approved_reviews(approve_only=False)
+    return []
+
+
+def _plan_shown_since(at: float) -> bool:
+    """A code task's plan reached him after these reviews: his "go ahead and
+    approve" is about the newer question, the plan, and the go-ahead takes it."""
+    for t in store.list_tasks(limit=30):
+        if t.get("kind") != "code" or t.get("status") != "awaiting_approval":
+            continue
+        events = store.task_events(t["id"])
+        if events and float(events[-1].get("created_at") or 0) > at:
+            return True
+    return False
+
+
+async def _post_reviews(picks: list, cid: str, user_text: str, sink, channel: str) -> None:
+    """Post each review he just approved, and say how each one went — in one note."""
+    store.add_ui_message(cid, "user", (user_text or "").strip(), {"channel": channel})
+    frontdesk.record("command", f"post {len(picks)} review(s)")
+    lines = []
+    for o in picks:
+        try:
+            lines.append(await ops.run(o.op))
+        except Exception as exc:                                   # noqa: BLE001
+            lines.append(f"⚠️ {o.subject}: couldn't post — {type(exc).__name__}: {exc}")
+    # A colleague's draft about these same PRs is answered by the reviews: it
+    # must not come back as "Asking again".
+    staged = loop.awaiting(cid)
+    if staged and staged.get("type") == "answer" and _about_these_prs(staged, picks):
+        from . import answers as _answers
+        loop.clear_awaiting(cid, answered_by=user_text)
+        _answers.shelve(staged, "answered_by_him", user_text)
+        loop.end_reply(cid)
+        lines.append(f"(The reply draft to {staged.get('to') or 'them'} is dropped — "
+                     "the reviews answer it. Say so if you still want it sent.)")
+    note = "\n".join(lines)
+    store.add_ui_message(cid, "assistant", note, {"via": "offer-op", "channel": channel})
+    await sink.send({"type": "note", "text": note})
+    if channel == "web":
+        await sink.send({"type": "done", "tools": []})
+
+
+def _about_these_prs(staged: dict, picks: list) -> bool:
+    """The draft talks about at least one of these PRs (by number)."""
+    text = " ".join(str(staged.get(k) or "") for k in ("what", "need", "analysis", "source_text"))
+    nums = {offers._pr_of(((o.op or {}).get("args") or {}).get("pr")) for o in picks}
+    return any(n and re.search(rf"(?<!\d){re.escape(n)}(?!\d)", text) for n in nums)
 
 
 def _task_awaiting_answer(cid: str, text: str) -> int | None:

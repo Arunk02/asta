@@ -1722,6 +1722,23 @@ async def propose_pr_review(pr: str, notes: str, workspace: str = "",
     if action == "approve" and not good:
         return "Not staged: approval needs an open PR with successful CI checks."
     head = (notes or "").strip().splitlines()
+    if not task_id:
+        # His own words this turn asked for this review on this PR ("Just approve
+        # all the PR"): that is the yes. 19 Nov: three approvals were staged
+        # behind an older comment review, and five yeses posted none of them.
+        from . import ops, pr_authority, scorecard
+        his = scorecard.his_words(capabilities.said_this_turn())
+        if pr_authority.asked_for(his, origin["ref"], action):
+            summary0 = next((line for line in head if line.upper().startswith("VERDICT")), "")
+            try:
+                done = await ops.run({"name": "pr_review_inline", "args": {
+                    "pr": origin["ref"], "workspace": workspace, "repo": repo,
+                    "action": action, "body": summary0, "comments": findings,
+                    "review_origin": origin}})
+            except Exception as exc:                           # noqa: BLE001
+                return f"Not posted — {exc}. Tell him exactly that; do not retry blindly."
+            offers.drop_reviews_for(origin["ref"])
+            return "✅ " + done + " — posted as he asked. Tell him in one line."
     summary = next((line for line in head if line.upper().startswith("VERDICT")), "")
     said = {"approve": "APPROVE", "comment": "COMMENT", "request_changes": "REQUEST CHANGES"}[action]
     summary = re.sub(r"^\s*VERDICT:\s*(?:APPROVE|COMMENT|REQUEST[ _]CHANGES)", f"VERDICT: {said}",
@@ -1784,7 +1801,8 @@ async def review_pr(pr: str, workspace: str = "", repo: str = "") -> str:
                     "analysis", workspace or None)
     granted = current and pr_authority.record(
         t["id"], current.rsplit("@", 1)[0], current, said, url=meta.get("url") or "",
-        author=(meta.get("author") or {}).get("login", ""), workspace=workspace, repo=repo)
+        author=(meta.get("author") or {}).get("login", ""), workspace=workspace, repo=repo,
+        view=pr_authority.in_view())
     if granted:
         import json
         store.kv_set(f"review_origin:{t['id']}", json.dumps(

@@ -263,7 +263,7 @@ def answered_since(chat: str, since: float | None, asked_text: str, who: str) ->
 
 
 def render(who: str, need: str, analysis: str, reply: str, note: str = "",
-           lead: str = "") -> str:
+           lead: str = "", chat: str = "", group: bool = False) -> str:
     """Exactly what he needs to decide, said the way a colleague would say it.
 
     Was a form — "🧑‍💻 X asked: … 🔎 … ✉️ Reply to X: ——— … ——— Send it?" — the
@@ -296,7 +296,11 @@ def render(who: str, need: str, analysis: str, reply: str, note: str = "",
     if basis:
         parts.append(f"⚠️ Basis: {basis} — check it before this goes.")
     quoted = "\n".join(f"> {line}" if line.strip() else ">" for line in reply.splitlines())
-    parts.append(f"Here's what I'd send {first}:\n{quoted}")
+    # Where it goes, said plainly. 19 Nov: a reply for the group a colleague asked in
+    # read "Here's what I'd send <colleague>" — he took it for a 1:1 draft.
+    where = (f"in *{chat}* (the group {first} asked in)" if group and chat
+             else f"to {first} (1:1)" if chat else first)
+    parts.append(f"Here's what I'd send {where}:\n{quoted}")
     parts.append("Shall I send it? Or tell me what to change.")
     return "\n\n".join(parts)
 
@@ -745,7 +749,8 @@ async def _show(cid: str, intent: dict) -> None:
         note = (note + "\n" if note else "") + \
             "🔒 Manager and above — this goes only on your *send*. Check every word."
     text = render(intent["who"], intent.get("need", ""), intent.get("analysis", ""),
-                  intent["what"], note, lead=intent.get("lead", ""))
+                  intent["what"], note, lead=intent.get("lead", ""),
+                  chat=intent.get("to") or "", group=bool(intent.get("to_group")))
     if waiting:
         text += f"\n\n({waiting} more waiting after this one.)"
     # In the conversation too, so "change the second line" has something to refer to.

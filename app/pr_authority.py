@@ -60,8 +60,50 @@ def wants_post(words: str) -> bool:
     return False
 
 
-def _names(words: str, ref: str) -> bool:
-    """His words name this PR: a link to exactly it, or (with no link) its number."""
+#: "approve all the PRs he shared", "just approve all the PR", "approve them":
+#: his words point at PRs in front of him without naming one.
+_POINTS_AT = re.compile(
+    r"\b(?:all|them|these|those|both|each|every)\b|\bthe\s+(?:\w+\s+)?prs?\b"
+    r"|\bprs?\s+(?:he|she|they)\b|\b(?:his|her|their)\s+prs?\b", re.I)
+
+#: How far back "the PRs he shared" can reach: this morning's asks, not last week's.
+IN_VIEW_SECONDS = 12 * 3600
+
+
+def in_view(now: float | None = None) -> set[str]:
+    """PRs in front of him: links in his phone conversation's recent messages and in
+    the colleagues' asks Asta picked up recently ("owner/repo#n", lowercase).
+
+    19 Nov: "Approve all the PRs he shared" named no PR, so none of the colleague's four
+    was granted, all were staged, and five yeses later none was approved."""
+    from . import answers, review
+    now = time.time() if now is None else now
+    texts: list[str] = []
+    cid = answers.phone_conversation()
+    if cid:
+        rows = store.list_ui_messages(cid)[-30:]
+        texts += [r.get("content") or "" for r in rows
+                  if now - float(r.get("created_at") or 0) < IN_VIEW_SECONDS]
+    for t in store.list_tasks(limit=60):
+        if now - float(t.get("created_at") or 0) >= IN_VIEW_SECONDS:
+            continue
+        try:
+            meta = json.loads(store.kv_get(f"answer_meta:{t['id']}") or "{}")
+        except ValueError:
+            meta = {}
+        texts.append(str(meta.get("source_text") or ""))
+    refs = set()
+    for text in texts:
+        for m in review._PR_LINK.finditer(text):
+            owner, repo, number = (m.group(1), m.group(2), m.group(3)) if m.group(3) \
+                else (m.group(4), m.group(5), m.group(6))
+            refs.add(f"{owner}/{repo}#{number}".lower())
+    return refs
+
+
+def _names(words: str, ref: str, view: set[str] | frozenset = frozenset()) -> bool:
+    """His words name this PR: a link to exactly it, or (with no link) its number —
+    or they point at "all the PRs" and this one is among those in front of him."""
     from . import review
     links = []
     for m in review._PR_LINK.finditer(words or ""):
@@ -71,7 +113,27 @@ def _names(words: str, ref: str) -> bool:
     if links:
         return ref.lower() in links
     number = ref.rsplit("#", 1)[-1]
-    return bool(re.search(rf"(?<![\w/.-])#?{re.escape(number)}\b", words or ""))
+    if re.search(rf"(?<![\w/.-])#?{re.escape(number)}\b", words or ""):
+        return True
+    return ref.lower() in view and bool(_POINTS_AT.search(words or ""))
+
+
+#: The review verbs in his words, per action.
+_ASKED = {"comment": re.compile(r"\b(?:post|comment|share|send|add)\b", re.I),
+          "approve": _APPROVE,
+          "request_changes": re.compile(
+              r"\brequest(?:ed|ing)?\s+(?:a\s+|for\s+)?changes?\b|\bchanges?\s+requested\b", re.I)}
+
+
+def asked_for(words: str, ref: str, action: str) -> bool:
+    """His own words this turn ask for exactly this review on this PR — the yes.
+    Used where a chat turn would otherwise stage it and ask again."""
+    from . import go
+    rx = _ASKED.get(action)
+    if not rx or not words:
+        return False
+    hit = next((m for m in rx.finditer(words) if not go._NOT.search(words[:m.start()])), None)
+    return bool(hit) and _names(words, ref, in_view())
 
 
 def _key(task_id) -> str:
@@ -84,10 +146,12 @@ def _save(task_id, rec: dict) -> None:
 
 def record(task_id: int, ref: str, revision: str, words: str, *, url: str = "",
            author: str = "", workspace: str = "", repo: str = "",
-           rereviews: int = 0, now: float | None = None) -> dict | None:
-    """Save the instruction when his words grant approve and/or merge for `ref`."""
+           rereviews: int = 0, now: float | None = None,
+           view: set[str] | frozenset = frozenset()) -> dict | None:
+    """Save the instruction when his words grant approve and/or merge for `ref`.
+    `view`: the PRs in front of him (in_view), for words like "approve all of them"."""
     approve, merge, post = wants_approve(words), _wants_merge(words), wants_post(words)
-    if not (approve or merge or post) or not _names(words, ref):
+    if not (approve or merge or post) or not _names(words, ref, view):
         return None
     rec = {"version": 1, "ref": ref, "revision": revision, "url": url or ref,
            "approve": approve, "merge": merge, "post": post, "words": (words or "")[:300],

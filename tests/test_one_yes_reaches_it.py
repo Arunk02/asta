@@ -215,3 +215,13 @@ def test_the_card_names_the_group_for_a_group_ask():
 def test_the_card_says_1to1_for_a_direct_ask():
     text = answers.render("Colleague One", "a check", "", "Done", chat="Colleague One")
     assert "to Colleague (1:1)" in text
+
+
+def test_a_plan_shown_after_the_reviews_takes_the_go_ahead(monkeypatch, github):
+    """The newer question wins: a plan reached him after the reviews were staged."""
+    _queue_like_19_nov()
+    t = store.create_task("A code change", "code", "p", None)
+    store.update_task(t["id"], status="awaiting_approval")
+    store.add_task_event(t["id"], "plan", "full plan sent")
+    assert main._reviews_his_word_approves("yes go ahead and approve", "c-plan") == []
+    assert len(offers.waiting_reviews()) == 4, "nothing consumed"

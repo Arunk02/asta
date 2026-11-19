@@ -5875,13 +5875,26 @@ def _reviews_his_word_approves(text: str, cid: str) -> list:
         return []
     if _explicit_task(t) is not None or _named_recent_task(t, cid) is not None:
         return []
-    if not offers.waiting_reviews():
+    waiting = offers.waiting_reviews()
+    if not waiting or _plan_shown_since(max(o.created for o in waiting)):
         return []
     if pr_authority.wants_approve(t):
         return offers.take_approved_reviews(approve_only=True)
     if _affirmation(t)[0] and not loop.awaiting(cid):
         return offers.take_approved_reviews(approve_only=False)
     return []
+
+
+def _plan_shown_since(at: float) -> bool:
+    """A code task's plan reached him after these reviews: his "go ahead and
+    approve" is about the newer question, the plan, and the go-ahead takes it."""
+    for t in store.list_tasks(limit=30):
+        if t.get("kind") != "code" or t.get("status") != "awaiting_approval":
+            continue
+        events = store.task_events(t["id"])
+        if events and float(events[-1].get("created_at") or 0) > at:
+            return True
+    return False
 
 
 async def _post_reviews(picks: list, cid: str, user_text: str, sink, channel: str) -> None:

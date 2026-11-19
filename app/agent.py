@@ -3036,6 +3036,32 @@ HANDED_OVER = ("\n\n[Arun asked for this himself — it is handed over to you. "
                "Do it; do not stop to ask him to confirm.]")
 
 
+#: A code task started from his turn owns the whole ask. 19 Nov: "this task
+#: was booking-only — AP and the prod helm PR were not in scope".
+WHOLE_ASK = ("\n[This task is his whole ask: every repo, branch and PR it names is yours, "
+             "in this one task. Do not leave a named part for a follow-up task.]")
+
+#: How long after his ask a second code task for it counts as the same ask.
+SAME_ASK_SECONDS = 15 * 60
+
+
+def _same_ask_task(workspace: str) -> dict | None:
+    """A live code task this same turn of his already started, or None."""
+    from . import capabilities, go, scorecard, tasks
+    said = scorecard.his_words(capabilities.said_this_turn()).strip()
+    if not said:
+        return None
+    now = time.time()
+    for t in store.list_tasks(limit=30):
+        if t.get("kind") != "code" or t.get("status") not in tasks.LIVE_STATUSES + ("paused",):
+            continue
+        if now - float(t.get("created_at") or 0) > SAME_ASK_SECONDS:
+            continue
+        if go.asked_with(t["id"]) == said:
+            return t
+    return None
+
+
 def delegate_task(title: str, prompt: str, kind: str = "analysis",
                   workspace: str = "", teams_chat: str = "") -> str:
     """Spawn a background worker so the chat stays free; Arun gets a WhatsApp/Telegram
@@ -3110,8 +3136,28 @@ def delegate_task(title: str, prompt: str, kind: str = "analysis",
                 return (f"Not spawned: this continues task #{n} (“{prior['title'][:60]}”, "
                         f"{prior['status']}). Call refine_task({n}, \"<his feedback, verbatim>\") "
                         f"so it carries on in that task's own session and branch.")
+    if kind == "code":
+        sibling = _same_ask_task(workspace)
+        if sibling:
+            # One ask is one task. 19 Nov: "enable a country in two services and raise
+            # PRs, also prod helm" became three code tasks; two of them changed the
+            # same file and opened duplicate PRs, and each stopped for its own yes.
+            part = f"Also part of the same ask — {title}:\n{prompt}"
+            try:
+                tasks.augment(sibling["id"], part, code_change=True)
+            except ValueError:
+                # Read as "a new task" by the interjection check — it is not: the
+                # same words of his started both. Kept with the task regardless.
+                key = f"task_addenda:{sibling['id']}"
+                prior = (store.kv_get(key) or "").strip('"').strip()
+                store.kv_set(key, (prior + "\n" if prior else "") + part)
+            return (f"Not a new task: task #{sibling['id']} (“{sibling['title'][:60]}”) "
+                    f"already carries this ask, and covers every repo and branch it names. "
+                    f"This part was added to it. Do not split his ask into more tasks.")
     if capabilities.said_this_turn():
         prompt += HANDED_OVER
+        if kind == "code":
+            prompt += WHOLE_ASK
     if kind == "code":
         owner = tasks.owner_of_pr(f"{title}\n{prompt}")
         if owner:

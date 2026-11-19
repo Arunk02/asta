@@ -503,9 +503,36 @@ def target(wanted: int | None, now: float | None = None) -> tuple[dict | None, s
     return None, ""
 
 
+def asked_with(task_id: int) -> str:
+    """His words that started this task ("" when not started from his turn)."""
+    try:
+        return (json.loads(store.kv_get(f"task_asked:{task_id}") or "{}").get("his") or "").strip()
+    except (ValueError, AttributeError):
+        return ""
+
+
+def one_ask(now: float | None = None) -> list[int]:
+    """The live code tasks a go-ahead could mean, when they all came from ONE ask
+    of his — [] otherwise. 19 Nov: one ask became three tasks, and "go ahead
+    and create PR, don't need my approval" got "Which one do you mean?"."""
+    now = time.time() if now is None else now
+    live = [t for t in _candidates(now)
+            if t["status"] in ("awaiting_approval", "running", "queued", "paused")
+            and not t.get("pr_urls")]
+    if len(live) < 2:
+        return []
+    said = {asked_with(t["id"]) for t in live}
+    return sorted(t["id"] for t in live) if len(said) == 1 and "" not in said else []
+
+
 async def act(text: str, wanted: int | None) -> str:
     """Carry out his go-ahead. "" when there is nothing it can mean."""
     from . import pr_authority, task_inform, tasks
+    if wanted is None:
+        siblings = one_ask()
+        if siblings:
+            notes = [await act(text, tid) for tid in siblings]
+            return "\n".join(n for n in notes if n)
     if task_inform.stop_command(text)[0]:
         person = task_inform._STOP.match(text).group(1).strip()
         n = task_inform.revoke(wanted, person)
@@ -542,6 +569,11 @@ async def act(text: str, wanted: int | None) -> str:
                    if ships(tid) else "; I won't stop it to ask."))
     if status == "done":
         if not pr:
+            if wanted is None:
+                # A bare "go ahead and approve" is not about a finished task with
+                # nothing to approve. 19 Nov: it answered "#<old task> … say raise PR"
+                # while three PR approvals waited for exactly that word.
+                return ""
             return (f"#{tid} {title} is finished and committed locally — "
                     f"say *raise PR* and I'll push it.")
         try:

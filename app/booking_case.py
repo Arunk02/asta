@@ -814,10 +814,11 @@ async def evidence(prompt: str, minutes: int = 4320, workspace: str = "") -> str
     # it is stale or he asked for a fresh look.
     snap = snapshot_for(found[0]) if found and not _RECHECK.search(prompt or "") else {}
     if snap:
+        # Not "the earlier answer's": 19 Nov, that wording came back in a colleague's
+        # reply as "same root cause as before" — about a case they had never been told.
         return (f"\n\n[Evidence Asta read for {found[0]} at "
-                f"{time.strftime('%H:%M', time.localtime(snap['at']))} — the same snapshot the "
-                f"earlier answer used; fetch again only for something it lacks or a later "
-                f"time.]\n{snap['text']}")
+                f"{time.strftime('%H:%M', time.localtime(snap['at']))} — fetch again only for "
+                f"something it lacks or a later time.]\n{snap['text']}")
     if "[Prior task #" in (prompt or "") or "Previous investigation for this case" in (prompt or ""):
         return ""
     if not m or not grafana.enabled():

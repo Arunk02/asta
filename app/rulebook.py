@@ -50,11 +50,14 @@ _STANDING = re.compile(
 _TODAY = re.compile(r"\b(?:(?:just\s+|only\s+)?for\s+today|today\s+only|for\s+the\s+day|"
                     r"(?:till|until)\s+(?:evening|tonight|eod|end\s+of\s+(?:the\s+)?day))\b", re.I)
 _TOMORROW = re.compile(r"\b(?:till|until|through)\s+(?:tomorrow|tmrw?|tmr)\b", re.I)
+_WEEKDAY = re.compile(r"\b(?:till|until|through|thru)\s+(?:this\s+|next\s+)?"
+                      r"(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b", re.I)
 _WEEK = re.compile(r"\b(?:for\s+(?:this|the)\s+week|this\s+week|till\s+(?:the\s+)?weekend)\b", re.I)
 _WAIVER = re.compile(
     r"\b(?:without\s+(?:my\s+)?(?:approval|asking(?:\s+me)?|my\s+yes|checking\s+with\s+me)|"
     r"(?:don'?t|do\s+not|dont|no)\s+(?:need|require[ds]?|required)?\s*(?:of\s+)?(?:me\s+|my\s+)?approval|"
     r"no\s+need\s+(?:of|for)\s+(?:my\s+)?approval|no\s+approval|"
+    r"(?:don'?t|dont|do\s+not|no)\s+need\s+to\s+(?:run|check|clear)\b.{0,40}\b(?:by|with)\s+me|"
     r"(?:talk|respond|reply|answer|speak|chat)\s+(?:(?:with|to)\s+(?:her|him|them|\w+)\s+)?directly)\b",
     re.I)
 #: Taking a person's chats over. Plain "reply"/"respond" only count beside a waiver:
@@ -103,6 +106,7 @@ update updates reminder reminders pushes push send sending sent notify forward i
 skip suppress drop stop avoid need tell show disturb bother escalate related regarding
 there here then than what which who when one ones kind type sort like whatever
 don won shouldn didn doesn isn wasn aren can't cant ll re ve hereafter
+same goes likewise similarly well
 """.split())
 
 ACTS_ALLOW = ("send",)
@@ -150,6 +154,11 @@ def until_from(text: str, now: float | None = None) -> float | None:
         return _end_of(0, now)
     if _TOMORROW.search(text):
         return _end_of(1, now)
+    m = _WEEKDAY.search(text)
+    if m:
+        want = ("mon", "tue", "wed", "thu", "fri", "sat", "sun").index(m.group(1).lower())
+        wd = time.localtime(time.time() if now is None else now).tm_wday
+        return _end_of((want - wd) % 7, now)
     if _WEEK.search(text):
         wd = time.localtime(time.time() if now is None else now).tm_wday
         return _end_of(6 - wd, now)
@@ -232,8 +241,8 @@ def _recent_words(days: int = 7) -> set[str]:
 
 def _fix_typo(word: str, known: set[str]) -> str:
     """'headwig' → 'hedwig', only toward a word his own notifications contain."""
-    if word in known or not known:
-        return word
+    if word in known or not known or len(word) < 5:
+        return word                         # "ci" is not a typo of "cli"
     close = difflib.get_close_matches(word, sorted(known), n=1, cutoff=0.8)
     return close[0] if close else word
 
@@ -355,19 +364,29 @@ def parse(text: str, now: float | None = None) -> Intent | None:
     # Standing in for him with a person.
     people, ask = people_in(t)
     lasting = (_STANDING.search(t) or _TODAY.search(t) or _TOMORROW.search(t) or _WEEK.search(t)
-               or _ALL.search(t))
+               or _WEEKDAY.search(t) or _ALL.search(t))
     allowish = lasting and (_WAIVER.search(t) or _HANDLE.search(t))
     if allowish and not _NEG_SEND.search(t):
         if ask:
             return Intent("ask", "allow", question=ask, words=t)
         if people:
             return Intent("add", "allow", people=tuple(people), until=until, words=t)
-    # "Same goes to Dev": the rule he just gave, for someone else.
+    # "Same goes to Dev": what he just did, for someone or something else —
+    # an add or a withdrawal alike.
     last = _last()
-    if _SAME.search(t) and last and people and last.get("effect") == "allow" \
-            and not _NEG_SEND.search(t) and not _ONE_OFF_SEND.search(t):
-        return Intent("add", "allow", people=tuple(people),
-                      until=until if until is not None else last.get("until"), words=t)
+    if _SAME.search(t) and last and not _NEG_SEND.search(t) and not _ONE_OFF_SEND.search(t):
+        if last.get("op") == "withdraw":
+            refs = tuple(r["ref"] for r in _withdraw_targets(t))
+            if refs:
+                return Intent("withdraw", refs=refs, words=t)
+        elif last.get("effect") == "allow" and people:
+            return Intent("add", "allow", people=tuple(people),
+                          until=until if until is not None else last.get("until"), words=t)
+        elif last.get("effect") == "mute" and not people:
+            topic = topic_of(t, [])
+            if topic:
+                return Intent("add", "mute", match=topic,
+                              until=until if until is not None else last.get("until"), words=t)
     return None
 
 
@@ -376,7 +395,7 @@ def might_be_rule(text: str) -> bool:
     t = _norm(text)
     if not t or len(t) > 400:
         return False
-    return bool(_STANDING.search(t) or _WAIVER.search(t) or _TODAY.search(t)
+    return bool(_STANDING.search(t) or _WAIVER.search(t) or _TODAY.search(t) or _WEEKDAY.search(t)
                 or ((_NEG_PUSH.search(t) or _IGNORE.search(t))
                     and (_NOUN.search(t) or re.search(r"\b(?:ci|failures?|incidents?|builds?)\b", t, re.I)))
                 or re.search(r"\bunmute\b", t, re.I)
@@ -397,18 +416,20 @@ Rules in force:
 His previous messages (oldest first):
 {recent}
 
+Today is {today}.
 Message: {text}
 
 JSON keys:
   "op": "none" | "add" | "withdraw" | "amend" | "ask"
-  "effect": "allow" (answer a person's 1:1 Teams chats without his approval) | "mute" (don't push him alerts/notifications about a topic or source)
+  "effect": "allow" (answer a person's 1:1 Teams chats without his approval) | "mute" (don't push him alerts/notifications about a topic or source — ONLY what reaches his phone; "don't check / investigate / look into X" is NOT a mute: answer "none")
   "people": [names exactly as he wrote them]
   "match": "1-3 words naming the alerts to mute, as he wrote them, e.g. hedwig"
   "until": "today" | "tomorrow" | "forever" | "YYYY-MM-DD"
   "ids": [refs like "P2", "R11" this ends or replaces]
   "question": "one short question, only when it is a rule but unclear"
 "none" when the message is a one-off (about a draft, a task, one message) or not a rule.
-"amend" when he corrects a rule: the ids it replaces AND the new rule."""
+"amend" when he corrects a rule: the ids it replaces AND the new rule.
+Output ONLY the JSON object on one line. No analysis, no prose, no code fence."""
 
 #: The one completion. A module attribute so the bench and tests can stand in.
 _complete = None
@@ -423,16 +444,23 @@ async def _model(text: str, cid: str = "") -> dict | None:
             rows = [r for r in store.list_ui_messages(cid)[-8:] if r["role"] == "user"][-3:]
             recent = "\n".join(f"- {(r.get('content') or '')[:200]}" for r in rows)
     rules = "\n".join(f"{r['ref']} {r['kind']}: {r['text']}" for r in live()) or "(none)"
-    prompt = _PROMPT.format(rules=rules, recent=recent or "(none)", text=json.dumps(text))
+    prompt = _PROMPT.format(rules=rules, recent=recent or "(none)", text=json.dumps(text),
+                            today=time.strftime("%A %Y-%m-%d"))
     try:
-        out = await asyncio.wait_for(complete(prompt, max_tokens=300, paid_ok=True), timeout=20)
+        out = await asyncio.wait_for(complete(prompt, max_tokens=900, paid_ok=True), timeout=40)
     except Exception:                                            # noqa: BLE001
         return None
-    m = re.search(r"\{.*\}", out or "", re.S)
-    if not m:
-        return None
-    with contextlib.suppress(ValueError):
-        return json.loads(m.group(0))
+    return _last_json(out or "")
+
+
+def _last_json(out: str) -> dict | None:
+    """The answer, even when a model reasons out loud first (20 Nov: a fallback
+    brain wrote 300 tokens of analysis and was cut off before its JSON)."""
+    for m in reversed(list(re.finditer(r"\{[^{}]*\}", out))):
+        with contextlib.suppress(ValueError):
+            d = json.loads(m.group(0))
+            if isinstance(d, dict) and "op" in d:
+                return d
     return None
 
 
@@ -446,10 +474,14 @@ def from_model(d: dict, text: str, now: float | None = None) -> Intent | None:
     if op == "ask":
         q = str(d.get("question") or "").strip()
         return Intent("ask", question=q[:200], words=text, by="model") if q else None
-    have = {r["ref"] for r in live()}
-    refs = tuple(str(x).upper() for x in (d.get("ids") or []) if str(x).upper() in have)
+    # A model may end only a rule his words name AND say to end. 20 Nov: "I said
+    # don't send headwig alter, not CI" came back as "withdraw the hedwig mute".
+    named = {r["ref"] for r in _withdraw_targets(text)}
+    says_end = bool(_WD_ANY.search(text) or _WD_WEAK.search(text) or _WD_GRANT.search(text)
+                    or _WD_MUTE.search(text) or _WD_GRANT_DONT.search(text))
+    refs = tuple(str(x).upper() for x in (d.get("ids") or []) if str(x).upper() in named)
     if op == "withdraw":
-        return Intent("withdraw", refs=refs, words=text, by="model") if refs else None
+        return Intent("withdraw", refs=refs, words=text, by="model") if refs and says_end else None
     effect = str(d.get("effect") or "").lower()
     until = _until_word(str(d.get("until") or ""), now) if d.get("until") not in (None, "forever") \
         else None
@@ -467,6 +499,12 @@ def from_model(d: dict, text: str, now: float | None = None) -> Intent | None:
         if people:
             intent = Intent("add", "allow", people=tuple(people), until=until, words=text, by="model")
     elif effect == "mute":
+        # A mute is about what reaches his phone. "Don't check on incidents" is
+        # about investigating (instructions.py owns it); a model read it as a mute.
+        bare = re.sub(r"\bgoing\s+forward\b", " ", text, flags=re.I)
+        if not (_NOUN.search(bare) or re.search(r"\b" + _PUSH_VERB + r"\b", bare, re.I)
+                or re.search(r"\b(?:noise|phone|buzz|spam)\b", bare, re.I)):
+            return None
         said = set(_tokens(text))
         known = _recent_words()
         words = []
@@ -474,7 +512,7 @@ def from_model(d: dict, text: str, now: float | None = None) -> Intent | None:
             if w in _FILLER:
                 continue
             if w in said:
-                words.append(w)
+                words.append(_fix_typo(w, known))
             elif any(difflib.SequenceMatcher(None, w, s).ratio() >= 0.8 for s in said) and w in known:
                 words.append(w)                 # his typo, corrected to a word his alerts use
         if words and len(words) <= 4:
@@ -482,7 +520,10 @@ def from_model(d: dict, text: str, now: float | None = None) -> Intent | None:
     if intent is None:
         return None
     if op == "amend":
-        intent.refs = refs
+        # Never "replace" the very rule it restates: that would end it and add it back.
+        same = {r["ref"] for r in live()
+                if r["who"].lower() in {intent.match.lower(), *(x.lower() for x in intent.people)}}
+        intent.refs = tuple(x for x in refs if x not in same)
     return intent
 
 
@@ -525,6 +566,20 @@ def _withdraw(refs: tuple[str, ...]) -> list[str]:
     return ended
 
 
+def _remember(intent: Intent) -> None:
+    """What he just did, so "same goes to X" can mean it for X."""
+    store.kv_set("rulebook:last", json.dumps({"op": intent.op, "effect": intent.effect,
+                                              "until": intent.until, "at": time.time()}))
+
+
+def _example(text: str, target: str) -> str:
+    """The line of an alert that shows what it is, not its header."""
+    from . import policy
+    lines = [x.strip(" •") for x in (text or "").splitlines() if x.strip()]
+    hit = next((x for x in lines if policy._words_in(target, x)), lines[0] if lines else "")
+    return hit[:90]
+
+
 def apply(intent: Intent) -> Applied:
     """Do what he said, and say exactly what is now stored — never just "noted"."""
     from . import authority, policy
@@ -538,6 +593,7 @@ def apply(intent: Intent) -> Applied:
                          + ("\nThat goes back to asking you first." if any(
                              e.startswith("P") for e in ended) else ""))
         if intent.op == "withdraw":
+            _remember(intent)
             store.record_outcome("rulebook", "withdrew", detail=", ".join(intent.refs)[:200])
             return Applied("\n".join(lines) or "Nothing live matched that — say “my rules”.", intent)
     people: tuple[str, ...] = ()
@@ -552,12 +608,11 @@ def apply(intent: Intent) -> Applied:
     elif intent.effect == "mute":
         r = policy.add("mute", "push", intent.match, words=intent.words, expires_at=intent.until)
         caught = would_have_caught(r.target)
-        proof = (f"Last 7 days it would have held {len(caught)}, e.g. “{caught[0].splitlines()[0][:90]}”."
+        proof = (f"Last 7 days it would have held {len(caught)}, e.g. “{_example(caught[0], r.target)}”."
                  if caught else f"Nothing in the last 7 days mentions “{r.target}” — check the word.")
-        lines.append(f"🔕 R{r.id}: {r.render()} — {_until_text(r.expires_at)}. {proof} "
+        lines.append(f"🔕 R{r.id}: {r._render()} — {_until_text(r.expires_at)}. {proof} "
                      f"Everything else still comes. “send {r.target} alerts again” ends it.")
-    store.kv_set("rulebook:last", json.dumps({"effect": intent.effect, "until": intent.until,
-                                              "at": time.time()}))
+    _remember(intent)
     store.record_outcome("rulebook", f"{intent.op} {intent.effect}", subject=intent.by,
                          detail=(", ".join(intent.people) or intent.match)[:200])
     return Applied("\n".join(lines), intent, people)

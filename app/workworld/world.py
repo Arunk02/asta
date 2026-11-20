@@ -563,6 +563,12 @@ class World:
         p.set(wa_bridge, "status", lambda: {"running": True})
         p.set(quiet, "in_quiet_hours", lambda *a, **k: False)
         p.set(memory, "local_llm_complete", lambda *a, **k: None)
+        # The rule reader's one completion: a scripted world asks no real model.
+        from app import rulebook
+
+        async def _no_rule_model(*a, **k):
+            return None
+        p.set(rulebook, "_complete", _no_rule_model)
         p.set(memory, "local_embed", lambda *a, **k: None)
         # The workspace names his config maps to real checkouts; here they all
         # resolve into the scratch directory.

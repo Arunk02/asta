@@ -289,17 +289,30 @@ def test_the_echo_filter_tolerates_double_spaces():
 def test_analysis_evidence_carries_decisions_and_received_events(monkeypatch):
     from app import temporal
 
-    async def outcome(booking, env, hours=72):
-        return f"What the system logged as DECIDED for {booking} in {env}"
+    async def decided(booking, env, hours=72):
+        return [_row(1795000008.0, "telikos-billing-service",
+                     f"RevalidationServiceImpl - TMS milestone is not executed for jobLineNumber: {OTHER}X")]
+
+    def run(t, kind, name, refs=None):
+        f = {"eventName": name}
+        if refs is not None:
+            f["_refs"] = refs
+        return {"started": t, "type": kind, "status": "COMPLETED", "facts": f}
 
     async def events(env, booking, limit=40):
-        return {"env": env, "booking": booking, "total": 1, "runs": [
-            {"started": "2026-11-18T12:26:39", "type": "bookingEventsWorkflow",
-             "status": "COMPLETED", "facts": {"eventName": "PRICING_UPDATE"}}]}
-    monkeypatch.setattr(booking_case, "outcome_lines", outcome)
+        return {"env": env, "booking": booking, "total": 3, "runs": [
+            run("2026-11-18T12:00:00", "BillingWorkflow", "SERVICE_DELIVERY_EXECUTION", ["ATA", "LAST_LEG_DATE"]),
+            run("2026-11-18T12:26:39", "bookingEventsWorkflow", "PRICING_UPDATE", ["ATD"]),
+            run("2026-11-18T12:26:41", "BillingWorkflow", "BOOKING_UPDATED", ["ATD"])]}
+    monkeypatch.setattr(booking_case, "decision_rows", decided)
     monkeypatch.setattr(temporal, "booking_events", events)
+    monkeypatch.setattr(temporal, "_seconds", lambda s: 1795000000.0 if "12:26:41" in s
+                        else 1794999998.0 if "12:26:39" in s else 1794998400.0)
     got = asyncio.run(booking_case._decided_and_received(OTHER, "sit", 4320))
     assert any("DECIDED" in g for g in got) and any("PRICING_UPDATE" in g for g in got)
+    kept = booking_case.regressions_for(OTHER)["items"]
+    assert kept and kept[0]["after"] == "PRICING_UPDATE", "a failure followed it within the window"
+    assert "PRICING_UPDATE" in booking_case.snapshot_for(OTHER)["text"]
 
 
 def test_booking_events_shows_what_each_run_added_and_dropped():
@@ -393,3 +406,99 @@ def test_an_event_that_carries_no_references_is_not_losing_them():
              "facts": {"eventName": "ACTIVITYPLAN_FEEDBACK", "workProcessStatus": "COMPLETED"}}]
     out = temporal.render_booking_events({"env": "sit", "booking": OTHER, "total": 2, "runs": runs})
     assert "What got worse" not in out
+
+
+# --- read once per case; the answer is checked against what code found -------
+
+def _reg(after="PRICING_UPDATE", items=("lost ref ATA", "lost ref LAST_LEG_DATE"), at=1000.0):
+    return {"started": "2026-11-18T12:26:41", "at": at, "run": "BillingWorkflow",
+            "event": "BOOKING_UPDATED", "items": list(items), "after": after,
+            "after_started": "2026-11-18T12:26:39", "gap": 2}
+
+
+def test_only_regressions_a_failure_followed_count():
+    verdict = [_row(1500.0, "billing", "TMS milestone is not executed for jobLineNumber: X")]
+    assert booking_case.failing_regressions([_reg(at=1000.0)], verdict)
+    assert not booking_case.failing_regressions([_reg(at=1000.0)], []), "nothing failed after"
+    assert not booking_case.failing_regressions([_reg(at=1000.0)],
+                                                [_row(9000.0, "billing", "TMS milestone is not executed for x")])
+    bad = _reg(items=("run COMPLETED→FAILED",))
+    assert booking_case.failing_regressions([bad], []), "moving to a failure is itself the failure"
+
+
+def _stored(task_id=9201, question="why is billing rejecting it, where does it break?"):
+    import json
+    booking_case.remember_case(task_id, [OTHER], "sit", question)
+    store.kv_set(f"case_regressions:{OTHER}", json.dumps({"env": "sit", "at": time.time(),
+                                                          "items": [_reg()]}))
+    return task_id
+
+
+def test_an_answer_that_walks_past_the_regression_is_caught():
+    tid = _stored()
+    miss = answers.ignores_regression(tid, "Billing rejects it: chassis filtered by a charge-type gate.")
+    assert "PRICING_UPDATE" in miss and "lost ref ATA" in miss
+    assert answers.ignores_regression(tid, "the pricing update dropped them") == ""
+    assert answers.ignores_regression(tid, "LAST_LEG_DATE was wiped at 12:26") == ""
+
+
+def test_the_check_stays_out_of_questions_that_are_not_about_a_break():
+    tid = _stored(9202, "did it reach TMS and get the ack?")
+    assert answers.ignores_regression(tid, "yes, reached TMS, ack back") == ""
+
+
+def test_one_reask_then_the_second_answer_stands(monkeypatch):
+    from app import tasks
+    tid = _stored(9203)
+    calls = []
+
+    async def run(task_id, t, prompt):
+        calls.append(prompt)
+        return "ANALYSIS:\nthe PRICING_UPDATE at 12:26 dropped ATA\nREPLY:\nok"
+    monkeypatch.setattr(tasks, "_run_simple", run)
+    first = "ANALYSIS:\nchassis filtered in AP\nREPLY:\nchassis filtered"
+    out = asyncio.run(tasks._reask_on_ignored_regression(tid, {}, "brief", first))
+    assert "PRICING_UPDATE" in out and len(calls) == 1
+    assert "Your previous answer" in calls[0] and "lost ref ATA" in calls[0]
+    calls.clear()
+    assert asyncio.run(tasks._reask_on_ignored_regression(tid, {}, "brief", out)) == out
+    assert not calls, "an answer that addresses it is not asked again"
+
+
+def test_evidence_is_read_once_per_case_and_refetched_on_recheck(monkeypatch):
+    import json
+    store.kv_set(f"case_snapshot:{OTHER}", json.dumps({"env": "sit", "at": time.time(),
+                                                       "text": "SNAPSHOT-TEXT"}))
+    brief = f"This is about a specific case — {OTHER}, in the sit environment."
+    assert "SNAPSHOT-TEXT" in asyncio.run(booking_case.evidence(brief))
+    from app import grafana
+    monkeypatch.setattr(grafana, "enabled", lambda: False)
+    assert asyncio.run(booking_case.evidence(brief + " please recheck it")) == ""
+    store.kv_set(f"case_snapshot:{OTHER}", json.dumps({"env": "sit", "at": time.time() - 3600,
+                                                       "text": "OLD"}))
+    assert asyncio.run(booking_case.evidence(brief)) == "", "a stale snapshot is not reused"
+
+
+def test_log_reads_fall_back_to_the_grafana_mcp(monkeypatch):
+    from app import debugkit, grafana
+
+    async def broken(path, params, uid=""):
+        raise grafana.GrafanaError("API down", 502)
+
+    async def via_mcp(query, start, end, limit, why, ns=""):
+        return [{"timestamp": 1.0, "line": "hello", "labels": {"app": "telikos-x"}}], str(why)
+    monkeypatch.setattr(debugkit, "_ask", broken)
+    monkeypatch.setattr(grafana, "_via_mcp", via_mcp)
+    got = asyncio.run(debugkit.lines("sit", "", (OTHER,), "", None, None, 10))
+    assert got["via"] == "mcp fallback" and got["rows"] and not got.get("error")
+
+
+def test_a_correction_carries_the_snapshot_and_the_regression():
+    import json
+    from app import main
+    tid = _stored(9204)
+    store.kv_set(f"case_snapshot:{OTHER}", json.dumps({"env": "sit", "at": time.time(),
+                                                       "text": "DECIDED LINES"}))
+    anchor = main._case_anchor({"task_id": tid, "who": "Lead"})
+    assert "What got worse before the failure" in anchor and "PRICING_UPDATE" in anchor
+    assert "DECIDED LINES" in anchor

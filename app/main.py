@@ -3782,9 +3782,21 @@ def _case_anchor(staged: dict) -> str:
         return ""
     where = f" in {case['env']}" if case.get("env") else ""
     asked = f" Their question: «{case['question']}»." if case.get("question") else ""
-    return (f"\n\nThe draft answers {staged.get('who') or 'them'} about "
-            f"{', '.join(case['ids'][:3])}{where}.{asked} Check his point against THAT "
-            f"booking's own logs; a booking the earlier answer found is not this case.")
+    out = (f"\n\nThe draft answers {staged.get('who') or 'them'} about "
+           f"{', '.join(case['ids'][:3])}{where}.{asked} Check his point against THAT "
+           f"booking's own logs; a booking the earlier answer found is not this case.")
+    # The same evidence the draft stood on, so his correction is weighed against
+    # what was read, not against a fresh fetch that may see other data.
+    from . import temporal
+    snap = booking_case.snapshot_for(case["ids"][0])
+    regs = (booking_case.regressions_for(case["ids"][0]) or {}).get("items") or []
+    if regs:
+        out += "\nWhat got worse before the failure: " + "; ".join(
+            temporal.regression_line(g) for g in regs[-2:])
+    if snap:
+        out += ("\nEvidence read for this case (reuse it; fetch again only for what it "
+                "lacks or a later time):\n" + snap["text"][:6000])
+    return out
 
 
 def _set_aside(cid: str, staged: dict, said: str, outcome: str) -> bool:

@@ -200,13 +200,23 @@ async def lines(env: str, service: str = "", terms=(), logger: str = "",
         q += f' |~ "{grafana.escape_label(matching)}"'
     params = grafana.query_params(q, start, end, max(1, min(int(limit), 200)))
     params["direction"] = "backward" if direction == "backward" else "forward"
+    via = ""
     try:
         records = grafana.parse(await _ask(grafana.QUERY_RANGE_PATH, params))
     except grafana.GrafanaError as exc:
-        return {"env": env, "namespace": ns, "query": q, "error": str(exc)[:240],
-                "link": explore_link(q, start, end), "rows": []}
+        # The API is the road; the Grafana MCP server is the fallback for every log
+        # read, not only grafana_logs (19 Nov: these reads had none).
+        try:
+            records, _why = await grafana._via_mcp(q, start, end, max(1, min(int(limit), 200)),
+                                                  exc, ns)
+            via = "mcp fallback"
+        except grafana.GrafanaError as final:
+            return {"env": env, "namespace": ns, "query": q, "error": str(final)[:240],
+                    "link": explore_link(q, start, end), "rows": []}
     rows = [_row(r) for r in records]
-    return {"env": env, "namespace": ns, "query": q, "rows": rows,
+    if via and direction == "backward":
+        rows.sort(key=lambda r: r["ts"], reverse=True)
+    return {"env": env, "namespace": ns, "query": q, "rows": rows, "via": via,
             "full": len(rows) >= int(limit), "start": start.timestamp(), "end": end.timestamp(),
             "link": explore_link(q, start, end)}
 

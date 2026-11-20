@@ -203,6 +203,62 @@ def promises_work(reply: str) -> str:
     return m.group(0).strip() if m else ""
 
 
+#: A question about something broken, stuck or wrong — the kind a regression answers.
+_ABOUT_A_BREAK = re.compile(r"\b(?:why|where|stuck|not\s+(?:sent|working|reaching|reflect\w*|"
+                            r"going|coming|received|updated)|fail\w*|break\w*|missing|reject\w*|"
+                            r"block\w*|issue|error|wrong|pending)\b", re.I)
+
+
+def _named(token: str, text: str) -> bool:
+    token = (token or "").strip()
+    if len(token) < 3:
+        return False
+    low = text.lower()
+    return token.lower() in low or token.replace("_", " ").lower() in low
+
+
+def _addressed(g: dict, text: str) -> bool:
+    """The answer speaks to this regression: the event before it, or what was lost."""
+    names = [g.get("after") or "", g.get("event") or ""]
+    for item in g.get("items") or []:
+        item = re.sub(r"^lost\s+", "", item)
+        item = re.sub(r"^(?:ref|TMS)\s+", "", item)
+        names.append(item.split(" ")[0].split("→")[0])
+    return any(_named(n, text) for n in names)
+
+
+def case_ids_of(task_id: int | None, prompt: str = "") -> list[str]:
+    from . import booking_case
+    ids = (booking_case.case_for(task_id) or {}).get("ids") or []
+    if not ids:
+        m = booking_case._CASE.search(prompt or "")
+        ids = [i.strip() for i in m.group(1).split(",") if i.strip()] if m else []
+    return ids[:3]
+
+
+def ignores_regression(task_id: int | None, analysis: str, reply: str = "",
+                       prompt: str = "") -> str:
+    """The regression the booking's own events show before a failure, when the answer
+    never names it — or "". Code decides what got worse; this only checks the answer
+    did not walk past it. Any kind: lost references, a status gone to FAILED, TMS
+    progress going backward. 19 Nov: the overwrite was first in the evidence and
+    three of five answers still blamed something else."""
+    import time as _t
+    from . import booking_case, temporal
+    question = (booking_case.case_for(task_id) or {}).get("question") or prompt[:2000]
+    if not _ABOUT_A_BREAK.search(question or ""):
+        return ""
+    text = f"{analysis}\n{reply}"
+    for booking in case_ids_of(task_id, prompt):
+        stored = booking_case.regressions_for(booking)
+        if not stored or _t.time() - float(stored.get("at") or 0) > 86400:
+            continue
+        missed = [g for g in stored.get("items") or [] if not _addressed(g, text)]
+        if missed and not any(_addressed(g, text) for g in stored["items"]):
+            return temporal.regression_line(missed[-1])
+    return ""
+
+
 def off_case_note(task_id: int | None, analysis: str, reply: str = "") -> str:
     """A warning when the answer is about other bookings than the one asked about."""
     from . import booking_case, verdict
@@ -390,6 +446,12 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
     wrong = await _with_its_pair(task_id, analysis, reply)
     if wrong:
         note = ((note + "\n") if note else "") + wrong
+    ignored = ignores_regression(task_id, analysis, reply,
+                                 (store.get_task(task_id) or {}).get("prompt", "") if task_id else "")
+    if ignored:
+        note = ((note + "\n") if note else "") + (
+            f"⚠️ The booking's own events show {ignored} — this answer doesn't address it. "
+            "Check it before this goes.")
     promised = promises_work(reply)
     if promised:
         note = ((note + "\n") if note else "") + (

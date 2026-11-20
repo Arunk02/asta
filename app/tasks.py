@@ -4132,6 +4132,33 @@ async def _with_later_reports(task_id: int, t: dict, result: str) -> str:
                 f"not be checked against it.)")
 
 
+REASK_REGRESSION = (
+    "\n\nBefore you answer again: the booking's own events show {line}, and a failure "
+    "followed it. Your previous answer below does not mention it. Explain it first — "
+    "is it the cause of what they asked about, and why — then answer in the same two "
+    "sections.\n\nYour previous answer:\n{previous}")
+
+
+async def _reask_on_ignored_regression(task_id: int, t: dict, prompt: str, result: str) -> str:
+    """One more pass when the answer walked past the regression code found. Once only:
+    if the second answer still does not address it, the draft carries the warning."""
+    from . import answers
+    try:
+        analysis, reply = answers.split(result)
+        line = answers.ignores_regression(task_id, analysis or result, reply, prompt)
+    except Exception:                                          # noqa: BLE001
+        return result
+    if not line:
+        return result
+    store.record_outcome("task", "reask regression", subject=str(task_id), detail=line[:200])
+    try:
+        again = await _run_simple(task_id, t, prompt + REASK_REGRESSION.format(
+            line=line, previous=(result or "")[-3000:]))
+    except Exception:                                          # noqa: BLE001
+        return result
+    return again or result
+
+
 async def _worker(task_id: int) -> None:
     from . import notify, rehearsal
     rehearsal.enter(task_id)
@@ -4199,6 +4226,7 @@ async def _worker(task_id: int) -> None:
                 result = await _run_simple(task_id, t, prompt)
                 if t["kind"] == "analysis":
                     result = await _with_later_reports(task_id, t, result)
+                    result = await _reask_on_ignored_regression(task_id, t, prompt, result)
         if (store.get_task(task_id) or {}).get("status") in FINAL:
             return   # rejected while it ran — drop the result, stay quiet
         if t["kind"] == "teams_draft" and _notes_about(result, t["teams_chat"]):

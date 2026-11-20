@@ -290,3 +290,52 @@ def test_the_first_real_ring_records_what_teams_rendered():
     import inspect
     assert "incoming-toast.html" in inspect.getsource(incoming.capture_toast)
     assert "if out.exists():" in inspect.getsource(incoming.capture_toast)
+
+
+# --- every ring reaches his phone -----------------------------------------------
+#
+# 20 Nov: two colleagues rang and Asta saw both rings, but neither reached his
+# phone. The line is the same words every time one person calls, and notify's
+# text dedups (the attention ledger, "already on his phone") read the new ring
+# as the old one. The real notify path runs here; only the phone is a double.
+
+@pytest.fixture
+def phone(monkeypatch):
+    from app import notify
+    sent = []
+
+    async def _deliver(text, **kw):
+        sent.append(text)
+        return {"whatsapp": True}
+
+    monkeypatch.setattr(notify, "deliver", _deliver)
+    return sent
+
+
+def test_a_second_ring_from_the_same_person_reaches_his_phone(phone, monkeypatch):
+    import datetime as _dt
+    from app import attention
+    monkeypatch.setattr(attention, "enabled", lambda: True)
+    call = {"who": "Alex Kumar", "group": False}
+
+    class _Clock(_dt.datetime):
+        t = _dt.datetime(2026, 1, 5, 10, 0)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.t
+
+    monkeypatch.setattr(_dt, "datetime", _Clock)
+    assert asyncio.run(incoming.offer(dict(call)))
+    incoming.clear()                                   # the ring stopped
+    _Clock.t = _dt.datetime(2026, 1, 5, 10, 12)        # rings again, same words
+    assert asyncio.run(incoming.offer(dict(call)))
+    assert len(phone) == 2, phone
+    assert all("Alex Kumar is calling" in t for t in phone)
+
+
+def test_one_ring_still_pushes_once(phone):
+    call = {"who": "Alex Kumar", "group": False}
+    assert asyncio.run(incoming.offer(dict(call)))
+    assert not asyncio.run(incoming.offer(dict(call)))  # same ring, next poll
+    assert len(phone) == 1

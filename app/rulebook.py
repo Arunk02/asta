@@ -23,6 +23,8 @@ What it holds:
 
   allow     answer one 1:1 contact without asking     authority grant (capped, revocable)
   mute      don't push me alerts about X              policy rule mute/push, checked in notify
+  block     don't START X on your own (only when       policy rule never/start, checked where
+            asked in Teams)                            every self-started investigation begins
   withdraw  any live rule or permission, by name      "stop handling Priya", "send hedwig alerts again"
 
 Quiet time, defaults, "never message X" and notes keep their front-desk path
@@ -80,6 +82,38 @@ _IGNORE = re.compile(r"\b(?:ignore|mute|silence|skip|suppress|drop)\b", re.I)
 _NOUN = re.compile(r"\b(?:alerts?|alarms?|notifications?|notifs?|pings?|mails?|emails?|"
                    r"updates?|reminders?|pushes)\b", re.I)
 
+#: Work Asta starts on its own, as he names it → the responder's kind.
+_WORK = (
+    (re.compile(r"\b(?:reviews?|review\s+requests?|prs?|pull\s+requests?)\b", re.I), "review_request"),
+    (re.compile(r"\b(?:incidents?|inc\d+)\b", re.I), "incident"),
+)
+#: "only when they ask / ping / tag / share it (in Teams)".
+_ONLY_WHEN = re.compile(r"\b(?:only|just)\b.{0,60}?\b(?:when|if|after|once)\b.{0,60}?"
+                        r"\b(?:ask|ping|tag|request|share|send|mention)\w*", re.I)
+#: "don't pick up / start / do reviews on your own / automatically".
+_SELF_START = re.compile(
+    _NEG + r"\s+(?:\w+\s+){0,2}?(?:auto[- ]?)?(?:pick|start|take|do|work|run|review)\w*\b", re.I)
+_ON_OWN = re.compile(r"\b(?:on\s+(?:your|its)\s+own|automatically|by\s+yourself|auto[- ]?\w+|"
+                     r"unless\s+(?:i|they|someone)\s+(?:ask|ping|tag)\w*|without\s+(?:being\s+)?asked|"
+                     r"from\s+github)\b", re.I)
+#: "pick up reviews on your own again" — never "review this PR again".
+_WD_START = re.compile(r"\b(?:pick\w*\s+up|on\s+(?:your|its)\s+own|automatically|auto[- ]?(?:review|pick)\w*)\b"
+                       r".*\bagain\b|\bagain\b.*\b(?:on\s+your\s+own|automatically)\b", re.I)
+
+
+def work_of(text: str) -> str:
+    """The kind of self-started work his words name, or ''."""
+    hits = [kind for rx, kind in _WORK if rx.search(text or "")]
+    return hits[0] if len(hits) == 1 else ""
+
+
+def _start_scope(text: str) -> str:
+    """Where an ask may still come from: Teams, unless he named GitHub alone."""
+    if re.search(r"\bteams\b", text, re.I) or not re.search(r"\bgithub\b", text, re.I):
+        return "except=teams"
+    return "only=github"
+
+
 #: Ending a rule. Each list only ever ends a rule that is live AND named.
 _WD_ANY = re.compile(r"\b(?:withdraw|revoke|take\s+back|take\s+away|lift)\b", re.I)
 #: Everyday verbs ("drop the draft to Priya") end a rule only beside a rule word or an id.
@@ -124,6 +158,7 @@ class Intent:
     question: str = ""
     words: str = ""
     by: str = "rules"
+    scope: str = ""                          # block: "except=teams" / "only=github"
 
 
 @dataclass
@@ -290,7 +325,8 @@ def live() -> list[dict]:
     out = [{"ref": f"P{g.id}", "kind": "allow", "who": g.target, "text": g.render()}
            for g in authority.grants()]
     out += [{"ref": f"R{r.id}", "kind": f"{r.kind}/{r.act}" if r.act else r.kind,
-             "who": r.target, "text": r.render()} for r in policy.rules() if r.kind != "quiet"]
+             "who": policy.WORK_WORDS.get(r.target, r.target) if r.act == "start" else r.target,
+             "text": r.render()} for r in policy.rules() if r.kind != "quiet"]
     return out
 
 
@@ -347,12 +383,21 @@ def parse(text: str, now: float | None = None) -> Intent | None:
     wd_grant = bool(_WD_GRANT.search(t)) or bool(
         _WD_GRANT_DONT.search(t) and (_STANDING.search(t) or _WAIVER.search(t)))
     wd_mute = bool(_WD_MUTE.search(t))
-    if wd_any or wd_grant or wd_mute:
+    wd_start = bool(_WD_START.search(t))
+    if wd_any or wd_grant or wd_mute or wd_start:
         targets = [r for r in _withdraw_targets(t)
                    if wd_any or (r["kind"] == "allow" and wd_grant)
-                   or (r["kind"] != "allow" and wd_mute)]
+                   or (r["kind"] == "mute/push" and wd_mute)
+                   or (r["kind"] == "never/start" and wd_start)]
         if targets:
             return Intent("withdraw", refs=tuple(r["ref"] for r in targets), words=t)
+
+    # Work he does not want started on its own: "do the review only when they
+    # ping me in Teams", "don't pick up PRs automatically".
+    work = work_of(t)
+    one_off = re.match(r"^\s*(?:pls\s+|please\s+|now\s+)?(?:send|share|post|tell|ping|forward|reply)\b", t, re.I)
+    if work and not one_off and (_ONLY_WHEN.search(t) or (_SELF_START.search(t) and _ON_OWN.search(t))):
+        return Intent("add", "block", match=work, until=until, words=t, scope=_start_scope(t))
 
     # Muting what reaches his phone: a negated push or "ignore", about alerts.
     if (_NEG_PUSH.search(t) or _IGNORE.search(t)) and _NOUN.search(t):
@@ -399,8 +444,9 @@ def might_be_rule(text: str) -> bool:
                 or ((_NEG_PUSH.search(t) or _IGNORE.search(t))
                     and (_NOUN.search(t) or re.search(r"\b(?:ci|failures?|incidents?|builds?)\b", t, re.I)))
                 or re.search(r"\bunmute\b", t, re.I)
+                or (work_of(t) and (_ONLY_WHEN.search(t) or _ON_OWN.search(t)))
                 or ((_WD_ANY.search(t) or _WD_WEAK.search(t) or _WD_GRANT.search(t)
-                     or _WD_MUTE.search(t) or _SAME.search(t)
+                     or _WD_MUTE.search(t) or _WD_START.search(t) or _SAME.search(t)
                      or re.search(r"\b(?:i\s+said|not\s+the)\b", t, re.I)) and _withdraw_targets(t)))
 
 
@@ -421,7 +467,9 @@ Message: {text}
 
 JSON keys:
   "op": "none" | "add" | "withdraw" | "amend" | "ask"
-  "effect": "allow" (answer a person's 1:1 Teams chats without his approval) | "mute" (don't push him alerts/notifications about a topic or source — ONLY what reaches his phone; "don't check / investigate / look into X" is NOT a mute: answer "none")
+  "effect": "allow" (answer a person's 1:1 Teams chats without his approval) | "mute" (don't push him alerts/notifications about a topic or source — ONLY what reaches his phone; "don't check / investigate / look into X" is NOT a mute) | "block" (don't START a kind of work on its own — e.g. reviews only when someone asks in Teams)
+  "work": for block: "review_request" | "incident"
+  "except": for block: "teams" when asks in Teams may still start it
   "people": [names exactly as he wrote them]
   "match": "1-3 words naming the alerts to mute, as he wrote them, e.g. hedwig"
   "until": "today" | "tomorrow" | "forever" | "YYYY-MM-DD"
@@ -453,13 +501,13 @@ async def _model(text: str, cid: str = "") -> dict | None:
     return _last_json(out or "")
 
 
-def _last_json(out: str) -> dict | None:
+def _last_json(out: str, key: str = "op") -> dict | None:
     """The answer, even when a model reasons out loud first (20 Nov: a fallback
     brain wrote 300 tokens of analysis and was cut off before its JSON)."""
     for m in reversed(list(re.finditer(r"\{[^{}]*\}", out))):
         with contextlib.suppress(ValueError):
             d = json.loads(m.group(0))
-            if isinstance(d, dict) and "op" in d:
+            if isinstance(d, dict) and key in d:
                 return d
     return None
 
@@ -478,7 +526,7 @@ def from_model(d: dict, text: str, now: float | None = None) -> Intent | None:
     # don't send headwig alter, not CI" came back as "withdraw the hedwig mute".
     named = {r["ref"] for r in _withdraw_targets(text)}
     says_end = bool(_WD_ANY.search(text) or _WD_WEAK.search(text) or _WD_GRANT.search(text)
-                    or _WD_MUTE.search(text) or _WD_GRANT_DONT.search(text))
+                    or _WD_MUTE.search(text) or _WD_GRANT_DONT.search(text) or _WD_START.search(text))
     refs = tuple(str(x).upper() for x in (d.get("ids") or []) if str(x).upper() in named)
     if op == "withdraw":
         return Intent("withdraw", refs=refs, words=text, by="model") if refs and says_end else None
@@ -517,6 +565,12 @@ def from_model(d: dict, text: str, now: float | None = None) -> Intent | None:
                 words.append(w)                 # his typo, corrected to a word his alerts use
         if words and len(words) <= 4:
             intent = Intent("add", "mute", match=" ".join(words), until=until, words=text, by="model")
+    elif effect == "block":
+        # Only work his own words name: "reviews" for review_request, and so on.
+        work = str(d.get("work") or "")
+        if work and work == work_of(text):
+            intent = Intent("add", "block", match=work, until=until, words=text, by="model",
+                            scope=_start_scope(text))
     if intent is None:
         return None
     if op == "amend":
@@ -612,6 +666,14 @@ def apply(intent: Intent) -> Applied:
                  if caught else f"Nothing in the last 7 days mentions “{r.target}” — check the word.")
         lines.append(f"🔕 R{r.id}: {r._render()} — {_until_text(r.expires_at)}. {proof} "
                      f"Everything else still comes. “send {r.target} alerts again” ends it.")
+    elif intent.effect == "block":
+        scope = intent.scope or "except=teams"
+        r = policy.add("never", "start", intent.match, value=scope, words=intent.words,
+                       expires_at=intent.until)
+        what = policy.WORK_WORDS.get(r.target, r.target)
+        lines.append(f"🚫 R{r.id}: {r._render()} — {_until_text(r.expires_at)}. "
+                     f"Held where every self-started piece of work begins; you asking me still "
+                     f"runs it. “pick up {what} on your own again” ends it.")
     _remember(intent)
     store.record_outcome("rulebook", f"{intent.op} {intent.effect}", subject=intent.by,
                          detail=(", ".join(intent.people) or intent.match)[:200])
@@ -624,3 +686,77 @@ async def handle(text: str, cid: str = "") -> Applied | None:
     if intent is None:
         return None
     return apply(intent)
+
+
+# --- notes that can be held by code, and a check for the rest ------------------
+
+def adopt_notes() -> list[str]:
+    """Each note whose words read as a rule code can hold becomes that rule.
+
+    20 Nov: "only when the ask and ping in teams u do the review" was stored as
+    a note — read by brains, checked by nothing — and a colleague's GitHub review
+    request was picked up an hour later. Run at start, so a note saved before
+    a rule kind existed is held the moment it can be. Rules first, no model;
+    idempotent (an adopted note is dropped).
+    """
+    from . import policy
+    done = []
+    for n in policy.rules("note"):
+        intent = parse(n.words)
+        if intent is None or intent.op != "add" or intent.effect not in ("block", "mute"):
+            continue
+        out = apply(intent)
+        policy.drop(n.id)
+        done.append(f"R{n.id} → {out.line.splitlines()[0]}")
+        store.record_outcome("rulebook", "note adopted", subject=f"R{n.id}", detail=n.words[:200])
+    return done
+
+
+_VETO_PROMPT = """Arun gave his assistant these standing notes:
+{notes}
+
+The assistant is about to START this on its own — Arun did not ask for it:
+source: {source}
+task: {title}
+{brief}
+
+Does any note say the assistant must NOT start this? Only a clear prohibition counts;
+style or how-to notes never do. Output ONLY one line of JSON:
+{{"forbidden": true or false, "note": <the note's number, or null>}}"""
+
+
+def completion():
+    """The completion to use, resolved NOW — a check that runs later (after a
+    bench scenario has unpatched) must not reach for a live brain."""
+    from . import memory
+    return _complete or memory.cheap_complete
+
+
+async def note_veto(title: str, brief: str, source: str = "", complete=None) -> str:
+    """The note that forbids starting this self-started work, or "".
+
+    The last net under the typed rules: a note no kind can hold is still read
+    before Asta starts anything nobody asked for. A model that cannot answer
+    leaves things as they were (it starts), and says so in the outcomes.
+    """
+    from . import policy
+    notes = policy.rules("note")
+    if not notes:
+        return ""
+    numbered = "\n".join(f"{i}. {n.words}" for i, n in enumerate(notes, 1))
+    prompt = _VETO_PROMPT.format(notes=numbered, source=source or "a watcher",
+                                 title=title[:200], brief=(brief or "")[:600])
+    complete = complete or completion()
+    try:
+        out = await asyncio.wait_for(complete(prompt, max_tokens=400, paid_ok=True), timeout=40)
+    except Exception:                                            # noqa: BLE001
+        out = None
+    d = _last_json(out or "", key="forbidden")
+    if d is None:
+        store.record_outcome("rulebook", "note check unavailable", detail=title[:200])
+        return ""
+    if d.get("forbidden") is True:
+        with contextlib.suppress(TypeError, ValueError, IndexError):
+            return notes[int(d.get("note")) - 1].words
+        return notes[0].words if len(notes) == 1 else ""
+    return ""

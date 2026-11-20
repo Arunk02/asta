@@ -368,6 +368,11 @@ def adopt(args: dict) -> str:
     guardrails.append_standing(f"{said_on}: {rule.render() if rule.kind != 'note' else rule.words}")
     path = write_replay(rule, said_on)
     tail = " A replay now guards it." if path else ""
+    if rule.kind == "note":
+        # Said plainly, so a rule he expects code to hold is never silently a
+        # suggestion (20 Nov: his review rule was a note; nothing checked it).
+        tail += (" It's a note: brains follow it, and anything I start on my own is "
+                 "checked against it first — but no code rule holds it.")
     return f"📌 Standing rule {rule.id}: {rule.render()}.{tail}"
 
 

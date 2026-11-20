@@ -297,16 +297,26 @@ async def offer(call: dict) -> bool:
     if already_offered(call):
         return False
     note_offered(call)
+    # The ring time is part of the line. Every ring from one person reads the
+    # same otherwise, and notify's text dedups ("already on his phone", and the
+    # attention ledger keyed on the words) took the second ring for the first:
+    # one colleague rang 11 times in six weeks and reached his phone once.
+    import datetime as _dt
+    line = f"{describe(call)} ({_dt.datetime.now().strftime('%-I:%M%p').lower()})"
     o = offers.staged_write(
         "call_answer", {"speak": False},
-        describe(call),
-        f"{describe(call)} Say yes and I'll pick up and listen; "
+        line,
+        f"{line} Say yes and I'll pick up and listen; "
         f"say 'answer and talk' if you want me to speak to them.",
         "Answer it?", kind="call")
     store.record_outcome("incoming", "offered", subject=(call.get("who") or "")[:80],
                          detail=call.get("via", "poll"))
+    # considered: one push per ring is already decided above (`already_offered`),
+    # so the ledger must not re-judge a new ring as an old one.
+    # asks: it asks him something with a thirty-second answer — never batched.
     with contextlib.suppress(Exception):
-        await notify.notify(o.render(), "calls", urgency="direct")
+        await notify.notify(o.render(), "calls", urgency="direct",
+                            considered=True, asks=True)
     return True
 
 

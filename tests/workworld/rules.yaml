@@ -134,3 +134,32 @@ scenarios:
     checks:
       - said_contains: "standing rule"
       - said_lacks: "adding that to what I"
+
+  - id: a-rule-said-any-way-is-applied-and-withdrawn-by-name
+    title: 'Stand-ins, "same goes", an alert mute and "stop handling X" are applied before any brain'
+    why: >
+      20 Nov: "handle all Priya chats going forward without my approval" and
+      "same goes to Dev" were answered "noted" by the chat brain and nothing
+      was stored; "don't send hedwig alert" had no rule to hold it and a brain
+      dropped the CI draft instead. One reader now applies each, by code, and
+      says what is stored. Synthetic names.
+    twin: false
+    setup:
+      teams:
+        - {chat: "Priya Raman", text: "hi, quick one on the release"}
+        - {chat: "Dev Kumar", text: "ping me when free"}
+    steps:
+      - say: "Hereafter handle all Priya chats only one to one, going forward without my approval .."
+      - say: "Same goes to Dev as well"
+      - say: "Don't send hedwig alert"
+      - say: "my rules"
+      - say: "stop handling Priya"
+    checks:
+      - brain_calls: {kind: chat, count: 0}
+      - said_contains: "answer .Priya Raman. 1:1 directly"
+      - said_contains: "answer .Dev Kumar. 1:1 directly"
+      - said_contains: "Don't push me hedwig alerts"
+      - said_contains: "Ended"
+      - said_lacks: "Noted"
+      - permissions: {count: 1, contains: "Dev Kumar"}
+      - rules: {kind: mute, count: 1}

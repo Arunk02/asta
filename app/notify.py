@@ -397,7 +397,7 @@ def _ledger_priority(urgency: str, priority: int | None) -> int:
 async def notify(text: str, level: str = "info", urgency: str = "direct",
                  priority: int | None = None, *, source: str = "",
                  key: str = "", considered: bool = False, asked: bool = False,
-                 keys: tuple | list = (), asks: bool = False) -> dict:
+                 keys: tuple | list = (), asks: bool = False, kind: str = "") -> dict:
     """Record for the UI bell and fan out to WhatsApp + Telegram.
 
     urgency="direct"  — someone is actually addressing Arun (1:1 message, @mention,
@@ -422,6 +422,18 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
         return {"bell": True, "held": False, "rehearsal": True,
                 "whatsapp": False, "telegram": False}
     keys = tuple(keys or ()) + ((key,) if key else ())
+    # "Don't send hedwig alerts": a rule he made about what reaches his phone.
+    # Checked here, the one door every push goes through, for every alert feed
+    # (kind="alert", or a feed level — policy.FEED_LEVELS). A push that asks him
+    # something and his own ask coming back are never muted.
+    if not asked and not asks:
+        from . import policy
+        muted = policy.muted_push(text, level, kind=kind)
+        if muted is not None:
+            store.record_outcome("notify", "muted by his rule", subject=f"R{muted.id}",
+                                 detail=text[:160])
+            return {"bell": True, "held": False, "muted": muted.id,
+                    "whatsapp": False, "telegram": False}
     if not asked and already_on_phone(text):
         # A reminder he set may ring the same words again; nothing else may.
         store.record_outcome("attention", "already on his phone — not repeated",

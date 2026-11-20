@@ -9,6 +9,7 @@ was ignored in the next, and he had to say it again.
 A rule here is data with a kind:
 
     mute     stop investigating a kind of ask          act=investigate  target=incident
+             or stop pushing a kind of alert           act=push         target=hedwig
     never    do not do this act (to this target)       act=send         target=<person>
     prefer   a default he has stated                   act=workspace    value=booking
     note     a standing instruction for the brains     (routed through guardrails.md)
@@ -41,10 +42,16 @@ class Rule:
     value: str = ""
     unless_asked: bool = False
     words: str = ""
+    expires_at: float | None = None
 
     def render(self) -> str:
         """One line he can read and recognise as his rule."""
+        return self._render() + _until(self.expires_at)
+
+    def _render(self) -> str:
         tail = " unless you ask" if self.unless_asked else ""
+        if self.kind == "mute" and self.act == "push":
+            return f"Don't push me {self.target or 'anything'} alerts"
         if self.kind == "mute":
             return f"Don't investigate {self.target or 'anything'} asks{tail}"
         if self.kind == "never":
@@ -74,26 +81,51 @@ class Decision:
         return f"your standing rule: “{self.rule.render()}”" if self.rule else ""
 
 
+def _until(end: float | None) -> str:
+    if not end:
+        return ""
+    day = time.strftime("%Y-%m-%d", time.localtime(end))
+    if day == time.strftime("%Y-%m-%d"):
+        return f" (until {time.strftime('%H:%M', time.localtime(end))} today)"
+    return f" (until {time.strftime('%a %d %b %H:%M', time.localtime(end))})"
+
+
 def _row(r) -> Rule:
+    keys = r.keys() if hasattr(r, "keys") else []
     return Rule(id=r["id"], kind=r["kind"], act=r["act"], target=r["target"],
-                value=r["value"], unless_asked=bool(r["unless_asked"]), words=r["words"])
+                value=r["value"], unless_asked=bool(r["unless_asked"]), words=r["words"],
+                expires_at=r["expires_at"] if "expires_at" in keys else None)
 
 
-def rules(kind: str = "") -> list[Rule]:
+def rules(kind: str = "", now: float | None = None) -> list[Rule]:
+    """His live rules. One he gave an end ("till Monday") stops applying by itself."""
     with store._connect() as conn:
         q = "SELECT * FROM rules WHERE active=1" + (" AND kind=?" if kind else "") + " ORDER BY id"
         rows = conn.execute(q, (kind,) if kind else ()).fetchall()
-    return [_row(r) for r in rows]
+    t = time.time() if now is None else now
+    return [r for r in map(_row, rows) if not r.expires_at or t < float(r.expires_at)]
 
 
 def add(kind: str, act: str = "", target: str = "", value: str = "",
-        unless_asked: bool = False, words: str = "") -> Rule:
-    """Record a rule he approved. The same rule twice is one rule."""
+        unless_asked: bool = False, words: str = "",
+        expires_at: float | None = None) -> Rule:
+    """Record a rule he approved. The same rule twice is one rule.
+
+    A `note` is free text with no act, target or value, so those three alone
+    made every note "the same" as the first one: from 5 Oct each new note came
+    back as rule 7 ("Dont include asta name…") and was never stored (20 Nov).
+    Notes are the same only when their words are.
+    """
     if kind not in KINDS:
         raise ValueError(f"rule kind must be one of {', '.join(KINDS)}")
     act, target = (act or "").strip().lower(), (target or "").strip()
     for r in rules(kind):
-        if r.act == act and r.target.lower() == target.lower() and r.value == value:
+        if r.act == act and r.target.lower() == target.lower() and r.value == value \
+                and (kind != "note" or _same_words(r.words, words)):
+            if expires_at is None and r.expires_at:       # "till Monday", then "going forward"
+                with store._connect() as conn:
+                    conn.execute("UPDATE rules SET expires_at=NULL WHERE id=?", (r.id,))
+                return next(x for x in rules(kind) if x.id == r.id)
             return r
     if kind == "prefer":
         # A new default replaces the old one rather than competing with it.
@@ -101,11 +133,12 @@ def add(kind: str, act: str = "", target: str = "", value: str = "",
             conn.execute("UPDATE rules SET active=0 WHERE kind='prefer' AND act=?", (act,))
     with store._connect() as conn:
         cur = conn.execute(
-            "INSERT INTO rules (kind, act, target, value, unless_asked, words, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (kind, act, target, value, int(unless_asked), (words or "")[:500], time.time()))
+            "INSERT INTO rules (kind, act, target, value, unless_asked, words, created_at, "
+            "expires_at) VALUES (?,?,?,?,?,?,?,?)",
+            (kind, act, target, value, int(unless_asked), (words or "")[:500], time.time(),
+             expires_at))
         rid = cur.lastrowid
-    if kind == "mute" and target:
+    if kind == "mute" and target and act != "push":
         # The responder's own mute list is where its fast path looks; keep one truth.
         from . import responder
         responder.mute(target)
@@ -120,7 +153,8 @@ def drop(rule_id: int) -> bool:
             return False
         conn.execute("UPDATE rules SET active=0 WHERE id=?", (rule_id,))
     r = _row(row)
-    if r.kind == "mute" and r.target:
+    store.record_outcome("rule", "dropped", subject=str(rule_id), detail=r.render()[:200])
+    if r.kind == "mute" and r.target and r.act != "push":
         from . import responder
         responder.unmute(r.target)
     return True
@@ -137,13 +171,57 @@ def check(act: str, target: str = "", asked: bool = False) -> Decision:
     """May Asta do `act` (to `target`) now? The first rule that forbids it says why."""
     act = (act or "").lower()
     for r in rules():
-        if r.kind == "mute" and act == "investigate" and _matches(r.target, target):
+        if r.kind == "mute" and act == "investigate" and r.act != "push" \
+                and _matches(r.target, target):
             if not (asked and r.unless_asked):
                 return Decision(False, r)
         elif r.kind == "never" and r.act == act and _matches(r.target, target):
             if not (asked and r.unless_asked):
                 return Decision(False, r)
     return Decision(True)
+
+
+def _same_words(a: str, b: str) -> bool:
+    import re
+    norm = lambda s: re.sub(r"\W+", " ", (s or "").lower()).strip()  # noqa: E731
+    return norm(a) == norm(b)
+
+
+def _words_in(target: str, text: str) -> bool:
+    """Every word of the rule's target is a word of the text (plural or not)."""
+    import re
+    words = [w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+             for w in re.findall(r"[a-z0-9]{2,}", (target or "").lower())]
+    low = (text or "").lower()
+    return bool(words) and all(re.search(r"(?<![a-z0-9])" + re.escape(w) + r"(?:s|es)?(?![a-z0-9])", low)
+                               for w in words)
+
+
+#: Feeds whose pushes are alerts by nature. Mail is not one: the same "outlook"
+#: level carries a person's mail to him, so the alert path says kind="alert".
+FEED_LEVELS = ("ci", "health", "jira", "warn")
+
+
+def is_alert(level: str, kind: str = "") -> bool:
+    return kind == "alert" or (level or "") in FEED_LEVELS
+
+
+def muted_push(text: str, source: str = "", now: float | None = None,
+               kind: str = "") -> Rule | None:
+    """The rule that says this alert must not reach his phone, or None.
+
+    "Don't send hedwig alerts": every push goes through app/notify.py, so one
+    check there covers mail alerts, CI and any watcher added later. Only
+    alerts: on his real week a mute on "incident" would also have held eight
+    colleague asks and four task results that merely mentioned one.
+    """
+    if not is_alert(source, kind):
+        return None
+    hay = f"{source} {text or ''}"
+    for r in rules("mute", now):
+        if r.act == "push" and _words_in(r.target, hay):
+            return r
+    return None
 
 
 def prefer(act: str) -> str:

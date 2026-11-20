@@ -233,7 +233,8 @@ CREATE TABLE IF NOT EXISTS rules (
     unless_asked INTEGER NOT NULL DEFAULT 0,
     words TEXT NOT NULL DEFAULT '', -- what he actually said
     active INTEGER NOT NULL DEFAULT 1,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    expires_at REAL                -- NULL: until he withdraws it
 );
 CREATE TABLE IF NOT EXISTS evolutions (
     -- Every change Asta proposed to itself: what it would move, what the bench
@@ -381,6 +382,8 @@ CREATE TABLE IF NOT EXISTS result_cache (
 _ADDED_COLUMNS = {
     # A permission he gave "just for today" ends tonight (authority.standing_from_words).
     "authority": (("expires_at", "REAL"),),
+    # A rule can end by itself ("mute hedwig till Monday"), like a permission (app/rulebook.py).
+    "rules": (("expires_at", "REAL"),),
     "traces": (("cache_write_tokens", "INTEGER NOT NULL DEFAULT 0"),
                ("cost_usd", "REAL NOT NULL DEFAULT 0"),
                ("measured", "INTEGER NOT NULL DEFAULT 0"),

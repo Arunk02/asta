@@ -217,7 +217,8 @@ def answer_from_state(text: str) -> str:
         return ""
     from . import policy
     if _RULES.match(t):
-        return policy.summary()
+        from . import rulebook
+        return rulebook.summary()
     if _EVOLUTIONS.match(t):
         from . import evolve, settings
         return evolve.summary() + "\n\n" + settings.summary()

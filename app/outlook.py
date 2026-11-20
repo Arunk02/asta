@@ -936,7 +936,7 @@ async def watch_loop() -> None:
             release = []
         if release:
             text, urgency = alert_message(release)
-            await notify.notify(text, "outlook", urgency=urgency)
+            await notify.notify(text, "outlook", urgency=urgency, kind="alert")
 
 
 if __name__ == "__main__":

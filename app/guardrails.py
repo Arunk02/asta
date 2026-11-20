@@ -137,10 +137,33 @@ def block(audience: str) -> str:
     for name, body in sections().items():
         if audience in _audience_of(name):
             parts.append(f"### {name.title()}\n{_cut(body)}")
+    if audience == "chat":
+        live = _live_rules()
+        if live:
+            parts.append(live)
     if not parts:
         return ""
     return ("## Arun's guardrails (guardrails.md — his standing instructions; "
             "these override any default above)\n\n" + "\n\n".join(parts))
+
+
+def _live_rules() -> str:
+    """The rules and permissions code enforces right now, read from the table.
+
+    20 Nov: a brain answered two stand-ins "noted" with nothing stored. Brains
+    see what is actually live, and are told they cannot set one themselves.
+    """
+    try:
+        from . import rulebook
+        rows = rulebook.live()
+    except Exception:                                            # noqa: BLE001
+        return ""
+    if not rows:
+        return ""
+    lines = [f"- {r['ref']}: {r['text']}" for r in rows][:20]
+    return ("### Live rules (held by code)\n" + "\n".join(lines) +
+            "\nHis own message sets or ends a rule, at the front desk. Never say a rule, "
+            "permission or stand-in is noted, set or ended unless this list shows it.")
 
 
 STANDING = "Standing instructions"

@@ -83,7 +83,7 @@ def test_the_dispatcher_records_it_before_any_brain(monkeypatch):
     asyncio.run(main._dispatch(conv, "Whatever Pat asks respond, no need of my approval, just for today",
                                sink, "whatsapp", skip_new_gates=True))
     said = " ".join(p.get("text") or "" for p in sink.sent)
-    assert "Lee Pat" in said and "23:59" in said and "revoke" in said
+    assert "Lee Pat" in said and "23:59" in said and "stop handling Pat" in said
     assert authority.auto_reply_to(CHAT)
 
 

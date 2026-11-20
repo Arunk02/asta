@@ -4695,22 +4695,22 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             await sink.send({"type": "done", "tools": []})
         return None
 
-    # "Whatever Harika asks, respond — no approval needed, just for today": his
-    # permission, recorded here and now. Left to a brain on 6 Nov it was answered
-    # "noted" and nothing was recorded, so the next two replies waited for his yes.
-    from . import authority
-    granted = authority.standing_from_words(user_text or "")
-    if granted:
-        await sink.send({"type": "note", "text": (
-            f"✅ Until {time.strftime('%H:%M', time.localtime(granted.expires_at))} today I'll "
-            f"answer *{granted.target}* directly — no approval needed, and I'll tell you what "
-            f"went. Permission {granted.id}: say “revoke {granted.id}” to stop sooner.")})
+    # His rules, said any way: "handle Priya's chats going forward without my
+    # approval", "same goes to Dev", "don't send hedwig alerts", "stop handling
+    # Priya". Read and APPLIED here, before any brain — left to brains they were
+    # answered "noted" and nothing was stored (6 Nov, 20 Nov). app/rulebook.py.
+    from . import rulebook
+    ruled = await rulebook.handle(user_text or "", cid)
+    rule_heard = ruled is not None
+    if ruled is not None:
+        frontdesk.record("rule", f"{ruled.intent.op} {ruled.intent.effect}".strip())
+        await sink.send({"type": "note", "text": ruled.line})
         staged = loop.awaiting(cid)
-        if not (staged and answers.is_for(staged, granted.target)):
+        if not (ruled.people and staged and any(answers.is_for(staged, p) for p in ruled.people)):
             if channel == "web":
                 await sink.send({"type": "done", "tools": []})
             return None
-        # A draft to her is waiting: his words are also feedback on it, and the
+        # A draft to them is waiting: his words are also feedback on it, and the
         # brain now sends the revised reply under the permission.
 
     # "new chat" on a phone channel — the clean slate the web UI gets from its
@@ -5471,7 +5471,7 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
         if channel == "web":
             await sink.send({"type": "done", "tools": []})
         return None
-    if frontdesk.enabled():
+    if frontdesk.enabled() and not rule_heard:
         proposal = frontdesk.standing_instruction(user_text)
         if proposal:
             frontdesk.record("rule", proposal.kind)

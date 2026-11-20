@@ -75,9 +75,13 @@ def grant(act: str, target: str, per_day: int = 1, words: str = "",
         raise ValueError("a permission needs an act and who it is for")
     for g in grants():
         if g.act == act and g.target.lower() == target.lower():
-            if expires_at and g.expires_at and expires_at > g.expires_at:
-                with store._connect() as conn:          # "for today" again, later: extend it
-                    conn.execute("UPDATE authority SET expires_at=? WHERE id=?", (expires_at, g.id))
+            longer = (g.expires_at and (expires_at is None or expires_at > g.expires_at))
+            if longer or per_day > g.per_day:
+                # "for today", then "going forward": the wider word wins.
+                with store._connect() as conn:
+                    conn.execute("UPDATE authority SET expires_at=?, per_day=? WHERE id=?",
+                                 (expires_at if longer else g.expires_at,
+                                  max(g.per_day, int(per_day)), g.id))
                 return next(x for x in grants() if x.id == g.id)
             return g
     with store._connect() as conn:
@@ -111,12 +115,19 @@ def record_explicit_contact(target: str, per_day: int = 20) -> Grant:
     The instruction comes from the turn boundary, never from a tool's arguments.
     This is one exact 1:1 contact and messaging only.
     """
-    from . import capabilities, consent, scorecard
+    from . import capabilities, consent, rulebook, scorecard
     said = scorecard.his_words(capabilities.said_this_turn())
-    standing = re.compile(r"\b(?:going\s+forward|from\s+now\s+on|always|standing\s+permission)\b", re.I)
-    verbs = re.compile(r"\b(?:message|send|reply|replies|talk|conversations?|follow[ -]?ups?)\b", re.I)
+    # He says "Priya"; Teams has "Priya Raman". Resolve to the one contact his
+    # words name (20 Nov: the full-name check refused, and the brain said "noted").
+    found, _ = rulebook.people_in(target)
+    if len(found) == 1:
+        target = found[0]
+    standing = re.compile(r"\b(?:going\s+forward|from\s+now(?:\s+on)?|here\s*after|henceforth|always|"
+                          r"standing\s+permission)\b", re.I)
+    verbs = re.compile(r"\b(?:message|send|reply|replies|talk|conversations?|follow[ -]?ups?|"
+                       r"handl\w*|chats?|interactions?|answer\w*|respond\w*)\b", re.I)
     clauses = re.split(r"[;\n]|\bbut\b", said, flags=re.I)
-    if not any(standing.search(clause) and explicitly_names(clause, target) and any(
+    if not any(standing.search(clause) and rulebook.names_person(clause, target) and any(
             not consent._negated(clause, m.start()) for m in verbs.finditer(clause)) for clause in clauses):
         raise ValueError("No explicit standing messaging instruction for this exact contact in your message")
     if any(c in target for c in (",", "+", ";")):
@@ -132,54 +143,20 @@ def record_explicit_contact(target: str, per_day: int = 20) -> Grant:
 #: "for today", "just for today", "today only", "till evening", "until tonight".
 _TODAY = re.compile(r"\b(?:(?:just\s+|only\s+)?for\s+today|today\s+only|for\s+the\s+day|"
                     r"(?:till|until)\s+(?:evening|tonight|eod|end\s+of\s+(?:the\s+)?day))\b", re.I)
-#: He waives his approval: "without my approval", "don't need my approval",
-#: "no need of my approval", "talk with her directly", "respond directly".
-_WAIVER = re.compile(
-    r"\b(?:without\s+(?:my\s+)?(?:approval|asking(?:\s+me)?|my\s+yes)|"
-    r"(?:don'?t|do\s+not|dont|no)\s+(?:need|require[ds]?|required)?\s*(?:of\s+)?(?:me\s+|my\s+)?approval|"
-    r"no\s+need\s+(?:of|for)\s+(?:my\s+)?approval|"
-    r"(?:talk|respond|reply|answer|speak)\s+(?:with\s+(?:her|him|them)\s+)?directly)\b", re.I)
-
-
-def _contact_named(words: str) -> list[str]:
-    """His 1:1 contacts that `words` names by any one of their names."""
-    from . import answers, chat_watch
-    said = set(answers.name_tokens(words))
-    # A person's chat is one where that person wrote: the 1:1 shows their name as
-    # both the chat and the sender. Meeting chats never do — and their titles
-    # ("… changes for billing") matched everyday words in his message (6 Nov,
-    # found on live data after deploy: 14 candidates, so nothing was granted).
-    with store._connect() as conn:
-        people = [r[0] for r in conn.execute(
-            "SELECT DISTINCT chat FROM teams_messages WHERE chat <> '' AND sender = chat").fetchall()]
-    people = [c for c in people if not any(ch in c for ch in (",", "+")) and not chat_watch.is_from_him(c)]
-    return [c for c in people
-            if any(len(t) >= 3 and t in said for t in answers.name_tokens(c))]
-
-
 def standing_from_words(words: str, now: float | None = None) -> Grant | None:
     """A permission he gave in so many words, for today, to one 1:1 contact.
 
     6 Nov: "Whatever Harika asks respond don't required me approval, talk with
-    her directly just for today" got "noted" — and the next two replies were
-    staged for his yes. The standing rule above wanted "going forward" and her
-    full Teams name ("Nakka Harika"); and there was no way to say "for today".
-    Read from HIS words at the turn boundary, never from a tool's arguments.
-    One person (named by any of their names, unique among his chats), messaging
-    only, ending at midnight. None when it is anything less clear than that.
+    her directly just for today" got "noted". Kept as the narrow legacy entry;
+    the reading itself is app/rulebook.py, the one reader of his rules.
     """
-    said = " ".join((words or "").split())
-    if not _TODAY.search(said) or not _WAIVER.search(said):
+    from . import rulebook
+    intent = rulebook.parse(words or "", now)
+    if intent is None or intent.op != "add" or intent.effect != "allow" \
+            or len(intent.people) != 1 or not _TODAY.search(" ".join((words or "").split())):
         return None
-    # "don't reply to her without my approval" says the opposite of a waiver.
-    if re.search(r"\b(?:don'?t|do\s+not|never)\s+(?:reply|respond|send|message|talk)\b", said, re.I):
-        return None
-    named = _contact_named(said)
-    if len(named) != 1:
-        return None
-    day = time.localtime(time.time() if now is None else now)
-    end = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, 23, 59, 0, 0, 0, -1))
-    return grant("send", named[0], per_day=50, words=said, expires_at=end)
+    return grant("send", intent.people[0], per_day=50, words=" ".join((words or "").split()),
+                 expires_at=intent.until)
 
 
 def revoke(grant_id: int) -> bool:

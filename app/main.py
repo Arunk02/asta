@@ -215,6 +215,10 @@ async def startup() -> None:
     # Mutes he gave before standing rules existed, shown and enforced as rules.
     with contextlib.suppress(Exception):
         policy.adopt_legacy()
+    # Notes whose words a rule kind can now hold become that rule (app/rulebook.py).
+    with contextlib.suppress(Exception):
+        from . import rulebook
+        rulebook.adopt_notes()
     # Follows shipped work until the PR merges or closes. Without it a task
     # ended at "PR raised" and everything after — CI, review, the merge — landed
     # with nothing that knew which task it belonged to.

@@ -1415,14 +1415,16 @@ def _notes_about(text: str, who: str) -> bool:
 def spawn(title: str, prompt: str, kind: str = "analysis",
           workspace: str | None = None, teams_chat: str = "",
           executor: str = "", context_from: int | None = None,
-          pipeline: str = "", priority: int = 2) -> dict:
+          pipeline: str = "", priority: int = 2, self_started: str = "") -> dict:
     """Create the task row and fire the worker; returns immediately.
 
     executor:     '' = auto (copilot, or claude while copilot's quota is down).
     context_from: id of a finished task whose result is injected as trusted
                   evidence — a code task after an inquiry skips re-discovery.
     pipeline:     '' = auto (jira-key tickets → full solo, ad-hoc → micro),
-                  or an explicit 'micro' / 'full'."""
+                  or an explicit 'micro' / 'full'.
+    self_started: where work Asta starts on its own came from ("github",
+                  "teams-chat") — checked against his notes before it runs."""
     if kind not in TASK_TIMEOUT:
         raise ValueError(f"unknown task kind '{kind}' (analysis|code|teams_draft)")
     if kind == "teams_draft" and not teams_chat:
@@ -1511,10 +1513,47 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
         if _agent_for(t) and _graph().enabled():
             _graph().start(t["id"])
             return t
+    if self_started:
+        from . import policy
+        if policy.rules("note"):
+            from . import rulebook
+            guard = asyncio.create_task(
+                _start_unless_a_note_forbids(t, self_started, rulebook.completion()))
+            _running[t["id"]] = guard
+            guard.add_done_callback(
+                lambda _j, tid=t["id"]: _running.get(tid) is _j and _running.pop(tid, None))
+            return t
+    return _start(t)
+
+
+def _start(t: dict) -> dict:
+    """Fire the worker for a created task row."""
     job = asyncio.create_task(_worker(t["id"]))
     _running[t["id"]] = job
-    job.add_done_callback(lambda _j, tid=t["id"]: _running.pop(tid, None))
+    job.add_done_callback(lambda _j, tid=t["id"]: _running.get(tid) is _j and _running.pop(tid, None))
     return t
+
+
+async def _start_unless_a_note_forbids(t: dict, source: str, complete=None) -> None:
+    """Work nobody asked for, read against his notes before it runs.
+
+    20 Nov: his note "only when they ping me in Teams do the review" sat in the
+    rules table while a colleague's GitHub review request was worked anyway. Typed
+    rules stop such work at the responder; this catches what only a note says.
+    """
+    from . import notify, rulebook
+    note = await rulebook.note_veto(t.get("title") or "", t.get("prompt") or "", source,
+                                    complete=complete)
+    if not note:
+        _start(t)
+        return
+    store.update_task(t["id"], status="cancelled", finished_at=time.time(),
+                      result=f"Not started — your rule: “{note}”")
+    store.record_outcome("task", "held by his note", subject=str(t["id"]), detail=note[:200])
+    with contextlib.suppress(Exception):
+        await notify.notify(f"⏸ Didn't start “{(t.get('title') or '')[:80]}” — your rule: "
+                            f"“{note[:160]}”. Ask me directly if you want it done.",
+                            "task", urgency="fyi", considered=True)
 
 
 def _graph():

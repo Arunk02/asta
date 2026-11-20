@@ -379,7 +379,9 @@ async def github_review_requests() -> list[dict]:
     picked up like a colleague's "please review" (11 Nov: auto-pickup without
     being told). Once per PR head; a new commit is a new request."""
     import asyncio as _aio
-    from . import review
+    from . import policy, review
+    if not policy.check("start", "review_request", source="github").ok:
+        return []                         # his rule: reviews only when asked — not even a look
     repos = _workspace_repos()
     if not repos:
         return []
@@ -1053,7 +1055,7 @@ def unmute(kind: str) -> str:
 
 def should_respond(kind: str, priority: int | None, key: str,
                    now: float | None = None, broadcast: bool = False,
-                   sent_at: float | None = None) -> str:
+                   sent_at: float | None = None, source: str = "") -> str:
     """"" when it should run, otherwise the reason it must not.
 
     Returned as a REASON rather than a bool because every one of these is a
@@ -1070,6 +1072,13 @@ def should_respond(kind: str, priority: int | None, key: str,
         return f"he asked me not to investigate {kind} asks"
     from . import policy
     ruled = policy.check("investigate", kind)
+    if not ruled.ok:
+        return ruled.why
+    # Work Asta would START on its own — "do the review only when they ping me in
+    # Teams" (20 Nov: a note, which this door never read, so a colleague's GitHub
+    # review request was picked up anyway). Every self-started investigation
+    # passes here, whatever watcher found it.
+    ruled = policy.check("start", kind, source=source)
     if not ruled.ok:
         return ruled.why
     # A review request stays a request while its PR is open, and "@Everyone pls
@@ -1276,7 +1285,7 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     # silently dropped another person's report or a changed build late in it.
     key = key or attention.key_for(source, who, hashlib.sha256(text.encode()).hexdigest())
     why_not = should_respond(kind, priority, key, now=time.time(),
-                             broadcast=is_broadcast(who, text), sent_at=sent_at)
+                             broadcast=is_broadcast(who, text), sent_at=sent_at, source=source)
     if why_not:
         # Written down, not dropped. should_respond returns a REASON so that "why
         # didn't you check that one?" has an answer — and on 29 Sep, a day with no
@@ -1417,7 +1426,8 @@ def respond(source: str, who: str, text: str, priority: int | None = None,
     t = tasks.spawn(title_for(kind, who, text), brief,
                     "analysis",                     # read-only. never code.
                     workspace or None, teams_chat=reply_to,
-                    priority=1 if kind == "incident" else (priority if priority is not None else 2))
+                    priority=1 if kind == "incident" else (priority if priority is not None else 2),
+                    self_started=source or "a watcher")
     # Counted when a task actually starts — a duplicate stopped by the dedup
     # once used up a slot of the old cap (30 Sep: 3 of 4 were phantoms).
     _note_started(time.time())

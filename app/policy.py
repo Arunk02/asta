@@ -10,6 +10,8 @@ A rule here is data with a kind:
 
     mute     stop investigating a kind of ask          act=investigate  target=incident
              or stop pushing a kind of alert           act=push         target=hedwig
+    never    ... or starting a kind of work on its own act=start        target=review_request
+             only from some sources                    value=except=teams (asked in Teams still runs)
     never    do not do this act (to this target)       act=send         target=<person>
     prefer   a default he has stated                   act=workspace    value=booking
     note     a standing instruction for the brains     (routed through guardrails.md)
@@ -54,6 +56,12 @@ class Rule:
             return f"Don't push me {self.target or 'anything'} alerts"
         if self.kind == "mute":
             return f"Don't investigate {self.target or 'anything'} asks{tail}"
+        if self.kind == "never" and self.act == "start":
+            what = WORK_WORDS.get(self.target, self.target or "any work")
+            src = _scope(self.value)
+            where = (f" — only when asked in {src['except'].title()}" if src.get("except")
+                     else f" from {src['only']}" if src.get("only") else "")
+            return f"Don't start {what} on your own{where}"
         if self.kind == "never":
             who = f" {self.target}" if self.target else ""
             verb = {"send": "Never message", "call": "Never call", "push": "Never push",
@@ -167,15 +175,48 @@ def _matches(rule_target: str, target: str) -> bool:
     return bool(b) and (a in b or b in a)
 
 
-def check(act: str, target: str = "", asked: bool = False) -> Decision:
-    """May Asta do `act` (to `target`) now? The first rule that forbids it says why."""
+#: The work kinds a `start` rule can name, as he would say them.
+WORK_WORDS = {"review_request": "reviews", "pr_review": "PR questions", "incident": "incidents",
+              "debug": "debugging", "port": "ports", "ask": "investigations"}
+
+
+def _scope(value: str) -> dict:
+    """"except=teams" / "only=github" → {"except": "teams"}; other values → {}."""
+    out = {}
+    for part in (value or "").split(";"):
+        k, _, v = part.partition("=")
+        if k.strip() in ("except", "only") and v.strip():
+            out[k.strip()] = v.strip().lower()
+    return out
+
+
+def _applies_to(value: str, source: str) -> bool:
+    """A rule scoped by where the ask came from. "except=teams": anywhere but a
+    Teams ask ("only when they ping me in Teams"). "only=github": GitHub only.
+    An unscoped rule applies everywhere."""
+    src = _scope(value)
+    s = (source or "").lower()
+    if src.get("except") and s.startswith(src["except"]):
+        return False
+    if src.get("only") and not s.startswith(src["only"]):
+        return False
+    return True
+
+
+def check(act: str, target: str = "", asked: bool = False, source: str = "") -> Decision:
+    """May Asta do `act` (to `target`) now? The first rule that forbids it says why.
+
+    `source` is where the ask came from ("github", "teams-chat", "outlook"), for
+    rules he scoped by it: "review only when someone pings me in Teams".
+    """
     act = (act or "").lower()
     for r in rules():
         if r.kind == "mute" and act == "investigate" and r.act != "push" \
                 and _matches(r.target, target):
             if not (asked and r.unless_asked):
                 return Decision(False, r)
-        elif r.kind == "never" and r.act == act and _matches(r.target, target):
+        elif r.kind == "never" and r.act == act and _matches(r.target, target) \
+                and _applies_to(r.value, source):
             if not (asked and r.unless_asked):
                 return Decision(False, r)
     return Decision(True)

@@ -325,3 +325,83 @@ def test_a_stand_in_reaches_the_dispatcher_without_a_brain(monkeypatch):
     _, said = _dispatch(monkeypatch, "Hereafter handle all Priya chats going forward without my approval")
     assert "Priya Raman" in said and "until you withdraw it" in said
     assert authority.auto_reply_to(PRIYA)
+
+
+# --- found by the live-data battery, 20 Nov ------------------------------------
+
+def test_a_two_letter_topic_is_never_typo_fixed():
+    """"mute CI alerts" was stored as "cli" — a word near "ci" in his alerts."""
+    store.add_notification("⚠️ Still broken after 5 min:\n• cli tool crashed", "outlook")
+    _apply("mute CI alerts till tomorrow")
+    assert [r.target for r in policy.rules("mute")] == ["ci"]
+    assert _apply("send CI alerts again").intent.op == "withdraw"
+
+
+def test_same_goes_after_a_withdrawal_withdraws(_model_says_none):
+    _apply("handle all Priya chats going forward without my approval")
+    _apply("handle all Dev chats going forward without my approval")
+    _apply("stop handling Dev")
+    done = _apply("Same goes to Priya")
+    assert done is not None and done.intent.op == "withdraw" and authority.grants() == []
+
+
+def test_same_goes_for_another_alert_source():
+    store.add_notification("❌ jira sync failed for board X", "jira")
+    _apply("Don't send hedwig alert")
+    _apply("same for jira")
+    assert sorted(r.target for r in policy.rules("mute")) == ["hedwig", "jira"]
+
+
+def test_till_a_weekday_ends_that_day():
+    _apply("handle Priya chats till Friday without my approval")
+    end = time.localtime(authority.grants()[0].expires_at)
+    assert end.tm_wday == 4 and (end.tm_hour, end.tm_min) == (23, 59)
+
+
+def test_a_model_that_reasons_first_still_gives_its_answer():
+    prose = ('Let me think. The message grants {temporary} permission.\n'
+             '{"op": "add", "effect": "allow", "people": ["Priya"], "until": "forever"}')
+    assert rulebook._last_json(prose)["op"] == "add"
+    assert rulebook._last_json("no json here") is None
+
+
+def test_the_example_shows_the_alert_not_its_header():
+    done = _apply("Don't send hedwig alert")
+    assert "Hedwig Alert (firing)" in done.line and "Still broken" not in done.line
+    assert done.line.count("until you withdraw it") == 1
+
+
+def test_a_model_cannot_end_a_rule_his_words_do_not_end(monkeypatch):
+    """The correction "not CI, hedwig" came back as "withdraw the hedwig mute"."""
+    _apply("Don't send hedwig alert")
+    rid = policy.rules("mute")[0].id
+    _model_says(monkeypatch, {"op": "withdraw", "ids": [f"R{rid}"]})
+    assert _apply("I said don't send headwig alter, not CI failure still u have to send") is None
+    assert [r.target for r in policy.rules("mute")] == ["hedwig"]
+
+
+def test_an_amend_never_ends_the_rule_it_restates(monkeypatch):
+    _apply("Don't send hedwig alert")
+    rid = policy.rules("mute")[0].id
+    _model_says(monkeypatch, {"op": "amend", "effect": "mute", "match": "headwig", "ids": [f"R{rid}"]})
+    _apply("I said don't send headwig alter, not CI failure still u have to send")
+    assert [(r.id, r.target) for r in policy.rules("mute")] == [(rid, "hedwig")]
+
+
+def test_dont_need_to_run_it_by_me_is_a_waiver():
+    _apply("you don't need to run Dev replies by me anymore, just answer him")
+    assert _live_targets() == [DEV]
+
+
+def test_same_for_another_source_keeps_only_the_source():
+    store.add_notification("❌ jira sync failed for board X", "jira")
+    _apply("Don't send hedwig alert")
+    _apply("same for jira")
+    assert "same jira" not in [r.target for r in policy.rules("mute")]
+
+
+def test_dont_check_is_not_a_mute_even_if_a_model_says_so(monkeypatch):
+    """A hosted model read "don't check on incidents going forward" as a push mute."""
+    _model_says(monkeypatch, {"op": "add", "effect": "mute", "match": "incidents"})
+    assert _apply("Don't check on any incidents going forward unless I ask you to monitor") is None
+    assert policy.rules("mute") == []

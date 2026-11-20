@@ -370,7 +370,7 @@ class World:
         # tests/test_bench_doubles.py, which compares the two signatures.
         async def notify_fn(text, level="info", urgency="direct", priority=None, *,
                             source="", key="", considered=False, asked=False,
-                            keys=(), asks=False):
+                            keys=(), asks=False, kind=""):
             self.pushes.append({"text": text, "level": level, "urgency": urgency})
             store.add_notification(text, level)
             return {"whatsapp": True}

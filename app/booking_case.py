@@ -709,25 +709,94 @@ _CASE = re.compile(r"This is about a specific case — ([A-Z0-9, ]+?), in (?:the
                    r"the lower environments|an environment nobody named)")
 
 
+#: A regression counts when a failure follows it this soon — the pass-then-fail.
+FAILURE_FOLLOWS_SECONDS = 1800
+SNAPSHOT_SECONDS = 900
+#: His words for "read it again": the snapshot is not reused.
+_RECHECK = re.compile(r"\b(?:re-?check|check again|fresh(?:ly)?|latest|re-?fetch|re-?read)\b", re.I)
+
+
+def failing_regressions(regs: list[dict], decided: list[dict]) -> list[dict]:
+    """The regressions that matter: a value that itself moved to a failure, or one
+    a logged failure verdict followed within FAILURE_FOLLOWS_SECONDS. A run that
+    lost something and nothing failed after it is history, not the cause."""
+    verdicts = [r["ts"] for r in decided if _VERDICT.search(r.get("message") or "")]
+    keep = []
+    for g in regs:
+        moved_bad = any("→" in item for item in g["items"])
+        followed = any(0 <= v - g["at"] <= FAILURE_FOLLOWS_SECONDS for v in verdicts)
+        if moved_bad or followed:
+            keep.append(g)
+    return keep
+
+
+def regressions_for(booking: str) -> dict:
+    """{"env", "at", "items": [...]} stored for this booking, or {}."""
+    import json
+    from . import store
+    try:
+        return json.loads(store.kv_get(f"case_regressions:{booking.upper()}") or "{}")
+    except ValueError:
+        return {}
+
+
+def snapshot_for(booking: str, now: float | None = None) -> dict:
+    """{"env", "at", "text"} — the evidence read for this booking, while fresh."""
+    import json
+    import time
+    from . import store
+    try:
+        snap = json.loads(store.kv_get(f"case_snapshot:{booking.upper()}") or "{}")
+    except ValueError:
+        return {}
+    now = time.time() if now is None else now
+    return snap if snap and now - float(snap.get("at") or 0) < SNAPSHOT_SECONDS else {}
+
+
+def _remember(booking: str, env: str, regs: list[dict], text: str) -> None:
+    import json
+    import time
+    from . import store
+    now = time.time()
+    store.kv_set(f"case_regressions:{booking.upper()}",
+                 json.dumps({"env": env, "at": now, "items": regs}))
+    store.kv_set(f"case_snapshot:{booking.upper()}",
+                 json.dumps({"env": env, "at": now, "text": text[:12000]}))
+
+
 async def _decided_and_received(booking: str, env: str, minutes: int) -> list[str]:
     """What each service logged as decided, and every event the booking's workflows
     received — the two reads a precise answer was built from (18 Nov). Without them
-    a busy booking's trail stopped at the row cap and a pass-then-fail read as fine."""
+    a busy booking's trail stopped at the row cap and a pass-then-fail read as fine.
+
+    Also kept for later: the regressions a failure followed (checked against the
+    answer, answers.ignores_regression) and the text itself, so feedback on the
+    answer reuses what was read instead of fetching it again."""
     import asyncio
     from . import temporal
 
-    async def received() -> str:
+    async def received() -> dict:
         try:
-            return temporal.render_booking_events(await temporal.booking_events(env, booking))
+            return await temporal.booking_events(env, booking)
         except Exception:                                      # noqa: BLE001
-            return ""
+            return {}
     try:
-        got = await asyncio.wait_for(asyncio.gather(
-            outcome_lines(booking, env, hours=max(1, minutes // 60)), received(),
+        decided, events = await asyncio.wait_for(asyncio.gather(
+            decision_rows(booking, env, hours=max(1, minutes // 60)), received(),
             return_exceptions=True), 40)
     except asyncio.TimeoutError:
         return []
-    return [g for g in got if isinstance(g, str) and g]
+    decided = decided if isinstance(decided, list) else []
+    events = events if isinstance(events, dict) else {}
+    parts = [render_decisions(booking, env, decided),
+             temporal.render_booking_events(events) if events else ""]
+    parts = [p for p in parts if p]
+    regs = failing_regressions(temporal.regressions(events.get("runs") or []), decided)
+    try:
+        _remember(booking, env, regs, "\n\n".join(parts))
+    except Exception:                                          # noqa: BLE001
+        pass
+    return parts
 
 
 async def evidence(prompt: str, minutes: int = 4320, workspace: str = "") -> str:
@@ -736,13 +805,23 @@ async def evidence(prompt: str, minutes: int = 4320, workspace: str = "") -> str
     about one booking, or the logs cannot be read (the brief already says how to
     report that)."""
     import asyncio
+    import time
     from . import grafana
+    m = _CASE.search(prompt or "")
+    found = [i.strip() for i in m.group(1).split(",") if i.strip()][:2] if m else []
+    # Read once per case: a correction or a follow-up on the same booking reuses
+    # what was read minutes ago, so both answers stand on the same data — unless
+    # it is stale or he asked for a fresh look.
+    snap = snapshot_for(found[0]) if found and not _RECHECK.search(prompt or "") else {}
+    if snap:
+        return (f"\n\n[Evidence Asta read for {found[0]} at "
+                f"{time.strftime('%H:%M', time.localtime(snap['at']))} — the same snapshot the "
+                f"earlier answer used; fetch again only for something it lacks or a later "
+                f"time.]\n{snap['text']}")
     if "[Prior task #" in (prompt or "") or "Previous investigation for this case" in (prompt or ""):
         return ""
-    m = _CASE.search(prompt or "")
     if not m or not grafana.enabled():
         return ""
-    found = [i.strip() for i in m.group(1).split(",") if i.strip()][:2]
     env = m.group(2) or ""
     envs = [env] if env else (["sit", "uat", "preprod"] if "lower" in m.group(0)
                               else grafana.envs())
@@ -919,6 +998,25 @@ async def outcome_lines(booking: str, env: str, hours: int = 72) -> str:
 
     Read in code before the turn, so the brain starts from what the system said
     it did, never from what a status field suggests it must have done."""
+    return render_decisions(booking, env, await decision_rows(booking, env, hours))
+
+
+def render_decisions(booking: str, env: str, rows: list[dict]) -> str:
+    from . import debugkit
+    if not rows:
+        return ""
+    shown = _decisions_to_show(rows)
+    body = "\n".join(f"  {debugkit.stamp(r['ts'])} [{r.get('app') or ''}] "
+                     f"{r.get('logger') or ''} :: {' '.join((r.get('message') or '').split())[:300]}"
+                     for r in shown)
+    more = (f"\n  … {len(rows) - len(shown)} more between the first and the newest"
+            if len(rows) > len(shown) else "")
+    return (f"What the system logged as DECIDED for {booking} in {env} (oldest first) — "
+            f"the outcome is what these say, not what a status field implies:\n{body}{more}")
+
+
+async def decision_rows(booking: str, env: str, hours: int = 72) -> list[dict]:
+    """The decided-outcome log rows themselves, oldest first, deduplicated."""
     import asyncio
     from datetime import datetime, timedelta, timezone
     from . import debugkit
@@ -942,16 +1040,7 @@ async def outcome_lines(booking: str, env: str, hours: int = 72) -> str:
         if _OUTCOME.search(msg) and not _ECHO.search(msg) and key not in seen:
             seen.add(key)
             rows.append(r)
-    if not rows:
-        return ""
-    shown = _decisions_to_show(rows)
-    body = "\n".join(f"  {debugkit.stamp(r['ts'])} [{r.get('app') or ''}] "
-                     f"{r.get('logger') or ''} :: {' '.join((r.get('message') or '').split())[:300]}"
-                     for r in shown)
-    more = (f"\n  … {len(rows) - len(shown)} more between the first and the newest"
-            if len(rows) > len(shown) else "")
-    return (f"What the system logged as DECIDED for {booking} in {env} (oldest first) — "
-            f"the outcome is what these say, not what a status field implies:\n{body}{more}")
+    return rows
 
 
 async def turn_evidence(text: str) -> str:

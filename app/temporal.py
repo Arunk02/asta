@@ -509,48 +509,65 @@ def _got_worse(old: dict, new: dict, same_event: bool) -> list[str]:
     return out
 
 
-def _worse_summary(runs: list[dict]) -> list[str]:
-    """One line per run that is worse than the run of the same workflow before it —
-    anything it lost or moved backward on — with the event received just before.
-
-    Any kind of regression, not one kind: 19 Nov it was booking references a
-    pricing update did not carry (the line was in the list and one of two answers
-    still missed it); next time it may be a status, a date or a TMS milestone."""
+def regressions(runs: list[dict]) -> list[dict]:
+    """Every run that is worse than the run of the same workflow before it, as data:
+    when, which run and event, what it lost or moved backward on, and the event the
+    booking received just before it. One source for the summary the brain reads and
+    for the check on its answer (answers.ignores_regression)."""
     last: dict[str, dict] = {}
-    found: list[tuple[int, list[str]]] = []
+    out: list[dict] = []
     for i, r in enumerate(runs):
         state, prev = _state(r), last.get(r["type"])
         if prev is not None:
             worse = _got_worse(prev["state"], state,
                                prev["event"] == r["facts"].get("eventName"))
             if worse:
-                found.append((i, worse))
+                after = _event_before(runs, i)
+                out.append({"started": r["started"], "at": _seconds(r["started"]),
+                            "run": r["type"], "event": r["facts"].get("eventName") or "",
+                            "items": worse,
+                            "after": after[1]["facts"]["eventName"] if after else "",
+                            "after_started": after[1]["started"] if after else "",
+                            "gap": int(after[0]) if after else None})
         last[r["type"]] = {"state": state, "event": r["facts"].get("eventName")}
+    return out
+
+
+def _event_before(runs: list[dict], i: int) -> tuple[float, dict] | None:
+    """The event the booking received just before run i, within ten minutes —
+    what it received itself winning over a run it set off in the same second."""
+    r, nearest = runs[i], None
+    for j in range(i - 1, -1, -1):
+        e = runs[j]
+        gap = _seconds(r["started"]) - _seconds(e["started"])
+        if gap > 600 or (nearest and gap > nearest[0] + 1):
+            break
+        if e["type"] != r["type"] and e["facts"].get("eventName"):
+            if nearest is None or (e["type"] == "bookingEventsWorkflow"
+                                   and nearest[1]["type"] != "bookingEventsWorkflow"):
+                nearest = (gap, e)
+    return nearest
+
+
+def regression_line(g: dict) -> str:
+    before = (f" — {g['gap']}s after {g['after']} ({g['after_started'][11:19]})"
+              if g.get("after") else "")
+    return (f"{g['started'].replace('T', ' ')} {g['run']} · {g['event'] or '-'}: "
+            f"{'; '.join(g['items'][:8])}{before}")
+
+
+def _worse_summary(runs: list[dict]) -> list[str]:
+    """The regressions, first in the list, where they cannot be missed.
+
+    Any kind of regression, not one kind: 19 Nov it was booking references a
+    pricing update did not carry (the line was in the list and one of two answers
+    still missed it); next time it may be a status, a date or a TMS milestone."""
+    found = regressions(runs)
     if not found:
         return []
-    lines = ["What got worse between runs — where a pass can turn into a fail; compare what "
-             "the event before it carried with what was there before:"]
-    for i, worse in found[-5:]:
-        r = runs[i]
-        before = ""
-        nearest = None
-        for j in range(i - 1, -1, -1):
-            e = runs[j]
-            gap = _seconds(r["started"]) - _seconds(e["started"])
-            if gap > 600 or (nearest and gap > nearest[0] + 1):
-                break
-            if e["type"] != r["type"] and e["facts"].get("eventName"):
-                # What the booking itself received wins over a run it set off in
-                # the same second (the activity plan echoing the update).
-                if nearest is None or (e["type"] == "bookingEventsWorkflow"
-                                       and nearest[1]["type"] != "bookingEventsWorkflow"):
-                    nearest = (gap, e)
-        if nearest:
-            gap, e = nearest
-            before = f" — {int(gap)}s after {e['facts']['eventName']} ({e['started'][11:19]})"
-        lines.append(f"  ⚠ {r['started'].replace('T', ' ')} {r['type']} · "
-                     f"{r['facts'].get('eventName') or '-'}: {'; '.join(worse[:8])}{before}")
-    return lines
+    return (["What got worse between runs — where a pass can turn into a fail; compare "
+             "what the event before it carried with what was there before:"]
+            + [f"  ⚠ {regression_line(g)}" for g in found[-5:]])
 
 
 def render_booking_events(found: dict) -> str:

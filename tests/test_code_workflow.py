@@ -15,6 +15,7 @@ Each of those is tested here against the thing that would otherwise go wrong.
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 
@@ -501,6 +502,18 @@ async def test_astas_own_repo_is_never_branched_even_if_named(monkeypatch):
     assert called == []
 
 
+def _checkout_head() -> tuple[str, str]:
+    def rev_parse(*args: str) -> str:
+        return subprocess.check_output(
+            ["git", "rev-parse", *args, "HEAD"], cwd=tasks.ROOT, text=True,
+        ).strip()
+
+    return rev_parse("--abbrev-ref"), rev_parse()
+
+
+_HEAD_AT_COLLECTION = _checkout_head()
+
+
 def test_the_suite_cannot_move_this_repos_branch():
     """A test run must leave HEAD exactly where it found it.
 
@@ -508,10 +521,7 @@ def test_the_suite_cannot_move_this_repos_branch():
     anywhere in the suite checked out a new branch in the working copy the tests
     were being read from.
     """
-    import subprocess
-    head = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                          cwd=tasks.ROOT, capture_output=True, text=True).stdout.strip()
-    assert head != "", "could not read HEAD"
-    import re
-    assert not re.match(r"feature/(asta-|.+-\d+$)", head), (
-        f"the suite branched this repo to {head!r} — _prepare_branches escaped its guard")
+    head = _checkout_head()
+    assert head == _HEAD_AT_COLLECTION, (
+        f"the suite changed this checkout from {_HEAD_AT_COLLECTION!r} to {head!r}"
+    )

@@ -972,7 +972,7 @@ def pet_activity(after: int | None, limit: int, statuses: tuple[str, ...]) -> tu
             ).fetchall()
         placeholders = ", ".join("?" for _ in statuses)
         tasks = conn.execute(
-            "SELECT id, status, COALESCE((SELECT created_at FROM task_events "
+            "SELECT id, kind, status, title, prompt, COALESCE((SELECT created_at FROM task_events "
             "WHERE task_id=tasks.id AND kind='status' ORDER BY id DESC LIMIT 1), "
             "finished_at, started_at, created_at) AS changed_at "
             f"FROM tasks WHERE status IN ({placeholders}) "

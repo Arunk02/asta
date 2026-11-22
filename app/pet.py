@@ -8,7 +8,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from . import delivery, notify, policy, rehearsal, store, voice_mode
+from . import booking_case, delivery, followup, notify, policy, rehearsal, store, voice_mode
 
 PAGE_SIZE = 100
 SPEECH_MAX_AGE = 60
@@ -43,6 +43,39 @@ def allow_speech(notification_id: int, alert_kind: str) -> None:
             _speech.popitem(last=False)
 
 
+def _task_kind(task: dict) -> str:
+    status, kind = task["status"], task["kind"]
+    if kind == "teams_draft":
+        return {"awaiting_approval": "draft_approval", "sending": "sending",
+                "sent": "message_sent", "send_uncertain": "send_uncertain"}.get(
+                    status, _TASK_STATES.get(status, "alert"))
+    if status == "running":
+        if kind == "code":
+            return "coding"
+        if kind == "analysis" and booking_case.investigating(task["title"], task["prompt"]):
+            return "debugging"
+    return _TASK_STATES.get(status, "alert")
+
+
+def _waiting_replies() -> list[dict]:
+    results = []
+    for tracker in followup.list_open():
+        task_id = store.kv_get(f"followup_draft:{tracker['id']}")
+        if not task_id or not task_id.isdecimal():
+            continue
+        task = store.get_task(int(task_id))
+        if (not task or task["kind"] != "teams_draft" or task["status"] != "sent"
+                or task["teams_chat"] != tracker.get("person")):
+            continue
+        sent_at = next((e["created_at"] for e in reversed(store.task_events(task["id"]))
+                        if e["kind"] == "status" and e["detail"] == "sending → sent"), None)
+        if sent_at is None or sent_at <= max(tracker.get("created_at", 0), tracker.get("heard_until", 0)):
+            continue
+        if followup.their_word({**tracker, "heard_until": sent_at}) is None:
+            results.append({"id": task["id"], "kind": "waiting_reply", "changed_at": sent_at})
+    return results
+
+
 def _event(row: dict) -> dict:
     text, level = row["text"], row["level"]
     event = {"id": row["id"], "kind": "alert", "level": level, "seen": bool(row["seen"]),
@@ -62,8 +95,7 @@ def _event(row: dict) -> dict:
         event["task_id"] = int(match[1])
         if task := store.get_task(event["task_id"]):
             # Approval and questions must reflect what is still waiting now.
-            kind = _TASK_STATES.get(task["status"])
-            event["kind"] = kind or "alert"
+            event["kind"] = _task_kind(task)
             if text.startswith("❌"):
                 event["kind"] = "blocked"
     elif level in {"teams", "mail", "outlook", "email"}:
@@ -72,11 +104,12 @@ def _event(row: dict) -> dict:
 
 
 def _task(row: dict) -> dict:
-    return {"id": row["id"], "kind": _TASK_STATES[row["status"]], "changed_at": row["changed_at"]}
+    return {"id": row["id"], "kind": _task_kind(row), "changed_at": row["changed_at"]}
 
 
 def activity(after: int | None) -> dict:
-    rows, unseen, seen_through, latest, tasks = store.pet_activity(after, PAGE_SIZE, tuple(_TASK_STATES))
+    statuses = (*_TASK_STATES, "sending", "send_uncertain")
+    rows, unseen, seen_through, latest, tasks = store.pet_activity(after, PAGE_SIZE, statuses)
     now = time.time()
     can_speak = speech_available()
     with _speech_lock:
@@ -89,7 +122,7 @@ def activity(after: int | None) -> dict:
         "items": [_event(row) for row in rows],
         "unseen": unseen, "seen_through": seen_through, "latest": latest,
         "cursor": rows[-1]["id"] if rows and after is not None else latest,
-        "tasks": [_task(row) for row in tasks],
+        "tasks": [_task(row) for row in tasks] + _waiting_replies(),
         "speech_available": can_speak,
         "speech": speech,
     }

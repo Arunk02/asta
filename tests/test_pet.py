@@ -5,7 +5,7 @@ from collections import OrderedDict
 import pytest
 from fastapi.testclient import TestClient
 
-from app import attention, ci_watch, delivery, main, notify, pet, policy, store, voice_mode
+from app import attention, ci_watch, delivery, followup, main, notify, pet, policy, store, tasks, teams_bridge, voice_mode
 
 
 @pytest.fixture
@@ -69,7 +69,7 @@ def test_pet_reactions_follow_task_state_and_notification_type(client, monkeypat
     question = store.add_notification("❓ Question: synthetic", "action")
 
     initial = client.get("/api/pet/activity").json()
-    assert initial["tasks"][0]["kind"] == "running"
+    assert initial["tasks"][0]["kind"] == "coding"
     store.update_task(task_id, status="awaiting_approval")
     activity = client.get("/api/pet/activity").json()
     events = {item["id"]: item for item in activity["items"]}
@@ -85,6 +85,54 @@ def test_pet_reactions_follow_task_state_and_notification_type(client, monkeypat
     assert client.get("/api/pet/activity").json()["tasks"][0]["kind"] == "ready"
     store.update_task(task_id, status="failed", finished_at=time.time())
     assert client.get("/api/pet/activity").json()["tasks"][0]["kind"] == "blocked"
+
+
+def test_pet_distinguishes_coding_investigation_and_other_work(client, monkeypatch):
+    monkeypatch.setenv("ASTA_PET", "1")
+    code = store.create_task("Implement change", "code", "synthetic prompt", None)
+    debug = store.create_task("Trace what failed", "analysis", "Debug the synthetic failure", None)
+    report = store.create_task("Summarize notes", "analysis", "synthetic prompt", None)
+    page = client.get("/api/pet/activity").json()
+    assert {row["id"]: row["kind"] for row in page["tasks"]} == {
+        code["id"]: "coding", debug["id"]: "debugging", report["id"]: "running",
+    }
+    assert "synthetic" not in str(page)
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_pet_tracks_real_followup_draft_and_delivery_transitions(client, monkeypatch, confirmed):
+    monkeypatch.setenv("ASTA_PET", "1")
+    monkeypatch.setattr(followup, "authorized", lambda row: False)
+    tracker = followup.track("Synthetic follow-up", ["https://github.com/example/demo/pull/1"], "Example Person")
+    tracker["last_moved_at"] -= followup.STALL_SECONDS + 1
+    note = asyncio.run(followup._nudge(tracker, 1, time.time()))
+    assert "Draft ready" in note
+    draft = store.list_tasks()[0]
+    task_id = draft["id"]
+    store.add_notification(note, "task")
+    ready = client.get("/api/pet/activity").json()
+    assert [t["kind"] for t in ready["tasks"]] == ["draft_approval"]
+    assert ready["items"][0]["kind"] == "draft_approval"
+
+    async def capture_send(person, message):
+        sending = client.get("/api/pet/activity").json()
+        assert [t["kind"] for t in sending["tasks"]] == ["sending"]
+        if not confirmed:
+            raise RuntimeError("synthetic missing receipt")
+
+    monkeypatch.setattr(teams_bridge, "send_message", capture_send)
+    asyncio.run(tasks.approve(task_id))
+    result = client.get("/api/pet/activity").json()
+    assert "Example Person" not in str(result)
+    if not confirmed:
+        assert [t["kind"] for t in result["tasks"]] == ["send_uncertain"]
+        assert result["items"][-1]["kind"] == "send_uncertain"
+        return
+
+    assert [t["kind"] for t in result["tasks"]] == ["waiting_reply"]
+    assert result["items"][-1]["kind"] == "message_sent"
+    monkeypatch.setattr(followup, "their_word", lambda row: ("reply", time.time(), "synthetic reply"))
+    assert client.get("/api/pet/activity").json()["tasks"] == []
 
 
 def test_pet_speech_uses_delivery_eligibility_without_changing_channels(client, monkeypatch):

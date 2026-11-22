@@ -1,26 +1,45 @@
 import Foundation
 
 enum Reaction: String, Decodable {
-    case idle, running, approval, question, ready, blocked, reminder, message, alert
+    case idle, appeared, running, coding, debugging, approval, question, ready, blocked, reminder, message, alert
     case ciFailed = "ci_failed"
     case ciPassed = "ci_passed"
+    case draftApproval = "draft_approval"
+    case sending
+    case messageSent = "message_sent"
+    case sendUncertain = "send_uncertain"
+    case waitingReply = "waiting_reply"
+
+    var isOngoing: Bool {
+        switch self {
+        case .running, .coding, .debugging, .sending, .waitingReply: return true
+        default: return false
+        }
+    }
 
     var priority: Int {
         switch self {
-        case .approval, .question: return 5
-        case .blocked, .ciFailed: return 4
+        case .approval, .question, .draftApproval: return 5
+        case .blocked, .ciFailed, .sendUncertain: return 4
         case .reminder: return 3
-        case .ready, .ciPassed, .message, .alert: return 2
-        case .running: return 1
-        case .idle: return 0
+        case .ready, .ciPassed, .message, .messageSent, .alert: return 2
+        case .running, .coding, .debugging, .sending, .waitingReply: return 1
+        case .idle, .appeared: return 0
         }
     }
 
     var label: String {
         switch self {
-        case .idle: return "All caught up"
+        case .idle, .appeared: return "All caught up"
         case .running: return "Asta is working"
+        case .coding: return "Coding"
+        case .debugging: return "Investigating"
         case .approval: return "Approval needed"
+        case .draftApproval: return "Message draft to review"
+        case .sending: return "Sending approved draft"
+        case .messageSent: return "Message sent"
+        case .sendUncertain: return "Delivery unconfirmed"
+        case .waitingReply: return "Waiting for a reply"
         case .question: return "Question for you"
         case .ready: return "Result ready"
         case .blocked: return "Task blocked"
@@ -35,8 +54,16 @@ enum Reaction: String, Decodable {
     var line: String {
         switch self {
         case .idle: return ""
+        case .appeared: return "Asta here. Ready when you are."
         case .running: return "I’m on it. I’ll call you when there’s news."
+        case .coding: return "I’m working on the code now."
+        case .debugging: return "I’m tracing what happened."
         case .approval: return "Your call. There’s something ready for you to review."
+        case .draftApproval: return "The message draft is ready for your review."
+        case .sending: return "I’m sending the approved message."
+        case .messageSent: return "The message was sent."
+        case .sendUncertain: return "I couldn’t confirm delivery. Check the chat before retrying."
+        case .waitingReply: return "The follow-up landed. I’m waiting for a reply."
         case .question: return "Quick question before I keep going."
         case .ready: return "Done! I’ve got the result ready."
         case .blocked: return "I hit a snag. The details are in Asta."
@@ -97,11 +124,23 @@ struct PetFocus {
     var kind: Reaction = .idle
     var notice: PetNotice?
     var task: PetTask?
+    var sourceID: Int? { task?.id ?? notice.map { -$0.id } }
 
-    static func choose(notices: [PetNotice], tasks: [PetTask], since: Double, seenThrough: Int) -> Self {
-        let notice = notices.filter { $0.id > seenThrough && !$0.seen && $0.createdAt >= since }
+    static func choose(notices: [PetNotice], tasks: [PetTask], now: Double, seenThrough: Int) -> Self {
+        let active = tasks.contains { $0.kind.isOngoing }
+        let since = now - 300
+        let recent = now - 12
+        let notice = notices.filter {
+            $0.id > seenThrough && !$0.seen && $0.createdAt >= since &&
+                (!active || $0.kind.priority >= 4 || $0.createdAt >= recent)
+        }
             .max { ($0.kind.priority, $0.id) < ($1.kind.priority, $1.id) }
-        let task = tasks.max { ($0.kind.priority, $0.changedAt) < ($1.kind.priority, $1.changedAt) }
+        let working = tasks.contains { $0.kind.isOngoing && $0.kind != .waitingReply }
+        let task = tasks.filter {
+            (!active || $0.kind != .ready || $0.changedAt >= recent) &&
+                (!working || $0.kind != .waitingReply)
+        }
+            .max { ($0.kind.priority, $0.changedAt) < ($1.kind.priority, $1.changedAt) }
         if let task, task.kind.priority >= (notice?.kind.priority ?? 0) {
             return Self(kind: task.kind, task: task)
         }

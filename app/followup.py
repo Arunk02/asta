@@ -291,6 +291,7 @@ async def _nudge(row: dict, blockers: int, now: float) -> str:
             + " ".join(row["urls"]))
     t = store.create_task(f"Nudge {who} — {row['goal'][:60]}", "teams_draft",
                           body, None, teams_chat=who)
+    store.kv_set(f"followup_draft:{row['id']}", str(t["id"]))
     store.update_task(t["id"], status="awaiting_approval", result=body)
     if automatic:
         result = await tasks.approve(t["id"])

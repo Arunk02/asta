@@ -10,6 +10,7 @@ final class PetModel: ObservableObject {
     @Published private(set) var seenThrough = 0
     @Published private(set) var status: String?
     @Published private(set) var snoozed = false
+    @Published private(set) var reactionSince = Date()
     @Published private(set) var speechMode: SpeechMode
     @Published var showingActivity = false
 
@@ -24,6 +25,7 @@ final class PetModel: ObservableObject {
     private var pending = [SpeechEvent]()
     private var speechIDs = [Int: Date]()
     private var connectionFailures = 0
+    private var greeted = false
 
     init() {
         speechMode = SpeechMode(rawValue: UserDefaults.standard.string(forKey: "petSpeech") ?? "") ?? .silent
@@ -33,7 +35,10 @@ final class PetModel: ObservableObject {
 
     func start() {
         guard loop == nil else { return }
+        reactionSince = Date()
+        focus = PetFocus(kind: .appeared)
         loop = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1200))
             while let self, !Task.isCancelled {
                 await self.poll()
                 let delay = self.connectionFailures == 0 ? 5 : min(60, 5 * self.connectionFailures)
@@ -48,6 +53,7 @@ final class PetModel: ObservableObject {
         cursor = nil
         tasks = nil
         speechIDs = [:]
+        greeted = false
         notices = []
         focus = PetFocus()
         unseen = 0
@@ -121,15 +127,25 @@ final class PetModel: ObservableObject {
             }
             let stamp = now.timeIntervalSince1970
             if let tasks, connectionFailures == 0 {
-                for task in page.tasks where task.kind == .running && tasks[task.id] != .running
+                for task in page.tasks where task.kind.isOngoing && tasks[task.id] != task.kind
                     && task.changedAt >= stamp - 60 {
-                    reactions.append(SpeechEvent(id: -task.id, kind: .running))
+                    reactions.append(SpeechEvent(id: -task.id, kind: task.kind))
+                }
+            }
+            if !greeted {
+                greeted = true
+                if speechMode == .talkative && reactions.isEmpty {
+                    reactions.append(SpeechEvent(id: 0, kind: .appeared))
                 }
             }
             tasks = Dictionary(uniqueKeysWithValues: page.tasks.map { ($0.id, $0.kind) })
             unseen = page.unseen
             seenThrough = page.seenThrough
-            focus = .choose(notices: notices, tasks: page.tasks, since: stamp - 300, seenThrough: seenThrough)
+            let next = PetFocus.choose(notices: notices, tasks: page.tasks, now: stamp, seenThrough: seenThrough)
+            if focus.kind != next.kind || focus.sourceID != next.sourceID {
+                reactionSince = Date()
+            }
+            focus = next
             status = nil
             connectionFailures = 0
             speak(reactions, at: Date(), available: page.speechAvailable, eligible: Set(page.speech.map(\.id)))
@@ -166,71 +182,6 @@ final class PetModel: ObservableObject {
     }
 }
 
-private struct Clown: View {
-    let kind: Reaction
-    let still: Bool
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24, paused: still || kind == .idle)) { timeline in
-            let t = still ? 0 : timeline.date.timeIntervalSinceReferenceDate
-            ZStack {
-                Circle().fill(Color(red: 0.96, green: 0.89, blue: 0.77)).frame(width: 78, height: 78)
-                HStack(spacing: 22) {
-                    Circle().fill(.orange).frame(width: 23)
-                    Circle().fill(.orange).frame(width: 23)
-                }.offset(y: -3)
-                Ellipse().fill(Color(red: 1, green: 0.96, blue: 0.89))
-                    .frame(width: 46, height: 48).offset(y: 3)
-                HStack(spacing: 12) {
-                    Capsule().frame(width: 3, height: 6)
-                    Capsule().frame(width: 3, height: 6)
-                }.foregroundStyle(Color(red: 0.19, green: 0.13, blue: 0.23)).offset(y: -1)
-                Circle().fill(.red).frame(width: 9, height: 9).offset(y: 7)
-                Path { path in
-                    path.move(to: CGPoint(x: 1, y: 1))
-                    path.addQuadCurve(to: CGPoint(x: 15, y: 1), control: CGPoint(x: 8, y: 12))
-                }.stroke(.pink, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .frame(width: 16, height: 8).offset(y: 17)
-                VStack(spacing: -3) {
-                    RoundedRectangle(cornerRadius: 3).fill(.purple).frame(width: 19, height: 15)
-                    Capsule().fill(.purple).frame(width: 30, height: 5)
-                }.rotationEffect(.degrees(-14)).offset(x: -4, y: -23)
-                Image(systemName: "bowtie.fill").font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.teal).offset(y: 27)
-                if kind == .running {
-                    ForEach(0..<3) { index in
-                        let angle = t * 3 + Double(index) * 2.1
-                        Circle().fill([Color.teal, .pink, .yellow][index]).frame(width: 6, height: 6)
-                            .offset(x: cos(angle) * 31, y: -28 + sin(angle) * 11)
-                    }
-                } else if let symbol {
-                    Image(systemName: symbol).font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(kind == .blocked || kind == .ciFailed ? Color.red : Color.purple)
-                        .padding(5).background(.white, in: Circle())
-                        .rotationEffect(.degrees(sin(t * 5) * 8))
-                        .offset(x: 29, y: 22 + sin(t * 4) * 3)
-                }
-            }
-            .rotationEffect(.degrees(kind == .ready || kind == .ciPassed ? sin(t * 3) * 11 : 0))
-        }
-        .frame(width: 88, height: 88)
-        .accessibilityHidden(true)
-    }
-
-    private var symbol: String? {
-        switch kind {
-        case .approval: return "list.clipboard"
-        case .question: return "questionmark"
-        case .blocked, .ciFailed: return "flag.fill"
-        case .ready, .ciPassed: return "sparkles"
-        case .reminder: return "clock.fill"
-        case .message: return "envelope.fill"
-        case .alert: return "bell.fill"
-        case .idle, .running: return nil
-        }
-    }
-}
-
 private struct PetView: View {
     @ObservedObject var model: PetModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -240,7 +191,8 @@ private struct PetView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
                 Button(action: model.openCurrent) {
-                    Clown(kind: model.focus.kind, still: reduceMotion || model.snoozed)
+                    AstaSprite(kind: model.focus.kind, started: model.reactionSince,
+                               still: reduceMotion || model.snoozed)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Open in Asta")
@@ -326,7 +278,7 @@ final class PetApp: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "face.smiling", accessibilityDescription: "Asta Pet")
+        item.button?.image = NSImage(systemSymbolName: "book.closed.fill", accessibilityDescription: "Asta Pet")
         self.item = item
         if !defaults.bool(forKey: "petDisabled") {
             model.start()

@@ -7,9 +7,11 @@ build_dir=$(mktemp -d)
 trap 'rm -rf "$build_dir"' EXIT
 
 mkdir -p "$build_dir/Asta Pet.app/Contents/MacOS"
+mkdir -p "$build_dir/Asta Pet.app/Contents/Resources"
+cp "$source_dir/Resources/asta-sprites.png" "$build_dir/Asta Pet.app/Contents/Resources/asta-sprites.png"
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos13.0" \
   -module-cache-path "$build_dir/module-cache" \
-  "$source_dir/PetActivity.swift" "$source_dir/AstaPet.swift" \
+  "$source_dir/PetActivity.swift" "$source_dir/AstaSprite.swift" "$source_dir/AstaPet.swift" \
   -o "$build_dir/Asta Pet.app/Contents/MacOS/AstaPet"
 
 cat > "$build_dir/Asta Pet.app/Contents/Info.plist" <<'PLIST'

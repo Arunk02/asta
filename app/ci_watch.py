@@ -434,7 +434,8 @@ async def announce(note: str) -> None:
         # Recovery is good news, and good news does not interrupt: an ambient
         # push still reached his phone once he stepped away — 7 of the 19 CI
         # pushes to 22 Sep. The digest is where it belongs.
-        store.add_notification(note, "ci")
+        notification_id = store.add_notification(note, "ci")
+        notify.permit_pet_speech(notification_id, "alert")
         digest.add(note, source="ci", why="good news does not interrupt")
 
 

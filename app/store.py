@@ -937,6 +937,51 @@ def list_notifications(limit: int = 30, unseen_only: bool = False) -> list[dict]
     return [dict(r) for r in rows]
 
 
+def get_notification(notification_id: int) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM notifications WHERE id=?", (notification_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def unseen_notifications_by_id(ids: tuple[int, ...]) -> list[dict]:
+    if not ids:
+        return []
+    placeholders = ", ".join("?" for _ in ids)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM notifications WHERE seen=0 AND id IN ({placeholders}) ORDER BY id", ids
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def pet_activity(after: int | None, limit: int, statuses: tuple[str, ...]) -> tuple:
+    with _connect() as conn:
+        latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notifications").fetchone()[0]
+        unseen, seen_through = conn.execute(
+            "SELECT COUNT(CASE WHEN seen=0 THEN 1 END), COALESCE(MAX(CASE WHEN seen=1 THEN id END), 0) "
+            "FROM notifications WHERE id<=?", (latest,)
+        ).fetchone()
+        if after is None or after > latest:
+            rows = conn.execute(
+                "SELECT * FROM notifications WHERE id<=? ORDER BY id DESC LIMIT ?", (latest, limit)
+            ).fetchall()[::-1]
+        else:
+            rows = conn.execute(
+                "SELECT * FROM notifications WHERE id>? AND id<=? ORDER BY id LIMIT ?",
+                (after, latest, limit),
+            ).fetchall()
+        placeholders = ", ".join("?" for _ in statuses)
+        tasks = conn.execute(
+            "SELECT id, status, COALESCE((SELECT created_at FROM task_events "
+            "WHERE task_id=tasks.id AND kind='status' ORDER BY id DESC LIMIT 1), "
+            "finished_at, started_at, created_at) AS changed_at "
+            f"FROM tasks WHERE status IN ({placeholders}) "
+            "AND (status NOT IN ('done', 'failed') OR finished_at>=?) ORDER BY id DESC",
+            (*statuses, time.time() - 300),
+        ).fetchall()
+    return [dict(row) for row in rows], unseen, seen_through, latest, [dict(task) for task in tasks]
+
+
 def mark_notifications_seen() -> None:
     with _connect() as conn:
         conn.execute("UPDATE notifications SET seen=1 WHERE seen=0")

@@ -394,6 +394,15 @@ def _ledger_priority(urgency: str, priority: int | None) -> int:
     return attention.P_TODAY if urgency == "direct" else attention.P_FYI
 
 
+def permit_pet_speech(notification_id: int, kind: str = "") -> None:
+    """Offer the pet an update independently of the existing delivery channels."""
+    if os.environ.get("ASTA_PET"):
+        with contextlib.suppress(Exception):
+            from . import pet
+            if pet.enabled():
+                pet.allow_speech(notification_id, kind)
+
+
 async def notify(text: str, level: str = "info", urgency: str = "direct",
                  priority: int | None = None, *, source: str = "",
                  key: str = "", considered: bool = False, asked: bool = False,
@@ -415,7 +424,7 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
     which is exactly how reminders "sent" for days while landing only in a bell
     no one was looking at.
     """
-    store.add_notification(text, level)  # the bell always gets everything
+    notification_id = store.add_notification(text, level)  # the bell always gets everything
     from . import rehearsal
     if rehearsal.active():
         # A live test's pushes are the test's, not news for his phone.
@@ -497,8 +506,12 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
 
     # Voice on: what matters is SAID, instead of buzzing his phone — unless it
     # asks him something and the mic is off, when it goes both ways.
+    voice_owns_update = False
     with contextlib.suppress(Exception):
         from . import voice_mode
+        if os.environ.get("ASTA_PET"):
+            with contextlib.suppress(Exception):
+                voice_owns_update = voice_mode.on()
         if await voice_mode.update(text, level, urgency):
             return {"bell": True, "spoken": True, "whatsapp": False, "telegram": False}
 
@@ -542,6 +555,10 @@ async def notify(text: str, level: str = "info", urgency: str = "direct",
                 return {"bell": True, **await flush_held(reason="waited long enough")}
             store.kv_set(HELD_KEY, json.dumps(held))
             return {"bell": True, "held": True, "whatsapp": False, "telegram": False}
+    # The pet can speak only after the notification policy has admitted the event.
+    # Its availability must never change how the regular channels deliver it.
+    if not voice_owns_update:
+        permit_pet_speech(notification_id, kind)
     # Something went out moments ago and this is not breakage: let it ride along
     # with the next flush. One buzz carrying four items beats four buzzes.
     # Never for something that ASKS him (a draft to send, a plan to approve, an

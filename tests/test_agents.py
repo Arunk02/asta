@@ -62,7 +62,7 @@ def test_pipelines_leak_nothing_from_the_real_registry(name):
 def test_override_dir_wins(tmp_path, monkeypatch):
     (tmp_path / "micro.md").write_text("custom micro")
     monkeypatch.setenv("ASTA_AGENTS_DIR", str(tmp_path))
-    assert agents.load("micro") == "custom micro"
+    assert agents.load("micro").startswith("custom micro")   # + the coding skill
     assert "CONTEXT CHECK" in agents.load("solo"), "unoverridden ones still resolve"
 
 
@@ -153,3 +153,33 @@ def test_a_brain_is_never_handed_whatever_is_on_our_stdin():
             stdin = next((k for k in call.keywords if k.arg == "stdin"), None)
             assert stdin is not None and ast.unparse(stdin.value).endswith("DEVNULL"), \
                 f"{name}:{call.lineno} spawns a brain that inherits stdin"
+
+
+# --- Round 5: one coding skill for both code pipelines ---------------------------
+
+@pytest.mark.parametrize("name", ["solo", "micro"])
+def test_code_pipelines_carry_the_coding_skill_once(name):
+    body = agents.load(name)
+    assert body.count("## Before you commit") == 1
+    assert body.count("## Amnesia guard") == 1
+    assert "Anchored reads only" in body
+    assert "{SKILL_DIR}" not in body
+    assert str(agents.CODING_SKILL.parent / "references" / "workflows.md") in body
+
+
+def test_read_only_pipelines_do_not(tmp_path):
+    assert "## Before you commit" not in agents.load("explore")
+    assert "## Before you commit" not in agents.load("bootstrap")
+
+
+def test_the_executor_file_is_the_composed_text(monkeypatch, tmp_path):
+    monkeypatch.setattr(agents, "COMPOSED_DIR", tmp_path)
+    f = agents.file_for("solo")
+    assert f.parent == tmp_path and f.read_text() == agents.load("solo")
+    assert agents.file_for("explore") == agents.path_for("explore")
+
+
+def test_every_reference_the_skill_names_exists():
+    import re
+    for ref in re.findall(r"(/\S+/references/\S+\.md)", agents.coding_skill()):
+        assert __import__("pathlib").Path(ref).is_file(), ref

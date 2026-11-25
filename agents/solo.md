@@ -17,19 +17,6 @@ during a plan invocation; the server dispatches the next stage.
 from cache, so *fewer turns* is the single biggest cost lever — bigger than being
 clever inside a turn. Read once, batch, and never re-derive.
 
-## Branch
-Asta has already cut your branch and checked it out in every repo of your own
-worktree — the "THIS RUN" block names it. Commit there. Never `git checkout -b`,
-never switch branch, and never report yourself blocked for want of a branch: you
-have one. If the change reaches a repo you have no checkout for, SAY SO by name
-and stop — Asta prepares it and continues this same task. Do not start a new one.
-
-The one exception is an EXISTING branch or PR. When he says the work belongs on a
-branch or pull request that already exists ("pick that PR", "fix it on the existing
-branch", "update the same PR"), that is an instruction, not a question for him: find
-it (`gh pr list --search`, `git branch -r`), `git fetch`, `git switch` this worktree
-to it, commit there, and name the branch in your summary.
-
 ## Boot
 Load orientation in ONE call if the workspace provides a boot command (Asta
 passes it under "This run"). Otherwise read the context index once. Never `cat`
@@ -49,14 +36,8 @@ most once — intent here, code-grounded questions later at the plan gate. Never
 ask here what reading the code would tell you.
 
 ## Stage 1 — discovery
-Ask the resolver which files answer this task. Then:
-- **Anchored reads only.** Open at the cited `source:line` with a range (±20).
-  Never read a whole large file — it dumps thousands of tokens that re-cache on
-  every later turn.
-- **Read each path once.** Already opened it this session? Reuse it. Never re-open.
-- **Batch.** Related greps/finds go in ONE call joined with `;`, each capped
-  with `| head -40`. One grep per turn is the classic way to burn a budget.
-- Never dump 100+ match lines into context.
+Read the way the coding skill says (resolver first, anchored reads, batched
+greps). Discovery ends when you can name every file the change touches.
 
 ## Stage 2 — plan gate
 State what changes, in which files, why, and how it will be verified.
@@ -72,41 +53,11 @@ and END; you will be resumed with the answer.
 Smallest change satisfying the plan. Follow the workspace's conventions. If the
 plan proves wrong, say so and stop — do not silently substitute a different one.
 
-## Before you commit — what a reviewer must never be the one to find
-- Every value from a request, a payload, the database or another service can be
-  missing. Guard every lookup on it (some collection types throw on a missing key
-  or a null lookup), and add a test that passes the missing value.
-- Never remove or rename a public method, a field in a message or schema, an enum
-  value, a topic or a stored field without keeping the old one working: callers
-  you cannot see still use it. A change to a durable workflow needs versioning so
-  running instances still replay.
-- Say in one line what behaviour changes and for whom, and keep a test proving
-  the behaviour you did NOT mean to change is unchanged.
-- Build, and run the tests you touched, before committing. Zero tests run is a
-  failure, not a pass.
-
 ## Stage 4 — verify
-- **Never let raw build output into the conversation.** Redirect and summarise:
-  `<cmd> > /tmp/build.log 2>&1; tail -5 /tmp/build.log`; on failure
-  `grep -E "ERROR|FAIL|Tests run" /tmp/build.log | tail -20`.
-- **Scoped tests only** for the touched modules. The full suite is CI's job.
-- Report failures verbatim. Never claim green without having seen green.
+Build and run the scoped tests the way the coding skill says. Report the
+verbatim result.
 
 ## Stage 5 — record
 Something durable learned — a build quirk, a required flag, a non-obvious
 dependency? Append one line to the workspace's lessons file. That is the only
 file you may write outside the change itself.
-
-## Amnesia guard
-Before redoing ANY work, especially after a context compaction, check
-`git log --oneline -3` and `git status`. A commit from today matching this task
-is your OWN finished work — report it done. Never re-discover or re-implement it.
-
-## Never
-- Never push, open a PR, or write to the issue tracker. Asta ships, after review.
-- Never mention AI, Claude, Copilot or Asta in a commit message or PR body, and
-  never add a Co-Authored-By or "Generated with" trailer. Plain
-  `git commit -m "<msg>"`.
-- Never commit unrelated changes. Never amend or force-push.
-- Keep narration lean: gate lines, `git diff --stat`, short findings. Do not
-  restate the plan or echo file contents back.

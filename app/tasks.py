@@ -2127,7 +2127,7 @@ def _with_pipeline(pipeline: str, prompt: str, task_id: str = "") -> str:
 
 def _agent_file(kind: str, pipeline: str = "full") -> str:
     """Path to the pipeline body, for executors that take a file."""
-    p = agents.path_for(_pipeline_name(kind, pipeline))
+    p = agents.file_for(_pipeline_name(kind, pipeline))
     return str(p) if p else ""
 
 
@@ -2434,6 +2434,60 @@ async def _observed_cli(task_id: int, executor: str, prompt: str, **kwargs) -> s
         return await cli.one_shot(prompt, **kwargs)
 
 
+def fresh_followups() -> bool:
+    """ASTA_FRESH_FOLLOWUP — a follow-up on finished work starts a new session
+    from a short handoff instead of resuming the old one (default on)."""
+    return os.environ.get("ASTA_FRESH_FOLLOWUP", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def mark_fresh_followup(task_id: int) -> None:
+    """The next leg of this finished task starts a new session (see _code_leg).
+
+    25 Nov, task 744: plan, build and four follow-ups all resumed ONE session, so
+    every turn re-read 55k–216k of context — 16M cache reads — until his spend
+    limit stopped it mid-build. What a follow-up needs is the approved plan and
+    where the branch stands, not the 99 turns that produced them."""
+    status = (store.get_task(task_id) or {}).get("status")
+    # Finished work only: a paused or running task is mid-thought, and its own
+    # session is what it needs to carry on.
+    if fresh_followups() and status in (*REFINABLE, "merged"):
+        store.kv_set(f"task_fresh_next:{task_id}", "1")
+
+
+def handoff(task_id: int, cwd: str) -> str:
+    """What a fresh follow-up leg starts from: the ask, the approved plan, the
+    branch's own commits and state, the PR. A few thousand characters."""
+    t = store.get_task(task_id) or {}
+    plan = (store.kv_get(f"task_plan:{task_id}") or "").strip()
+    parts = [f"HANDOFF — task #{task_id}: {t.get('title', '')}",
+             "You are continuing finished work in a fresh session. Everything you need "
+             "from the earlier sessions is below; the checkout is already on the task's "
+             "branch. Do not re-discover or re-plan what the plan already settles.",
+             f"His original ask:\n{clip.clip(t.get('prompt') or '', 1500)}"]
+    if plan:
+        parts.append(f"The plan he approved (it still holds unless he says otherwise):\n"
+                     f"{clip.clip(plan, 3000)}")
+    from . import worktrees as _wt
+    root = Path(cwd)
+    repos = [root] if (root / ".git").exists() else _wt.repos_in(root)
+    for repo in repos[:4]:
+        def git(*args: str) -> str:
+            try:
+                return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                                      text=True, timeout=20).stdout.strip()
+            except Exception:                                   # noqa: BLE001
+                return ""
+        branch = git("rev-parse", "--abbrev-ref", "HEAD")
+        log = git("log", "--oneline", "-8")
+        status = git("status", "--short")
+        if branch or log:
+            parts.append(f"{repo.name} — branch {branch}\nRecent commits:\n{log}"
+                         + (f"\nUncommitted:\n{clip.clip(status, 600)}" if status else ""))
+    if t.get("pr_urls"):
+        parts.append(f"Pull request(s): {t['pr_urls']}")
+    return "\n\n".join(parts) + "\n\n---\n\n"
+
+
 async def _code_leg(task_id: int, prompt: str, cwd: str, *,
                     resume: bool, effort: str, workspace: str | None = None) -> str:
     """One executor leg of a code task, pinned to the task's session so gates
@@ -2446,6 +2500,11 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     # ran a standard flow, one that took several hit something worth recording.
     store.kv_set(f"task_rounds:{task_id}", str(_rounds(task_id) + 1))
     sid_key = f"task_session:{task_id}:{ex}"
+    if store.kv_get(f"task_fresh_next:{task_id}"):
+        store.kv_del(f"task_fresh_next:{task_id}")
+        store.kv_del(sid_key)
+        prompt = handoff(task_id, cwd) + prompt
+        store.add_task_event(task_id, "session", "fresh session for a follow-up (handoff, no resume)")
     sid = store.kv_get(sid_key)
     if not sid:
         sid, resume = str(uuid.uuid4()), False
@@ -6024,6 +6083,7 @@ async def propose_change(task_id: int, feedback: str) -> str:
         raise ValueError(f"task #{task_id} is not a code task")
     if t["status"] in LIVE_STATUSES:
         raise ValueError(f"task #{task_id} is still running — I'll plan this when it stops")
+    mark_fresh_followup(task_id)
     await ensure_checkout(task_id)
     ci_read = await _ci_failure_for(t, feedback)
     if quality_gate_only(ci_read):
@@ -6292,6 +6352,7 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
         # Still running: kept for its next step — or, when he says the approved
         # design is wrong, the build stops and it plans again.
         return await note_for_live_task(task_id, feedback, code_change=code_change)
+    mark_fresh_followup(task_id)
     after_merge = t["status"] == "merged"
     if after_merge:
         await _reopen_merged(task_id, t)

@@ -58,6 +58,12 @@ PARK_SECONDS = _minutes(os.environ.get("ASTA_DECISION_PARK_MINUTES"), 15)
 STALE_SECONDS = _minutes(os.environ.get("ASTA_DECISION_STALE_MINUTES"), 180)
 #: Shown this many times without an answer, it is retired.
 MAX_SHOWINGS = 2
+#: A draft he has not answered this long after he FIRST saw it leaves the line
+#: without a message; the next digest names it in one line. 25 Nov, his words:
+#: "if we don't ack the msg in some time, remove it from the queue — it keeps
+#: notifying the same draft again and again". A lone draft never expired (the
+#: retire step only ran when something else was queued behind it).
+DRAFT_TTL_SECONDS = _minutes(os.environ.get("ASTA_DRAFT_TTL_MINUTES"), 120)
 
 #: Appended to an investigation's brief when a colleague is waiting for the answer.
 REPLY_FORMAT = """
@@ -475,7 +481,7 @@ async def present(*, who: str, need: str, chat: str, group: bool, analysis: str,
         _enqueue({"type": "answer", **intent})
         return True
     await _show(cid, intent)
-    return True
+    return True                     # handled: shown, or expired quietly
 
 
 async def _deliver_automatic_reply(intent: dict) -> bool:
@@ -535,6 +541,65 @@ async def _deliver_automatic_reply(intent: dict) -> bool:
     return True
 
 
+#: Needs that say nothing about WHAT was asked: chat_watch uses them for every
+#: held line, so the draft text has to tell two of them apart.
+_GENERIC_NEEDS = {"wrote to you", "replied to you", "pinged you", "messaged you"}
+_SEEN = "draft_seen:"
+
+
+def ask_key(item: dict) -> str:
+    """One identity per ask, whichever path stages it.
+
+    A task's answer is that task's, per chat. Without a task: the person and
+    what they asked; when the need is generic ("wrote to you"), the draft text.
+    25 Nov: the same untasked draft was queued at 13:37 and again at 13:40 and
+    shown both times — the only dedupe needed a task id."""
+    to = (item.get("to") or item.get("chat") or "").strip().lower()[:60]
+    if item.get("task_id"):
+        return f"t{item['task_id']}:{to}"
+    need = _gist(item.get("need") or "")
+    basis = need if need and need not in _GENERIC_NEEDS else _gist(item.get("what") or "")
+    return "a" + hashlib.sha256(f"{to}\n{(item.get('who') or '').lower()}\n{basis}"
+                                .encode()).hexdigest()[:16]
+
+
+def _seen(key: str, now: float) -> dict:
+    """{n, first}: how often this ask was put in front of him, and when first.
+    A day later the same words are a new ask."""
+    try:
+        s = json.loads(store.kv_get(_SEEN + key) or "{}")
+    except ValueError:
+        s = {}
+    if not isinstance(s, dict) or now - float(s.get("first") or 0) > SHELF_SECONDS:
+        return {"n": 0, "first": 0.0}
+    return {"n": int(s.get("n") or 0), "first": float(s.get("first") or 0)}
+
+
+def spent(item: dict, now: float | None = None) -> str:
+    """Why this draft may not be shown again ("shown twice", "unanswered 2h"), or ""."""
+    now = time.time() if now is None else now
+    s = _seen(ask_key(item), now)
+    if s["n"] >= MAX_SHOWINGS:
+        return f"shown {s['n']} times"
+    if s["first"] and now - s["first"] > DRAFT_TTL_SECONDS:
+        return f"unanswered {int((now - s['first']) // 60)} min"
+    return ""
+
+
+def _expire(item: dict, why: str) -> None:
+    """Off the line, without a push: shelved (so "send it to X" still finds it)
+    and one line in the next digest."""
+    from . import digest
+    shelve(item, "expired", why)
+    who = item.get("who") or item.get("to") or "?"
+    need = (item.get("need") or "").strip()
+    digest.add(f"Draft for {who}{f' ({need[:60]})' if need else ''} expired unanswered "
+               f"— say \"send it to {who.split()[0]}\" if it should still go.",
+               source="answers", why=why)
+    store.record_outcome("answer", "expired", subject=str(item.get("task_id") or ""),
+                         detail=f"{who}: {why}"[:200])
+
+
 def _blocked(cid: str, now: float | None = None) -> bool:
     """Is he already being asked something his next "yes" would answer?
 
@@ -545,6 +610,17 @@ def _blocked(cid: str, now: float | None = None) -> bool:
     from . import loop, offers
     now = time.time() if now is None else now
     staged = loop.awaiting(cid)
+    if staged and staged.get("type") == "answer":
+        why = spent(staged, now) if now - float(staged.get("_shown") or 0) >= PARK_SECONDS else ""
+        if why and not why.startswith("shown"):
+            loop.clear_awaiting(cid)
+            _expire(staged, why)
+            staged = None
+    elif staged:
+        at = float(staged.get("_at") or 0) or loop.staged_at(cid)
+        if now - at > DRAFT_TTL_SECONDS:
+            _set_aside(cid, staged)
+            staged = None
     if staged and staged.get("type") != "answer":
         # A draft of HIS (a send he asked for) holds the line while it is fresh.
         # 13 Nov: one he never answered held every colleague answer for 3 days —
@@ -704,6 +780,27 @@ def _enqueue(item: dict) -> None:
     item.setdefault("_at", time.time())
     item["_queued"] = time.time()
     q = _load_queue()
+    if item.get("type") == "answer":
+        key = ask_key(item)
+        from . import loop
+        cid = phone_conversation()
+        front = loop.awaiting(cid) if cid else None
+        if front and front.get("type") == "answer" and ask_key(front) == key:
+            store.record_outcome("answer", "already in front of him",
+                                 subject=str(item.get("task_id") or ""),
+                                 detail=f"{item.get('who')}: {item.get('need', '')}"[:200])
+            return
+        same = [i for i, it in enumerate(q) if it.get("type") == "answer" and ask_key(it) == key]
+        if same:
+            # The newer wording replaces the waiting one, in its place in line.
+            old = q[same[0]]
+            q[same[0]] = {**item, "_at": old.get("_at", item["_at"]),
+                          "_queued": old.get("_queued", item["_queued"])}
+            store.kv_set(_QUEUE, json.dumps(q))
+            store.record_outcome("answer", "replaced in queue",
+                                 subject=str(item.get("task_id") or ""),
+                                 detail=f"{item.get('who')}: {item.get('need', '')}"[:200])
+            return
     q.append(item)
     store.kv_set(_QUEUE, json.dumps(q))
     store.record_outcome("answer", "queued", subject=str(item.get("task_id") or ""),
@@ -788,13 +885,24 @@ async def _show_plan(item: dict) -> None:
                         "answer", urgency="direct", considered=True, asks=True)
 
 
-async def _show(cid: str, intent: dict) -> None:
+async def _show(cid: str, intent: dict) -> bool:
+    """Put one draft in front of him. False when it was not shown: refused by
+    origin, or spent (shown MAX_SHOWINGS times, or past DRAFT_TTL) — then it is
+    expired quietly instead of asked again."""
     from . import loop, notify
     if not origin_allowed(intent):
         _record_rejected_origin(intent)
-        return
-    intent = {**intent, "type": "answer", "_shown": time.time(),
-              "_showings": int(intent.get("_showings") or 0) + 1}
+        return False
+    now = time.time()
+    why = spent(intent, now)
+    if why:
+        _expire(intent, why)
+        return False
+    key = ask_key(intent)
+    seen = _seen(key, now)
+    store.kv_set(_SEEN + key, json.dumps({"n": seen["n"] + 1, "first": seen["first"] or now}))
+    intent = {**intent, "type": "answer", "_shown": now,
+              "_showings": seen["n"] + 1}
     loop.stage(cid, intent)
     _note_shown()
     waiting = len(_load_queue())
@@ -820,6 +928,7 @@ async def _show(cid: str, intent: dict) -> None:
     store.record_outcome("answer", "presented", subject=str(intent.get("task_id") or ""),
                          detail=f"{intent['who']}: {intent.get('need', '')}"[:200])
     await notify.notify(text, "answer", urgency="direct", considered=True, asks=True)
+    return True
 
 
 #: Words that are not a person: "send it", "send the previous one".
@@ -1070,8 +1179,8 @@ async def next_after(cid: str = "") -> bool:
             continue
         if await _rechecking(item):
             continue
-        await _show(cid, item)
-        return True
+        if await _show(cid, item):
+            return True
     return False
 
 

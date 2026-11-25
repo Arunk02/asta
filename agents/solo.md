@@ -60,6 +60,9 @@ Ask the resolver which files answer this task. Then:
 
 ## Stage 2 — plan gate
 State what changes, in which files, why, and how it will be verified.
+He reads the plan as a PDF where diagrams are drawn: include ONE small Mermaid
+flowchart of the changed flow (```mermaid, `flowchart TD`, 4–10 boxes, the
+changed step marked "(new)" or "(changed)"). Plain labels, no quotes inside them.
 - **Small change** — ≤2 files, ~≤30 lines, no schema/migration/config/cross-repo
   or API-contract impact, and zero open questions → print
   `AUTO-PROCEED (small change): <one-line plan>` and continue in this same run.

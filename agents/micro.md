@@ -25,6 +25,10 @@ RISK: none — one field, covered by the existing test
 PLAN READY
 ```
 
+When the change alters a flow (not a one-value config edit), add one small
+```mermaid flowchart (3–6 boxes, the changed step marked "(changed)"). He reads
+the plan as a PDF with diagrams drawn.
+
 END the response there. You are headless: Asta shows that to Arun and resumes
 you when the server authorizes implementation, using any existing task grant. Do not
 ask for another yes when Asta says authorization is already recorded. Do not

@@ -3683,11 +3683,21 @@ async def _send_full_plan(task_id: int, t: dict, plan: str) -> str:
     above it is a summary; the file is what he reads. Sent with the card — a
     plan card already reaches his phone wherever he is. Returns the line that
     says it is attached, or where it is when the phone could not take it."""
-    from . import notify, plan_pdf, task_spec
-    path = task_spec.preview(task_id, plan, t.get("title", ""))
-    # 18 Nov: "the .md file … I don't feel it easy to read". The same plan as a
-    # phone-shaped PDF; the .md stays beside it, and goes instead if it fails.
-    path = plan_pdf.render(path, t.get("title", "")) or path
+    from . import notify, plan_pdf, plan_visual, task_spec
+    if plan_pr(task_id):
+        with contextlib.suppress(Exception):
+            await refresh_plan_pr(task_id, plan)
+    md = task_spec.preview(task_id, plan, t.get("title", ""))
+    # 25 Nov, his words: "diagrammatic PDF … easy to understand just by watching,
+    # remove sending the plan.md". The plan with its flows DRAWN (plan_visual);
+    # the text-only PDF if that cannot be made; never the .md — when no PDF can
+    # be made, the card carries the plan text instead.
+    path = await plan_visual.render(md, t.get("title", "")) \
+        or await plan_visual.render(md, t.get("title", "")) \
+        or plan_pdf.render(md, t.get("title", ""))
+    if path is None:
+        store.add_task_event(task_id, "plan", f"no plan PDF could be made ({md.parent.name[:10]})")
+        return ""
     store.add_task_event(task_id, "plan", f"full plan sent: {path.name} ({path.parent.name[:10]})")
     try:
         sent = await notify.wa_document(str(path), f"Plan #{task_id} — {clip.clip(t.get('title', ''), 60)}")
@@ -3698,9 +3708,12 @@ async def _send_full_plan(task_id: int, t: dict, plan: str) -> str:
 
 
 def _card_text(plan: str, attached: str) -> str:
-    """The plan's head for the card: short when the whole plan rides as a file."""
-    return _phone_text(plan, CARD_WITH_FILE if attached.startswith("📎") else 1500,
-                       head_first=True)
+    """The card's share of the plan: none when the PDF carries it (his words, 25
+    Nov: no plan text in the message — the PDF is what he reads), the plan's head
+    when no PDF could be made."""
+    if attached.startswith("📎"):
+        return ""
+    return _phone_text(plan, 1500, head_first=True)
 
 
 async def _go_on(task_id: int, born: float = 0.0) -> None:
@@ -4458,6 +4471,16 @@ def reply(task_id: int, text: str) -> str:
         _graph().answer(task_id, {"approved": approved, "text": text})
         return (f"Task #{task_id}: accepting the check failure as-is."
                 if approved else f"Task #{task_id}: continuing with your direction.")
+    if store.kv_get(f"task_gate:{task_id}") == "plan" and wants_plan_pr(text) \
+            and not plan_yes(text):
+        # His words, 25 Nov: for a big feature, the plan itself goes up as a PR
+        # so the team agrees on the approach before any code. An option he asks
+        # for — the task keeps waiting at its plan gate for his approve.
+        job = asyncio.create_task(_ship_plan_and_tell(task_id))
+        _running[task_id] = job
+        job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
+        return (f"Task #{task_id}: raising the plan as a draft PR for the team — the link "
+                f"comes to you. It still waits for your approve before any code.")
     # A plan approved WITH amendments is still an approval. Exact-match meant
     # "PLAN APPROVED — but hold the PDF half" was scored as a rejection, run at
     # planning effort, and sent back for a whole extra planning round before it
@@ -4528,6 +4551,11 @@ def record_answer(task_id: int, t: dict, text: str) -> tuple[bool, str]:
     # Anything buffered by augment() while the task ran rides in now, on the user's
     # gate action — so mid-flight additions land without a session restart.
     full_text = text + _drain_addenda(task_id)
+    if approved and plan_pr(task_id):
+        info = plan_pr(task_id)
+        full_text += (f"\n\nThe branch's \"Plan:\" commit(s) hold only the plan document "
+                      f"({info.get('path')}, on PR {info.get('url')}). No code is done yet — "
+                      f"build the change on top of them; leave that file as it is.")
     return approved, full_text
 
 
@@ -5114,6 +5142,133 @@ async def _push_named_branches(task_id: int, t: dict) -> list[str]:
     return out
 
 
+_PLAN_PR = re.compile(
+    r"\b(?:raise|open|create|make|share|put|send)\b[^.\n]{0,40}?\bplan\b[^.\n]{0,12}?"
+    r"\b(?:pr|pull\s*request)\b|\bplan\s+(?:pr|pull\s*request)\b", re.I)
+
+
+def wants_plan_pr(text: str) -> bool:
+    """"raise a plan PR", "share the plan as a PR", "plan PR first"."""
+    return bool(_PLAN_PR.search(text or ""))
+
+
+def plan_pr(task_id: int) -> dict:
+    """{repo, url, path, branch} of this task's plan PR, or {}."""
+    try:
+        return _json.loads(store.kv_get(f"task_plan_pr:{task_id}") or "{}")
+    except ValueError:
+        return {}
+
+
+def _plan_doc(t: dict, task_id: int, plan: str) -> str:
+    from .plan_pdf import clean
+    ticket = _JIRA_KEY.search(f"{t.get('title', '')} {t.get('prompt', '')}")
+    return (f"# Plan: {t.get('title', '')}\n\n"
+            f"> Plan for review — no code yet. Comment on the approach here; the implementation "
+            f"follows on this branch once the plan is agreed, and this file stays as the record "
+            f"of what was decided.\n\n"
+            + (f"Ticket: {ticket.group(0)}\n\n" if ticket else "")
+            + clean(plan))
+
+
+async def _plan_repo(task_id: int, t: dict, plan: str) -> Path:
+    """The repo the plan PR goes to: the one checkout, or the one the plan names first."""
+    from . import worktrees as _wt
+    root = Path(task_cwd(task_id, t["workspace"]))
+    repos = [root] if (root / ".git").exists() else _wt.repos_in(root)
+    if len(repos) == 1:
+        return repos[0]
+    named = sorted((plan.find(r.name), r) for r in repos if r.name in plan)
+    if named:
+        return named[0][1]
+    raise ValueError("the plan names no repo of this task's checkout — say which repo")
+
+
+async def ship_plan(task_id: int) -> str:
+    """Commit the plan as docs/specs/<branch>-plan.md on the task's branch, push
+    it and open a DRAFT PR. Returns the PR url.
+
+    One branch, one PR: when he approves, the build commits on top and `ship`
+    marks the same PR ready — so the agreed plan is reviewed with the code and
+    stays in the repo as the decision record."""
+    t = store.get_task(task_id)
+    if not t or t["kind"] != "code":
+        raise ValueError(f"task #{task_id} is not a code task")
+    if t["status"] != "awaiting_approval" or store.kv_get(f"task_gate:{task_id}") != "plan":
+        raise ValueError(f"task #{task_id} is not waiting at its plan gate")
+    plan = (t.get("result") or "").strip()
+    if not plan:
+        raise ValueError(f"task #{task_id} has no plan to share")
+    await ensure_checkout(task_id)
+    repo = await _plan_repo(task_id, t, plan)
+    rc, branch = await repo_ops.git(repo, "git", "rev-parse", "--abbrev-ref", "HEAD")
+    branch = branch.strip()
+    if rc != 0 or branch in repo_ops.BASE_BRANCHES:
+        raise ValueError(f"{repo.name}: no task branch checked out")
+    rel = f"docs/specs/{branch.replace('/', '-')}-plan.md"
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(_plan_doc(t, task_id, plan))
+    from . import worktrees as _wt
+    base = await _wt._base_branch(repo)
+    for args in (("git", "add", "--", rel), ("git", "commit", "-q", "-m", f"Plan: {t['title']}", "--", rel)):
+        rc, out = await repo_ops.git(repo, *args)
+        if rc != 0:
+            raise RuntimeError(f"{repo.name}: {' '.join(args[:2])} failed: {out[:200]}")
+    rc, out = await repo_ops.git(repo, "git", "push", "-u", "origin", branch, timeout=300)
+    if rc != 0:
+        raise RuntimeError(f"{repo.name}: push failed: {out[:300]}")
+    body = ("Plan for review before any code. Comment on the approach; the implementation "
+            f"follows on this branch once it is agreed.\n\nThe plan: `{rel}`")
+    rc, out = await repo_ops.git(repo, "gh", "pr", "create", "--draft", "--head", branch,
+                                 "--base", base.removeprefix("origin/"),
+                                 "--title", f"Plan: {t['title']}", "--body", body, timeout=300)
+    if rc != 0 and "already exists" not in out:
+        raise RuntimeError(f"{repo.name}: gh pr create failed: {out[:300]}")
+    url = await _verified_pr(repo, branch, base)
+    store.kv_set(f"task_plan_pr:{task_id}", _json.dumps(
+        {"repo": repo.name, "url": url, "path": rel, "branch": branch}))
+    store.add_task_event(task_id, "plan", f"plan PR opened: {url}")
+    store.record_outcome("ship", "plan_pr_opened", subject=str(task_id), detail=url)
+    return url
+
+
+async def _ship_plan_and_tell(task_id: int) -> None:
+    from . import notify, prname
+    try:
+        url = await ship_plan(task_id)
+    except (ValueError, RuntimeError) as exc:
+        await notify.notify(f"❌ #{task_id}: the plan PR was not raised — {str(exc)[:300]}",
+                            "task", urgency="direct")
+        return
+    await notify.notify(
+        f"📐 #{task_id} plan PR (draft) for the team: {prname.name_links(url)}\n"
+        f"Their comments → tell me the changes and the plan file is updated on the same PR. "
+        f"Say *approve task {task_id}* when the approach is agreed; the code then lands on "
+        f"this branch and the same PR goes ready for review.", "task", urgency="direct")
+
+
+async def refresh_plan_pr(task_id: int, plan: str) -> bool:
+    """A revised plan at the gate: the plan file on the plan PR follows it."""
+    info = plan_pr(task_id)
+    if not info:
+        return False
+    t = store.get_task(task_id) or {}
+    from . import worktrees as _wt
+    root = Path(task_cwd(task_id, t.get("workspace")))
+    repo = root if root.name == info.get("repo") else root / info.get("repo", "")
+    path = repo / info.get("path", "")
+    if not path.parent.is_dir():
+        return False
+    path.write_text(_plan_doc(t, task_id, plan))
+    rc, _ = await repo_ops.git(repo, "git", "commit", "-q", "-m", f"Plan: revised — {t.get('title', '')}",
+                               "--", info["path"])
+    if rc != 0:
+        return False
+    rc, _ = await repo_ops.git(repo, "git", "push", "origin", info.get("branch", "HEAD"), timeout=300)
+    store.add_task_event(task_id, "plan", "plan PR updated with the revised plan")
+    return rc == 0
+
+
 async def ship(task_id: int) -> str:
     """Push the pipeline's committed feature branch(es) and open PRs — one per
     repo the task touched. Only ever triggered by Arun after reviewing the diff."""
@@ -5157,6 +5312,12 @@ async def ship(task_id: int) -> str:
         if rc != 0 and "already exists" not in out:
             raise RuntimeError(f"{repo.name}: gh pr create failed: {out[:300]}")
         urls.append(f"{repo.name}: {await _verified_pr(repo, cur, base)}")
+        info = plan_pr(task_id)
+        if info and info.get("repo") == repo.name and info.get("branch") == cur:
+            # The plan PR becomes the code PR: out of draft, titled for the change.
+            await repo_ops.git(repo, "gh", "pr", "ready", info["url"], timeout=120)
+            await repo_ops.git(repo, "gh", "pr", "edit", info["url"], "--title", t["title"],
+                               timeout=120)
         # "develop as well as release 3.1.6": the same commits, on the other
         # base too, each with its own PR. A task has one worktree, so #178
         # stopped at "needs a worktree" with half the ask undone (30 Sep).

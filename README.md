@@ -74,11 +74,22 @@ Everything lives in `.env`; new features are **off by default**.
 | `ASTA_FRONTDESK` | instant answers from state and standing rules |
 | `ASTA_ROUTING` | picks the model by how hard the work is |
 | `ASTA_PUSH_BUDGET` | interruptions per day before news waits for the digest |
+| `ASTA_PET` | read-only activity for the optional Asta pet on Mac |
 | `ASTA_EVOLVE` | bounded self-tuning, proved before it is kept |
 | `ASTA_APPS` / `ASTA_SCREEN` | app doors / the screen-and-mouse fallback |
 
 **macOS permissions** — apps need *Privacy & Security → Automation* for the Python
 that runs Asta; the screen fallback also needs *Accessibility*.
+
+### Asta pet for Mac
+
+1. Set `ASTA_PET=1` for the Asta server and restart it. The activity endpoint is off by default.
+2. On macOS 13 or newer with the Command Line Tools installed, run `sh deploy/pet/install.sh`.
+3. Put your Asta token in a local file at `~/.config/asta/pet-token` with permissions `0600`. Launch **Asta Pet** from `~/Applications`. If you run the bundle executable directly, it can use an inherited `ASTA_TOKEN` or `ASTA_PET_TOKEN_FILE` and an optional `ASTA_PET_PORT`.
+
+The pet uses Asta's grimoire, sword and Devil Union poses for coding, investigations, approvals, follow-ups, results and failures. Click the mascot or an activity item to open the details. Choose **Silent** (default), **Important only**, or **Talkative** in the pet menu. It speaks short, generic lines with macOS speech synthesis and defers to Asta Voice and quiet rules. macOS Reduce Motion shows still poses.
+
+Use the macOS menu bar icon to **Disable Asta Pet** immediately. This hides the mascot and stops polling and speech until you enable it again. Set `ASTA_PET=0` and restart the server to turn off the activity API.
 
 ## Development
 

@@ -1853,8 +1853,24 @@ async def api_ci():
 
 
 @app.get("/api/notifications", dependencies=[Depends(require_auth)])
-def api_notifications():
-    return {"items": store.list_notifications(), "unseen": len(store.list_notifications(unseen_only=True))}
+def api_notifications(notification: int | None = None):
+    items = store.list_notifications()
+    if notification is not None and 0 < notification < 2**63 and all(
+        item["id"] != notification for item in items
+    ):
+        if item := store.get_notification(notification):
+            items.insert(0, item)
+    return {"items": items, "unseen": len(store.list_notifications(unseen_only=True))}
+
+
+@app.get("/api/pet/activity", dependencies=[Depends(require_auth)])
+def api_pet_activity(after: int | None = None):
+    from . import pet
+    if not pet.enabled():
+        raise HTTPException(404, "Asta Pet is disabled")
+    if after is not None and after < 0:
+        raise HTTPException(422, "Invalid activity cursor")
+    return JSONResponse(pet.activity(after), headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/notifications/seen", dependencies=[Depends(require_auth)])

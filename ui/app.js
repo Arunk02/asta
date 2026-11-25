@@ -1105,9 +1105,15 @@ setInterval(() => {
 
 /* ---------- notifications ---------- */
 
+const petLink = new URLSearchParams(window.location.search);
+const petNotice = /^\d+$/.test(petLink.get("pet_notification")) ? petLink.get("pet_notification") : "";
+const petTask = /^\d+$/.test(petLink.get("pet_task")) ? petLink.get("pet_task") : "";
+let focusedPetNotice = false;
+let focusedPetTask = false;
+
 async function loadNotifs() {
   try {
-    const n = await api("/api/notifications");
+    const n = await api("/api/notifications" + (petNotice ? "?notification=" + petNotice : ""));
     const badge = $("#bell-badge");
     if (n.unseen > 0) { badge.textContent = n.unseen; badge.classList.remove("hidden"); }
     else badge.classList.add("hidden");
@@ -1119,6 +1125,13 @@ async function loadNotifs() {
       const when = new Date(it.created_at * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
       el.innerHTML = `<div class="when">${when} · ${esc(it.level)}</div>${esc(it.text)}`;
       list.appendChild(el);
+      if (String(it.id) === petNotice) {
+        el.style.outline = "1px solid currentColor";
+        if (!focusedPetNotice && !$("#notif-panel").classList.contains("hidden")) {
+          focusedPetNotice = true;
+          el.scrollIntoView({ block: "nearest" });
+        }
+      }
     });
   } catch (e) {}
 }
@@ -1138,7 +1151,13 @@ document.addEventListener("click", (e) => {
 async function loadTasks() {
   try {
     const rows = await api("/api/tasks");
+    if (petTask && !rows.some((t) => String(t.id) === petTask)) {
+      const selected = await api("/api/tasks/" + petTask);
+      if (selected.id) rows.unshift(selected);
+    }
     const list = $("#task-list");
+    const selectedResult = list.querySelector(".pet-selected .task-result");
+    const showSelected = !focusedPetTask || (selectedResult && !selectedResult.classList.contains("hidden"));
     if (!rows.length) {
       list.innerHTML = '<p class="dim">No background tasks yet. Ask in chat: “delegate a task to …”.</p>';
       return;
@@ -1147,6 +1166,8 @@ async function loadTasks() {
     rows.forEach((t) => {
       const el = document.createElement("div");
       el.className = "mission";
+      const selected = String(t.id) === petTask;
+      if (selected) el.classList.add("pet-selected");
       const dur = t.finished_at && t.started_at ? ` · ${(t.finished_at - t.started_at).toFixed(0)}s` : "";
       const target = t.teams_chat ? ` → ${esc(t.teams_chat)}` : "";
       el.innerHTML = `<div class="m-title"><span class="badge ${esc(t.status)}">${esc(t.status.replace(/_/g, " "))}</span>${esc(t.title)}</div>
@@ -1154,7 +1175,7 @@ async function loadTasks() {
       if (t.error) el.innerHTML += `<div class="m-sub" style="color:var(--err)">⚠ ${esc(t.error.slice(0, 120))}</div>`;
       if (t.result) {
         const pre = document.createElement("pre");
-        pre.className = "task-result hidden";
+        pre.className = selected && showSelected ? "task-result" : "task-result hidden";
         pre.textContent = t.result.slice(0, 3000);
         el.appendChild(pre);
         el.querySelector(".m-title").onclick = () => pre.classList.toggle("hidden");
@@ -1181,6 +1202,10 @@ async function loadTasks() {
         el.appendChild(act);
       }
       list.appendChild(el);
+      if (selected && !focusedPetTask) {
+        focusedPetTask = true;
+        el.scrollIntoView({ block: "nearest" });
+      }
     });
   } catch (e) {}
 }
@@ -1245,6 +1270,8 @@ async function boot() {
   renderTts();
   renderWake();
   loadVoicebox();
+  if (petTask) switchTab("missions");
+  if (petNotice && !petTask) $("#notif-panel").classList.remove("hidden");
   loadNotifs();
   state.ws = wsConnect();
   setInterval(loadStatus, 60000);

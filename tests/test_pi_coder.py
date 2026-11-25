@@ -170,7 +170,7 @@ def test_one_leg_runs_over_rpc_with_the_fence_and_returns_the_answer(tmp_path, m
     args = json.loads(log.read_text())
     assert args[:2] == ["--mode", "rpc"]
     assert args[args.index("--session-id") + 1] == "s-1"
-    assert args[args.index("--model") + 1] == "anthropic/claude-opus-5"
+    assert args[args.index("--model") + 1] == "anthropic/claude-opus-5-5"
     assert args[args.index("--thinking") + 1] == "high"
     assert "--no-extensions" in args and args[args.index("-e") + 1].endswith("pi_fence.ts")
 
@@ -296,7 +296,7 @@ def test_a_big_feature_is_t3_by_its_size():
 def test_pi_builds_on_the_same_claude_models():
     # 19 Nov, his table: every build runs on sonnet at high — the plan carries the thinking.
     assert routing._cell("pi", routing.T3) == routing._cell("claude", routing.T3) == ("sonnet", "high")
-    assert pi_cli.model_id("sonnet") == "anthropic/claude-sonnet-5"
+    assert pi_cli.model_id("sonnet") == "anthropic/claude-sonnet-5-5"
 
 
 def test_a_pi_build_leg_gets_the_booking_workspace_context(pi_on, monkeypatch, tmp_path, task):

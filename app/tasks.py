@@ -1485,9 +1485,7 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
                 store.kv_set(f"task_asked:{t['id']}", _json.dumps({"his": said, "offer": ""}))
     if kind == "code":
         if not pipeline:
-            # Jira tickets are stories — full pipeline with gates. Ad-hoc asks
-            # start micro; the agent ESCALATEs if discovery proves it bigger.
-            pipeline = "full" if _JIRA_KEY.search(title + " " + prompt) else "micro"
+            pipeline = _pipeline_by_tier(t["id"], title, prompt)
         store.kv_set(f"task_pipeline:{t['id']}", pipeline)
         cid = _TURN_CONV.get()
         if cid:
@@ -2005,6 +2003,20 @@ def _resolve_executor(task_id: int) -> str:
         ex = "claude"
     store.kv_set(f"task_executor:{task_id}", ex)
     return ex
+
+
+def _pipeline_by_tier(task_id: int, title: str, prompt: str) -> str:
+    """micro for a T1 change, the staged pipeline for anything bigger.
+
+    One question, one answer: routing already sized the work from his words
+    (T1/T2/T3). The pipeline used to be sized separately by "has a Jira key",
+    so a one-line config ticket got the full staged ceremony and an ad-hoc
+    cross-repo change started micro. Without routing, the old rule stands:
+    a ticket is a story, an ad-hoc ask starts micro and ESCALATEs if bigger."""
+    from . import routing
+    if routing.enabled() and store.kv_get(routing._key(task_id)):
+        return "micro" if routing.tier_of(task_id) == routing.T1 else "full"
+    return "full" if _JIRA_KEY.search(title + " " + prompt) else "micro"
 
 
 def _pipeline_for(task_id: int) -> str:

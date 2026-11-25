@@ -55,7 +55,10 @@ AUDIENCES: dict[str, tuple[str, ...]] = {
     "communication": ("chat", "draft"),
     "investigation": ("chat", "analysis"),
     "git and accounts": ("chat", "code", "analysis"),
-    "standing instructions": ("chat", "analysis", "draft"),
+    # Every path, code included. 25 Nov: "Don't include asta name in feature
+    # branch creation" was told on 5 Oct, 8 Oct and 20 Nov — and never reached a
+    # code leg, the only place a branch is cut.
+    "standing instructions": ("chat", "code", "analysis", "draft"),
     "automatic teams replies": ("chat", "draft"),
     # The names, read by app/senior.py, which enforces them in the send path.
     "manager and above": ("chat", "draft"),
@@ -119,9 +122,42 @@ def _cut(body: str) -> str:
     return head.rstrip() + "\n…(cut here — the rest of this section is not sent; shorten it in guardrails.md)"
 
 
+_DATED = re.compile(r"^-\s*(?:\d{4}-\d{2}-\d{2}:\s*)?(.*)$")
+
+
+def _rule_text(line: str) -> str:
+    """A standing line without its bullet and date, for comparing two lines."""
+    m = _DATED.match(line.strip())
+    return " ".join((m.group(1) if m else line).lower().split()).rstrip(".")
+
+
+def standing_lines(body: str) -> str:
+    """His standing instructions, each rule once (the newest dating kept), in
+    the file's order, never cut.
+
+    These are short dated lines he said yes to, appended as he gives them, so a
+    cut at the cap dropped the NEWEST rules first — 25 Nov the section was 1,815
+    characters and the rules of 20 and 25 Nov never reached a brain. A rule told
+    again is one rule, not two lines spending the budget."""
+    lines = body.splitlines()
+    last: dict[str, int] = {}
+    for i, line in enumerate(lines):
+        if line.strip().startswith("-"):
+            last[_rule_text(line)] = i
+    out = [ln for i, ln in enumerate(lines)
+           if not ln.strip().startswith("-") or last.get(_rule_text(ln)) == i]
+    return "\n".join(out).strip()
+
+
+def _render(name: str, body: str) -> str:
+    return standing_lines(body) if name == STANDING.lower() else _cut(body)
+
+
 def section(name: str) -> str:
-    """One section's body, capped. '' when he has not written it."""
-    return _cut(sections().get(name.strip().lower(), ""))
+    """One section's body, capped (standing instructions: de-duplicated, never
+    cut). '' when he has not written it."""
+    key = name.strip().lower()
+    return _render(key, sections().get(key, ""))
 
 
 def _audience_of(name: str) -> tuple[str, ...]:
@@ -136,7 +172,7 @@ def block(audience: str) -> str:
     parts = []
     for name, body in sections().items():
         if audience in _audience_of(name):
-            parts.append(f"### {name.title()}\n{_cut(body)}")
+            parts.append(f"### {name.title()}\n{_render(name, body)}")
     if audience == "chat":
         live = _live_rules()
         if live:
@@ -181,6 +217,10 @@ def append_standing(line: str) -> Path:
     bullet = f"- {' '.join((line or '').split())}"
     if bullet in text:
         return target
+    said = _rule_text(bullet)
+    if said and any(_rule_text(ln) == said for ln in text.splitlines()
+                    if ln.strip().startswith("-")):
+        return target                    # the same rule, told again on another day
     marks = list(_HEADING.finditer(text))
     here = next((i for i, m in enumerate(marks)
                  if m.group(1).strip().lower() == STANDING.lower()), None)
@@ -212,7 +252,8 @@ def problems() -> dict[str, str]:
         except OSError:
             out["guardrails"] = f"{p.name} could not be read"
         return out
-    over = [f"{n} ({len(b)} chars)" for n, b in secs.items() if len(b) > SECTION_MAX]
+    over = [f"{n} ({len(b)} chars)" for n, b in secs.items()
+            if len(b) > SECTION_MAX and n != STANDING.lower()]
     if over:
         out["guardrails"] = (f"section(s) over {SECTION_MAX} chars — only the first {SECTION_MAX} "
                              f"reach a prompt: {', '.join(over)}. Trim, or move detail into a skill")

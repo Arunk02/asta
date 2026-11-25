@@ -403,7 +403,7 @@ _SPECS: dict[str, dict] = {
                    "label": "Claude CLI (subscription)", "hint": "install/auth: claude login"},
     "claude":     {"kind": "api", "env": "ANTHROPIC_API_KEY", "executes": False, "effort": False,
                    "identity": "system", "tools": "in_process", "context": 200000, "rank": 40,
-                   "model_env": ("ASTA_CLAUDE_MODEL", "claude-sonnet-5"), "label": "Claude"},
+                   "model_env": ("ASTA_CLAUDE_MODEL", "claude-sonnet-5-5"), "label": "Claude"},
     "openai":     {"kind": "api", "env": "OPENAI_API_KEY", "executes": False, "effort": True,
                    "identity": "system", "tools": "in_process", "context": 128000, "rank": 50,
                    "model_env": ("ASTA_OPENAI_MODEL", "gpt-4o"), "label": "OpenAI"},
@@ -936,7 +936,7 @@ def get_model(name: str):
             custom_output_text="Test model online. The chat pipeline (WS → agent → stream → store) works.",
         )
     if name == "claude":
-        return AnthropicModel(os.environ.get("ASTA_CLAUDE_MODEL", "claude-sonnet-5"))
+        return AnthropicModel(os.environ.get("ASTA_CLAUDE_MODEL", "claude-sonnet-5-5"))
     if name == "openai":
         return OpenAIChatModel(os.environ.get("ASTA_OPENAI_MODEL", "gpt-4o"))
     if name in ("copilot", "claude_cli"):

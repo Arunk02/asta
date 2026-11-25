@@ -79,11 +79,27 @@ def mermaid_js() -> Path | None:
 
 def _label(text: str) -> str:
     """A string Mermaid accepts inside ["..."]."""
-    return re.sub(r'["\[\]{}<>|#;]', " ", text).strip()[:70] or "step"
+    return re.sub(r'["\[\]{}<>|#;`]', " ", text).strip()[:70] or "step"
+
+
+_TABLE_ROW = re.compile(r"^\|\s*`?([^|`]+?)`?\s*\|\s*([^|]+?)\s*\|")
+
+
+def _table_rows(plan: str) -> list[tuple[str, str]]:
+    """(file, change) from a plan's Markdown table — | File | Change |."""
+    rows = []
+    for line in plan.splitlines():
+        m = _TABLE_ROW.match(line.strip())
+        if not m or set(m.group(1)) <= set("-: ") or m.group(1).strip().lower() in (
+                "file", "files", "step", "class", "path"):
+            continue
+        rows.append((m.group(1).strip(), m.group(2).strip().strip("`")))
+    return rows
 
 
 def structure_diagram(plan: str) -> str:
-    """Mermaid for a plan that drew nothing: what the change touches, in order."""
+    """Mermaid for a plan that drew nothing: what the change touches, in order —
+    from its STRUCTURE lines, else from its file/change table."""
     from . import routing
     rows = []
     for line in routing._structure_lines(plan):
@@ -94,6 +110,8 @@ def structure_diagram(plan: str) -> str:
         what = parts[0].strip("`*")
         why = parts[1].strip() if len(parts) > 1 else ""
         rows.append((what, why))
+    if not rows:
+        rows = _table_rows(plan)
     if not rows:
         return ""
     lines = ["flowchart TD"]
@@ -187,8 +205,10 @@ async def render(md_path: Path, title: str = "") -> Path | None:
                                  live.as_uri())
             text = dom.decode(errors="replace")
             drawn = len(re.findall(r'<svg[^>]*aria-roledescription="(?!error)', text))
-            if rc != 0 or "<svg" not in text or 'aria-roledescription="error"' in text \
-                    or drawn < doc.count('class="mermaid"'):
+            wanted = doc.count('<pre class="mermaid">')
+            # A plan with nothing to draw is still a plan: it prints without a
+            # diagram. Only a diagram that was asked for and did not draw fails.
+            if rc != 0 or 'aria-roledescription="error"' in text or drawn < wanted:
                 return None
             static = Path(tmp) / "static.html"
             static.write_text(re.sub(r"<script\b.*?</script>", "", text, flags=re.S))

@@ -184,3 +184,52 @@ def test_a_plan_pr_needs_the_plan_gate(monkeypatch):
     store.update_task(t["id"], status="shipped")
     with pytest.raises(ValueError):
         asyncio.run(tasks.ship_plan(t["id"]))
+
+
+# --- 25 Nov live: a plan with a file table, no diagram and no STRUCTURE ------------------
+
+TABLE_PLAN = """**Plan (calc only, 2 files)**
+
+| File | Change |
+|---|---|
+| `calc.py` | Add `def subtract(a, b): return a - b`, below `add`. |
+| `test_calc.py` | Import `subtract`; add a test in the style of `test_add`. |
+
+Approve to implement?
+"""
+
+
+def test_a_table_plan_draws_its_files():
+    drawn = plan_visual.structure_diagram(TABLE_PLAN)
+    assert drawn.startswith("flowchart TD") and "calc.py" in drawn and "test_calc.py" in drawn
+    assert "File" not in drawn.split("\n")[1]
+
+
+def test_code_in_a_table_cell_still_makes_the_text_pdf(tmp_path):
+    from app import plan_pdf
+    md = tmp_path / "plan-748.md"
+    md.write_text("# Plan for task #748 — subtract\n\n" + TABLE_PLAN)
+    out = plan_pdf.render(md, "subtract")
+    assert out is not None and out.stat().st_size > 1000
+
+
+@pytest.mark.skipif(not plan_visual.chrome(), reason="needs a local Chrome")
+def test_a_plan_with_nothing_to_draw_still_renders(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASTA_PLAN_VISUAL", "1")
+    md = tmp_path / "plan-749.md"
+    md.write_text("# Plan for task #749 — words only\n\nChange the log line in one place.\n")
+    out = asyncio.run(plan_visual.render(md, "words"))
+    if out is None and plan_visual.mermaid_js() is None:
+        pytest.skip("Mermaid could not be fetched (offline)")
+    assert out is not None
+
+
+@pytest.mark.skipif(not plan_visual.chrome(), reason="needs a local Chrome")
+def test_the_live_table_plan_renders_with_a_diagram(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASTA_PLAN_VISUAL", "1")
+    md = tmp_path / "plan-748.md"
+    md.write_text("# Plan for task #748 — subtract\n\n" + TABLE_PLAN)
+    out = asyncio.run(plan_visual.render(md, "subtract"))
+    if out is None and plan_visual.mermaid_js() is None:
+        pytest.skip("Mermaid could not be fetched (offline)")
+    assert out is not None

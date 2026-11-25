@@ -235,11 +235,12 @@ CODE_OVERRIDES = """
 
   A BIG CHANGE ALSO GETS A PICTURE. When the plan touches more than ten files,
   two or more repos, a Temporal workflow or an event/contract between services,
-  add a `DIAGRAM` block after FLOW: boxes and arrows in plain ASCII inside a
-  ``` code block, at most 20 lines and 60 columns, showing the services or
-  classes and the data moving between them, with the change marked `*`. The
-  plan reaches him as plan-<id>.md on his phone, so it must read in a plain
-  text viewer — no Mermaid, no images. A small change gets no diagram.
+  add a `DIAGRAM` block after FLOW: one ```mermaid code block, `flowchart TD`,
+  4–12 boxes, showing the services or classes and the data moving between
+  them, the changed step labelled "(new)" or "(changed)". Plain labels, no
+  quotes inside them. The plan reaches him as a PDF where it is drawn (25 Nov:
+  "diagrammatic … easy to understand just by watching"). A small change may
+  draw its flow in 3–6 boxes; a one-value config change needs none.
 
   END THE PLAN WITH A LINE THAT SAYS ONLY `PLAN READY`. Asta needs one
   unambiguous mark to tell a plan apart from finished work — without it a plan

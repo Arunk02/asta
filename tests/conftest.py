@@ -26,7 +26,9 @@ OFF_IN_TESTS = ("ASTA_CI_AUTOFIX", "ASTA_CI_PREFETCH", "ASTA_CLI_MCP", "TEAMS_BR
                 "ASTA_DELIVERY", "ASTA_MEET2", "ASTA_VERIFY", "ASTA_GRAPH", "ASTA_ROUTING",
                 "ASTA_EVOLVE", "ASTA_APPS", "ASTA_SCREEN", "ASTA_GRAPHS", "ASTA_RESPOND",
                 "ASTA_CHATWATCH", "ASTA_INCOMING", "ASTA_BENCH_NIGHTLY", "ASTA_ASK_BACK",
-                "ASTA_THREADS", "ASTA_THREAD_CHECKIN", "ASTA_BROWSER_NO_HTTP2", "ASTA_GRAFANA")
+                "ASTA_THREADS", "ASTA_THREAD_CHECKIN", "ASTA_BROWSER_NO_HTTP2", "ASTA_GRAFANA",
+                # No test draws a plan in a real browser unless it asks to.
+                "ASTA_PLAN_VISUAL")
 for _name in OFF_IN_TESTS:
     os.environ[_name] = "0"
 

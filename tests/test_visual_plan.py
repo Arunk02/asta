@@ -54,7 +54,8 @@ def test_switched_off_it_renders_nothing(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(not plan_visual.chrome(), reason="needs a local Chrome")
-def test_a_real_render_draws_the_diagram(tmp_path):
+def test_a_real_render_draws_the_diagram(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASTA_PLAN_VISUAL", "1")
     md = tmp_path / "plan-9.md"
     md.write_text("# Plan for task #9 — rail ETA\n\n" + PLAN)
     out = asyncio.run(plan_visual.render(md, "rail ETA"))

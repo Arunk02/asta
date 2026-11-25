@@ -39,9 +39,9 @@ FENCE = ROOT / "app" / "pi_fence.ts"
 SESSIONS = ROOT / "data" / "pi-sessions"
 
 #: Claude Code model aliases → pi model ids. routing.py speaks in aliases.
-_MODELS = {"opus": "anthropic/claude-opus-5", "sonnet": "anthropic/claude-sonnet-5",
-           "haiku": "anthropic/claude-haiku-4-5"}
-DEFAULT_MODEL = "anthropic/claude-sonnet-5"
+_MODELS = {"opus": "anthropic/claude-opus-5-5", "sonnet": "anthropic/claude-sonnet-5-5",
+           "haiku": "anthropic/claude-haiku-5-5"}
+DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
 
 _DOWN_KEY = "pi_down"
 #: How long pi stays out after an account error. Credit or a login does not come

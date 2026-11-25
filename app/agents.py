@@ -61,9 +61,53 @@ def load(name: str) -> str:
     if not p:
         return ""
     try:
-        return p.read_text()
+        body = p.read_text()
     except OSError:
         return ""
+    if name in CODE_PIPELINES:
+        skill = coding_skill()
+        if skill:
+            body = body.rstrip() + "\n\n" + skill + "\n"
+    return body
+
+
+#: The pipelines that change code. Each carries the coding skill: the stages
+#: are the pipeline's, the way code is read, changed, verified and committed is
+#: one file for both (skills/coding/SKILL.md). 25 Nov: the same rules lived in
+#: solo.md, micro.md, the task brief and the guardrails — and the costly ones
+#: were broken anyway.
+CODE_PIPELINES = ("solo", "micro")
+CODING_SKILL = ROOT / "skills" / "coding" / "SKILL.md"
+COMPOSED_DIR = ROOT / "data" / "agents"
+
+
+def coding_skill() -> str:
+    """The coding skill's body, frontmatter off, its reference paths absolute."""
+    try:
+        text = CODING_SKILL.read_text()
+    except OSError:
+        return ""
+    import re
+    text = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.S).strip()
+    return text.replace("{SKILL_DIR}", str(CODING_SKILL.parent))
+
+
+def file_for(name: str) -> Path | None:
+    """The file an executor is handed for this pipeline: the pipeline itself, or
+    for a code pipeline the pipeline + coding skill, written once under data/
+    (rewritten only when either source changes)."""
+    p = path_for(name)
+    if not p or name not in CODE_PIPELINES:
+        return p
+    body = load(name)
+    out = COMPOSED_DIR / f"{name}.md"
+    try:
+        if not out.exists() or out.read_text() != body:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(body)
+    except OSError:
+        return p
+    return out
 
 
 def available() -> list[str]:

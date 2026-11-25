@@ -603,6 +603,44 @@ def _gate_gone_stale(t: dict, now: float) -> bool:
     return bool(since) and (now - float(since)) >= GATE_STALE_SECONDS
 
 
+_IDENT = re.compile(r"\b(?:[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+|[a-z]+(?:[A-Z][A-Za-z0-9]*)+|"
+                    r"[A-Z][A-Z0-9]{1,15}-\d{1,6}|[A-Z0-9]+(?:_[A-Z0-9]+){1,})\b")
+_SUBJECT_STOP = frozenset((
+    "about", "after", "again", "also", "change", "check", "could", "every", "field", "first",
+    "fixed", "issue", "other", "please", "should", "their", "there", "these", "thing", "those",
+    "using", "value", "where", "which", "while", "would", "service", "booking", "update",
+    "added", "adding", "remove", "create", "missing", "handle", "tests", "plan", "approve",
+    "test", "make", "also", "that", "this", "with", "from", "have", "same", "done", "code",
+    "file", "into", "when", "then", "them", "just", "like", "need", "want", "fine", "more",
+    "some", "only", "well", "case", "data", "keep", "good", "work", "task", "pull", "push",
+    "commit", "branch", "merge", "review", "comment", "comments", "change", "changes"))
+
+
+def _subject_terms(text: str) -> tuple[set[str], set[str]]:
+    """(identifiers, content words) — class/method names, tickets, CONSTANTS;
+    and words of four letters or more that say what something is about."""
+    idents = {m.group(0).lower() for m in _IDENT.finditer(text or "")}
+    words = {w for w in re.findall(r"[a-z]{4,}", (text or "").lower()) if w not in _SUBJECT_STOP}
+    return idents, words
+
+
+def same_subject(task_id: int, text: str) -> bool:
+    """Does this message talk about what the task is about?
+
+    One shared identifier (a class, a ticket, a constant from its title, ask or
+    approved plan), or two shared content words. A message about something else
+    — another service, another ticket — shares neither."""
+    t = store.get_task(task_id) or {}
+    about = " ".join((t.get("title") or "", (t.get("prompt") or "")[:3000],
+                      (store.kv_get(f"task_plan:{task_id}") or "")[:4000]))
+    ti, tw = _subject_terms(about)
+    mi, mw = _subject_terms(text)
+    other_ticket = {i for i in mi if re.fullmatch(r"[a-z][a-z0-9]{1,15}-\d{1,6}", i)} - ti
+    if other_ticket:
+        return False                 # names a different ticket: new work
+    return bool(mi & ti) or len(mw & tw) >= 2
+
+
 def refinable_for(conv_id: str, now: float | None = None) -> list[int]:
     """Recently-finished tasks from this conversation that feedback can continue.
 
@@ -1486,9 +1524,7 @@ def spawn(title: str, prompt: str, kind: str = "analysis",
                 store.kv_set(f"task_asked:{t['id']}", _json.dumps({"his": said, "offer": ""}))
     if kind == "code":
         if not pipeline:
-            # Jira tickets are stories — full pipeline with gates. Ad-hoc asks
-            # start micro; the agent ESCALATEs if discovery proves it bigger.
-            pipeline = "full" if _JIRA_KEY.search(title + " " + prompt) else "micro"
+            pipeline = _pipeline_by_tier(t["id"], title, prompt)
         store.kv_set(f"task_pipeline:{t['id']}", pipeline)
         cid = _TURN_CONV.get()
         if cid:
@@ -2008,6 +2044,20 @@ def _resolve_executor(task_id: int) -> str:
     return ex
 
 
+def _pipeline_by_tier(task_id: int, title: str, prompt: str) -> str:
+    """micro for a T1 change, the staged pipeline for anything bigger.
+
+    One question, one answer: routing already sized the work from his words
+    (T1/T2/T3). The pipeline used to be sized separately by "has a Jira key",
+    so a one-line config ticket got the full staged ceremony and an ad-hoc
+    cross-repo change started micro. Without routing, the old rule stands:
+    a ticket is a story, an ad-hoc ask starts micro and ESCALATEs if bigger."""
+    from . import routing
+    if routing.enabled() and store.kv_get(routing._key(task_id)):
+        return "micro" if routing.tier_of(task_id) == routing.T1 else "full"
+    return "full" if _JIRA_KEY.search(title + " " + prompt) else "micro"
+
+
 def _pipeline_for(task_id: int) -> str:
     return store.kv_get(f"task_pipeline:{task_id}") or "full"
 
@@ -2078,7 +2128,7 @@ def _with_pipeline(pipeline: str, prompt: str, task_id: str = "") -> str:
 
 def _agent_file(kind: str, pipeline: str = "full") -> str:
     """Path to the pipeline body, for executors that take a file."""
-    p = agents.path_for(_pipeline_name(kind, pipeline))
+    p = agents.file_for(_pipeline_name(kind, pipeline))
     return str(p) if p else ""
 
 
@@ -2385,6 +2435,60 @@ async def _observed_cli(task_id: int, executor: str, prompt: str, **kwargs) -> s
         return await cli.one_shot(prompt, **kwargs)
 
 
+def fresh_followups() -> bool:
+    """ASTA_FRESH_FOLLOWUP — a follow-up on finished work starts a new session
+    from a short handoff instead of resuming the old one (default on)."""
+    return os.environ.get("ASTA_FRESH_FOLLOWUP", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def mark_fresh_followup(task_id: int) -> None:
+    """The next leg of this finished task starts a new session (see _code_leg).
+
+    25 Nov, task 744: plan, build and four follow-ups all resumed ONE session, so
+    every turn re-read 55k–216k of context — 16M cache reads — until his spend
+    limit stopped it mid-build. What a follow-up needs is the approved plan and
+    where the branch stands, not the 99 turns that produced them."""
+    status = (store.get_task(task_id) or {}).get("status")
+    # Finished work only: a paused or running task is mid-thought, and its own
+    # session is what it needs to carry on.
+    if fresh_followups() and status in (*REFINABLE, "merged"):
+        store.kv_set(f"task_fresh_next:{task_id}", "1")
+
+
+def handoff(task_id: int, cwd: str) -> str:
+    """What a fresh follow-up leg starts from: the ask, the approved plan, the
+    branch's own commits and state, the PR. A few thousand characters."""
+    t = store.get_task(task_id) or {}
+    plan = (store.kv_get(f"task_plan:{task_id}") or "").strip()
+    parts = [f"HANDOFF — task #{task_id}: {t.get('title', '')}",
+             "You are continuing finished work in a fresh session. Everything you need "
+             "from the earlier sessions is below; the checkout is already on the task's "
+             "branch. Do not re-discover or re-plan what the plan already settles.",
+             f"His original ask:\n{clip.clip(t.get('prompt') or '', 1500)}"]
+    if plan:
+        parts.append(f"The plan he approved (it still holds unless he says otherwise):\n"
+                     f"{clip.clip(plan, 3000)}")
+    from . import worktrees as _wt
+    root = Path(cwd)
+    repos = [root] if (root / ".git").exists() else _wt.repos_in(root)
+    for repo in repos[:4]:
+        def git(*args: str) -> str:
+            try:
+                return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                                      text=True, timeout=20).stdout.strip()
+            except Exception:                                   # noqa: BLE001
+                return ""
+        branch = git("rev-parse", "--abbrev-ref", "HEAD")
+        log = git("log", "--oneline", "-8")
+        status = git("status", "--short")
+        if branch or log:
+            parts.append(f"{repo.name} — branch {branch}\nRecent commits:\n{log}"
+                         + (f"\nUncommitted:\n{clip.clip(status, 600)}" if status else ""))
+    if t.get("pr_urls"):
+        parts.append(f"Pull request(s): {t['pr_urls']}")
+    return "\n\n".join(parts) + "\n\n---\n\n"
+
+
 async def _code_leg(task_id: int, prompt: str, cwd: str, *,
                     resume: bool, effort: str, workspace: str | None = None) -> str:
     """One executor leg of a code task, pinned to the task's session so gates
@@ -2397,6 +2501,11 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     # ran a standard flow, one that took several hit something worth recording.
     store.kv_set(f"task_rounds:{task_id}", str(_rounds(task_id) + 1))
     sid_key = f"task_session:{task_id}:{ex}"
+    if store.kv_get(f"task_fresh_next:{task_id}"):
+        store.kv_del(f"task_fresh_next:{task_id}")
+        store.kv_del(sid_key)
+        prompt = handoff(task_id, cwd) + prompt
+        store.add_task_event(task_id, "session", "fresh session for a follow-up (handoff, no resume)")
     sid = store.kv_get(sid_key)
     if not sid:
         sid, resume = str(uuid.uuid4()), False
@@ -2431,9 +2540,14 @@ async def _code_leg(task_id: int, prompt: str, cwd: str, *,
     model = ""
     from . import routing
     if routing.enabled():
-        choice = routing.choose(task_id, ex, "plan" if plan_only else "implement")
+        # An amendment to an approved plan is a small delta, not a design: it
+        # runs on the model that builds, not the one that plans a T3 feature.
+        stage = "implement" if (plan_only and amending(task_id)) else \
+            ("plan" if plan_only else "implement")
+        choice = routing.choose(task_id, ex, stage)
         model, effort = choice.model, choice.effort or effort
-        routing.record(task_id, "plan" if plan_only else "implement", ex, choice)
+        routing.record(task_id, "amend" if stage != ("plan" if plan_only else "implement")
+                       else stage, ex, choice)
     if ex == "pi":
         from . import pi_cli
         try:
@@ -6093,6 +6207,36 @@ _PLAN_ONLY_BRIEF = (
     "Arun approves the plan before anything is changed.")
 
 
+#: A follow-up on work whose plan he already approved is an AMENDMENT to that
+#: plan, not a new one. 25 Nov, his words: "every time it re-plans even for minor
+#: improvements — the first plan is better, the others are comments it missed on
+#: top of the first plan". Task 744 that day: one plan, then four Opus re-plans,
+#: each replacing the plan he had approved.
+_AMEND_BRIEF = (
+    "\n\nAMENDMENT ONLY — change NO file in this step. He already approved the plan "
+    "below; it stands. Do not re-plan it, restate it or re-justify it. Report, under 12 "
+    "lines, no narration:\n"
+    "1. CAUSE: one line with file:line, only if this is a fix.\n"
+    "2. AMENDMENT: only what this adds to or changes in the approved plan, one line "
+    "each — `+ file → what is added`, `~ file → what changes`, `- file → what is "
+    "dropped`. For tests: which test and what it asserts. Never weaken an assertion.\n"
+    "3. RISK: one line.\n"
+    "Only if the approved design itself no longer holds, start your answer with "
+    "`DESIGN CHANGED: <one line why>` and then give the whole new plan instead.\n"
+    "Arun approves the amendment before anything is changed.")
+
+
+def amending(task_id: int) -> bool:
+    """Is the leg running now an amendment leg (plan-only, build model)?"""
+    return bool(store.kv_get(f"task_amending:{task_id}"))
+
+
+def _amended_plan(approved: str, n: int, request: str, amendment: str) -> str:
+    """Plan v1 with amendment A<n> appended — never replaced by it."""
+    return (f"{approved.rstrip()}\n\nAMENDMENT A{n} ({time.strftime('%d %b')}) — "
+            f"{clip.clip(' '.join(request.split()), 160)}\n{amendment.strip()}\n")
+
+
 async def propose_change(task_id: int, feedback: str) -> str:
     """Analyse and plan a change to finished work, in the task's own session,
     without editing anything; the plan waits for his approval."""
@@ -6101,6 +6245,7 @@ async def propose_change(task_id: int, feedback: str) -> str:
         raise ValueError(f"task #{task_id} is not a code task")
     if t["status"] in LIVE_STATUSES:
         raise ValueError(f"task #{task_id} is still running — I'll plan this when it stops")
+    mark_fresh_followup(task_id)
     await ensure_checkout(task_id)
     ci_read = await _ci_failure_for(t, feedback)
     if quality_gate_only(ci_read):
@@ -6125,13 +6270,23 @@ async def propose_change(task_id: int, feedback: str) -> str:
                     "most often coverage or new issues on the changed code. Plan the change "
                     "that meets it (tests for the new code); do not change unrelated code.")
     store.kv_set(f"task_approved:{task_id}", "")          # this leg cannot write
+    approved_before = (store.kv_get(f"task_plan:{task_id}") or "").strip()
+    amend = bool(approved_before) and os.environ.get("ASTA_PLAN_AMEND", "1").strip().lower() \
+        not in ("0", "false", "no", "off")
     store.kv_set(f"task_proposal:{task_id}", _json.dumps(
-        {"feedback": feedback, "status": t["status"], "at": time.time()}))
+        {"feedback": feedback, "status": t["status"], "at": time.time(), "amend": amend}))
     store.update_task(task_id, status="running")
-    store.record_outcome("task", "proposal", subject=str(task_id), detail=feedback[:200])
-    prompt = (f"FOLLOW-UP ON YOUR OWN TASK — this is not a new task.\n"
-              f"Arun's request:\n{feedback}\n\n" + (f"{ci_read}\n\n" if ci_read else "")
-              + _PLAN_ONLY_BRIEF)
+    store.record_outcome("task", "amendment" if amend else "proposal", subject=str(task_id),
+                         detail=feedback[:200])
+    if amend:
+        store.kv_set(f"task_amending:{task_id}", "1")
+        prompt = (f"FOLLOW-UP ON YOUR OWN TASK — this is not a new task.\n"
+                  f"Arun's request:\n{feedback}\n\n" + (f"{ci_read}\n\n" if ci_read else "")
+                  + f"The plan he approved:\n{clip.clip(approved_before, 3500)}" + _AMEND_BRIEF)
+    else:
+        prompt = (f"FOLLOW-UP ON YOUR OWN TASK — this is not a new task.\n"
+                  f"Arun's request:\n{feedback}\n\n" + (f"{ci_read}\n\n" if ci_read else "")
+                  + _PLAN_ONLY_BRIEF)
     job = asyncio.create_task(_propose_worker(task_id, prompt))
     _running[task_id] = job
     job.add_done_callback(lambda _j, tid=task_id: _running.pop(tid, None))
@@ -6149,26 +6304,57 @@ async def _propose_worker(task_id: int, prompt: str) -> None:
                                          resume=True, effort=_effort_for("code", _resolve_executor(task_id)),
                                          workspace=t.get("workspace"))
     except Exception as exc:                                    # noqa: BLE001
+        store.kv_del(f"task_amending:{task_id}")
         raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
         store.update_task(task_id, status=raw.get("status") or "done")
         await notify.notify(f"❌ #{task_id} could not plan the change: {str(exc)[:200]}", "task")
         return
+    store.kv_del(f"task_amending:{task_id}")
     raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
     raw["plan"] = result
     store.kv_set(f"task_proposal:{task_id}", _json.dumps(raw))
     store.kv_set(f"task_gate:{task_id}", "change")
     store.update_task(task_id, status="awaiting_approval")
+    redesign = _DESIGN_CHANGED.search(result or "")
+    if raw.get("amend") and not redesign:
+        n = int(store.kv_get(f"task_amendments:{task_id}") or 0) + 1
+        head = (f"📝 #{task_id} {t.get('title', '')} — amendment A{n} to the plan you "
+                f"approved (nothing changed yet; the plan itself stands):")
+    elif redesign:
+        head = (f"⚠️ #{task_id} {t.get('title', '')} — this changes the approved design "
+                f"({redesign.group(1).strip()[:160]}). New plan (nothing changed yet):")
+    else:
+        head = f"📋 #{task_id} {t.get('title', '')} — proposed change (nothing changed yet):"
     await notify.notify(
-        f"📋 #{task_id} {t.get('title', '')} — proposed change (nothing changed yet):\n\n"
-        f"{_phone_text(readable_outcome(result), 1800, head_first=True)}\n\n"
+        f"{head}\n\n{_phone_text(readable_outcome(result), 1800, head_first=True)}\n\n"
         f"Reply *approve task {task_id}* to apply it, or tell me what to change.", "task")
 
 
+_DESIGN_CHANGED = re.compile(r"(?im)^\W*DESIGN CHANGED\s*:\s*(.*)$")
+
+
 def _apply_proposal(task_id: int) -> tuple[str, str]:
-    """(the plan he approved, the status to resume from)."""
+    """(the plan he approved, the status to resume from).
+
+    An amendment is appended to the plan he approved earlier, which keeps
+    standing; only a DESIGN CHANGED answer replaces it."""
     raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
     from . import task_spec
     approved = readable_outcome(raw.get("plan") or "")
+    before = (store.kv_get(f"task_plan:{task_id}") or "").strip()
+    if raw.get("amend") and before and not _DESIGN_CHANGED.search(raw.get("plan") or ""):
+        n = int(store.kv_get(f"task_amendments:{task_id}") or 0) + 1
+        store.kv_set(f"task_amendments:{task_id}", str(n))
+        whole = _amended_plan(before, n, raw.get("feedback", ""), approved)
+        store.kv_set(f"task_plan:{task_id}", whole)
+        task_spec.capture(task_id, whole)
+        store.kv_del(f"task_proposal:{task_id}")
+        store.kv_del(f"task_gate:{task_id}")
+        store.record_outcome("task", "amendment approved", subject=str(task_id), detail=f"A{n}")
+        return (f"Arun approved amendment A{n} to the plan he approved earlier — implement "
+                f"exactly this amendment, on top of the work already done, nothing else:\n"
+                f"{approved}\n\nHis request was: {raw.get('feedback', '')}",
+                raw.get("status") or "done")
     task_spec.capture(task_id, approved)
     store.kv_set(f"task_plan:{task_id}", approved)
     store.kv_del(f"task_proposal:{task_id}")
@@ -6328,6 +6514,7 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
         # Still running: kept for its next step — or, when he says the approved
         # design is wrong, the build stops and it plans again.
         return await note_for_live_task(task_id, feedback, code_change=code_change)
+    mark_fresh_followup(task_id)
     after_merge = t["status"] == "merged"
     if after_merge:
         await _reopen_merged(task_id, t)

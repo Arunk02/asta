@@ -167,6 +167,9 @@ def build_instructions(conversation_summary: str, recall_block: str, workspace: 
         parts.append(voice)
     if channel in CHANNEL_NOTES:
         parts.append(CHANNEL_NOTES[channel])
+    pins = memory.pinned_block()
+    if pins:
+        parts.append("## " + pins)
     idx = memory.index_text()
     if idx.strip():
         parts.append("## Memory index\n" + idx)
@@ -403,7 +406,7 @@ _SPECS: dict[str, dict] = {
                    "label": "Claude CLI (subscription)", "hint": "install/auth: claude login"},
     "claude":     {"kind": "api", "env": "ANTHROPIC_API_KEY", "executes": False, "effort": False,
                    "identity": "system", "tools": "in_process", "context": 200000, "rank": 40,
-                   "model_env": ("ASTA_CLAUDE_MODEL", "claude-sonnet-5"), "label": "Claude"},
+                   "model_env": ("ASTA_CLAUDE_MODEL", "claude-sonnet-5-5"), "label": "Claude"},
     "openai":     {"kind": "api", "env": "OPENAI_API_KEY", "executes": False, "effort": True,
                    "identity": "system", "tools": "in_process", "context": 128000, "rank": 50,
                    "model_env": ("ASTA_OPENAI_MODEL", "gpt-4o"), "label": "OpenAI"},
@@ -936,7 +939,7 @@ def get_model(name: str):
             custom_output_text="Test model online. The chat pipeline (WS → agent → stream → store) works.",
         )
     if name == "claude":
-        return AnthropicModel(os.environ.get("ASTA_CLAUDE_MODEL", "claude-sonnet-5"))
+        return AnthropicModel(os.environ.get("ASTA_CLAUDE_MODEL", "claude-sonnet-5-5"))
     if name == "openai":
         return OpenAIChatModel(os.environ.get("ASTA_OPENAI_MODEL", "gpt-4o"))
     if name in ("copilot", "claude_cli"):
@@ -1029,7 +1032,9 @@ def forget_memory(path: str, purge: bool = False) -> str:
 
 def remember(title: str, fact: str, kind: str = "fact", workspace: str = "", source: str = "",
              distinct: bool = False) -> str:
-    """Store a durable memory. kind: fact | preference | gotcha | fix.
+    """Store a durable memory. kind: fact | preference | gotcha | fix | identity.
+    identity: a fact about Asta itself or about Arun (a date, a name, a default) —
+    pinned, so every turn knows it without a search.
     Use for corrections, preferences, root causes, environment quirks.
     For project facts, include the workspace and an evidence/source reference.
     distinct: true only after being told a close note exists and this one is a

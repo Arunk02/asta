@@ -228,7 +228,10 @@ def test_every_command_saves_big_bash_output_to_a_file(conv, monkeypatch):
     import json as _json
     assert _flag(claude_cli._build_cmd(conv, "hi"), "--settings") == claude_cli.OUTPUT_SETTINGS
     assert _json.loads(claude_cli.OUTPUT_SETTINGS) == {"bashOutputMaxChars": 8000}
-    assert _flag(_leg(monkeypatch, on=True), "--settings") == claude_cli.OUTPUT_SETTINGS
+    # A code leg keeps the same cap, and carries the code guard (25 Nov) beside it.
+    leg = _json.loads(_flag(_leg(monkeypatch, on=True), "--settings"))
+    assert leg["bashOutputMaxChars"] == 8000
+    assert leg["hooks"]["PreToolUse"][0]["matcher"] == "Read|Bash"
 
 
 def test_mcp_results_have_a_lower_ceiling_unless_he_set_one(monkeypatch):

@@ -105,8 +105,12 @@ def test_no_prepared_branch_means_no_claim():
 def test_both_pipelines_carry_the_branch_rule(f):
     """One rule, both tiers. Neither mentioned branches at all, which is why the
     agent did the only thing left to it and cut its own."""
+    # What a leg is handed: the pipeline plus the coding skill (25 Nov), where
+    # the branch rule now lives once for both.
     from pathlib import Path
-    body = Path(f).read_text()
+
+    from app import agents
+    body = agents.load(Path(f).stem)
     assert "## Branch" in body
     assert "Never `git checkout -b`" in body
 

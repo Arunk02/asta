@@ -1011,7 +1011,9 @@ def test_a_task_is_told_it_may_switch_to_an_existing_branch_without_asking():
     assert "not a" in tasks.CODE_OVERRIDES and "question to bring back to him" in tasks.CODE_OVERRIDES
     from pathlib import Path
     for f in ("agents/solo.md", "agents/micro.md"):
-        assert "EXISTING branch or PR" in Path(f).read_text()
+        # Pipeline + coding skill, as a leg receives it (25 Nov).
+        from app import agents
+        assert "EXISTING branch or PR" in agents.load(Path(f).stem)
 
 
 def test_the_self_review_reads_only_what_this_task_committed(monkeypatch, tmp_path):

@@ -46,6 +46,10 @@ def _html(markdown: str) -> str:
     body = body.replace("<table>", '<table border="1" width="100%">')
     body = re.sub(r"<pre><code[^>]*>", '<pre><font face="Courier" size="8">', body)
     body = body.replace("</code></pre>", "</font></pre>")
+    # fpdf cannot nest <font> inside a table cell (25 Nov, live: a plan with
+    # `calc.py` in its table made no PDF at all) — code in a cell is plain text.
+    body = re.sub(r"<td>(.*?)</td>", lambda m: "<td>" + re.sub(r"</?code>", "", m.group(1)) + "</td>",
+                  body, flags=re.S)
     body = re.sub(r"<code>(.*?)</code>", r'<font face="Courier" color="#8a2be2">\1</font>', body, flags=re.S)
     return body
 

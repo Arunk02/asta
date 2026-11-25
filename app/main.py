@@ -5518,9 +5518,14 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
             return None
     elif len(live) == 1 and not _names_another_task(user_text, live) \
             and not _about_offer(user_text, offers.pending()) \
-            and _conversation_is_on_task(cid, live[0]):
-        if (not _independent_code_ask(user_text, conv.get("workspace") or
-                                      policy.prefer("workspace")) and
+            and (_conversation_is_on_task(cid, live[0]) or tasks.same_subject(live[0], user_text)):
+        # 25 Nov, live: "add a docstring to subtract in calc.py" while the
+        # subtract task waited at its gate became a NEW task — work-shaped, no
+        # "also", so "independent". A message about what the task is about
+        # (its classes, ticket, title words) is about the task.
+        if ((not _independent_code_ask(user_text, conv.get("workspace") or
+                                       policy.prefer("workspace"))
+             or tasks.same_subject(live[0], user_text)) and
                 await _route_to_task(live[0], user_text, sink, channel,
                                      conv.get("model", ""))):
             return None
@@ -6132,6 +6137,10 @@ async def _route_to_task(task_id: int, user_text: str, sink, channel: str,
         return False
     intent = (frontdesk.interjection(user_text, named) if frontdesk.enabled()
               else await activity.resolve_interjection(user_text, model_name))
+    if intent == "ambiguous" and frontdesk.task_intent(user_text) == "edit" \
+            and tasks.same_subject(task_id, user_text):
+        # An edit about what this task is about is an addition to it (25 Nov).
+        intent = "augment"
     if intent in ("status", "redirect", "augment"):
         frontdesk.record("job", f"{intent} #{task_id}")
     if intent == "status":

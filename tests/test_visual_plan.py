@@ -128,6 +128,8 @@ def _repo_with_remote(tmp_path: Path) -> Path:
     (repo / "README.md").write_text("svc\n")
     g("add", "-A"); g("commit", "-qm", "base"); g("push", "-q", "origin", "HEAD:develop")
     g("fetch", "-q"); g("switch", "-q", "-c", "ABC-9-rail-eta")
+    # Asta's own commit in ship_plan uses the repo's identity; CI has no global one.
+    g("config", "user.email", "t@t"); g("config", "user.name", "t")
     return repo
 
 

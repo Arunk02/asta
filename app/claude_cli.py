@@ -177,6 +177,28 @@ CODER_PROMPT = (
 #: tools detached: a 22k result → a 2.3k preview.
 BASH_INLINE_CHARS = 8000
 OUTPUT_SETTINGS = '{"bashOutputMaxChars": %d}' % BASH_INLINE_CHARS
+#: The code-leg guard (app/hooks/code_guard.py): whole-file reads of big files
+#: and shell writes into the repo are refused — task 744, 25 Nov. ASTA_CODE_GUARD=0
+#: turns it off.
+CODE_GUARD = Path(__file__).resolve().parent / "hooks" / "code_guard.py"
+
+
+def code_guard_on() -> bool:
+    return os.environ.get("ASTA_CODE_GUARD", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def leg_settings(code_leg: bool, plan_only: bool) -> str:
+    """The --settings JSON for one run: the output cap, plus the guard on a code leg."""
+    if not (code_leg and code_guard_on()):
+        return OUTPUT_SETTINGS
+    import shlex
+    import sys as _sys
+    cmd = " ".join(shlex.quote(x) for x in (_sys.executable, str(CODE_GUARD),
+                                            "plan" if plan_only else "build"))
+    return json.dumps({"bashOutputMaxChars": BASH_INLINE_CHARS,
+                       "hooks": {"PreToolUse": [{"matcher": "Read|Bash",
+                                                 "hooks": [{"type": "command", "command": cmd,
+                                                            "timeout": 10}]}]}})
 #: An MCP result's ceiling in tokens (Claude Code's default is 25,000).
 MCP_OUTPUT_TOKENS = 8000
 
@@ -258,7 +280,8 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
     # copilot_cli.now_line for the Monday this is here to stop repeating.
     from . import copilot_cli
     prompt = f"{copilot_cli.now_line()}\n{prompt}"
-    cmd = ["claude", "-p", prompt, NO_SKILLS, "--settings", OUTPUT_SETTINGS,
+    cmd = ["claude", "-p", prompt, NO_SKILLS,
+           "--settings", leg_settings(bool(builtins) and not tools_off, plan_only),
            # JSON, so the run's own cost comes back with its text (see _parse_run).
            "--output-format", "json",
            # Parity with the copilot path's --allow-all-tools: the pipeline

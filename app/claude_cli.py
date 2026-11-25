@@ -69,6 +69,11 @@ def _subprocess_env() -> dict:
     # `remember` tool and his guardrails file; nothing else. Measured: with this
     # set, the session reports no memory directory; without it, it has one.
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    # Code Mode (experimental) is for his interactive terminal sessions only:
+    # the docs support an interactive `claude`, not headless runs, and a Code
+    # Mode session resumes only with Code Mode on. Turned on in his user
+    # settings, it would otherwise reach every Asta leg; "0" anywhere wins.
+    env["CLAUDE_CODE_EXPERIMENTAL_CODE_MODE"] = "0"
     # A runaway MCP result (a wide log pull) stops at ~8k tokens instead of the
     # CLI's 25k default. Asta's own tools already answer in a few thousand.
     env.setdefault("MAX_MCP_OUTPUT_TOKENS", str(MCP_OUTPUT_TOKENS))

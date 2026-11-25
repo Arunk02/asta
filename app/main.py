@@ -5624,8 +5624,20 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
                       else await activity.resolve_interjection(user_text, conv.get("model", "")))
             if frontdesk.task_intent(user_text) == "external" and intent == "augment":
                 intent = "ambiguous"
+            if intent == "ambiguous" and tasks.same_subject(recent[-1], user_text):
+                # 25 Nov, his words: "it's not understanding which is a reply and
+                # which is the actual task". "Fix the null check in the
+                # validator" right after the validator task finished has no
+                # "also" in it, so it was work-shaped and unplaced — and became
+                # a new task that started from nothing. Naming what the task is
+                # about (its classes, its ticket, its title) places it.
+                intent = "augment"
             if intent == "augment":
                 target = recent[-1]
+        elif len(recent) > 1:
+            on = [i for i in recent if tasks.same_subject(i, user_text)]
+            if len(on) == 1 and activity.classify_interjection(user_text) != "new_task":
+                target = on[0]
         if target is not None and frontdesk.task_intent(user_text) == "edit":
             try:
                 note = await tasks.refine(target, user_text)

@@ -32,6 +32,15 @@ INDEX_FILE = MEMORY_DIR / "MEMORY.md"
 
 INDEX_HEADER = "# Asta Memory Index\n\nOne line per memory. Full facts live in facts/ and episodes/.\n\n"
 INDEX_MAX_CHARS = 4000  # keep the always-in-prompt index tiny
+#: Facts about Asta itself or about Arun — "Asta was created on 27 Jan 2026" —
+#: are known on every turn, not left to a search that may not find them. 25 Nov,
+#: his words: "creation date I set long back, now if I ask it's not sure". The
+#: fact was on file; it was line 82 of a 115-line index of which only the first
+#: 4,000 characters reached a prompt, and unasked recall returns nothing while
+#: the local embedder is down.
+PINNED_KINDS = ("identity",)
+_PIN_TITLE = re.compile(r"^(?:asta|arun)['\u2019]s\b", re.I)
+PINNED_MAX_CHARS = 1200
 
 
 def ensure_dirs() -> None:
@@ -441,7 +450,8 @@ def similar(title: str, fact: str, limit: int = 3) -> list[tuple[float, dict]]:
 
 def remember(title: str, fact: str, mtype: str = "fact", *, workspace: str = "",
              source: str = "", supersedes: str = "") -> str:
-    """Persist a durable fact. mtype: fact | preference | gotcha | fix.
+    """Persist a durable fact. mtype: fact | preference | gotcha | fix | identity
+    (identity: about Asta itself or about Arun — pinned, known on every turn).
 
     The same title and text already on file is not written twice: its path is
     returned instead."""
@@ -526,9 +536,70 @@ def _index_add_line(line: str) -> None:
 
 # --- read path ---------------------------------------------------------------
 
-def index_text() -> str:
+def _pinned_meta(meta: dict) -> bool:
+    if meta.get("superseded_by"):
+        return False
+    return (meta.get("pinned", "").lower() in ("true", "yes", "1")
+            or meta.get("type", "") in PINNED_KINDS
+            or bool(_PIN_TITLE.match(meta.get("title", ""))))
+
+
+def pinned() -> list[dict]:
+    """Facts known on every turn: identity facts, newest first."""
     ensure_dirs()
-    return INDEX_FILE.read_text()[:INDEX_MAX_CHARS]
+    out = []
+    for p in FACTS_DIR.glob("*.md"):
+        try:
+            raw = p.read_text()
+        except OSError:
+            continue
+        meta = _parse_frontmatter(raw)
+        if _pinned_meta(meta):
+            out.append({"path": f"facts/{p.name}", "title": meta.get("title", p.stem),
+                        "date": meta.get("date", ""), "fact": " ".join(_body(raw).split())})
+    return sorted(out, key=lambda r: r["date"], reverse=True)
+
+
+def pinned_block() -> str:
+    """The pinned facts as one short block, or ''. Same text for every brain."""
+    lines, used = [], 0
+    for r in pinned():
+        line = f"- {r['title']}: {r['fact'][:240]}"
+        if used + len(line) > PINNED_MAX_CHARS:
+            break
+        lines.append(line)
+        used += len(line)
+    if not lines:
+        return ""
+    return "Always known (pinned facts — true unless he corrects them):\n" + "\n".join(lines)
+
+
+def index_text() -> str:
+    """The index lines that fit in INDEX_MAX_CHARS: pinned first, then newest.
+
+    The file is appended to, so a plain head cut kept the OLDEST entries and
+    dropped everything learned since — 77 of 115 lines on 25 Nov."""
+    ensure_dirs()
+    text = INDEX_FILE.read_text()
+    if len(text) <= INDEX_MAX_CHARS:
+        return text
+    head, entries = [], []
+    for line in text.splitlines():
+        (entries if line.startswith("- ") else head).append(line)
+    pins = {r["path"] for r in pinned()}
+    first = [e for e in entries if any(f"({p})" in e for p in pins)]
+    rest = [e for e in reversed(entries) if e not in first]
+    kept, used = [], len("\n".join(head)) + 1
+    for e in first + rest:
+        if used + len(e) + 1 > INDEX_MAX_CHARS:
+            break
+        kept.append(e)
+        used += len(e) + 1
+    order = {e: i for i, e in enumerate(entries)}
+    kept.sort(key=lambda e: (0 if e in first else 1, -order[e]))
+    dropped = len(entries) - len(kept)
+    tail = [f"({dropped} older entries not shown — search_memory finds them)"] if dropped else []
+    return "\n".join(head + kept + tail) + "\n"
 
 
 def local_embed(texts: list[str]) -> list[list[float]] | None:
@@ -639,8 +710,12 @@ def recall(query: str, k: int = 4, *, workspace: str = "",
 
 
 def turn_recall_block(query: str, *, workspace: str = "") -> str:
-    """The curated notes a chat turn gets unasked — or nothing (see TURN_KINDS)."""
-    return recall_block(query, workspace=workspace, kinds=TURN_KINDS, floor=TURN_RECALL_FLOOR, k=3)
+    """The curated notes a chat turn gets unasked (see TURN_KINDS), after the
+    pinned facts, which every turn gets whatever the query and whether or not
+    the embedder is up."""
+    parts = [pinned_block(), recall_block(query, workspace=workspace, kinds=TURN_KINDS,
+                                          floor=TURN_RECALL_FLOOR, k=3)]
+    return "\n\n".join(p for p in parts if p)
 
 
 def recall_block(query: str, *, workspace: str = "", kinds: tuple[str, ...] | None = None,

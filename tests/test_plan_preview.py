@@ -93,16 +93,18 @@ def test_the_plan_reads_as_a_pdf_not_raw_markdown(phone):
     assert Path(path).suffix == ".pdf"
 
 
-def test_when_the_pdf_cannot_be_made_the_md_goes(phone, monkeypatch):
+def test_when_no_pdf_can_be_made_the_md_is_not_sent_and_the_card_carries_the_plan(phone, monkeypatch):
+    """25 Nov, his words: remove sending the plan.md. Without any PDF the plan
+    still reaches him — as text on the card, not as a raw .md file."""
     monkeypatch.setattr(plan_pdf, "render", lambda *a, **k: None)
     tid = _code()
     asyncio.run(tasks.announce_plan(tid, store.get_task(tid), LONG))
-    (path, body), = phone["documents"]
-    assert path.endswith(f"plan-{tid}.md") and "79. In Service79.java" in body
+    assert not any(p.endswith(".md") for p, _ in phone["documents"])
+    assert any("In Service" in m for m in phone["messages"])
 
 
-def test_a_big_change_is_asked_for_a_plain_text_diagram():
-    assert "add a `DIAGRAM` block" in tasks.CODE_OVERRIDES and "no Mermaid" in tasks.CODE_OVERRIDES
+def test_a_big_change_is_asked_for_a_drawn_diagram():
+    assert "add a `DIAGRAM` block" in tasks.CODE_OVERRIDES and "```mermaid" in tasks.CODE_OVERRIDES
 
 
 def test_a_revised_plan_is_a_new_file_and_the_one_he_read_is_kept():

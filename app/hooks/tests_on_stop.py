@@ -109,6 +109,7 @@ def main() -> int:
     except (OSError, ValueError):
         pass
     if tries >= MAX_TRIES:
+        state.unlink(missing_ok=True)    # the next leg on this session is gated afresh
         print(f"[tests-on-stop] gave up after {tries} tries; the leg stops without a passing test run.",
               file=sys.stderr)
         return 0

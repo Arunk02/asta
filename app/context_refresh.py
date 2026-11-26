@@ -32,7 +32,7 @@ from . import context_layer, store
 
 #: Paths the refresh may change and commit, relative to the workspace root.
 ALLOWED = ("CLAUDE.md", ".claude/rules/", "services/", "docs/", ".asta-context/repos/",
-           ".asta-context/aliases.json", ".asta-context/_index.json")
+           ".asta-context/aliases.json", ".asta-context/lessons.md")
 BRIEF_KEY = "context_refresh_line"
 _SECRET = re.compile(r"(?i)(password|passwd|secret|api[_-]?key|token|private[_-]?key)\s*[:=]\s*\S{6,}"
                      r"|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\bghp_[A-Za-z0-9]{30,}")
@@ -303,7 +303,7 @@ async def _commit_and_push(root: Path, workspace: str) -> str:
     rc, out = await _run(["git", "commit", "-q", "-m", "Refresh workspace context against develop"], root)
     if rc != 0:
         return f"❌ context refresh: commit failed: {out[-160:]}"
-    rc, out = await _run(["git", "pull", "-q", "--rebase", "origin", "main"], root, timeout=120)
+    rc, out = await _run(["git", "pull", "-q", "--rebase", "--autostash", "origin", "main"], root, timeout=120)
     if rc != 0:
         await _run(["git", "rebase", "--abort"], root)
         return "⚠️ context refresh: committed locally; pull failed, not pushed"

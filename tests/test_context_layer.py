@@ -171,3 +171,6 @@ def test_stop_gate_blocks_then_gives_up(tmp_path, monkeypatch):
                                                                              "PATH": "/usr/bin:/bin"}).returncode
              for _ in range(4)]
     assert codes == [2, 2, 2, 0]
+    again = subprocess.run([sys.executable, str(claude_cli.TESTS_ON_STOP)], input=event, capture_output=True,
+                           text=True, timeout=20, env={"TMPDIR": str(tmp_path), "PATH": "/usr/bin:/bin"})
+    assert again.returncode == 2          # a later leg on the same session is gated afresh

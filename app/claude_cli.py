@@ -87,11 +87,14 @@ def _subprocess_env() -> dict:
     return env
 
 
-def _layer_env(env: dict, layer: Path | None) -> dict:
-    """An added folder's CLAUDE.md and rules load only with this set (measured 26 Nov)."""
+def _layer_env(env: dict, layer: Path | None, cwd: str | None = None) -> dict:
+    """An added folder's CLAUDE.md and rules load only with this set (measured 26 Nov). The leg's
+    checkout rides along, so `ctx.js find` points into it, not into his working copies."""
     if layer:
         from . import context_layer
         env = dict(env, **{context_layer.ENV_ADDITIONAL_MD: "1"})
+        if cwd:
+            env[context_layer.ENV_CHECKOUT] = str(Path(cwd).resolve())
     return env
 
 
@@ -390,7 +393,7 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
         stdin=asyncio.subprocess.DEVNULL,
         cwd=cwd or str(ROOT),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env=task_fence.env(_layer_env(_subprocess_env(), layer)),
+        env=task_fence.env(_layer_env(_subprocess_env(), layer, cwd)),
     )
     async def _drain() -> str:
         # Read incrementally rather than communicate(), so on_progress can watch

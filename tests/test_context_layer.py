@@ -107,7 +107,7 @@ def test_the_boot_step_becomes_one_ctx_call(ws, monkeypatch):
     out = context_layer.rewrite_boot(prompt, ws)
     assert "boot.sh" not in out.split("CONTEXT USED")[0]
     assert f"node {ws / '.asta-context' / 'ctx.js'} find" in out
-    assert "COMPANIONS:" in out
+    assert "COMPANIONS:" in out and "CONTRACT:" in out and "flow <Type>" in out
     monkeypatch.setenv("ASTA_CONTEXT_LAYER", "0")
     assert context_layer.rewrite_boot(prompt, ws) == prompt
 

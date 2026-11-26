@@ -27,6 +27,8 @@ import re
 from pathlib import Path
 
 ENV_ADDITIONAL_MD = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+#: The leg's own task checkout; ctx.js prints file paths inside it instead of the workspace's.
+ENV_CHECKOUT = "ASTA_CHECKOUT"
 SERVICES = Path(".asta-context") / "services.json"
 LOCAL = "CLAUDE.local.md"
 #: A leg's report of where a doc and the code disagree, the precedence line's output:
@@ -132,6 +134,10 @@ def excludes(ws_root: str | Path) -> list[str]:
     for repo in services(root).values():
         for name in ("CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.md"):
             out += [str(root / repo / name), f"{base}/*/{repo}/{name}"]
+    # A task checkout lives under ~/.asta-worktrees, and nothing above it has a CLAUDE.md, so the CLI
+    # loaded ~/AGENTS.md (his other agents' copy of ~/.claude/CLAUDE.md, 3.3k chars) on every leg.
+    # Measured live 26 Nov; the exclude drops it.
+    out += [str(p / "AGENTS.md") for p in base.parents]
     return out
 
 
@@ -140,7 +146,9 @@ def deny_his_checkouts(ws_root: str | Path) -> list[str]:
     reachable, and a leg works only in its task checkout. Measured 26 Nov: the deny holds under
     bypassPermissions ("File is in a directory that is denied")."""
     root = Path(ws_root).resolve()
-    return [f"{tool}(/{root}/{repo}/**)" for repo in services(root).values() for tool in ("Edit", "Write")]
+    # Read too: rehearsal (26 Nov) caught a leg planning from his checkout, on whatever branch he has
+    # there, instead of its own task checkout. ctx.js prints task-checkout paths (ASTA_CHECKOUT).
+    return [f"{tool}(/{root}/{repo}/**)" for repo in services(root).values() for tool in ("Edit", "Write", "Read")]
 
 
 def boot_line(ws_root: str | Path) -> str:

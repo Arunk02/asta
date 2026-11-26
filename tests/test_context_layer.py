@@ -78,6 +78,7 @@ def test_excludes_cover_his_checkout_and_every_task_checkout(ws):
     assert str(ws.resolve() / "alpha-service" / "CLAUDE.md") in ex
     assert f"{worktrees.base_for(ws).resolve()}/*/alpha-service/CLAUDE.md" in ex
     assert not any(e.endswith("CLAUDE.local.md") for e in ex)
+    assert str(worktrees.base_for(ws).resolve().parent / "AGENTS.md") in ex     # ancestor of task checkouts
 
 
 def test_leg_settings_carry_excludes_and_the_stop_gate_on_build_legs_only(ws, monkeypatch):
@@ -85,6 +86,7 @@ def test_leg_settings_carry_excludes_and_the_stop_gate_on_build_legs_only(ws, mo
     build = json.loads(claude_cli.leg_settings(True, False, ws))
     assert build["claudeMdExcludes"] == context_layer.excludes(ws)
     assert f"Edit(/{ws.resolve()}/alpha-service/**)" in build["permissions"]["deny"]
+    assert f"Read(/{ws.resolve()}/alpha-service/**)" in build["permissions"]["deny"]
     assert build["hooks"]["Stop"][0]["hooks"][0]["command"].endswith("tests_on_stop.py")
     plan = json.loads(claude_cli.leg_settings(True, True, ws))
     assert "Stop" not in plan["hooks"] and plan["claudeMdExcludes"]
@@ -96,6 +98,7 @@ def test_leg_settings_carry_excludes_and_the_stop_gate_on_build_legs_only(ws, mo
 def test_the_layer_env_var_is_set_only_with_a_layer(ws):
     assert context_layer.ENV_ADDITIONAL_MD not in claude_cli._layer_env({"A": "1"}, None)
     assert claude_cli._layer_env({"A": "1"}, ws)[context_layer.ENV_ADDITIONAL_MD] == "1"
+    assert claude_cli._layer_env({}, ws, str(ws))[context_layer.ENV_CHECKOUT] == str(ws.resolve())
 
 
 def test_the_boot_step_becomes_one_ctx_call(ws, monkeypatch):

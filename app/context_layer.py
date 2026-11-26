@@ -161,7 +161,11 @@ def boot_line(ws_root: str | Path) -> str:
             f"- Companions: real changes here usually also touch files the task never names (an amend twin,\n"
             f"  BookingConstants, a helper, an enum pair, event-history mappers). For every file on `find`'s\n"
             f"  \"usually changes with\" line and in the service CLAUDE.md's \"Usually changes too\", open it and\n"
-            f"  decide. The plan carries one line: `COMPANIONS: <File> in|out — why` for each.\n")
+            f"  decide. The plan carries one line: `COMPANIONS: <File> in|out — why` for each.\n"
+            f"- Cross-repo: when `find` prints a `cross-repo:` block or the task names two services, run\n"
+            f"  `node {ctx} flow <Type>` for each shared type. The plan carries one line per hop:\n"
+            f"  `CONTRACT: <what crosses> · <repo>/<File> (producer) → <repo>/<File> (consumer)`, and changes\n"
+            f"  every schema copy and mapper on both ends. A plan that names only one side of a hop is not done.\n")
 
 
 def note(ws_root: str | Path) -> str:

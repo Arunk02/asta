@@ -192,7 +192,9 @@ async def refresh(workspace: str, root: Path, *, force: bool = False) -> str:
     if rc != 0:
         return _brief(workspace, f"❌ context refresh: index failed: {idx[-160:]}")
     learned = await _learn(root, workspace)
-    rc, ver = await _run(["node", str(ctx), "verify"], root)
+    # --run executes each service's verify block (scoped tests on develop, ~75 s for all three), so
+    # a build command that stopped working is a problem tonight, not when a leg trips on it.
+    rc, ver = await _run(["node", str(ctx), "verify", "--run"], root, timeout=1800)
     problems = [l[5:] for l in ver.splitlines() if l.startswith("FAIL ")]
     rc_d, drift = await _run(["node", str(root / ".asta-context" / "check-drift.js"), str(root)], root)
     if rc_d not in (0,) and drift.strip():

@@ -4565,14 +4565,18 @@ def reply(task_id: int, text: str) -> str:
         # A yes with words after it is still a yes; the words ride with the plan.
         from . import go
         plan, back = _apply_proposal(task_id)
-        store.update_task(task_id, status=back if back in REFINABLE else "done")
+        back = back if back in REFINABLE else "done"
+        # Running from here — what it is. 25 Nov, live: it was set back to
+        # "done" so refine would take it, and for those seconds it read as
+        # finished (a message then would be filed as a follow-up on finished
+        # work) and refine opened yet another fresh session for the build.
+        store.update_task(task_id, status="running")
         mark_approved(task_id)
         if go.wants_pr(text):
             go.grant(task_id, text, ship=True)
         extra = _APPROVE_LEAD.sub("", text).strip(" —-,.:")
         brief = plan + (f"\n\nArun, approving it: {extra}" if extra else "")
-        asyncio.get_running_loop().create_task(
-            refine(task_id, brief, code_change=True, approved_plan=True))
+        asyncio.get_running_loop().create_task(_build_approved(task_id, brief, back))
         return f"Task #{task_id}: plan approved — implementing now."
     if t["status"] == "awaiting_approval" and store.kv_get(f"task_gate:{task_id}") == "change":
         raw = _json.loads(store.kv_get(f"task_proposal:{task_id}") or "{}")
@@ -6481,8 +6485,21 @@ async def continue_finished(task_id: int, followup: str, *, record_asked: bool =
     return f"Task #{task_id}: continuing with your question — same task, building on its answer."
 
 
+async def _build_approved(task_id: int, brief: str, back: str) -> None:
+    """Build an approved change. If it cannot start, the task goes back to where
+    it was and he is told — never left "running" with nothing running."""
+    try:
+        await refine(task_id, brief, code_change=True, approved_plan=True, resume_from=back)
+    except Exception as exc:                                    # noqa: BLE001
+        if (store.get_task(task_id) or {}).get("status") == "running" and task_id not in _running:
+            store.update_task(task_id, status=back)
+        from . import notify
+        await notify.notify(f"❌ #{task_id}: the approved change did not start — {str(exc)[:200]}",
+                            "task", urgency="direct")
+
+
 async def refine(task_id: int, feedback: str, *, code_change: bool = False,
-                 approved_plan: bool = False) -> str:
+                 approved_plan: bool = False, resume_from: str = "") -> str:
     """Continue a finished task with feedback, in the session it already has.
 
     This is the whole point of REFINABLE. The alternative — and what used to
@@ -6499,6 +6516,10 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
         raise ValueError(f"no task #{task_id}")
     if t["kind"] != "code":
         raise ValueError(f"task #{task_id} is not a code task (kind={t['kind']})")
+    if approved_plan and resume_from:
+        # An approved change already marked running by its caller: decide as
+        # from the status it had before the approval.
+        t = {**t, "status": resume_from}
     if t["status"] == "pr_ci_failed" and _BARE_FIX.match(feedback or ""):
         # 5 Nov: "Fix 521", typed after "CI red … say fix #521", reached the
         # worker with nothing about the CI, and it answered "already done".
@@ -6522,7 +6543,8 @@ async def refine(task_id: int, feedback: str, *, code_change: bool = False,
         # Still running: kept for its next step — or, when he says the approved
         # design is wrong, the build stops and it plans again.
         return await note_for_live_task(task_id, feedback, code_change=code_change)
-    mark_fresh_followup(task_id)
+    if not (approved_plan and resume_from):
+        mark_fresh_followup(task_id)      # the approved build keeps the amendment's session
     after_merge = t["status"] == "merged"
     if after_merge:
         await _reopen_merged(task_id, t)

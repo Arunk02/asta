@@ -91,6 +91,28 @@ _OTHER_FLOW = re.compile(
     r"mail|email|reply|dm|group|leave|ooo|reminder|standup|brief|me\b)\b", re.I)
 
 
+#: Where, before what: "In calc.py add …", "In the booking service, fix …",
+#: "For AP, handle …". 26 Nov, live: "In calc.py add subtract(a, b) and a test"
+#: was not routed — the verb was not first — and the chat brain answered it.
+#: Only a place that is recognisably code: a path or file name, a repo of this
+#: workspace, or a word saying repo/service/module/file. The verb must follow.
+_LOCATION = re.compile(
+    r"^\s*(?:in|inside|within|for|on)\s+(?:the\s+|our\s+|my\s+)?(?P<where>[\w./-]+)"
+    r"(?:\s+(?P<kind>repo|repository|service|module|file|class|package|project|folder|codebase))?"
+    r"\s*[,:–—-]?\s+", re.I)
+
+
+def _strip_location(text: str, repos: tuple[str, ...]) -> str:
+    """The sentence after a leading code location, or '' when it has none."""
+    m = _LOCATION.match(text)
+    if not m:
+        return ""
+    where = m.group("where").lower()
+    codey = bool(re.search(r"[./_]", where) or m.group("kind")
+                 or any(r and r.lower() == where for r in repos))
+    return text[m.end():] if codey else ""
+
+
 def is_work_assignment(text: str, repos: tuple[str, ...] = ()) -> bool:
     """True when this is Arun handing over CODE work, not asking about it.
 
@@ -121,6 +143,9 @@ def is_work_assignment(text: str, repos: tuple[str, ...] = ()) -> bool:
         return False
 
     if _IMPERATIVE.match(t):
+        return True
+    rest = _strip_location(t, repos)
+    if rest and _IMPERATIVE.match(rest) and not _QUESTION.match(rest):
         return True
     return bool(ticket and _WORK_VERB_ANYWHERE.search(t))
 

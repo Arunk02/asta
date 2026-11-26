@@ -135,6 +135,14 @@ def excludes(ws_root: str | Path) -> list[str]:
     return out
 
 
+def deny_his_checkouts(ws_root: str | Path) -> list[str]:
+    """Edit/Write rules that keep a leg out of his own service checkouts. `--add-dir <ws>` makes them
+    reachable, and a leg works only in its task checkout. Measured 26 Nov: the deny holds under
+    bypassPermissions ("File is in a directory that is denied")."""
+    root = Path(ws_root).resolve()
+    return [f"{tool}(/{root}/{repo}/**)" for repo in services(root).values() for tool in ("Edit", "Write")]
+
+
 def boot_line(ws_root: str | Path) -> str:
     """What replaces the boot.sh instruction in a code leg's runtime rules."""
     ctx = Path(ws_root) / ".asta-context" / "ctx.js"

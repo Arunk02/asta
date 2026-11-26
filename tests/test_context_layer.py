@@ -84,6 +84,7 @@ def test_leg_settings_carry_excludes_and_the_stop_gate_on_build_legs_only(ws, mo
     monkeypatch.delenv("ASTA_STOP_TESTS", raising=False)
     build = json.loads(claude_cli.leg_settings(True, False, ws))
     assert build["claudeMdExcludes"] == context_layer.excludes(ws)
+    assert f"Edit(/{ws.resolve()}/alpha-service/**)" in build["permissions"]["deny"]
     assert build["hooks"]["Stop"][0]["hooks"][0]["command"].endswith("tests_on_stop.py")
     plan = json.loads(claude_cli.leg_settings(True, True, ws))
     assert "Stop" not in plan["hooks"] and plan["claudeMdExcludes"]

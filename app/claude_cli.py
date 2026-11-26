@@ -232,6 +232,7 @@ def leg_settings(code_leg: bool, plan_only: bool, layer_root: Path | None = None
     if layer_root:
         from . import context_layer
         settings["claudeMdExcludes"] = context_layer.excludes(layer_root)
+        settings["permissions"] = {"deny": context_layer.deny_his_checkouts(layer_root)}
     if len(settings) == 1:
         return OUTPUT_SETTINGS
     return json.dumps(settings)

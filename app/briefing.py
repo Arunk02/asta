@@ -271,7 +271,12 @@ async def morning_brief() -> str:
         learned = learned_line(cutoff)
     except Exception:                                          # noqa: BLE001
         learned = ""
-    parts += [ready, learned, yesterday_line(cutoff)]
+    try:
+        from . import context_refresh
+        context = context_refresh.brief_line(cutoff)
+    except Exception:                                          # noqa: BLE001
+        context = ""
+    parts += [ready, learned, yesterday_line(cutoff), context]
     parts = [p for p in parts if p]
     try:
         since = _night_start(time.time())

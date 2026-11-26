@@ -2236,6 +2236,11 @@ def context_boot_paths(prompt: str, cwd: str, workspace: str | None) -> str:
         root = Path(code_cwd(workspace))
     except Exception:                                          # noqa: BLE001
         return prompt
+    from . import context_layer
+    if context_layer.active(root):
+        # The workspace's CLAUDE.md layer loads on its own (--add-dir); the boot
+        # step becomes one `ctx find` call (app/context_layer.py).
+        return context_layer.rewrite_boot(prompt, root)
     boot = root / ".asta-context" / "boot.sh"
     if not boot.is_file() or (Path(cwd) / ".asta-context" / "boot.sh").is_file():
         return prompt
@@ -2295,6 +2300,11 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
     with contextlib.suppress(Exception):
         await free_idle_checkouts(Path(code_cwd(ws)), task_id)
     refuse_shared_tree(task_id, cwd, ws)
+    from . import context_layer
+    layer = context_layer.root_for_cwd(cwd)
+    if layer:
+        with contextlib.suppress(Exception):
+            context_layer.link_service_files(cwd, layer)
     before = await other_trees(ws, cwd)
     from . import reproduction
     planning = not (plan_approved(task_id) or reproduction.active(task_id))
@@ -2308,6 +2318,11 @@ async def _run_code_leg(task_id: int, prompt: str, cwd: str, *,
                                   cwd, resume=resume, effort=effort, workspace=workspace)
         if clean:
             out += await _set_aside_plan_writes(task_id, clean)
+        if layer:
+            with contextlib.suppress(Exception):
+                n = context_layer.record_mismatches(layer, task_id, out)
+                if n:
+                    store.add_task_event(task_id, "context", f"{n} doc/code mismatch(es) noted for the refresh")
         return out
     finally:
         task_fence.MODE.reset(token)
@@ -2329,6 +2344,11 @@ def workspace_context_note(workspace: str | None, cwd: str, prompt: str = "") ->
     here = Path(cwd).resolve()
     if here == root or root in here.parents:
         return ""
+    from . import context_layer
+    if context_layer.active(root):
+        # Claude Code loads these itself (--add-dir + the CLAUDE.local.md links); one line
+        # keeps every other coder (pi, Copilot) on the same rules.
+        return context_layer.note(root)
     bits = []
     boot = root / ".asta-context" / "boot.sh"
     if boot.is_file() and str(boot) not in (prompt or ""):

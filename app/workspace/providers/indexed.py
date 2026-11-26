@@ -264,10 +264,14 @@ class IndexedProvider(ContextProvider):
         return "\n\n".join(parts)
 
     def boot_command(self, hint: str = "") -> str | None:
+        safe = (hint or "").replace('"', "'")[:200]
+        from ... import context_layer
+        if context_layer.active(self.root):
+            # The CLAUDE.md layer is loaded by the CLI; orientation is one code-derived lookup.
+            return f'node {self.ctx / "ctx.js"} find "{safe}"'
         boot = self.ctx / "boot.sh"
         if not boot.is_file():
             return None
-        safe = (hint or "").replace('"', "'")[:200]
         return f'sh {context_dirname(self.root)}/boot.sh "{safe}"'
 
     async def _sha_drift(self) -> list[str]:

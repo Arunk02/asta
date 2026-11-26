@@ -83,4 +83,5 @@ def test_only_code_legs_get_the_guard(monkeypatch):
     assert s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].endswith("plan")
     assert s["bashOutputMaxChars"] == claude_cli.BASH_INLINE_CHARS
     monkeypatch.setenv("ASTA_CODE_GUARD", "0")
+    monkeypatch.setenv("ASTA_STOP_TESTS", "0")
     assert claude_cli.leg_settings(True, False) == claude_cli.OUTPUT_SETTINGS

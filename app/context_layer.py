@@ -132,6 +132,10 @@ def excludes(ws_root: str | Path) -> list[str]:
     for repo in services(root).values():
         for name in ("CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.md"):
             out += [str(root / repo / name), f"{base}/*/{repo}/{name}"]
+    # A task checkout lives under ~/.asta-worktrees, and nothing above it has a CLAUDE.md, so the CLI
+    # loaded ~/AGENTS.md (his other agents' copy of ~/.claude/CLAUDE.md, 3.3k chars) on every leg.
+    # Measured live 26 Nov; the exclude drops it.
+    out += [str(p / "AGENTS.md") for p in base.parents]
     return out
 
 

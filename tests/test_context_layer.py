@@ -78,6 +78,7 @@ def test_excludes_cover_his_checkout_and_every_task_checkout(ws):
     assert str(ws.resolve() / "alpha-service" / "CLAUDE.md") in ex
     assert f"{worktrees.base_for(ws).resolve()}/*/alpha-service/CLAUDE.md" in ex
     assert not any(e.endswith("CLAUDE.local.md") for e in ex)
+    assert str(worktrees.base_for(ws).resolve().parent / "AGENTS.md") in ex     # ancestor of task checkouts
 
 
 def test_leg_settings_carry_excludes_and_the_stop_gate_on_build_legs_only(ws, monkeypatch):

@@ -596,6 +596,12 @@ async def refresh_workspace(workspace: str, reason: str = "manual") -> str:
     if ws is None or not ws.exists():
         return f"Unknown workspace '{workspace}'."
     ws_root = ws.path
+    from . import context_layer, context_refresh
+    if context_layer.active(ws_root):
+        # The CLAUDE.md layer is kept true at night without asking (app/context_refresh.py).
+        # An ask he has to answer is how this workspace went 286 commits stale.
+        return await context_refresh.refresh(
+            workspace, Path(ws_root), force=reason.startswith(("manual", "requested")))
     lines = [f"🔄 Context refresh — {workspace} ({reason})"]
     noteworthy = reason.startswith("manual") or reason.startswith("requested")
 
@@ -641,6 +647,23 @@ def _weekly_due(now: float) -> bool:
     return (t.tm_hour, t.tm_min) >= (hh, mm)
 
 
+async def _night_layer_due(workspace: str, now: float) -> bool:
+    """A workspace with the CLAUDE.md layer refreshes once a night inside the window (cheap when
+    nothing drifted: fetch, index, verify; no model). Returns True when it is a layered workspace,
+    so the day-time change/weekly paths leave it alone."""
+    from . import context_layer, context_refresh
+    ws = ws_mod.get(workspace)
+    if ws is None or not context_layer.active(ws.path):
+        return False
+    night = time.strftime("%Y-%m-%d", time.localtime(now - 12 * 3600))   # 22:00-06:00 is one night
+    if store.kv_get(f"context_night:{workspace}") == night or not context_refresh.in_window(now):
+        return True
+    line = await context_refresh.refresh(workspace, Path(ws.path))
+    if not line.startswith("deferred"):
+        store.kv_set(f"context_night:{workspace}", night)
+    return True
+
+
 async def scheduler_loop() -> None:
     """Runs forever: change-triggered refresh (10-min git fingerprint) + weekly baseline."""
     while True:
@@ -651,6 +674,8 @@ async def scheduler_loop() -> None:
                 store.kv_set("last_baseline_refresh", str(now))
             for ws, info in ws_mod.available_workspaces().items():
                 if not info["exists"]:
+                    continue
+                if await _night_layer_due(ws, now):
                     continue
                 change = await asyncio.to_thread(detect_big_change, ws)
                 if change:

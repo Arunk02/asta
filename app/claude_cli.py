@@ -87,6 +87,14 @@ def _subprocess_env() -> dict:
     return env
 
 
+def _layer_env(env: dict, layer: Path | None) -> dict:
+    """An added folder's CLAUDE.md and rules load only with this set (measured 26 Nov)."""
+    if layer:
+        from . import context_layer
+        env = dict(env, **{context_layer.ENV_ADDITIONAL_MD: "1"})
+    return env
+
+
 #: Claude Code's own skill catalogue (dataviz, artifacts, …) — ~3k tokens per
 #: call that no Asta session has used. Asta's skills arrive through load_skill.
 NO_SKILLS = "--disable-slash-commands"
@@ -192,18 +200,42 @@ def code_guard_on() -> bool:
     return os.environ.get("ASTA_CODE_GUARD", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
-def leg_settings(code_leg: bool, plan_only: bool) -> str:
-    """The --settings JSON for one run: the output cap, plus the guard on a code leg."""
-    if not (code_leg and code_guard_on()):
+#: Stop hook on a build leg: no "done" until a test run after the last edit passed.
+TESTS_ON_STOP = Path(__file__).resolve().parent / "hooks" / "tests_on_stop.py"
+
+
+def stop_tests_on() -> bool:
+    return os.environ.get("ASTA_STOP_TESTS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def leg_settings(code_leg: bool, plan_only: bool, layer_root: Path | None = None) -> str:
+    """The --settings JSON for one run: the output cap, plus on a code leg the guard, the
+    tests-on-stop gate (build legs) and the workspace layer's claudeMdExcludes.
+
+    Project hooks from an --add-dir folder don't load, so every hook a leg needs rides here."""
+    if not code_leg:
         return OUTPUT_SETTINGS
     import shlex
     import sys as _sys
-    cmd = " ".join(shlex.quote(x) for x in (_sys.executable, str(CODE_GUARD),
-                                            "plan" if plan_only else "build"))
-    return json.dumps({"bashOutputMaxChars": BASH_INLINE_CHARS,
-                       "hooks": {"PreToolUse": [{"matcher": "Read|Bash",
-                                                 "hooks": [{"type": "command", "command": cmd,
-                                                            "timeout": 10}]}]}})
+    settings: dict = {"bashOutputMaxChars": BASH_INLINE_CHARS}
+    hooks: dict = {}
+    if code_guard_on():
+        cmd = " ".join(shlex.quote(x) for x in (_sys.executable, str(CODE_GUARD),
+                                                "plan" if plan_only else "build"))
+        hooks["PreToolUse"] = [{"matcher": "Read|Bash",
+                                "hooks": [{"type": "command", "command": cmd, "timeout": 10}]}]
+    if not plan_only and stop_tests_on():
+        cmd = " ".join(shlex.quote(x) for x in (_sys.executable, str(TESTS_ON_STOP)))
+        hooks["Stop"] = [{"hooks": [{"type": "command", "command": cmd, "timeout": 20}]}]
+    if hooks:
+        settings["hooks"] = hooks
+    if layer_root:
+        from . import context_layer
+        settings["claudeMdExcludes"] = context_layer.excludes(layer_root)
+        settings["permissions"] = {"deny": context_layer.deny_his_checkouts(layer_root)}
+    if len(settings) == 1:
+        return OUTPUT_SETTINGS
+    return json.dumps(settings)
 #: An MCP result's ceiling in tokens (Claude Code's default is 25,000).
 MCP_OUTPUT_TOKENS = 8000
 
@@ -285,8 +317,12 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
     # copilot_cli.now_line for the Monday this is here to stop repeating.
     from . import copilot_cli
     prompt = f"{copilot_cli.now_line()}\n{prompt}"
+    code_leg = bool(builtins) and not tools_off
+    from . import context_layer
+    # The workspace's own CLAUDE.md layer, loaded by the CLI itself (app/context_layer.py).
+    layer = context_layer.root_for_cwd(cwd) if code_leg else None
     cmd = ["claude", "-p", prompt, NO_SKILLS,
-           "--settings", leg_settings(bool(builtins) and not tools_off, plan_only),
+           "--settings", leg_settings(code_leg, plan_only, layer),
            # JSON, so the run's own cost comes back with its text (see _parse_run).
            "--output-format", "json",
            # Parity with the copilot path's --allow-all-tools: the pipeline
@@ -311,6 +347,8 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
         cmd += ["--plugin-dir", str(ON_DEMAND_CHAT_PLUGIN)]
     if lean_flags():
         cmd.append(SAME_PREFIX)
+    if layer:
+        cmd += ["--add-dir", str(layer)]
     if mcp_config or tools_off or fence:
         cmd += ["--mcp-config", mcp_config or '{"mcpServers":{}}']
         if tools_off or fence:
@@ -352,7 +390,7 @@ async def _one_shot(prompt: str, cwd: str | None, timeout: int, agent_file: str,
         stdin=asyncio.subprocess.DEVNULL,
         cwd=cwd or str(ROOT),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env=task_fence.env(_subprocess_env()),
+        env=task_fence.env(_layer_env(_subprocess_env(), layer)),
     )
     async def _drain() -> str:
         # Read incrementally rather than communicate(), so on_progress can watch

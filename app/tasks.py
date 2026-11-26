@@ -3684,9 +3684,15 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
     # and the push below adds the real buttons underneath it. Two asks in a
     # row, the first one unactionable, is exactly the clutter he pointed at.
     result = _ASK_LINE.sub("", result).rstrip()
-    store.update_task(task_id, status="awaiting_approval", result=result)
+    # The plan is stored now; the task is marked as waiting for him only where
+    # each branch below is ready to take an answer. 25 Nov, live (rehearsal
+    # #751): drawing the plan PDF takes a few seconds, and an approve that landed
+    # in them reached a workflow not yet at its gate — the answer was lost and
+    # the plan was announced twice.
+    store.update_task(task_id, result=result)
     note = note_waiting(task_id)
     if note:
+        store.update_task(task_id, status="awaiting_approval")
         # 8 Oct, #268: "dont revert the whole changes of him, only the startup
         # flag ones" arrived while it planned a full revert — and a "go" task's
         # plan goes ahead on its own. A plan that predates his note goes back.
@@ -3706,6 +3712,7 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
     from . import go
     why = go.no_ask(task_id, result)
     if why:
+        store.update_task(task_id, status="awaiting_approval")
         # His rule, 18 Nov: "if I gave approve upfront it can do the
         # implementation — it doesn't need my approval or a plan.md for me to
         # review." His go was the approval, so no plan card and no plan file:
@@ -3740,6 +3747,7 @@ async def announce_plan(task_id: int, t: dict, result: str) -> None:
                 go.after_plan_seconds(), lambda: asyncio.ensure_future(_go_on(task_id, born)))
         return
     attached = await _send_full_plan(task_id, t, result)
+    store.update_task(task_id, status="awaiting_approval")
     full = attached + _missing_line(result)
     stopped = go.stop_reason(task_id)
     if stopped:

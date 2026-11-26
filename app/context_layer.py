@@ -156,8 +156,12 @@ def boot_line(ws_root: str | Path) -> str:
     ctx = Path(ws_root) / ".asta-context" / "ctx.js"
     return (f"- Context: the workspace's CLAUDE.md files are already loaded. Find code with ONE call:\n"
             f"  `node {ctx} find \"<key nouns>\"`, which returns ranked repo/path:line with the test\n"
-            f"  beside each, plus the docs to read. Read only those hits and what they call.\n"
-            f"  Never grep a whole repo first. Do NOT run check-drift.js: drift is Asta's refresh job.\n")
+            f"  beside each, plus the docs to read. Read those hits and what they call.\n"
+            f"  Never grep a whole repo first. Do NOT run check-drift.js: drift is Asta's refresh job.\n"
+            f"- Companions: real changes here usually also touch files the task never names (an amend twin,\n"
+            f"  BookingConstants, a helper, an enum pair, event-history mappers). For every file on `find`'s\n"
+            f"  \"usually changes with\" line and in the service CLAUDE.md's \"Usually changes too\", open it and\n"
+            f"  decide. The plan carries one line: `COMPANIONS: <File> in|out — why` for each.\n")
 
 
 def note(ws_root: str | Path) -> str:

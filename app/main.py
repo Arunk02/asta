@@ -5593,6 +5593,24 @@ async def _dispatch(conv: dict, user_text: str, sink, channel: str = "web",
     work_ws = (conv.get("workspace") or "").strip() or policy.prefer("workspace")
     if (work_ws
             and work_intent.is_work_assignment(user_text, _workspace_repos(work_ws))):
+        # A work message about what the task that just finished here is about
+        # continues THAT task (asta PR 318's rule). This check has to come before
+        # the spawn: 25 Nov, live, "add a docstring to subtract in calc.py" right
+        # after the subtract task finished became task #753 — the spawn below ran
+        # first and the "recently finished" branch further down never saw it.
+        if not live and activity.classify_interjection(user_text) != "new_task":
+            on = [i for i in tasks.refinable_for(cid) if tasks.same_subject(i, user_text)]
+            if len(on) == 1:
+                try:
+                    note = await tasks.refine(on[0], user_text)
+                except ValueError:
+                    pass           # not continuable after all — a new task, as before
+                else:
+                    frontdesk.record("job", f"refine #{on[0]}")
+                    await sink.send({"type": "note", "text": note})
+                    if channel == "web":
+                        await sink.send({"type": "done", "tools": []})
+                    return None
         try:
             t = tasks.spawn(work_intent.title_for(user_text), user_text,
                             "code", work_ws)
